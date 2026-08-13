@@ -45,12 +45,13 @@
             </a-space>
           </div>
           <a-table
-            v-model:expandedRowKeys="departmentManagement.expandedRowKeys"
+            :expanded-row-keys="departmentManagement.expandedRowKeys"
             :dataSource="departmentTree"
             :columns="columns"
             :rowKey="(record) => record.id"
             :pagination="false"
             :scroll="{ x: 720 }"
+            @expand="handleDepartmentExpand"
             class="department-table"
           >
             <template #bodyCell="{ column, record }">
@@ -80,15 +81,13 @@
                       <SquarePen :size="14" />
                     </a-button>
                   </a-tooltip>
-                  <a-tooltip
-                    :title="record.id === ROOT_DEPARTMENT_ID ? '集团根不可删除' : '删除组织节点'"
-                  >
+                  <a-tooltip :title="getDeleteDisabledReason(record) || '删除组织节点'">
                     <a-button
                       type="text"
                       size="small"
                       danger
                       @click="confirmDeleteDepartment(record)"
-                      :disabled="record.id === ROOT_DEPARTMENT_ID"
+                      :disabled="Boolean(getDeleteDisabledReason(record))"
                       class="action-btn lucide-icon-btn"
                     >
                       <Trash2 :size="14" />
@@ -252,7 +251,11 @@ import { computed, onMounted, reactive, watch } from 'vue'
 import { notification, message, Modal } from 'ant-design-vue'
 import { departmentApi, apiSuperAdminGet } from '@/apis'
 import { ChevronsDown, ChevronsUp, Plus, RefreshCw, SquarePen, Trash2 } from 'lucide-vue-next'
-import { buildDepartmentTree, getDepartmentExpandableKeys } from '@/utils/departmentTree'
+import {
+  buildDepartmentTree,
+  getDepartmentExpandableKeys,
+  updateDepartmentExpandedKeys
+} from '@/utils/departmentTree'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 
 const ROOT_DEPARTMENT_ID = 1
@@ -334,6 +337,21 @@ const expandAllDepartments = () => {
 
 const collapseAllDepartments = () => {
   departmentManagement.expandedRowKeys = []
+}
+
+const handleDepartmentExpand = (expanded, department) => {
+  departmentManagement.expandedRowKeys = updateDepartmentExpandedKeys(
+    departmentManagement.expandedRowKeys,
+    department.id,
+    expanded
+  )
+}
+
+const getDeleteDisabledReason = (department) => {
+  if (department.id === ROOT_DEPARTMENT_ID) return '集团根不可删除'
+  if (department.children?.length) return '该组织节点下还有子节点，请先处理子节点'
+  if (department.user_count) return '该组织节点下还有直属用户，请先调整用户的组织归属'
+  return ''
 }
 
 const parentTreeData = computed(() => {
@@ -570,7 +588,7 @@ const handleDepartmentFormSubmit = async () => {
 const confirmDeleteDepartment = (department) => {
   Modal.confirm({
     title: '确认删除组织节点',
-    content: `确定要删除组织节点 “${department.name}” 吗？此操作不可撤销。该节点下的用户会回落到集团根，节点关联的 API Key 会一并清理。`,
+    content: `确定要删除组织节点 “${department.name}” 吗？此操作不可撤销，节点关联的 API Key 会一并清理。`,
     okText: '删除',
     okType: 'danger',
     cancelText: '取消',

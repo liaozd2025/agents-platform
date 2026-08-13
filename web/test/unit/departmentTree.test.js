@@ -7,7 +7,8 @@ import {
   getDepartmentExpandableKeys,
   getDepartmentSelectionSummary,
   isDepartmentSelectionCovered,
-  normalizeDepartmentSelection
+  normalizeDepartmentSelection,
+  updateDepartmentExpandedKeys
 } from '../../src/utils/departmentTree.js'
 
 test('组织节点列表可组装为树且移动时禁用自身与后代', () => {
@@ -74,6 +75,11 @@ test('展开全部只包含拥有子节点的组织节点', () => {
   ]
 
   assert.deepEqual(getDepartmentExpandableKeys(departments), [1, 2])
+})
+
+test('节点图标可逐项展开和收起受控树表', () => {
+  assert.deepEqual(updateDepartmentExpandedKeys([1], 2, true), [1, 2])
+  assert.deepEqual(updateDepartmentExpandedKeys([1, 2], 1, false), [2])
 })
 
 test('共享范围树会禁用已选节点的全部后代', () => {

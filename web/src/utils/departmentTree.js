@@ -43,6 +43,16 @@ export function getDepartmentExpandableKeys(departments) {
 }
 
 /**
+ * 根据单个节点的展开事件更新受控树表状态。
+ */
+export function updateDepartmentExpandedKeys(expandedKeys, departmentId, expanded) {
+  const nextKeys = new Set(expandedKeys)
+  if (expanded) nextKeys.add(departmentId)
+  else nextKeys.delete(departmentId)
+  return [...nextKeys]
+}
+
+/**
  * 移除已被选中上级覆盖的后代节点。
  */
 export function normalizeDepartmentSelection(departments, selectedIds) {

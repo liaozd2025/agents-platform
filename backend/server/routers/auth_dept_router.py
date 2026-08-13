@@ -8,7 +8,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete as sqlalchemy_delete, select, func
+from sqlalchemy import delete as sqlalchemy_delete, select, func, update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Department, User
@@ -268,23 +268,24 @@ async def delete_department(
     if child_count_result.scalar():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该组织节点下还有子节点，请先处理子节点")
 
+    user_count_result = await db.execute(
+        select(func.count(User.id)).filter(User.department_id == department_id, User.is_deleted == 0)
+    )
+    if user_count_result.scalar():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="该组织节点下还有直属用户，请先调整用户的组织归属",
+        )
+
     department_name = department.name
-    result = await db.execute(select(User).filter(User.department_id == department_id))
-    department_users = result.scalars().all()
-
-    if department_users:
-        for user in department_users:
-            user.department_id = ROOT_DEPARTMENT_ID  # 被删除节点的用户回落集团根
-
+    # 软删除用户不参与业务判断，但需要迁移其外键后才能删除组织节点。
+    await db.execute(
+        sqlalchemy_update(User).where(User.department_id == department_id).values(department_id=ROOT_DEPARTMENT_ID)
+    )
     await db.execute(sqlalchemy_delete(APIKey).where(APIKey.department_id == department_id))
     await db.delete(department)
     await db.commit()
 
-    # 记录操作
-    if department_users:
-        detail = f"删除组织节点: {department_name}，回落 {len(department_users)} 个用户到集团根"
-    else:
-        detail = f"删除组织节点: {department_name}"
-    await log_operation(db, current_user.id, "删除组织节点", detail, request)
+    await log_operation(db, current_user.id, "删除组织节点", f"删除组织节点: {department_name}", request)
 
     return {"success": True, "message": "组织节点已删除"}

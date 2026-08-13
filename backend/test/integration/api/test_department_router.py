@@ -305,7 +305,7 @@ async def test_delete_department_with_children_is_rejected(test_client, admin_he
     assert child_still_exists.json()["parent_id"] == parent_id
 
 
-async def test_superadmin_can_delete_department_with_users(test_client, admin_headers):
+async def test_delete_department_with_direct_users_is_rejected(test_client, admin_headers):
     suffix = uuid.uuid4().hex[:8]
     department_payload = {
         "name": f"pytest_department_{suffix}",
@@ -353,35 +353,34 @@ async def test_superadmin_can_delete_department_with_users(test_client, admin_he
         delete_department_response = await test_client.delete(
             f"/api/departments/{department_id}", headers=admin_headers
         )
-        assert delete_department_response.status_code == 200, delete_department_response.text
-        assert delete_department_response.json()["success"] is True
-        department_id = None
+        assert delete_department_response.status_code == 400, delete_department_response.text
+        assert "直属用户" in delete_department_response.json()["detail"]
 
-        deleted_department_response = await test_client.get(
-            f"/api/departments/{create_department_response.json()['id']}",
+        existing_department_response = await test_client.get(
+            f"/api/departments/{department_id}",
             headers=admin_headers,
         )
-        assert deleted_department_response.status_code == 404, deleted_department_response.text
+        assert existing_department_response.status_code == 200, existing_department_response.text
 
-        list_users_after_delete_response = await test_client.get("/api/auth/users", headers=admin_headers)
-        assert list_users_after_delete_response.status_code == 200, list_users_after_delete_response.text
-        users_after_delete = list_users_after_delete_response.json()
+        list_users_after_rejection = await test_client.get("/api/auth/users", headers=admin_headers)
+        assert list_users_after_rejection.status_code == 200, list_users_after_rejection.text
+        users_after_rejection = list_users_after_rejection.json()
 
-        # 删除组织节点后用户回落集团根（代码中集团根固定为 id=1，其名称可被用户修改）
-        migrated_admin = next((user for user in users_after_delete if user["id"] == department_admin_id), None)
-        assert migrated_admin is not None
-        assert migrated_admin["department_id"] == ROOT_DEPARTMENT_ID
+        existing_admin = next((user for user in users_after_rejection if user["id"] == department_admin_id), None)
+        assert existing_admin is not None
+        assert existing_admin["department_id"] == department_id
 
-        migrated_user = next((user for user in users_after_delete if user["id"] == created_user_id), None)
-        assert migrated_user is not None
-        assert migrated_user["department_id"] == ROOT_DEPARTMENT_ID
+        existing_user = next((user for user in users_after_rejection if user["id"] == created_user_id), None)
+        assert existing_user is not None
+        assert existing_user["department_id"] == department_id
     finally:
         if department_admin_id is not None:
             await test_client.delete(f"/api/auth/users/{department_admin_id}", headers=admin_headers)
         if created_user_id is not None:
             await test_client.delete(f"/api/auth/users/{created_user_id}", headers=admin_headers)
         if department_id is not None:
-            await test_client.delete(f"/api/departments/{department_id}", headers=admin_headers)
+            cleanup_response = await test_client.delete(f"/api/departments/{department_id}", headers=admin_headers)
+            assert cleanup_response.status_code in (200, 404), cleanup_response.text
 
 
 async def test_superadmin_cannot_delete_group_root(test_client, admin_headers):
