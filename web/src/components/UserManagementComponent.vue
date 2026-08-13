@@ -36,16 +36,18 @@
         <template #prefix><Search :size="16" /></template>
       </a-input>
       <div class="filter-actions">
-        <a-select v-model:value="userManagement.departmentFilter" class="filter-select">
-          <a-select-option value="">全部部门</a-select-option>
-          <a-select-option
-            v-for="dept in departmentFilterOptions"
-            :key="dept.value"
-            :value="dept.value"
-          >
-            {{ dept.label }}
-          </a-select-option>
-        </a-select>
+        <a-tree-select
+          v-model:value="userManagement.departmentFilter"
+          :tree-data="departmentTree"
+          :field-names="treeFieldNames"
+          class="filter-select"
+          placeholder="全部组织机构"
+          tree-node-filter-prop="name"
+          tree-default-expand-all
+          show-search
+          allow-clear
+          :dropdown-style="{ maxHeight: '360px', overflow: 'auto' }"
+        />
         <a-select v-model:value="userManagement.roleFilter" class="filter-select">
           <a-select-option value="">全部权限</a-select-option>
           <a-select-option value="superadmin">超级管理员</a-select-option>
@@ -234,17 +236,18 @@
           </a-select>
         </a-form-item>
 
-        <!-- 部门选择器（仅超级管理员可见） -->
-        <a-form-item v-if="userStore.isSuperAdmin" label="部门" class="form-item">
-          <a-select v-model:value="userManagement.form.departmentId" placeholder="请选择部门">
-            <a-select-option
-              v-for="dept in departmentManagement.departments"
-              :key="dept.id"
-              :value="dept.id"
-            >
-              {{ dept.name }}
-            </a-select-option>
-          </a-select>
+        <!-- 组织机构选择器（仅超级管理员可见） -->
+        <a-form-item v-if="userStore.isSuperAdmin" label="所属组织机构" class="form-item">
+          <a-tree-select
+            v-model:value="userManagement.form.departmentId"
+            :tree-data="departmentTree"
+            :field-names="treeFieldNames"
+            placeholder="请选择组织机构"
+            tree-node-filter-prop="name"
+            tree-default-expand-all
+            show-search
+            :dropdown-style="{ maxHeight: '360px', overflow: 'auto' }"
+          />
         </a-form-item>
       </a-form>
     </a-modal>
@@ -269,6 +272,7 @@ import {
 import { formatDateTime } from '@/utils/time'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
+import { buildDepartmentTree } from '@/utils/departmentTree'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 
@@ -280,7 +284,7 @@ const userManagement = reactive({
   refreshing: false,
   users: [],
   searchKeyword: '',
-  departmentFilter: '',
+  departmentFilter: null,
   roleFilter: '',
   currentPage: 1,
   pageSize: 50,
@@ -303,39 +307,13 @@ const userManagement = reactive({
   displayPasswordFields: true // 编辑时是否显示密码字段
 })
 
-// 部门列表（仅超级管理员使用）
+// 组织机构列表
 const departmentManagement = reactive({
   departments: []
 })
 
-const departmentFilterOptions = computed(() => {
-  const options = new Map()
-
-  departmentManagement.departments.forEach((dept) => {
-    options.set(String(dept.id), {
-      value: String(dept.id),
-      label: dept.name
-    })
-  })
-
-  userManagement.users.forEach((user) => {
-    const departmentId = user.department_id
-    const departmentName = user.department_name
-
-    if (departmentId == null && !departmentName) return
-
-    const value = String(departmentId ?? departmentName)
-
-    if (!options.has(value)) {
-      options.set(value, {
-        value,
-        label: departmentName || `部门 ${departmentId}`
-      })
-    }
-  })
-
-  return [...options.values()]
-})
+const treeFieldNames = { children: 'children', label: 'name', value: 'id' }
+const departmentTree = computed(() => buildDepartmentTree(departmentManagement.departments))
 
 const filteredUsers = computed(() => {
   const keyword = userManagement.searchKeyword.trim().toLowerCase()
@@ -349,8 +327,8 @@ const filteredUsers = computed(() => {
           .includes(keyword)
       )
     const matchesDepartment =
-      !userManagement.departmentFilter ||
-      String(user.department_id ?? user.department_name ?? '') === userManagement.departmentFilter
+      userManagement.departmentFilter == null ||
+      Number(user.department_id) === Number(userManagement.departmentFilter)
     const matchesRole = !userManagement.roleFilter || user.role === userManagement.roleFilter
 
     return matchesKeyword && matchesDepartment && matchesRole
@@ -363,14 +341,13 @@ const paginatedUsers = computed(() => {
   return filteredUsers.value.slice(start, start + pageSize)
 })
 
-// 获取部门列表
+// 获取组织机构列表
 const fetchDepartments = async () => {
-  if (!userStore.isSuperAdmin) return // 普通管理员不需要获取所有部门列表
   try {
     const departments = await departmentApi.getDepartments()
     departmentManagement.departments = departments
   } catch (error) {
-    console.error('获取部门列表失败:', error)
+    console.error('获取组织机构列表失败:', error)
   }
 }
 

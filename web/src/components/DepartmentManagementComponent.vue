@@ -32,7 +32,20 @@
         </div>
 
         <template v-else-if="departmentManagement.departments.length > 0">
+          <div class="tree-toolbar">
+            <a-space>
+              <a-button size="small" @click="expandAllDepartments">
+                <template #icon><ChevronsDown :size="14" /></template>
+                全部展开
+              </a-button>
+              <a-button size="small" @click="collapseAllDepartments">
+                <template #icon><ChevronsUp :size="14" /></template>
+                全部收起
+              </a-button>
+            </a-space>
+          </div>
           <a-table
+            v-model:expandedRowKeys="departmentManagement.expandedRowKeys"
             :dataSource="departmentTree"
             :columns="columns"
             :rowKey="(record) => record.id"
@@ -238,8 +251,8 @@
 import { computed, onMounted, reactive, watch } from 'vue'
 import { notification, message, Modal } from 'ant-design-vue'
 import { departmentApi, apiSuperAdminGet } from '@/apis'
-import { Plus, RefreshCw, SquarePen, Trash2 } from 'lucide-vue-next'
-import { buildDepartmentTree } from '@/utils/departmentTree'
+import { ChevronsDown, ChevronsUp, Plus, RefreshCw, SquarePen, Trash2 } from 'lucide-vue-next'
+import { buildDepartmentTree, getDepartmentExpandableKeys } from '@/utils/departmentTree'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 
 const ROOT_DEPARTMENT_ID = 1
@@ -302,6 +315,7 @@ const departmentManagement = reactive({
   loading: false,
   refreshing: false,
   departments: [],
+  expandedRowKeys: [],
   error: null,
   modalVisible: false,
   modalTitle: '添加组织节点',
@@ -311,6 +325,16 @@ const departmentManagement = reactive({
 })
 
 const departmentTree = computed(() => buildDepartmentTree(departmentManagement.departments))
+
+const expandAllDepartments = () => {
+  departmentManagement.expandedRowKeys = getDepartmentExpandableKeys(
+    departmentManagement.departments
+  )
+}
+
+const collapseAllDepartments = () => {
+  departmentManagement.expandedRowKeys = []
+}
 
 const parentTreeData = computed(() => {
   const disabledRootId =
@@ -328,6 +352,7 @@ const fetchDepartments = async () => {
     departmentManagement.error = null
     const departments = await departmentApi.getDepartments()
     departmentManagement.departments = departments
+    expandAllDepartments()
   } catch (error) {
     console.error('获取组织节点列表失败:', error)
     departmentManagement.error = error.message || '获取组织节点列表失败'
@@ -637,6 +662,12 @@ onMounted(() => {
     .empty-state {
       padding: 60px 20px;
       text-align: center;
+    }
+
+    .tree-toolbar {
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 8px;
     }
 
     .department-table {

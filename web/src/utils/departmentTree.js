@@ -29,6 +29,20 @@ export function buildDepartmentTree(departments, disabledRootId = null) {
 }
 
 /**
+ * 返回拥有子节点的组织节点 ID，用于树表格全部展开。
+ */
+export function getDepartmentExpandableKeys(departments) {
+  const departmentIds = new Set(departments.map((department) => Number(department.id)))
+  return [
+    ...new Set(
+      departments
+        .map((department) => Number(department.parent_id))
+        .filter((parentId) => departmentIds.has(parentId))
+    )
+  ]
+}
+
+/**
  * 移除已被选中上级覆盖的后代节点。
  */
 export function normalizeDepartmentSelection(departments, selectedIds) {

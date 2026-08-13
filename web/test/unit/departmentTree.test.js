@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   buildDepartmentShareTree,
   buildDepartmentTree,
+  getDepartmentExpandableKeys,
   getDepartmentSelectionSummary,
   isDepartmentSelectionCovered,
   normalizeDepartmentSelection
@@ -62,6 +63,17 @@ test('数百个组织节点可一次线性组装且保持完整', () => {
 
   assert.equal(tree.length, 1)
   assert.equal(tree[0].children.length, 600)
+})
+
+test('展开全部只包含拥有子节点的组织节点', () => {
+  const departments = [
+    { id: 1, parent_id: null, name: '集团' },
+    { id: 2, parent_id: 1, name: '华东公司' },
+    { id: 3, parent_id: 2, name: '研发部' },
+    { id: 4, parent_id: 1, name: '华南公司' }
+  ]
+
+  assert.deepEqual(getDepartmentExpandableKeys(departments), [1, 2])
 })
 
 test('共享范围树会禁用已选节点的全部后代', () => {
