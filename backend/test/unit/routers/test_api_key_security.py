@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.routers.auth_router import delete_user
 from server.routers.user_router import APIKeyCreate, create_api_key
-from server.utils.auth_middleware import _verify_api_key
+from server.utils.auth_middleware import _verify_api_key, get_required_user
 from yuxi.repositories import user_repository as user_repository_module
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.storage.postgres.models_business import APIKey, Base, Department, User
@@ -78,6 +78,9 @@ async def session():
         await db.commit()
         for item in [dept_a, dept_b, superadmin, dept_b_admin, regular_user, deleted_user]:
             await db.refresh(item)
+        dept_a.path = f"/{dept_a.id}/"
+        dept_b.path = f"/{dept_b.id}/"
+        await db.commit()
         yield {
             "db": db,
             "dept_a": dept_a,
@@ -108,6 +111,41 @@ async def test_api_key_rejects_deleted_bound_user_without_department_or_superadm
 
     assert user is None
     assert verified_key is None
+
+
+async def test_api_key_user_loads_department_ancestor_ids(session):
+    db = session["db"]
+    secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+    api_key = APIKey(
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name="ancestor key",
+        user_id=session["regular_user"].id,
+        created_by=str(session["regular_user"].id),
+    )
+    db.add(api_key)
+    await db.commit()
+
+    user, verified_key = await _verify_api_key(secret, db)
+
+    assert verified_key is not None
+    assert user.department_ancestor_ids == (session["dept_a"].id,)
+
+
+async def test_user_repository_rejects_bound_user_without_materialized_path(session):
+    department = Department(name="Broken Department")
+    user = User(username="Broken", uid="broken", password_hash="x", role="user", department=department)
+    session["db"].add_all([department, user])
+    await session["db"].commit()
+
+    with pytest.raises(ValueError, match="缺少有效物化路径"):
+        await UserRepository().get_by_uid_with_db(session["db"], user.uid)
+
+
+async def test_required_user_allows_user_without_valid_department():
+    user = User(username="Unbound", uid="unbound", password_hash="x", role="user", department_id=None)
+
+    assert await get_required_user(user) is user
 
 
 async def test_api_key_without_user_binding_is_rejected_before_department_mapping(session):

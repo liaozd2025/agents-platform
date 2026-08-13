@@ -43,6 +43,7 @@ async def _ensure_knowledge_read_access(current_user: User, kb_id: str) -> None:
             "uid": current_user.uid,
             "role": current_user.role,
             "department_id": current_user.department_id,
+            "department_ancestor_ids": getattr(current_user, "department_ancestor_ids", ()),
         },
         kb_id,
     )

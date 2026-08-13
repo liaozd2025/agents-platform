@@ -181,8 +181,7 @@ class KnowledgeBaseManager:
         self,
         share_config: dict | None,
         *,
-        user_uid: str | None = None,
-        department_id: int | str | None = None,
+        strict: bool = False,
     ) -> dict:
         if share_config is None:
             return {
@@ -192,17 +191,9 @@ class KnowledgeBaseManager:
             }
 
         if share_config and share_config.get("version") == 2:
-            normalized = normalize_permission_config(
-                share_config,
-                strict=user_uid is not None or department_id is not None,
-            )
-            if normalized["read_scope"] is None and (user_uid is not None or department_id is not None):
+            normalized = normalize_permission_config(share_config, strict=strict)
+            if normalized["read_scope"] is None and strict:
                 raise ValueError("知识库必须设置读取范围")
-            read_scope = normalized["read_scope"]
-            if read_scope and read_scope["access_level"] == "department" and department_id is not None:
-                read_scope["department_ids"] = sorted({*read_scope["department_ids"], int(department_id)})
-            elif read_scope and read_scope["access_level"] == "user" and user_uid:
-                read_scope["user_uids"] = sorted({*read_scope["user_uids"], str(user_uid)})
             return normalized
 
         raise ValueError("知识库共享配置必须使用 version 2")
@@ -393,6 +384,7 @@ class KnowledgeBaseManager:
                 "uid": user.uid,
                 "role": user.role,
                 "department_id": user.department_id,
+                "department_ancestor_ids": getattr(user, "department_ancestor_ids", ()),
             }
 
         user_role = user_info.get("role")
@@ -453,7 +445,6 @@ class KnowledgeBaseManager:
         llm_model_spec: str | None = None,
         share_config: dict | None = None,
         created_by: str | None = None,
-        created_by_department_id: int | str | None = None,
         **kwargs,
     ) -> KnowledgeBaseDetail:
         """
@@ -467,7 +458,6 @@ class KnowledgeBaseManager:
             llm_model_spec: LLM 模型 spec
             share_config: 共享配置
             created_by: 创建者 uid
-            created_by_department_id: 创建者部门 ID
             **kwargs: 其他配置参数
 
         Returns:
@@ -480,11 +470,7 @@ class KnowledgeBaseManager:
         if await self.database_name_exists(database_name):
             raise KBNameConflictError(f"知识库名称 '{database_name}' 已存在，请使用其他名称")
 
-        share_config = self._normalize_share_config(
-            share_config,
-            user_uid=created_by,
-            department_id=created_by_department_id,
-        )
+        share_config = self._normalize_share_config(share_config, strict=True)
 
         kb_instance = self._get_or_create_kb_instance(kb_type)
         additional_params = kwargs
@@ -1107,8 +1093,6 @@ class KnowledgeBaseManager:
         update_llm_model_spec: bool = False,
         additional_params: dict | None = None,
         share_config: dict | None = None,
-        operator_uid: str | None = None,
-        operator_department_id: int | str | None = None,
     ) -> KnowledgeBaseDetail:
         """更新数据库"""
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
@@ -1142,11 +1126,7 @@ class KnowledgeBaseManager:
             update_data["additional_params"] = merged_additional_params
 
         if share_config is not None:
-            update_data["share_config"] = self._normalize_share_config(
-                share_config,
-                user_uid=operator_uid,
-                department_id=operator_department_id,
-            )
+            update_data["share_config"] = self._normalize_share_config(share_config, strict=True)
 
         # 保存到数据库
         await kb_repo.update(kb_id, update_data)

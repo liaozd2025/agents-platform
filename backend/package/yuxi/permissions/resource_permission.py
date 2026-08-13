@@ -143,9 +143,9 @@ def scope_matches(user: Any, scope: dict | None) -> bool:
     if access_level == "global":
         return True
     if access_level == "department":
-        department_id = _value(user, "department_id")
+        ancestor_ids = _value(user, "department_ancestor_ids", ()) or ()
         try:
-            return department_id is not None and int(department_id) in scope.get("department_ids", [])
+            return not set(map(int, ancestor_ids)).isdisjoint(scope.get("department_ids", []))
         except (TypeError, ValueError):
             return False
     if access_level == "user":

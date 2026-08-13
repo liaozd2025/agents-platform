@@ -14,6 +14,7 @@ from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
 from yuxi.agents.skills.service import init_builtin_skills
 from yuxi.config import config as sys_config
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.agent_request_queue_service import (
     RUN_STATUS_TO_DELIVERY_STATUS,
     dispatch_next_request,
@@ -28,7 +29,7 @@ from yuxi.services.run_queue_service import (
     wait_for_cancel_signal,
 )
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Message, User
+from yuxi.storage.postgres.models_business import Message
 from yuxi.storage.redis import get_arq_redis_settings
 from yuxi.utils.logging_config import logger
 from yuxi.utils.thread_utils import extract_thread_id
@@ -176,8 +177,8 @@ async def mark_run_terminal(run_id: str, status: str, error_type: str | None = N
 
 async def _load_user(uid: str):
     async with pg_manager.get_async_session_context() as db:
-        result = await db.execute(select(User).where(User.uid == uid, User.is_deleted == 0))
-        return result.scalar_one_or_none()
+        user = await UserRepository().get_by_uid_with_db(db, uid)
+        return user if user and not user.is_deleted else None
 
 
 async def _is_cancel_requested(run_id: str) -> bool:
@@ -201,7 +202,10 @@ def _is_last_try(ctx) -> bool:
 def _is_retryable_exception(exc: Exception) -> bool:
     if isinstance(exc, NonRetryableRunError):
         return False
-    return isinstance(exc, (RetryableRunError, OperationalError, ConnectionError, TimeoutError, asyncio.TimeoutError))
+    return isinstance(
+        exc,
+        RetryableRunError | OperationalError | ConnectionError | TimeoutError | asyncio.TimeoutError,
+    )
 
 
 def _iter_json_chunks(chunk_bytes: bytes) -> list[dict]:

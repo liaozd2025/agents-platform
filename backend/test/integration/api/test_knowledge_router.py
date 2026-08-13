@@ -13,6 +13,8 @@ from yuxi.knowledge.chunking.ragflow_like.presets import CHUNK_PRESET_IDS
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
+ROOT_DEPARTMENT_ID = 1
+
 
 def _assert_forbidden_response(response):
     """验证 403 禁止访问响应的格式"""
@@ -22,17 +24,20 @@ def _assert_forbidden_response(response):
     assert isinstance(payload["detail"], str)
 
 
-async def _create_test_department(test_client, admin_headers, prefix="pytest_dept"):
+async def _create_test_department(test_client, admin_headers, prefix="pytest_dept", parent_id=None):
     suffix = uuid.uuid4().hex[:8]
     admin_uid = f"deptadmin_{suffix}"
+    payload = {
+        "name": f"{prefix}_{suffix}",
+        "description": "pytest department",
+        "admin_uid": admin_uid,
+        "admin_password": f"Pw!{suffix}",
+    }
+    if parent_id is not None:
+        payload["parent_id"] = parent_id
     response = await test_client.post(
         "/api/departments",
-        json={
-            "name": f"{prefix}_{suffix}",
-            "description": "pytest department",
-            "admin_uid": admin_uid,
-            "admin_password": f"Pw!{suffix}",
-        },
+        json=payload,
         headers=admin_headers,
     )
     assert response.status_code == 201, response.text
@@ -102,6 +107,12 @@ async def _create_test_database(test_client, admin_headers, share_config=None):
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def _department_share_config(department_id):
+    """构造组织节点子树可读、管理员可管的共享配置。"""
+    scope = {"access_level": "department", "department_ids": [department_id], "user_uids": []}
+    return {"version": 2, "read_scope": scope, "manage_scope": scope}
 
 
 async def _accessible_kb_ids(test_client, headers):
@@ -577,37 +588,82 @@ async def test_create_database_defaults_to_global_share_config(test_client, admi
         await test_client.delete(f"/api/knowledge/databases/{kb_id}", headers=admin_headers)
 
 
-async def test_department_share_config_filters_accessible_databases(test_client, admin_headers):
-    department_a = await _create_test_department(test_client, admin_headers, "pytest_dept_a")
-    department_b = await _create_test_department(test_client, admin_headers, "pytest_dept_b")
+async def test_department_share_config_inherits_to_subtree_and_isolates_siblings(test_client, admin_headers):
+    departments = []
     user_a = user_b = None
-    database = None
+    databases = []
 
     try:
-        user_a = await _create_test_user(test_client, admin_headers, department_a["id"])
-        user_b = await _create_test_user(test_client, admin_headers, department_b["id"])
-        scope = {"access_level": "department", "department_ids": [department_a["id"]], "user_uids": []}
-        database = await _create_test_database(
+        company_a = await _create_test_department(test_client, admin_headers, "pytest_company_a")
+        departments.append(company_a)
+        company_b = await _create_test_department(test_client, admin_headers, "pytest_company_b")
+        departments.append(company_b)
+        department_a = await _create_test_department(
             test_client,
             admin_headers,
-            {"version": 2, "read_scope": scope, "manage_scope": scope},
+            "pytest_dept_a",
+            parent_id=company_a["id"],
         )
+        departments.append(department_a)
+        department_b = await _create_test_department(
+            test_client,
+            admin_headers,
+            "pytest_dept_b",
+            parent_id=company_b["id"],
+        )
+        departments.append(department_b)
 
-        saved_config = database["share_config"]
-        assert saved_config["manage_scope"]["access_level"] == "department"
-        assert department_a["id"] in saved_config["manage_scope"]["department_ids"]
+        user_a = await _create_test_user(test_client, admin_headers, department_a["id"])
+        user_b = await _create_test_user(test_client, admin_headers, department_b["id"])
+        database_a = await _create_test_database(
+            test_client,
+            admin_headers,
+            _department_share_config(company_a["id"]),
+        )
+        databases.append(database_a)
+        database_b = await _create_test_database(
+            test_client,
+            admin_headers,
+            _department_share_config(company_b["id"]),
+        )
+        databases.append(database_b)
+        group_database = await _create_test_database(
+            test_client,
+            admin_headers,
+            _department_share_config(ROOT_DEPARTMENT_ID),
+        )
+        databases.append(group_database)
 
-        assert database["kb_id"] in await _accessible_kb_ids(test_client, user_a["headers"])
-        assert database["kb_id"] not in await _accessible_kb_ids(test_client, user_b["headers"])
+        user_a_kb_ids = await _accessible_kb_ids(test_client, user_a["headers"])
+        user_b_kb_ids = await _accessible_kb_ids(test_client, user_b["headers"])
+
+        assert database_a["kb_id"] in user_a_kb_ids
+        assert database_b["kb_id"] not in user_a_kb_ids
+        assert group_database["kb_id"] in user_a_kb_ids
+
+        assert database_b["kb_id"] in user_b_kb_ids
+        assert database_a["kb_id"] not in user_b_kb_ids
+        assert group_database["kb_id"] in user_b_kb_ids
+
+        response = await test_client.get(
+            f"/api/knowledge/databases/{database_b['kb_id']}",
+            headers=user_a["headers"],
+        )
+        _assert_forbidden_response(response)
+        response = await test_client.get(
+            f"/api/knowledge/databases/{database_a['kb_id']}",
+            headers=user_b["headers"],
+        )
+        _assert_forbidden_response(response)
     finally:
-        if database:
+        for database in databases:
             await test_client.delete(f"/api/knowledge/databases/{database['kb_id']}", headers=admin_headers)
         if user_a:
             await _delete_user_by_id(test_client, admin_headers, user_a["user"]["id"])
         if user_b:
             await _delete_user_by_id(test_client, admin_headers, user_b["user"]["id"])
-        await _delete_department_with_admin(test_client, admin_headers, department_a)
-        await _delete_department_with_admin(test_client, admin_headers, department_b)
+        for department in reversed(departments):
+            await _delete_department_with_admin(test_client, admin_headers, department)
 
 
 async def test_user_share_config_filters_accessible_databases(test_client, admin_headers):

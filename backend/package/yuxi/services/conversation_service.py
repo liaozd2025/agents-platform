@@ -16,10 +16,11 @@ from yuxi.config import config as app_config
 from yuxi.knowledge.parser.factory import DocumentProcessorFactory
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import INVOCATION_CONVERSATION_SOURCES, ConversationRepository
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.mention_search_service import invalidate_mention_cache
 from yuxi.services.ocr_service import parse_document
 from yuxi.storage.minio import StorageError, get_minio_client
-from yuxi.storage.postgres.models_business import AgentRun, User
+from yuxi.storage.postgres.models_business import AgentRun
 from yuxi.utils.datetime_utils import format_utc_datetime, utc_isoformat
 from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import VIRTUAL_PATH_UPLOADS
@@ -414,8 +415,7 @@ async def create_thread_view(
     db: AsyncSession,
     current_uid: str,
 ) -> dict:
-    user_result = await db.execute(select(User).where(User.uid == str(current_uid)))
-    current_user = user_result.scalar_one_or_none()
+    current_user = await UserRepository().get_by_uid_with_db(db, str(current_uid))
     if not current_user:
         raise HTTPException(status_code=404, detail="用户不存在")
 

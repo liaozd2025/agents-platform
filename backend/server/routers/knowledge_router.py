@@ -255,7 +255,6 @@ async def create_database(
             llm_model_spec=llm_model_spec,
             share_config=share_config,
             created_by=current_user.uid,
-            created_by_department_id=current_user.department_id,
             **(additional_params or {}),
         )
 
@@ -419,8 +418,6 @@ async def update_database_info(
             update_llm_model_spec=update_llm_model_spec,
             additional_params=data.additional_params,
             share_config=data.share_config,
-            operator_uid=current_user.uid,
-            operator_department_id=current_user.department_id,
         )
         return {"message": "更新成功", "database": serialize_knowledge_base(database)}
     except HTTPException:

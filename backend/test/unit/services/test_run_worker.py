@@ -87,6 +87,27 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, run_obj: SimpleNamespace):
 
 
 @pytest.mark.asyncio
+async def test_load_user_includes_department_ancestor_ids(monkeypatch: pytest.MonkeyPatch):
+    db = object()
+    user = SimpleNamespace(uid="user-1", is_deleted=0, department_ancestor_ids=(1, 2))
+
+    @asynccontextmanager
+    async def fake_session_ctx():
+        yield db
+
+    class UserRepo:
+        async def get_by_uid_with_db(self, db_session, uid):
+            assert db_session is db
+            assert uid == "user-1"
+            return user
+
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_ctx)
+    monkeypatch.setattr(run_worker, "UserRepository", UserRepo)
+
+    assert await run_worker._load_user("user-1") is user
+
+
+@pytest.mark.asyncio
 async def test_process_agent_run_restores_invocation_meta(monkeypatch: pytest.MonkeyPatch):
     run_obj = _build_run()
     _patch_common(monkeypatch, run_obj)
@@ -495,6 +516,8 @@ def test_chunk_thread_id_uses_fallback_for_unstable_nested_metadata():
 
 @pytest.mark.asyncio
 async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.MonkeyPatch):
+    from yuxi.config import options
+
     calls: list[str] = []
 
     def fake_initialize():
@@ -517,6 +540,10 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         del session
         calls.append("init_builtin_skills")
 
+    async def fake_ensure_options_in_db(session):
+        del session
+        calls.append("ensure_options_in_db")
+
     def fake_start_runtime_sync():
         calls.append("start_runtime_sync")
 
@@ -529,6 +556,7 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
     monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_ctx)
     monkeypatch.setattr(run_worker, "ensure_builtin_mcp_servers_in_db", fake_ensure_builtin_mcp_servers_in_db)
     monkeypatch.setattr(run_worker, "init_builtin_skills", fake_init_builtin_skills)
+    monkeypatch.setattr(options, "ensure_options_in_db", fake_ensure_options_in_db)
     monkeypatch.setattr(run_worker.sys_config, "start_runtime_sync", fake_start_runtime_sync)
     monkeypatch.setattr(run_worker, "recover_pending_dispatches", fake_recover_pending_dispatches)
 
@@ -540,6 +568,7 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "ensure_business_schema",
         "ensure_builtin_mcp_servers_in_db",
         "init_builtin_skills",
+        "ensure_options_in_db",
         "start_runtime_sync",
         "recover_pending_dispatches",
     ]

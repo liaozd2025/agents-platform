@@ -8,12 +8,38 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import APIKey, User
+from yuxi.storage.postgres.models_business import APIKey, Department, User
 
 
 def _utc_now() -> dt:
     # 使用 naive datetime 以匹配 PostgreSQL TIMESTAMP WITHOUT TIME ZONE 列
     return dt.now(UTC).replace(tzinfo=None)
+
+
+def _parse_department_ancestor_ids(path: str | None) -> tuple[int, ...]:
+    """从组织节点物化路径解析包含自身的祖先节点 ID。"""
+    if not path:
+        return ()
+    return tuple(int(node_id) for node_id in path.strip("/").split("/") if node_id)
+
+
+async def _get_user_with_department_ancestors(db: AsyncSession, criterion: Any) -> User | None:
+    """查询用户并一次带出其组织节点祖先链。"""
+    result = await db.execute(
+        select(User, Department.path).outerjoin(Department, User.department_id == Department.id).where(criterion)
+    )
+    row = result.one_or_none()
+    if row is None:
+        return None
+
+    user, department_path = row
+    if user.department_id is not None and not department_path:
+        raise ValueError(f"用户 {user.uid} 所属组织节点缺少有效物化路径")
+    ancestor_ids = _parse_department_ancestor_ids(department_path)
+    if user.department_id is not None and (not ancestor_ids or ancestor_ids[-1] != user.department_id):
+        raise ValueError(f"用户 {user.uid} 所属组织节点的物化路径无效")
+    user.department_ancestor_ids = ancestor_ids
+    return user
 
 
 class UserRepository:
@@ -26,8 +52,7 @@ class UserRepository:
 
     async def get_by_id_with_db(self, db: AsyncSession, id: int) -> User | None:
         """使用指定的 db 根据 ID 获取用户"""
-        result = await db.execute(select(User).where(User.id == id))
-        return result.scalar_one_or_none()
+        return await _get_user_with_department_ancestors(db, User.id == id)
 
     async def get_by_uid(self, uid: str) -> User | None:
         """根据 uid 获取用户"""
@@ -36,8 +61,7 @@ class UserRepository:
 
     async def get_by_uid_with_db(self, db: AsyncSession, uid: str) -> User | None:
         """使用指定的 db 获取用户"""
-        result = await db.execute(select(User).where(User.uid == uid))
-        return result.scalar_one_or_none()
+        return await _get_user_with_department_ancestors(db, User.uid == uid)
 
     async def list_by_uids(self, uids: list[str]) -> list[User]:
         """批量获取指定 uid 的用户。"""
@@ -74,8 +98,6 @@ class UserRepository:
     ) -> Annotated[list[tuple[User, str | None]], "用户列表，包含部门名称"]:
         """获取用户列表，包含部门名称"""
         async with pg_manager.get_async_session_context() as session:
-            from yuxi.storage.postgres.models_business import Department
-
             query = (
                 select(User, Department.name.label("department_name"))
                 .outerjoin(Department, User.department_id == Department.id)

@@ -12,8 +12,15 @@ from yuxi.permissions import (
 )
 
 
-def _user(uid="user-1", role="user", department_id=1):
-    return SimpleNamespace(uid=uid, role=role, department_id=department_id)
+def _user(uid="user-1", role="user", department_id=1, department_ancestor_ids=None):
+    if department_ancestor_ids is None:
+        department_ancestor_ids = [] if department_id is None else [department_id]
+    return SimpleNamespace(
+        uid=uid,
+        role=role,
+        department_id=department_id,
+        department_ancestor_ids=department_ancestor_ids,
+    )
 
 
 def _resource(created_by="owner", share_config=None):
@@ -33,6 +40,83 @@ def test_knowledge_base_global_read_and_department_manage():
     readonly_admin = _user(uid="other", role="admin", department_id=2)
     assert resolve_knowledge_base_permission(managing_admin, resource) == ResourcePermission.MANAGE
     assert resolve_knowledge_base_permission(readonly_admin, resource) == ResourcePermission.READ
+
+
+def test_department_scope_inherits_to_descendants_only():
+    resource = _resource(
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [2]},
+            "manage_scope": None,
+        }
+    )
+
+    assert (
+        resolve_knowledge_base_permission(
+            _user(department_id=3, department_ancestor_ids=[1, 2, 3]),
+            resource,
+        )
+        == ResourcePermission.READ
+    )
+    assert (
+        resolve_knowledge_base_permission(
+            _user(department_id=2, department_ancestor_ids=[1, 2]),
+            resource,
+        )
+        == ResourcePermission.READ
+    )
+    assert (
+        resolve_knowledge_base_permission(
+            _user(department_id=1, department_ancestor_ids=[1]),
+            resource,
+        )
+        == ResourcePermission.NONE
+    )
+    assert (
+        resolve_knowledge_base_permission(
+            _user(department_id=4, department_ancestor_ids=[1, 4]),
+            resource,
+        )
+        == ResourcePermission.NONE
+    )
+
+
+def test_global_scope_and_group_root_scope_differ_for_unbound_users():
+    global_resource = _resource(
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "global"},
+            "manage_scope": None,
+        }
+    )
+    group_resource = _resource(
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [1]},
+            "manage_scope": None,
+        }
+    )
+    unbound_user = _user(department_id=None, department_ancestor_ids=[])
+    descendant_user = _user(department_id=3, department_ancestor_ids=[1, 2, 3])
+
+    assert resolve_knowledge_base_permission(unbound_user, global_resource) == ResourcePermission.READ
+    assert resolve_knowledge_base_permission(unbound_user, group_resource) == ResourcePermission.NONE
+    assert resolve_knowledge_base_permission(descendant_user, group_resource) == ResourcePermission.READ
+
+
+def test_all_resource_types_share_subtree_matching_and_keep_role_ceilings():
+    resource = _resource(
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [2]},
+            "manage_scope": {"access_level": "department", "department_ids": [2]},
+        }
+    )
+    descendant = _user(department_id=3, department_ancestor_ids=[1, 2, 3])
+
+    assert resolve_knowledge_base_permission(descendant, resource) == ResourcePermission.READ
+    assert resolve_agent_permission(descendant, resource) == ResourcePermission.MANAGE
+    assert resolve_skill_permission(descendant, resource) == ResourcePermission.MANAGE
 
 
 def test_invalid_v2_scope_does_not_expand_read_access_when_reading():

@@ -4,11 +4,11 @@ from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import APIKey, User
-from yuxi.utils.datetime_utils import utc_now_naive
-
 from yuxi.utils.auth_utils import AuthUtils
+from yuxi.utils.datetime_utils import utc_now_naive
 
 # 定义OAuth2密码承载器，指定token URL
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
@@ -39,8 +39,7 @@ async def _verify_api_key(key: str, db: AsyncSession) -> tuple[User | None, APIK
     if not api_key.user_id:
         return None, None
 
-    result = await db.execute(select(User).filter(User.id == api_key.user_id))
-    user = result.scalar_one_or_none()
+    user = await UserRepository().get_by_id_with_db(db, api_key.user_id)
     if user and not user.is_deleted:
         return user, api_key
 
@@ -90,9 +89,8 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    result = await db.execute(select(User).filter(User.id == int(user_id), User.is_deleted == 0))
-    user = result.scalar_one_or_none()
-    if user is None:
+    user = await UserRepository().get_by_id_with_db(db, int(user_id))
+    if user is None or user.is_deleted:
         raise credentials_exception
     if user.is_login_locked():
         raise HTTPException(
@@ -111,11 +109,6 @@ async def get_required_user(user: User | None = Depends(get_current_user)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="请登录后再访问",
             headers={"WWW-Authenticate": "Bearer"},
-        )
-    if not user.department_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="当前用户未绑定部门",
         )
     return user
 
