@@ -219,12 +219,15 @@ const agentStore = useAgentStore()
 const chatThreadsStore = useChatThreadsStore()
 const route = useRoute()
 const router = useRouter()
-const { surface: appSurface, isEmbedded: embedMode } = useEmbedContext()
+const {
+  surface: appSurface,
+  isEmbedded: embedMode,
+  displayMode: embedDisplayMode,
+  modeConfirmed: embedModeConfirmed
+} = useEmbedContext()
 const {
   isAuthorized: embedAuthorized,
   statusMessage: embedStatusMessage,
-  displayMode: embedDisplayMode,
-  modeConfirmed: embedModeConfirmed,
   requestDisplayMode,
   requestClose
 } = useOAEmbedBridge(embedMode)

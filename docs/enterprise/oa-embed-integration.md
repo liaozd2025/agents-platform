@@ -68,7 +68,6 @@ function applyMode(mode) {
 }
 
 function openYuxi() {
-  sendOAToken()
   applyMode('fixed') // 每次打开默认固定模式，不重载 iframe
 }
 
@@ -94,7 +93,7 @@ window.addEventListener('message', (event) => {
 })
 ```
 
-`getCurrentOAToken()` 和 `refreshOALogin()` 由 OA 按现有登录机制提供。OA 的打开按钮调用 `openYuxi()`；关闭只隐藏容器，不销毁或重载 iframe。不要把 token 放入 URL、DOM 属性或日志。
+`getCurrentOAToken()` 和 `refreshOALogin()` 由 OA 按现有登录机制提供。OA 的打开按钮调用 `openYuxi()`；重新打开只切回固定模式，不重复下发 token。关闭只隐藏容器，不销毁或重载 iframe。不要把 token 放入 URL、DOM 属性或日志。
 
 ## 显示模式协议
 

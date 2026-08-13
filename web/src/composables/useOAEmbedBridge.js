@@ -2,6 +2,11 @@ import { onActivated, onDeactivated, onMounted, onUnmounted, ref, unref } from '
 import { useChatThreadsStore } from '@/stores/chatThreads'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/apis/auth_api'
+import {
+  confirmEmbedDisplayMode,
+  markEmbedDisplayModePending,
+  resetEmbedDisplayMode
+} from '@/composables/useEmbedMode'
 import { createOAEmbedBridge, parseOAEmbedAllowedOrigins } from '@/utils/oaEmbedBridge'
 import { setOAEmbedAuthRequiredHandler } from '@/utils/oaEmbedSession'
 
@@ -11,8 +16,6 @@ export function useOAEmbedBridge(enabled) {
   const chatThreadsStore = useChatThreadsStore()
   const isAuthorized = ref(false)
   const statusMessage = ref('等待 OA 授权')
-  const displayMode = ref('fixed')
-  const modeConfirmed = ref(false)
   let bridge = null
   let clearAuthRequiredHandler = null
 
@@ -34,6 +37,7 @@ export function useOAEmbedBridge(enabled) {
       isAuthorized.value = true
       return
     }
+    resetEmbedDisplayMode()
 
     const allowedOrigins = parseOAEmbedAllowedOrigins(
       import.meta.env.VITE_YUXI_EMBED_ALLOWED_ORIGINS
@@ -58,10 +62,7 @@ export function useOAEmbedBridge(enabled) {
           throw error
         }
       },
-      onModeChanged: (mode) => {
-        displayMode.value = mode
-        modeConfirmed.value = true
-      }
+      onModeChanged: confirmEmbedDisplayMode
     })
     clearAuthRequiredHandler = setOAEmbedAuthRequiredHandler(requestAuthRequired)
     bridge.start()
@@ -85,10 +86,8 @@ export function useOAEmbedBridge(enabled) {
   return {
     isAuthorized,
     statusMessage,
-    displayMode,
-    modeConfirmed,
     requestDisplayMode(mode, threadId) {
-      if (bridge?.requestMode(mode, threadId)) modeConfirmed.value = false
+      if (bridge?.requestMode(mode, threadId)) markEmbedDisplayModePending()
     },
     requestClose(threadId) {
       bridge?.requestClose(threadId)

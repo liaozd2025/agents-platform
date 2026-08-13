@@ -17,7 +17,9 @@ export function parseOAEmbedAllowedOrigins(value) {
   ]
 }
 
-const OA_EMBED_MODES = new Set(['fixed', 'floating', 'fullscreen'])
+export const OA_EMBED_MODES = Object.freeze(['fixed', 'floating', 'fullscreen'])
+export const DEFAULT_OA_EMBED_MODE = 'fixed'
+const OA_EMBED_MODE_SET = new Set(OA_EMBED_MODES)
 
 /**
  * 创建 OA iframe 的 postMessage 桥，所有出站消息都绑定到明确 origin。
@@ -46,7 +48,7 @@ export function createOAEmbedBridge({
     if (event.source !== browserWindow.parent || !origins.includes(event.origin)) return
 
     if (event.data?.type === 'oa:mode-changed') {
-      if (event.origin === parentOrigin && OA_EMBED_MODES.has(event.data.mode)) {
+      if (event.origin === parentOrigin && OA_EMBED_MODE_SET.has(event.data.mode)) {
         onModeChanged(event.data.mode)
       }
       return
@@ -86,7 +88,7 @@ export function createOAEmbedBridge({
       post('yuxi:auth-required')
     },
     requestMode(mode, threadId) {
-      if (!OA_EMBED_MODES.has(mode)) return false
+      if (!OA_EMBED_MODE_SET.has(mode)) return false
       post('yuxi:mode-request', { mode, ...(threadId ? { threadId } : {}) })
       return true
     },

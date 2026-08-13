@@ -149,8 +149,10 @@
       });
 
       document.querySelector("#open").addEventListener("click", () => {
-        if (!frame.getAttribute("src")) loadFrame();
-        sendToken();
+        if (!frame.getAttribute("src")) {
+          loadFrame();
+          return;
+        }
         applyMode("fixed");
       });
       document

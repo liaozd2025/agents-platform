@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { createOAEmbedBridge, parseOAEmbedAllowedOrigins } from '../../src/utils/oaEmbedBridge.js'
+import {
+  DEFAULT_OA_EMBED_MODE,
+  createOAEmbedBridge,
+  parseOAEmbedAllowedOrigins
+} from '../../src/utils/oaEmbedBridge.js'
+import { resolveAppSurface } from '../../src/composables/useEmbedMode.js'
 
 function createBrowserHarness() {
   const messages = []
@@ -44,12 +49,18 @@ function createBrowserHarness() {
 }
 
 test('OA origin config only keeps exact HTTP origins', () => {
+  assert.equal(DEFAULT_OA_EMBED_MODE, 'fixed')
   assert.deepEqual(
     parseOAEmbedAllowedOrigins(
       'https://oa.example.test, http://localhost:4173 https://oa.example.test/path ftp://oa.test *'
     ),
     ['https://oa.example.test', 'http://localhost:4173']
   )
+})
+
+test('route metadata is the only standalone and OA embed surface boundary', () => {
+  assert.equal(resolveAppSurface({ matched: [{ meta: { embed: true } }] }), 'oa-embed')
+  assert.equal(resolveAppSurface({ matched: [{ meta: { requiresAuth: true } }] }), 'standalone')
 })
 
 test('OA bridge only accepts a token from an allowed parent origin', async () => {
@@ -100,7 +111,7 @@ test('OA bridge retries ready once when the parent listener is late', () => {
   assert.equal(harness.timers.length, 1)
 })
 
-test('OA bridge pins mode and close messages to the authenticated parent', async () => {
+test('OA bridge validates all mode and close messages at the authenticated parent boundary', async () => {
   const harness = createBrowserHarness()
   const confirmedModes = []
   const bridge = harness.createBridge({
@@ -116,9 +127,16 @@ test('OA bridge pins mode and close messages to the authenticated parent', async
     data: { type: 'oa:token', token: 'yuxi-token' }
   })
   bridge.requestAuthRequired()
+  assert.equal(bridge.requestMode('fixed'), true)
   assert.equal(bridge.requestMode('floating', 'thread-1'), true)
+  assert.equal(bridge.requestMode('fullscreen', 'thread-1'), true)
   assert.equal(bridge.requestMode('invalid', 'thread-1'), false)
   bridge.requestClose('thread-1')
+  await harness.dispatchMessage({
+    source: {},
+    origin: 'https://oa-backup.example.test',
+    data: { type: 'oa:mode-changed', mode: 'fixed' }
+  })
   await harness.dispatchMessage({
     source: harness.browserWindow.parent,
     origin: 'https://attacker.example.test',
@@ -127,16 +145,29 @@ test('OA bridge pins mode and close messages to the authenticated parent', async
   await harness.dispatchMessage({
     source: harness.browserWindow.parent,
     origin: 'https://oa-backup.example.test',
+    data: { type: 'oa:mode-changed', mode: 'invalid' }
+  })
+  await harness.dispatchMessage({
+    source: harness.browserWindow.parent,
+    origin: 'https://oa-backup.example.test',
     data: { type: 'oa:mode-changed', mode: 'fullscreen' }
   })
 
-  assert.deepEqual(harness.messages.slice(-3), [
+  assert.deepEqual(harness.messages.slice(-5), [
     {
       message: { type: 'yuxi:auth-required' },
       targetOrigin: 'https://oa-backup.example.test'
     },
     {
+      message: { type: 'yuxi:mode-request', mode: 'fixed' },
+      targetOrigin: 'https://oa-backup.example.test'
+    },
+    {
       message: { type: 'yuxi:mode-request', mode: 'floating', threadId: 'thread-1' },
+      targetOrigin: 'https://oa-backup.example.test'
+    },
+    {
+      message: { type: 'yuxi:mode-request', mode: 'fullscreen', threadId: 'thread-1' },
       targetOrigin: 'https://oa-backup.example.test'
     },
     {
@@ -145,4 +176,8 @@ test('OA bridge pins mode and close messages to the authenticated parent', async
     }
   ])
   assert.deepEqual(confirmedModes, ['fullscreen'])
+  assert.equal(
+    harness.messages.some(({ targetOrigin }) => targetOrigin === '*'),
+    false
+  )
 })

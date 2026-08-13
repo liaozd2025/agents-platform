@@ -21,6 +21,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.operation_log_service import log_operation
+from yuxi.services.user_identity_service import (
+    build_unique_external_username,
+    get_or_create_external_department,
+)
 from yuxi.storage.postgres.models_business import Department, User
 from yuxi.storage.redis import get_async_redis_client
 from yuxi.utils.auth_utils import AuthUtils
@@ -527,59 +531,6 @@ class OIDCUtils:
         }
 
 
-async def get_or_create_external_department(
-    db,
-    department_name: str | None = None,
-    department_description: str | None = None,
-    default_department: str | None = None,
-) -> Department | None:
-    """获取或创建外部身份所属部门。"""
-    processed_dept_name = None
-    processed_dept_desc = None
-
-    if department_name:
-        processed_dept_name = department_name.strip()
-        if len(processed_dept_name) > 50:
-            processed_dept_name = processed_dept_name[:50]
-        if not processed_dept_name:
-            processed_dept_name = None
-
-    if department_description:
-        processed_dept_desc = department_description.strip()
-        if len(processed_dept_desc) > 255:
-            processed_dept_desc = processed_dept_desc[:255]
-        if not processed_dept_desc:
-            processed_dept_desc = None
-
-    final_dept_name = processed_dept_name or default_department
-    if not final_dept_name:
-        return None
-    final_dept_desc = processed_dept_desc or f"{final_dept_name}部门"
-
-    result = await db.execute(select(Department).filter(Department.name == final_dept_name))
-    dept = result.scalar_one_or_none()
-
-    if dept:
-        logger.info(f"Using existing department: {final_dept_name}")
-        return dept
-
-    dept = Department(
-        name=final_dept_name,
-        description=final_dept_desc,
-    )
-    db.add(dept)
-    try:
-        await db.commit()
-        await db.refresh(dept)
-        logger.info(f"Created external identity department: {final_dept_name}")
-    except IntegrityError:
-        await db.rollback()
-        result = await db.execute(select(Department).filter(Department.name == final_dept_name))
-        dept = result.scalar_one_or_none()
-
-    return dept
-
-
 async def find_user_by_oidc_sub(db, sub: str) -> User | None:
     """通过 OIDC sub 查找用户"""
     # 方法1: 检查是否有用户的 uid 直接等于 "oidc:{sub}"（标准 OIDC 用户）
@@ -698,34 +649,6 @@ async def _create_oidc_binding_placeholder(db, sub: str, target_user: User) -> N
         # 并发创建冲突，回滚后忽略
         await db.rollback()
         logger.info(f"OIDC binding placeholder already exists for sub {sub}")
-
-
-async def build_unique_external_username(db, preferred_username: str, external_id: str) -> str:
-    """为外部身份生成不冲突的显示用户名。"""
-    base_username = preferred_username.strip() if preferred_username else ""
-    if not base_username:
-        base_username = f"external_{external_id[:8]}"
-
-    result = await db.execute(select(User.id).filter(User.username == base_username))
-    if result.scalar_one_or_none() is None:
-        return base_username
-
-    hash_suffix = hashlib.sha256(external_id.encode()).hexdigest()[:6]
-    candidate = f"{base_username}-{hash_suffix}"
-    result = await db.execute(select(User.id).filter(User.username == candidate))
-    if result.scalar_one_or_none() is None:
-        return candidate
-
-    for i in range(2, 100):
-        indexed_candidate = f"{candidate}-{i}"
-        result = await db.execute(select(User.id).filter(User.username == indexed_candidate))
-        if result.scalar_one_or_none() is None:
-            return indexed_candidate
-
-    raise HTTPException(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail="无法生成可用用户名，请联系管理员",
-    )
 
 
 async def create_oidc_user(db, user_info: dict, department_id: int | None = None) -> User:

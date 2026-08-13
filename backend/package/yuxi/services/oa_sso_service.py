@@ -12,8 +12,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from yuxi.services.oidc_service import build_unique_external_username, get_or_create_external_department
 from yuxi.services.operation_log_service import log_operation
+from yuxi.services.user_identity_service import (
+    build_unique_external_username,
+    get_or_create_external_department,
+)
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
