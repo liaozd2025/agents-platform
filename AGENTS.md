@@ -135,3 +135,27 @@ make format        # 格式化代码
 1. 参考 [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) 规范编写提交信息。
 2. 使用中文提交信息，标题简洁明了，描述具体改动内容和原因。
 3. 创建 PR 必须参考 [contributing.md](docs/develop-guides/contributing.md) 以及 PR 模板[PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md)，并在提交前完成其中的检查项。
+
+## Agent skills
+
+engineering skills（`/grill-with-docs` → `/to-spec` → `/to-tickets` → `/implement`）在本仓库的配置。
+
+### Issue tracker
+
+GitHub Issues，仓库为 `origin`（`liaozd2025/Yuxi`）。**只发 `origin`，绝不发 `upstream`（`xerrors/Yuxi`）。** 见 [docs/agent-workflow/issue-tracker.md](docs/agent-workflow/issue-tracker.md)。
+
+### Triage labels
+
+五个规范化标签，字符串与角色同名。见 [docs/agent-workflow/triage-labels.md](docs/agent-workflow/triage-labels.md)。
+
+### Domain docs
+
+单上下文。`ARCHITECTURE.md` 是现成的代码地图，优先读它；`CONTEXT.md` 与 `docs/adr/` 由 `/domain-modeling` 懒创建，不存在时静默继续。见 [docs/agent-workflow/domain.md](docs/agent-workflow/domain.md)。
+
+### 本仓库对 skills 产出的约束
+
+- **语言**：spec、ticket、ADR、issue 正文一律用中文；标签字符串与命令片段保持英文。
+- **测试环境**：`/implement` 与 `/tdd` 的测试必须在容器内执行（`docker exec api-dev ...`），不要在宿主机直接跑；测试落位遵循 [testing-guidelines.md](docs/develop-guides/testing-guidelines.md)。
+- **提交**：遵循上方「提交规范」，不要用英文 commit message。
+- **文档位置**：`docs/vibe/` 已被 gitignore，仅放临时草稿；需要入库、需要交给 agent 或团队协作的设计文档放 `docs/enterprise/`。注意 `docs/agents/` 是**产品文档**目录（智能体功能说明，挂在 VitePress 导航），不要往里写工具链配置。
+- **Review**：`/code-review` 需同时应用本文件的「代码 Review 准则」。
