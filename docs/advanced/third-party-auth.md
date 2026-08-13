@@ -93,7 +93,7 @@ docker restart api-dev web-dev
 系统会创建一个标记为删除的占位用户 `oidc:{sub}:{target_user_id}` 来记录 OIDC sub 与 Yuxi 用户的绑定关系，确保只有绑定过的 OIDC 身份才能登录对应的账号，**防止账号冒用**。其中 `target_user_id` 是数据库中的数值 `users.id`；用户登录标识仍使用字符串 `uid`。
 
 ### 自动获取部门信息（OIDC_FETCH_DEPARTMENT_INFO=true）
-开启后，系统会从 OIDC userinfo 的 `OIDC_DEPARTMENT_CLAIM` 配置字段读取组织节点名称，仅在全部已有组织节点中精确命中一个时关联新用户。
+开启后，系统会从 OIDC userinfo 的 `OIDC_DEPARTMENT_CLAIM` 配置字段读取组织节点名称，仅在全部已有组织节点中精确命中一个时关联用户；已有用户再次登录也会按本次 claim 更新归属节点。
 
-- claim 命中 0 个或多个同名节点时，新用户回落到集团根，并写入 warning 日志
+- claim 命中 0 个或多个同名节点时，用户回落到集团根，并写入 warning 日志
 - 登录流程不会创建组织节点，不做模糊匹配或路径字符串解析

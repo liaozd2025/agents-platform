@@ -31,13 +31,12 @@
           <a-alert type="error" :message="departmentManagement.error" show-icon />
         </div>
 
-        <template v-if="departmentManagement.departments.length > 0">
+        <template v-else-if="departmentManagement.departments.length > 0">
           <a-table
             :dataSource="departmentTree"
             :columns="columns"
             :rowKey="(record) => record.id"
             :pagination="false"
-            :default-expanded-row-keys="[ROOT_DEPARTMENT_ID]"
             :scroll="{ x: 720 }"
             class="department-table"
           >
@@ -89,7 +88,7 @@
         </template>
 
         <div v-else class="empty-state">
-          <a-empty description="暂无组织节点" />
+          <a-empty description="暂无组织节点，请先添加组织节点" />
         </div>
       </a-spin>
     </div>

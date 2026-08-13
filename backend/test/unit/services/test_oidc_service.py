@@ -51,6 +51,7 @@ async def _create_user(session, uid: str = "alice") -> User:
 
 
 async def test_resolve_oidc_department_returns_unique_exact_match(oidc_session):
+    """唯一同名 claim 应精确挂载已有组织节点。"""
     department = Department(name="研发部", parent_id=ROOT_DEPARTMENT_ID, path=f"/{ROOT_DEPARTMENT_ID}/2/")
     oidc_session.add(department)
     await oidc_session.commit()
@@ -61,6 +62,7 @@ async def test_resolve_oidc_department_returns_unique_exact_match(oidc_session):
 
 
 async def test_resolve_oidc_department_falls_back_to_root_when_no_exact_match(oidc_session, monkeypatch):
+    """零命中时应回落集团根且不能解析路径或创建节点。"""
     oidc_session.add(Department(name="研发部", parent_id=ROOT_DEPARTMENT_ID, path=f"/{ROOT_DEPARTMENT_ID}/2/"))
     await oidc_session.commit()
     count_before = await oidc_session.scalar(select(func.count(Department.id)))
@@ -75,6 +77,7 @@ async def test_resolve_oidc_department_falls_back_to_root_when_no_exact_match(oi
 
 
 async def test_resolve_oidc_department_falls_back_to_root_when_name_is_duplicated(oidc_session, monkeypatch):
+    """多个同名节点时应回落集团根而不是猜测。"""
     company_a = Department(name="A 公司", parent_id=ROOT_DEPARTMENT_ID, path=f"/{ROOT_DEPARTMENT_ID}/2/")
     company_b = Department(name="B 公司", parent_id=ROOT_DEPARTMENT_ID, path=f"/{ROOT_DEPARTMENT_ID}/3/")
     oidc_session.add_all([company_a, company_b])
@@ -124,8 +127,12 @@ async def test_find_deleted_oidc_user_by_sub_resolves_deleted_target_when_sub_co
 
 
 async def test_oidc_callback_allows_existing_binding_when_sub_contains_colon(oidc_session, monkeypatch):
+    """已有 OIDC 用户登录时也应按本次 claim 更新归属节点。"""
     user = await _create_user(oidc_session)
     await oidc_service._create_oidc_binding_placeholder(oidc_session, "tenant:user", user)
+    department = Department(name="研发部", parent_id=ROOT_DEPARTMENT_ID, path=f"/{ROOT_DEPARTMENT_ID}/2/")
+    oidc_session.add(department)
+    await oidc_session.commit()
 
     monkeypatch.setattr(oidc_service.oidc_config, "enabled", True)
     monkeypatch.setattr(oidc_service.oidc_config, "client_id", "cid")
@@ -135,6 +142,7 @@ async def test_oidc_callback_allows_existing_binding_when_sub_contains_colon(oid
     monkeypatch.setattr(oidc_service.oidc_config, "userinfo_endpoint", "https://example/userinfo")
     monkeypatch.setattr(oidc_service.oidc_config, "use_raw_username", True)
     monkeypatch.setattr(oidc_service.oidc_config, "auto_create_user", False)
+    monkeypatch.setattr(oidc_service.oidc_config, "fetch_department_info", True)
 
     monkeypatch.setattr(
         oidc_service.OIDCUtils,
@@ -146,7 +154,7 @@ async def test_oidc_callback_allows_existing_binding_when_sub_contains_colon(oid
         return {"access_token": "token"}
 
     async def fake_userinfo(cls, access_token):
-        return {"sub": "tenant:user", "preferred_username": "alice"}
+        return {"sub": "tenant:user", "preferred_username": "alice", "department": "研发部"}
 
     async def fake_log_operation(db, user_id, operation, request=None):
         return None
@@ -159,3 +167,67 @@ async def test_oidc_callback_allows_existing_binding_when_sub_contains_colon(oid
 
     assert response.status_code == 302
     assert unquote(response.headers["location"]).startswith("/auth/oidc/callback?code=")
+    await oidc_session.refresh(user)
+    assert user.department_id == department.id
+
+
+async def test_oidc_callback_auto_create_uses_unique_existing_department(oidc_session, monkeypatch):
+    """OIDC 自动建用户的主流程应挂载已有唯一节点且不建节点。"""
+    department = Department(name="研发部", parent_id=ROOT_DEPARTMENT_ID, path=f"/{ROOT_DEPARTMENT_ID}/2/")
+    oidc_session.add(department)
+    await oidc_session.commit()
+    count_before = await oidc_session.scalar(select(func.count(Department.id)))
+
+    monkeypatch.setattr(oidc_service.oidc_config, "enabled", True)
+    monkeypatch.setattr(oidc_service.oidc_config, "client_id", "cid")
+    monkeypatch.setattr(oidc_service.oidc_config, "client_secret", "secret")
+    monkeypatch.setattr(oidc_service.oidc_config, "token_endpoint", "https://example/token")
+    monkeypatch.setattr(oidc_service.oidc_config, "authorization_endpoint", "https://example/auth")
+    monkeypatch.setattr(oidc_service.oidc_config, "userinfo_endpoint", "https://example/userinfo")
+    monkeypatch.setattr(oidc_service.oidc_config, "use_raw_username", False)
+    monkeypatch.setattr(oidc_service.oidc_config, "auto_create_user", True)
+    monkeypatch.setattr(oidc_service.oidc_config, "fetch_department_info", True)
+    monkeypatch.setattr(
+        oidc_service.OIDCUtils,
+        "verify_state",
+        classmethod(lambda cls, state: {"redirect_path": "/"}),
+    )
+
+    async def fake_exchange(cls, code):
+        """返回固定的测试访问令牌。"""
+        return {"access_token": "token"}
+
+    async def fake_userinfo(cls, access_token):
+        """返回唯一命中研发部的测试用户信息。"""
+        return {"sub": "new-user", "preferred_username": "new-user", "department": "研发部"}
+
+    async def fake_create_user(db, user_info, department_id):
+        """在当前测试会话中按回调传入的组织节点创建用户。"""
+        user = User(
+            username=user_info["username"],
+            uid=f"oidc:{user_info['sub']}",
+            password_hash="x",
+            role="user",
+            department_id=department_id,
+            is_deleted=0,
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        return user
+
+    async def fake_log_operation(db, user_id, operation, request=None):
+        """避免单元测试写入未建表的操作日志。"""
+        return None
+
+    monkeypatch.setattr(oidc_service.OIDCUtils, "exchange_code_for_token", classmethod(fake_exchange))
+    monkeypatch.setattr(oidc_service.OIDCUtils, "get_userinfo", classmethod(fake_userinfo))
+    monkeypatch.setattr(oidc_service, "create_oidc_user", fake_create_user)
+    monkeypatch.setattr(oidc_service, "log_operation", fake_log_operation)
+
+    response = await oidc_service.oidc_callback_handler("dummy-code", "dummy-state", oidc_session)
+    created_user = await oidc_session.scalar(select(User).where(User.uid == "oidc:new-user"))
+
+    assert response.status_code == 302
+    assert created_user.department_id == department.id
+    assert await oidc_session.scalar(select(func.count(Department.id))) == count_before

@@ -8,11 +8,11 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete as sqlalchemy_delete, select, func, update as sqlalchemy_update
+from sqlalchemy import delete as sqlalchemy_delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Department, User
-from yuxi.repositories.department_repository import DepartmentRepository, build_child_path
+from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.user_repository import UserRepository
 from server.utils.auth_middleware import get_superadmin_user, get_admin_user, get_db
 from yuxi.utils.auth_utils import AuthUtils
@@ -190,6 +190,7 @@ async def update_department(
     db: AsyncSession = Depends(get_db),
 ):
     """更新组织节点信息，并在父节点变化时移动整棵子树"""
+    dept_repo = DepartmentRepository()
     result = await db.execute(select(Department).filter(Department.id == department_id))
     department = result.scalar_one_or_none()
 
@@ -207,8 +208,7 @@ async def update_department(
         if department_data.parent_id == department.id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="组织节点不能移动到自身之下")
 
-        result = await db.execute(select(Department).filter(Department.id == department_data.parent_id))
-        target_parent = result.scalar_one_or_none()
+        target_parent = await dept_repo.get_by_id(department_data.parent_id)
         if target_parent is None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="父级组织节点不存在")
         if target_parent.path.startswith(department.path):
@@ -217,14 +217,7 @@ async def update_department(
 
     target_name = department_data.name or department.name
     if target_name != department.name or target_parent_id != department.parent_id:
-        result = await db.execute(
-            select(Department.id).filter(
-                Department.id != department.id,
-                Department.parent_id == target_parent_id,
-                Department.name == target_name,
-            )
-        )
-        if result.first() is not None:
+        if await dept_repo.exists_sibling_name(target_parent_id, target_name):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="同一父级下已存在同名组织节点")
 
     if department_data.name:
@@ -234,14 +227,7 @@ async def update_department(
         department.description = department_data.description
 
     if target_parent is not None and target_parent.id != department.parent_id:
-        old_path = department.path
-        new_path = build_child_path(target_parent.path, department.id)
-        await db.execute(
-            sqlalchemy_update(Department)
-            .where(Department.path.like(f"{old_path}%"))
-            .values(path=func.concat(new_path, func.substr(Department.path, len(old_path) + 1)))
-        )
-        department.parent_id = target_parent.id
+        await dept_repo.move_subtree(db, department, target_parent)
 
     await db.commit()
     await db.refresh(department)

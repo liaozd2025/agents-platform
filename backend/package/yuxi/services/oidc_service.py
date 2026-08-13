@@ -641,13 +641,19 @@ async def create_oidc_user(db, user_info: dict, department_id: int | None = None
     )
 
 
-async def restore_deleted_oidc_user(db, deleted_user: User, user_info: dict) -> User:
+async def restore_deleted_oidc_user(
+    db,
+    deleted_user: User,
+    user_info: dict,
+    department_id: int,
+) -> User:
     """恢复已注销的 OIDC 用户并返回可登录用户"""
     preferred_username = user_info["name"] or user_info["username"]
 
     deleted_user.is_deleted = 0
     deleted_user.deleted_at = None
     deleted_user.last_login = utc_now_naive()
+    deleted_user.department_id = department_id
     deleted_user.phone_number = None
     deleted_user.avatar = None
 
@@ -664,9 +670,11 @@ async def restore_deleted_oidc_user(db, deleted_user: User, user_info: dict) -> 
     return deleted_user
 
 
-async def update_oidc_user_login(db, user: User) -> None:
-    """更新 OIDC 用户登录时间"""
+async def update_oidc_user_login(db, user: User, department_id: int | None = None) -> None:
+    """更新 OIDC 用户登录时间与本次 claim 对应的归属节点。"""
     user.last_login = utc_now_naive()
+    if department_id is not None:
+        user.department_id = department_id
     await db.commit()
 
 
@@ -767,17 +775,20 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
         user = user_by_sub
 
     if user:
-        await update_oidc_user_login(db, user)
+        department_id = None
+        if oidc_config.fetch_department_info:
+            department = await resolve_oidc_department(db, extracted_info.get("department_name"))
+            department_id = department.id
+        await update_oidc_user_login(db, user, department_id)
         logger.info(f"OIDC user logged in: {user.username}")
     elif oidc_config.auto_create_user:
+        department = await resolve_oidc_department(db, extracted_info.get("department_name"))
         deleted_user = await find_deleted_oidc_user_by_sub(db, sub)
         if deleted_user:
-            user = await restore_deleted_oidc_user(db, deleted_user, extracted_info)
+            user = await restore_deleted_oidc_user(db, deleted_user, extracted_info, department.id)
             logger.info(f"OIDC deleted user restored and logged in: {user.username}")
         else:
-            dept = await resolve_oidc_department(db, extracted_info.get("department_name"))
-            department_id = dept.id
-            user = await create_oidc_user(db, extracted_info, department_id)
+            user = await create_oidc_user(db, extracted_info, department.id)
     else:
         return _redirect_to_login_with_error("用户未注册，请联系管理员开通账号")
 

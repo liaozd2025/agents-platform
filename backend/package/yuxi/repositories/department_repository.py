@@ -2,7 +2,8 @@
 
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
@@ -125,3 +126,19 @@ class DepartmentRepository:
                 select(Department.id).where(Department.parent_id == parent_id, Department.name == name)
             )
             return result.first() is not None
+
+    async def move_subtree(
+        self,
+        session: AsyncSession,
+        department: Department,
+        target_parent: Department,
+    ) -> None:
+        """在当前事务内更新父节点，并批量替换整棵子树的物化路径前缀。"""
+        old_path = department.path
+        new_path = build_child_path(target_parent.path, department.id)
+        await session.execute(
+            update(Department)
+            .where(Department.path.like(f"{old_path}%"))
+            .values(path=func.concat(new_path, func.substr(Department.path, len(old_path) + 1)))
+        )
+        department.parent_id = target_parent.id

@@ -43,3 +43,19 @@ test('组织节点列表可组装为树且移动时禁用自身与后代', () =>
     }
   ])
 })
+
+test('数百个组织节点可一次线性组装且保持完整', () => {
+  const departments = [
+    { id: 1, parent_id: null, name: '集团' },
+    ...Array.from({ length: 600 }, (_, index) => ({
+      id: index + 2,
+      parent_id: 1,
+      name: `组织节点 ${index + 1}`
+    }))
+  ]
+
+  const tree = buildDepartmentTree(departments)
+
+  assert.equal(tree.length, 1)
+  assert.equal(tree[0].children.length, 600)
+})
