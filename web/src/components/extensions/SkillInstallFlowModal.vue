@@ -150,7 +150,6 @@
             <ShareConfigForm
               ref="shareConfigFormRef"
               v-model="shareConfig"
-              :auto-select-user-dept="true"
               :allowed-access-levels="allowedAccessLevels"
             />
           </div>

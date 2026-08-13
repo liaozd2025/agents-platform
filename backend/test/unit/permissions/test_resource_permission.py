@@ -159,6 +159,82 @@ def test_strict_config_rejects_user_manage_scope_under_department_read_scope():
         )
 
 
+def test_strict_config_accepts_manage_department_under_read_ancestor():
+    from yuxi.permissions import normalize_permission_config
+
+    config = {
+        "version": 2,
+        "read_scope": {"access_level": "department", "department_ids": [1]},
+        "manage_scope": {"access_level": "department", "department_ids": [2]},
+    }
+
+    assert normalize_permission_config(
+        config,
+        strict=True,
+        department_paths={1: "/1/", 2: "/1/2/"},
+    ) == {
+        "version": 2,
+        "read_scope": {"access_level": "department", "department_ids": [1], "user_uids": []},
+        "manage_scope": {"access_level": "department", "department_ids": [2], "user_uids": []},
+    }
+
+
+@pytest.mark.parametrize(
+    ("read_id", "manage_id"),
+    [
+        (2, 1),
+        (2, 3),
+    ],
+)
+def test_strict_config_rejects_manage_department_outside_read_subtree(read_id, manage_id):
+    from yuxi.permissions import normalize_permission_config
+
+    with pytest.raises(ValueError, match="管理范围必须包含在读取范围内"):
+        normalize_permission_config(
+            {
+                "version": 2,
+                "read_scope": {"access_level": "department", "department_ids": [read_id]},
+                "manage_scope": {"access_level": "department", "department_ids": [manage_id]},
+            },
+            strict=True,
+            department_paths={1: "/1/", 2: "/1/2/", 3: "/1/3/"},
+        )
+
+
+@pytest.mark.parametrize("scope_name", ["read_scope", "manage_scope"])
+def test_strict_config_rejects_redundant_department_ancestor(scope_name):
+    from yuxi.permissions import normalize_permission_config
+
+    config = {
+        "version": 2,
+        "read_scope": {"access_level": "global"},
+        "manage_scope": None,
+    }
+    config[scope_name] = {"access_level": "department", "department_ids": [1, 2]}
+
+    with pytest.raises(ValueError, match="同一权限范围不能同时选择上级和下级组织节点"):
+        normalize_permission_config(
+            config,
+            strict=True,
+            department_paths={1: "/1/", 2: "/1/2/"},
+        )
+
+
+def test_historical_redundant_department_scope_remains_readable():
+    from yuxi.permissions import normalize_permission_config
+
+    config = {
+        "version": 2,
+        "read_scope": {"access_level": "department", "department_ids": [1, 2]},
+        "manage_scope": None,
+    }
+
+    assert normalize_permission_config(
+        config,
+        department_paths={1: "/1/", 2: "/1/2/"},
+    )["read_scope"]["department_ids"] == [1, 2]
+
+
 def test_global_agent_scope_preserves_admin_management():
     resource = _resource(
         share_config={

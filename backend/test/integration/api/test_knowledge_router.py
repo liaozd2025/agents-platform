@@ -588,6 +588,37 @@ async def test_create_database_defaults_to_global_share_config(test_client, admi
         await test_client.delete(f"/api/knowledge/databases/{kb_id}", headers=admin_headers)
 
 
+async def test_group_read_and_company_manage_scope_can_be_saved(test_client, admin_headers):
+    """全集团可读时，管理范围可收窄到下级公司。"""
+
+    company = await _create_test_department(test_client, admin_headers, "pytest_manage_company")
+    database = None
+    try:
+        database = await _create_test_database(
+            test_client,
+            admin_headers,
+            {
+                "version": 2,
+                "read_scope": {
+                    "access_level": "department",
+                    "department_ids": [ROOT_DEPARTMENT_ID],
+                    "user_uids": [],
+                },
+                "manage_scope": {
+                    "access_level": "department",
+                    "department_ids": [company["id"]],
+                    "user_uids": [],
+                },
+            },
+        )
+
+        assert database["share_config"]["manage_scope"]["department_ids"] == [company["id"]]
+    finally:
+        if database:
+            await test_client.delete(f"/api/knowledge/databases/{database['kb_id']}", headers=admin_headers)
+        await _delete_department_with_admin(test_client, admin_headers, company)
+
+
 async def test_department_share_config_inherits_to_subtree_and_isolates_siblings(test_client, admin_headers):
     departments = []
     user_a = user_b = None

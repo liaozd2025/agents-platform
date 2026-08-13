@@ -84,7 +84,43 @@ def _normalize_scope(scope: dict | None) -> dict | None:
     return {"access_level": access_level, "department_ids": [], "user_uids": user_uids}
 
 
-def _validate_manage_scope(read_scope: dict | None, manage_scope: dict | None) -> None:
+def get_permission_department_ids(share_config: dict | None) -> set[int]:
+    """提取共享配置中保存校验所需的组织节点 ID。"""
+
+    if not isinstance(share_config, dict) or share_config.get("version") != 2:
+        return set()
+
+    return {
+        int(department_id)
+        for scope_name in ("read_scope", "manage_scope")
+        if isinstance(scope := share_config.get(scope_name), dict) and scope.get("access_level") == "department"
+        for department_id in scope.get("department_ids") or []
+    }
+
+
+def _validate_department_scope(scope: dict | None, department_paths: Mapping[int, str]) -> None:
+    """拒绝同一范围内同时选择上级与下级组织节点。"""
+
+    if not scope or scope["access_level"] != "department":
+        return
+
+    selected_ids = scope["department_ids"]
+    if any(department_id not in department_paths for department_id in selected_ids):
+        raise ValueError("所选组织节点不存在或已删除")
+
+    for index, department_id in enumerate(selected_ids):
+        path = department_paths[department_id]
+        for other_id in selected_ids[index + 1 :]:
+            other_path = department_paths[other_id]
+            if path.startswith(other_path) or other_path.startswith(path):
+                raise ValueError("同一权限范围不能同时选择上级和下级组织节点")
+
+
+def _validate_manage_scope(
+    read_scope: dict | None,
+    manage_scope: dict | None,
+    department_paths: Mapping[int, str] | None = None,
+) -> None:
     """确保管理范围不会超出读取范围。"""
 
     if not read_scope or not manage_scope or read_scope["access_level"] == "global":
@@ -95,7 +131,15 @@ def _validate_manage_scope(read_scope: dict | None, manage_scope: dict | None) -
     if manage_level != read_level:
         raise ValueError("管理范围必须包含在读取范围内")
     if read_level == manage_level == "department":
-        if not set(manage_scope["department_ids"]).issubset(read_scope["department_ids"]):
+        if department_paths is None:
+            covered = set(manage_scope["department_ids"]).issubset(read_scope["department_ids"])
+        else:
+            read_paths = [department_paths[department_id] for department_id in read_scope["department_ids"]]
+            covered = all(
+                any(department_paths[department_id].startswith(read_path) for read_path in read_paths)
+                for department_id in manage_scope["department_ids"]
+            )
+        if not covered:
             raise ValueError("管理范围必须包含在读取范围内")
     elif read_level == manage_level == "user":
         if not set(manage_scope["user_uids"]).issubset(read_scope["user_uids"]):
@@ -108,6 +152,7 @@ def normalize_permission_config(
     allowed_access_levels: Collection[str] | None = None,
     unauthorized_access_level_message: str = "当前用户无权使用该资源共享范围",
     strict: bool = False,
+    department_paths: Mapping[int, str] | None = None,
 ) -> dict:
     """规范化并校验 v2 共享配置。"""
 
@@ -116,7 +161,10 @@ def normalize_permission_config(
         read_scope = _normalize_scope(config.get("read_scope"))
         manage_scope = _normalize_scope(config.get("manage_scope"))
         try:
-            _validate_manage_scope(read_scope, manage_scope)
+            if strict and department_paths is not None:
+                _validate_department_scope(read_scope, department_paths)
+                _validate_department_scope(manage_scope, department_paths)
+            _validate_manage_scope(read_scope, manage_scope, department_paths if strict else None)
         except ValueError:
             if strict:
                 raise

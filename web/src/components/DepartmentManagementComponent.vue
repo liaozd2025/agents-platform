@@ -137,6 +137,7 @@
           <div v-if="departmentManagement.editMode" class="help-text">
             修改父级会连同该节点的整棵子树一起移动
           </div>
+          <div v-else class="help-text">新建子节点会继承父节点已授权的资源</div>
         </a-form-item>
 
         <a-form-item

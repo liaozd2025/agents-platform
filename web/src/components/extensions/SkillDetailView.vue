@@ -157,7 +157,6 @@
                     v-else
                     ref="shareConfigFormRef"
                     v-model="shareConfigForm"
-                    :auto-select-user-dept="true"
                     :allowed-access-levels="allowedSkillAccessLevels"
                   />
                 </section>

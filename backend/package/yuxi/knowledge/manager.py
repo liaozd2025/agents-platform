@@ -2,7 +2,7 @@ import asyncio
 import os
 import secrets
 import string
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -25,7 +25,12 @@ from yuxi.knowledge.read_models import (
 )
 from yuxi.knowledge.schemas import FindOutputSchema, OpenOutputSchema
 from yuxi.knowledge.utils.security import redact_sensitive_params
-from yuxi.permissions import ResourcePermission, normalize_permission_config, resolve_knowledge_base_permission
+from yuxi.permissions import (
+    ResourcePermission,
+    get_permission_department_ids,
+    normalize_permission_config,
+    resolve_knowledge_base_permission,
+)
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 from yuxi.utils.datetime_utils import utc_isoformat
@@ -182,6 +187,7 @@ class KnowledgeBaseManager:
         share_config: dict | None,
         *,
         strict: bool = False,
+        department_paths: Mapping[int, str] | None = None,
     ) -> dict:
         if share_config is None:
             return {
@@ -191,12 +197,28 @@ class KnowledgeBaseManager:
             }
 
         if share_config and share_config.get("version") == 2:
-            normalized = normalize_permission_config(share_config, strict=strict)
+            normalized = normalize_permission_config(
+                share_config,
+                strict=strict,
+                department_paths=department_paths,
+            )
             if normalized["read_scope"] is None and strict:
                 raise ValueError("知识库必须设置读取范围")
             return normalized
 
         raise ValueError("知识库共享配置必须使用 version 2")
+
+    async def _normalize_share_config_for_save(self, share_config: dict | None) -> dict:
+        """加载组织路径并校验待保存的知识库共享配置。"""
+
+        from yuxi.repositories.department_repository import DepartmentRepository
+
+        department_paths = await DepartmentRepository().get_paths_by_ids(get_permission_department_ids(share_config))
+        return self._normalize_share_config(
+            share_config,
+            strict=True,
+            department_paths=department_paths,
+        )
 
     @staticmethod
     def _normalize_database_stats(stats: dict | None) -> dict[str, int]:
@@ -470,7 +492,7 @@ class KnowledgeBaseManager:
         if await self.database_name_exists(database_name):
             raise KBNameConflictError(f"知识库名称 '{database_name}' 已存在，请使用其他名称")
 
-        share_config = self._normalize_share_config(share_config, strict=True)
+        share_config = await self._normalize_share_config_for_save(share_config)
 
         kb_instance = self._get_or_create_kb_instance(kb_type)
         additional_params = kwargs
@@ -1126,7 +1148,7 @@ class KnowledgeBaseManager:
             update_data["additional_params"] = merged_additional_params
 
         if share_config is not None:
-            update_data["share_config"] = self._normalize_share_config(share_config, strict=True)
+            update_data["share_config"] = await self._normalize_share_config_for_save(share_config)
 
         # 保存到数据库
         await kb_repo.update(kb_id, update_data)

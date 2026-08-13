@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from typing import Any, Literal
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.permissions import ResourcePermission, normalize_permission_config, resolve_agent_permission
+from yuxi.permissions import (
+    ResourcePermission,
+    get_permission_department_ids,
+    normalize_permission_config,
+    resolve_agent_permission,
+)
+from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.storage.postgres.models_business import Agent, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
@@ -128,12 +134,16 @@ def normalize_agent_share_config(
     share_config: dict | None,
     *,
     allowed_access_levels: Collection[str] | None = None,
+    department_paths: Mapping[int, str] | None = None,
 ) -> dict:
+    """规范化并校验智能体共享配置。"""
+
     return normalize_permission_config(
         share_config or DEFAULT_SHARE_CONFIG,
         allowed_access_levels=allowed_access_levels,
         unauthorized_access_level_message="当前用户无权使用该智能体共享范围",
         strict=True,
+        department_paths=department_paths,
     )
 
 
@@ -155,6 +165,24 @@ def _slugify(value: str | None) -> str:
 class AgentRepository:
     def __init__(self, db_session: AsyncSession):
         self.db = db_session
+
+    async def _normalize_share_config_for_save(
+        self,
+        share_config: dict | None,
+        *,
+        allowed_access_levels: Collection[str] | None,
+    ) -> dict:
+        """加载组织路径并校验待保存的智能体共享配置。"""
+
+        department_paths = await DepartmentRepository().get_paths_by_ids(
+            get_permission_department_ids(share_config),
+            session=self.db,
+        )
+        return normalize_agent_share_config(
+            share_config,
+            allowed_access_levels=allowed_access_levels,
+            department_paths=department_paths,
+        )
 
     async def ensure_default_agent(self, *, created_by: str | None = None) -> Agent:
         agent = await self.get_by_slug(DEFAULT_AGENT_SLUG)
@@ -419,7 +447,7 @@ class AgentRepository:
             "manage_scope": None,
         }
         allowed_access_levels = get_allowed_agent_access_levels(creator) if creator else None
-        normalized_share_config = normalize_agent_share_config(
+        normalized_share_config = await self._normalize_share_config_for_save(
             share_config or default_share_config,
             allowed_access_levels=allowed_access_levels,
         )
@@ -480,7 +508,7 @@ class AgentRepository:
                 agent.share_config = DEFAULT_SHARE_CONFIG.copy()
             else:
                 allowed_access_levels = get_allowed_agent_access_levels(updater) if updater else None
-                agent.share_config = normalize_agent_share_config(
+                agent.share_config = await self._normalize_share_config_for_save(
                     share_config,
                     allowed_access_levels=allowed_access_levels,
                 )

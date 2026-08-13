@@ -335,7 +335,6 @@
                   <ShareConfigForm
                     ref="shareConfigFormRef"
                     v-model="editShareConfig"
-                    :auto-select-user-dept="true"
                     :require-read-scope="true"
                   >
                     <template #manage-description>
@@ -405,6 +404,7 @@ import { departmentApi } from '@/apis/department_api'
 import { authApi } from '@/apis/auth_api'
 import { useChunkPresetOptions } from '@/composables/useChunkPresetOptions'
 import { DEFAULT_CHUNK_PRESET_ID } from '@/utils/chunkUtils'
+import { getDepartmentSelectionSummary } from '@/utils/departmentTree'
 import { formatFileSize } from '@/utils/file_utils'
 import { getKbTypeIcon, getKbTypeLabel, kbUtils } from '@/utils/kb_utils'
 
@@ -763,9 +763,7 @@ const shareConfigDisplay = computed(() => {
     if (!scope) return '无'
     if (scope.access_level === 'global') return '全局'
     if (scope.access_level === 'department') {
-      const names =
-        (scope.department_ids || []).map((id) => getDepartmentName(id)).join('、') || '无'
-      return `${scope.department_ids?.length || 0} 个部门：${names}`
+      return getDepartmentSelectionSummary(departments.value, scope.department_ids || [])
     }
     const names = (scope.user_uids || []).map((uid) => getUserName(uid)).join('、') || '无'
     return `${scope.user_uids?.length || 0} 个用户：${names}`
@@ -783,11 +781,6 @@ const shareConfigDisplay = computed(() => {
     detail: `读取：${describeScope(readScope)}`
   }
 })
-
-const getDepartmentName = (id) => {
-  const dept = departments.value.find((item) => Number(item.id) === Number(id))
-  return dept?.name || `部门${id}`
-}
 
 const getUserName = (uid) => {
   const user = users.value.find((item) => item.uid === uid)

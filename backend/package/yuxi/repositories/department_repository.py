@@ -1,5 +1,6 @@
 """组织节点数据访问层 - Repository"""
 
+from collections.abc import Collection
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -39,6 +40,26 @@ class DepartmentRepository:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(select(Department).order_by(Department.path))
             return list(result.scalars().all())
+
+    async def get_paths_by_ids(
+        self,
+        ids: Collection[int],
+        *,
+        session: AsyncSession | None = None,
+    ) -> dict[int, str]:
+        """一次读取保存权限配置所需的组织节点路径。"""
+
+        if not ids:
+            return {}
+
+        statement = select(Department.id, Department.path).where(Department.id.in_(ids))
+        if session is not None:
+            result = await session.execute(statement)
+            return dict(result.all())
+
+        async with pg_manager.get_async_session_context() as managed_session:
+            result = await managed_session.execute(statement)
+            return dict(result.all())
 
     async def list_with_user_count(self) -> list[dict[str, Any]]:
         """获取所有组织节点，按物化路径排序并附带用户数量"""

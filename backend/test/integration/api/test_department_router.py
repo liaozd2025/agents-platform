@@ -227,6 +227,48 @@ async def test_create_department_without_admin_account(test_client, admin_header
     assert body["user_count"] == 0
 
 
+async def test_department_list_counts_active_users_only(test_client, admin_headers):
+    """组织列表的聚合计数应与实际有效用户数一致。"""
+
+    suffix = uuid.uuid4().hex[:8]
+    department_id = None
+    user_ids = []
+
+    try:
+        department_id = await _create_node_id(test_client, admin_headers, f"pytest_count_{suffix}")
+        for index in range(2):
+            response = await test_client.post(
+                "/api/auth/users",
+                json={
+                    "username": f"cu_{suffix}_{index}",
+                    "password": "RouterUser123!",
+                    "role": "user",
+                    "department_id": department_id,
+                },
+                headers=admin_headers,
+            )
+            assert response.status_code == 200, response.text
+            user_ids.append(response.json()["id"])
+
+        list_response = await test_client.get("/api/departments", headers=admin_headers)
+        assert list_response.status_code == 200, list_response.text
+        listed = {department["id"]: department for department in list_response.json()}
+        assert listed[department_id]["user_count"] == 2
+
+        delete_response = await test_client.delete(f"/api/auth/users/{user_ids.pop()}", headers=admin_headers)
+        assert delete_response.status_code == 200, delete_response.text
+
+        list_response = await test_client.get("/api/departments", headers=admin_headers)
+        assert list_response.status_code == 200, list_response.text
+        listed = {department["id"]: department for department in list_response.json()}
+        assert listed[department_id]["user_count"] == 1
+    finally:
+        for user_id in user_ids:
+            await test_client.delete(f"/api/auth/users/{user_id}", headers=admin_headers)
+        if department_id is not None:
+            await test_client.delete(f"/api/departments/{department_id}", headers=admin_headers)
+
+
 async def test_create_department_rejects_admin_phone_without_uid(test_client, admin_headers):
     """只填写管理员手机号时应明确拒绝，不能静默忽略该字段。"""
     suffix = uuid.uuid4().hex[:8]

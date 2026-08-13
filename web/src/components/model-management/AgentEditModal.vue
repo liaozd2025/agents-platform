@@ -548,7 +548,6 @@ defineExpose({
             <ShareConfigForm
               ref="agentShareConfigFormRef"
               v-model="agentShareConfig"
-              :auto-select-user-dept="true"
               :allowed-access-levels="getAgentShareAllowedLevels()"
             />
           </div>

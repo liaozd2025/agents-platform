@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 import zipfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -24,7 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi import config as sys_config
 from yuxi.agents.mcp.service import get_enabled_mcp_server_slugs
 from yuxi.agents.skills.repository import SkillRepository
-from yuxi.permissions import ResourcePermission, normalize_permission_config, resolve_skill_permission
+from yuxi.permissions import (
+    ResourcePermission,
+    get_permission_department_ids,
+    normalize_permission_config,
+    resolve_skill_permission,
+)
+from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.storage.postgres.models_business import Skill, User
 from yuxi.storage.redis import get_async_redis_client
 from yuxi.utils.logging_config import logger
@@ -179,7 +185,10 @@ def normalize_skill_share_config(
     operator_uid: str,
     source_type: str = "upload",
     allowed_access_levels: set[str] | None = None,
+    department_paths: Mapping[int, str] | None = None,
 ) -> dict:
+    """规范化并校验 Skill 共享配置。"""
+
     if source_type == "builtin":
         return {"version": 2, "read_scope": BUILTIN_SKILL_SHARE_CONFIG.copy(), "manage_scope": None}
 
@@ -193,6 +202,38 @@ def normalize_skill_share_config(
         allowed_access_levels=allowed_access_levels,
         unauthorized_access_level_message="当前用户无权使用该 Skill 共享范围",
         strict=True,
+        department_paths=department_paths,
+    )
+
+
+async def _normalize_skill_share_config_for_save(
+    db: AsyncSession,
+    share_config: dict | None,
+    *,
+    operator_uid: str,
+    source_type: str = "upload",
+    allowed_access_levels: set[str] | None = None,
+) -> dict:
+    """加载组织路径并校验待保存的 Skill 共享配置。"""
+
+    if source_type == "builtin":
+        return normalize_skill_share_config(
+            share_config,
+            operator_uid=operator_uid,
+            source_type=source_type,
+            allowed_access_levels=allowed_access_levels,
+        )
+
+    department_paths = await DepartmentRepository().get_paths_by_ids(
+        get_permission_department_ids(share_config),
+        session=db,
+    )
+    return normalize_skill_share_config(
+        share_config,
+        operator_uid=operator_uid,
+        source_type=source_type,
+        allowed_access_levels=allowed_access_levels,
+        department_paths=department_paths,
     )
 
 
@@ -1305,7 +1346,8 @@ async def confirm_skill_install_draft(
     draft_dir, data, draft_items = _load_and_select_draft_items(draft_id, slugs, operator)
     source_type = data.get("source_type")
 
-    normalized_share_config = normalize_skill_share_config(
+    normalized_share_config = await _normalize_skill_share_config_for_save(
+        db,
         share_config,
         operator_uid=operator.uid,
         source_type=source_type,
@@ -1479,16 +1521,18 @@ async def import_skill_dir(
         raise ValueError("技能目录路径不合法")
     if not source_skill_dir.exists() or not source_skill_dir.is_dir():
         raise ValueError("技能目录不存在")
+    normalized_share_config = await _normalize_skill_share_config_for_save(
+        db,
+        share_config,
+        operator_uid=created_by or "",
+        source_type=source_type,
+    )
     return await _import_skill_dir_impl(
         db,
         source_skill_dir=source_skill_dir,
         created_by=created_by,
         source_type=source_type,
-        share_config=normalize_skill_share_config(
-            share_config,
-            operator_uid=created_by or "",
-            source_type=source_type,
-        ),
+        share_config=normalized_share_config,
     )
 
 
@@ -1709,7 +1753,8 @@ async def update_skill_share_config(
 ) -> Skill:
     item = await get_manageable_skill_or_raise(db, operator, slug)
     _ensure_non_builtin(item)
-    normalized = normalize_skill_share_config(
+    normalized = await _normalize_skill_share_config_for_save(
+        db,
         share_config,
         operator_uid=operator.uid,
         source_type=item.source_type,

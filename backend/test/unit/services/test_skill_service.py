@@ -324,6 +324,11 @@ async def test_normal_user_confirm_skill_draft_rejects_wider_share_scope(
 ):
     monkeypatch.setattr(svc.sys_config, "save_dir", str(tmp_path))
 
+    async def fake_department_paths(_repository, department_ids, **_kwargs):
+        return {department_id: f"/1/{department_id}/" for department_id in department_ids}
+
+    monkeypatch.setattr(svc.DepartmentRepository, "get_paths_by_ids", fake_department_paths)
+
     class FakeRepo:
         def __init__(self, _db):
             pass

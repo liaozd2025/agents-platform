@@ -160,7 +160,6 @@
           <ShareConfigForm
             ref="shareConfigFormRef"
             v-model="shareConfig"
-            :auto-select-user-dept="true"
             :require-read-scope="true"
           >
             <template #manage-description>
