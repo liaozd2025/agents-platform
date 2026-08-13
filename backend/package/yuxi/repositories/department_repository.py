@@ -44,20 +44,13 @@ class DepartmentRepository:
         async with pg_manager.get_async_session_context() as session:
             from yuxi.storage.postgres.models_business import User
 
-            result = await session.execute(select(Department).order_by(Department.path))
-            departments = result.scalars().all()
-
-            department_list = []
-            for dep in departments:
-                user_count_result = await session.execute(
-                    select(func.count(User.id)).where(User.department_id == dep.id, User.is_deleted == 0)
-                )
-                user_count = user_count_result.scalar()
-                dep_dict = dep.to_dict()
-                dep_dict["user_count"] = user_count
-                department_list.append(dep_dict)
-
-            return department_list
+            result = await session.execute(
+                select(Department, func.count(User.id))
+                .outerjoin(User, (User.department_id == Department.id) & (User.is_deleted == 0))
+                .group_by(Department.id)
+                .order_by(Department.path)
+            )
+            return [{**department.to_dict(), "user_count": user_count} for department, user_count in result.all()]
 
     async def create_child(
         self,

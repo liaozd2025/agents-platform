@@ -71,7 +71,7 @@
             v-if="userStore.isSuperAdmin"
           >
             <Users class="icon" :size="18" />
-            <span>部门管理</span>
+            <span>组织机构</span>
           </div>
           <div
             class="sider-item"
@@ -174,7 +174,7 @@
           @click="activeTab = 'department'"
           v-if="userStore.isSuperAdmin"
         >
-          部门管理
+          组织机构
         </div>
       </div>
 

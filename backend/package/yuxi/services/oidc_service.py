@@ -17,7 +17,6 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from yuxi.repositories.department_repository import build_child_path
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.operation_log_service import log_operation
 from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, Department, User
@@ -47,7 +46,6 @@ class OIDCConfig(BaseModel):
     scopes: str = Field(default="openid profile email", description="请求的 scope")
     auto_create_user: bool = Field(default=True, description="是否自动创建用户")
     default_role: str = Field(default="user", description="OIDC 用户的默认角色")
-    default_department: str = Field(default="OIDC用户", description="OIDC 用户的默认部门")
     username_claim: str = Field(default="preferred_username", description="用户名映射字段")
     email_claim: str = Field(default="email", description="邮箱映射字段")
     name_claim: str = Field(default="name", description="姓名映射字段")
@@ -82,7 +80,6 @@ class OIDCConfig(BaseModel):
             scopes=_env("OIDC_SCOPES", "openid profile email"),
             auto_create_user=os.environ.get("OIDC_AUTO_CREATE_USER", "true").lower() == "true",
             default_role=_env("OIDC_DEFAULT_ROLE", "user"),
-            default_department=_env("OIDC_DEFAULT_DEPARTMENT", "OIDC用户"),
             username_claim=_env("OIDC_USERNAME_CLAIM", "preferred_username"),
             email_claim=_env("OIDC_EMAIL_CLAIM", "email"),
             name_claim=_env("OIDC_NAME_CLAIM", "name"),
@@ -387,16 +384,8 @@ class OIDCUtils:
             name = username
 
         department_name = None
-        department_description = None
         if oidc_config.fetch_department_info:
             department_name = userinfo.get(oidc_config.department_claim)
-            if not department_name:
-                department_name = userinfo.get("department")
-
-            # 获取部门描述
-            department_description = userinfo.get("department_description")
-            if not department_description:
-                department_description = userinfo.get("department_desc")
 
         return {
             "sub": sub,
@@ -404,82 +393,28 @@ class OIDCUtils:
             "email": email,
             "name": name,
             "department_name": department_name,
-            "department_description": department_description,
             "raw": userinfo,
         }
 
 
-async def get_or_create_oidc_department(
-    db,
-    dept_name_from_oidc: str | None = None,
-    dept_desc_from_oidc: str | None = None,
-) -> Department | None:
-    """获取或创建 OIDC 用户的部门"""
-    # 清理并验证从 OIDC 获取的部门名称
-    processed_dept_name = None
-    processed_dept_desc = None
-
-    if dept_name_from_oidc:
-        # 去除首尾空格
-        processed_dept_name = dept_name_from_oidc.strip()
-        # 截断到 50 字符（匹配数据库限制）
-        if len(processed_dept_name) > 50:
-            processed_dept_name = processed_dept_name[:50]
-        # 如果处理后为空，放弃使用
-        if not processed_dept_name:
-            processed_dept_name = None
-
-    # 清理并验证从 OIDC 获取的部门描述
-    if dept_desc_from_oidc:
-        processed_dept_desc = dept_desc_from_oidc.strip()
-        # 截断到 255 字符（匹配数据库限制）
-        if len(processed_dept_desc) > 255:
-            processed_dept_desc = processed_dept_desc[:255]
-        if not processed_dept_desc:
-            processed_dept_desc = None
-
-    # 最终确定部门名称：优先使用处理后的OIDC部门名称，否则使用默认部门名称
-    final_dept_name = processed_dept_name or oidc_config.default_department
-    # 最终确定部门描述：优先使用处理后的OIDC部门描述，否则使用默认描述
-    final_dept_desc = processed_dept_desc or f"{final_dept_name}部门"
-
-    # 名称升级为同级唯一后，同名节点可能分布在不同分子公司下，这里不能再假设至多一条
-    result = await db.execute(select(Department).filter(Department.name == final_dept_name))
-    matched = list(result.scalars().all())
+async def resolve_oidc_department(db, department_claim: Any) -> Department:
+    """按 OIDC 部门 claim 精确匹配已有组织节点，无法唯一定位时回落集团根。"""
+    matched = []
+    if isinstance(department_claim, str):
+        result = await db.execute(select(Department).where(Department.name == department_claim))
+        matched = list(result.scalars().all())
 
     if len(matched) == 1:
-        logger.info(f"Using existing department: {final_dept_name}")
+        logger.info(f"Using existing department: {department_claim}")
         return matched[0]
 
-    if matched:
-        # 靠名字无法唯一定位组织节点，落集团根而不是猜一个：猜错会让用户看到别家公司的知识库
-        logger.warning(
-            f"Department claim '{final_dept_name}' matched {len(matched)} org nodes, falling back to group root"
-        )
-        return await db.get(Department, ROOT_DEPARTMENT_ID)
-
-    # 组织节点不存在，在集团根下创建
-    dept = Department(
-        name=final_dept_name,
-        description=final_dept_desc,
-        parent_id=ROOT_DEPARTMENT_ID,
+    logger.warning(
+        f"Department claim {department_claim!r} matched {len(matched)} org nodes, falling back to group root"
     )
-    db.add(dept)
-    try:
-        await db.flush()
-        dept.path = build_child_path(f"/{ROOT_DEPARTMENT_ID}/", dept.id)
-        await db.commit()
-        await db.refresh(dept)
-        logger.info(f"Created OIDC department: {final_dept_name}")
-    except IntegrityError:
-        # 并发创建时节点可能已存在，再次查询
-        await db.rollback()
-        result = await db.execute(
-            select(Department).filter(Department.name == final_dept_name, Department.parent_id == ROOT_DEPARTMENT_ID)
-        )
-        dept = result.scalar_one_or_none()
-
-    return dept
+    group_root = await db.get(Department, ROOT_DEPARTMENT_ID)
+    if group_root is None:
+        raise RuntimeError("集团根组织节点不存在")
+    return group_root
 
 
 async def find_user_by_oidc_sub(db, sub: str) -> User | None:
@@ -840,11 +775,8 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
             user = await restore_deleted_oidc_user(db, deleted_user, extracted_info)
             logger.info(f"OIDC deleted user restored and logged in: {user.username}")
         else:
-            # 从用户信息中获取部门信息
-            dept_name = extracted_info.get("department_name")
-            dept_desc = extracted_info.get("department_description")
-            dept = await get_or_create_oidc_department(db, dept_name, dept_desc)
-            department_id = dept.id if dept else None
+            dept = await resolve_oidc_department(db, extracted_info.get("department_name"))
+            department_id = dept.id
             user = await create_oidc_user(db, extracted_info, department_id)
     else:
         return _redirect_to_login_with_error("用户未注册，请联系管理员开通账号")

@@ -56,9 +56,6 @@ Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有�
 # OIDC 用户的默认角色 (user/admin，默认: user)
 # OIDC_DEFAULT_ROLE=user
 
-# OIDC 用户的默认部门名称 (默认: OIDC用户)
-# OIDC_DEFAULT_DEPARTMENT=OIDC用户
-
 # 用户名映射字段 (默认: preferred_username)
 # OIDC_USERNAME_CLAIM=preferred_username
 
@@ -72,7 +69,7 @@ Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有�
 # 开启后，OIDC 返回的 username 会直接作为业务登录标识 uid 登录，需要管理员提前创建好用户账号
 # OIDC_USE_RAW_USERNAME=false
 
-# 是否从OIDC userinfo 中获取部门信息并自动创建关联部门 (true/false，默认: false)
+# 是否从 OIDC userinfo 中获取部门 claim (true/false，默认: false)
 # OIDC_FETCH_DEPARTMENT_INFO=false
 
 # 部门名称字段映射 (默认: department)
@@ -96,8 +93,7 @@ docker restart api-dev web-dev
 系统会创建一个标记为删除的占位用户 `oidc:{sub}:{target_user_id}` 来记录 OIDC sub 与 Yuxi 用户的绑定关系，确保只有绑定过的 OIDC 身份才能登录对应的账号，**防止账号冒用**。其中 `target_user_id` 是数据库中的数值 `users.id`；用户登录标识仍使用字符串 `uid`。
 
 ### 自动获取部门信息（OIDC_FETCH_DEPARTMENT_INFO=true）
-开启后，系统会从 OIDC userinfo 中读取部门名称和描述，自动在 Yuxi 中创建部门并将用户关联到该部门。
+开启后，系统会从 OIDC userinfo 的 `OIDC_DEPARTMENT_CLAIM` 配置字段读取组织节点名称，仅在全部已有组织节点中精确命中一个时关联新用户。
 
-- 对从 OIDC 获取的部门名称会自动做 `strip()` 去空格，并截断到 50 字符
-- 部门描述会自动截断到 255 字符
-- 如果部门名称处理后为空，会回退到使用 `OIDC_DEFAULT_DEPARTMENT` 默认部门
+- claim 命中 0 个或多个同名节点时，新用户回落到集团根，并写入 warning 日志
+- 登录流程不会创建组织节点，不做模糊匹配或路径字符串解析

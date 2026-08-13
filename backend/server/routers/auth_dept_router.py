@@ -8,11 +8,11 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete as sqlalchemy_delete, select, func
+from sqlalchemy import delete as sqlalchemy_delete, select, func, update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Department, User
-from yuxi.repositories.department_repository import DepartmentRepository
+from yuxi.repositories.department_repository import DepartmentRepository, build_child_path
 from yuxi.repositories.user_repository import UserRepository
 from server.utils.auth_middleware import get_superadmin_user, get_admin_user, get_db
 from yuxi.utils.auth_utils import AuthUtils
@@ -46,6 +46,7 @@ class DepartmentUpdate(BaseModel):
 
     name: str | None = None
     description: str | None = None
+    parent_id: int | None = None
 
 
 class DepartmentResponse(BaseModel):
@@ -155,9 +156,7 @@ async def create_department(
     )
 
     if not admin_uid:
-        await log_operation(
-            db, current_user.id, "创建组织节点", f"创建组织节点: {department_data.name}", request
-        )
+        await log_operation(db, current_user.id, "创建组织节点", f"创建组织节点: {department_data.name}", request)
         return {**new_department.to_dict(), "user_count": 0}
 
     await user_repo.create(
@@ -190,21 +189,59 @@ async def update_department(
     current_user: User = Depends(get_superadmin_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """更新部门信息"""
+    """更新组织节点信息，并在父节点变化时移动整棵子树"""
     result = await db.execute(select(Department).filter(Department.id == department_id))
     department = result.scalar_one_or_none()
 
     if not department:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
 
-    # 如果要修改名称，检查同级下是否已有同名节点（改名前已确认与自身不同名，无需排除自身）
-    if department_data.name and department_data.name != department.name:
-        if await DepartmentRepository().exists_sibling_name(department.parent_id, department_data.name):
+    move_requested = "parent_id" in department_data.model_fields_set
+    target_parent = None
+    target_parent_id = department.parent_id
+    if move_requested:
+        if department.id == ROOT_DEPARTMENT_ID:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="集团根不允许移动")
+        if department_data.parent_id is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="父级组织节点不能为空")
+        if department_data.parent_id == department.id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="组织节点不能移动到自身之下")
+
+        result = await db.execute(select(Department).filter(Department.id == department_data.parent_id))
+        target_parent = result.scalar_one_or_none()
+        if target_parent is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="父级组织节点不存在")
+        if target_parent.path.startswith(department.path):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="组织节点不能移动到自身后代之下")
+        target_parent_id = target_parent.id
+
+    target_name = department_data.name or department.name
+    if target_name != department.name or target_parent_id != department.parent_id:
+        result = await db.execute(
+            select(Department.id).filter(
+                Department.id != department.id,
+                Department.parent_id == target_parent_id,
+                Department.name == target_name,
+            )
+        )
+        if result.first() is not None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="同一父级下已存在同名组织节点")
+
+    if department_data.name:
         department.name = department_data.name
 
     if department_data.description is not None:
         department.description = department_data.description
+
+    if target_parent is not None and target_parent.id != department.parent_id:
+        old_path = department.path
+        new_path = build_child_path(target_parent.path, department.id)
+        await db.execute(
+            sqlalchemy_update(Department)
+            .where(Department.path.like(f"{old_path}%"))
+            .values(path=func.concat(new_path, func.substr(Department.path, len(old_path) + 1)))
+        )
+        department.parent_id = target_parent.id
 
     await db.commit()
     await db.refresh(department)

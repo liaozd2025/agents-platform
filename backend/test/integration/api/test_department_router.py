@@ -78,6 +78,148 @@ async def test_superadmin_can_build_multi_level_tree(test_client, admin_headers)
         await _delete_nodes(test_client, admin_headers, [department_id, company_id])
 
 
+async def test_superadmin_can_move_subtree(test_client, admin_headers):
+    """移动组织节点时，其整棵子树仍按新祖先链连续展示。"""
+    suffix = uuid.uuid4().hex[:8]
+    first_company_id = None
+    second_company_id = None
+    division_id = None
+    department_id = None
+
+    try:
+        first_company_id = await _create_node_id(
+            test_client, admin_headers, f"pytest_move_a_{suffix}", node_type="company"
+        )
+        second_company_id = await _create_node_id(
+            test_client, admin_headers, f"pytest_move_b_{suffix}", node_type="company"
+        )
+        division_id = await _create_node_id(
+            test_client, admin_headers, f"pytest_division_{suffix}", parent_id=first_company_id
+        )
+        department_id = await _create_node_id(
+            test_client, admin_headers, f"pytest_team_{suffix}", parent_id=division_id
+        )
+
+        move_response = await test_client.put(
+            f"/api/departments/{division_id}",
+            json={"parent_id": second_company_id},
+            headers=admin_headers,
+        )
+        assert move_response.status_code == 200, move_response.text
+        assert move_response.json()["parent_id"] == second_company_id
+
+        list_response = await test_client.get("/api/departments", headers=admin_headers)
+        assert list_response.status_code == 200, list_response.text
+        listed = list_response.json()
+        nodes = {node["id"]: node for node in listed}
+        order = [node["id"] for node in listed]
+
+        assert nodes[division_id]["parent_id"] == second_company_id
+        assert nodes[department_id]["parent_id"] == division_id
+        assert order.index(second_company_id) < order.index(division_id) < order.index(department_id)
+    finally:
+        await _delete_nodes(
+            test_client,
+            admin_headers,
+            [department_id, division_id, first_company_id, second_company_id],
+        )
+
+
+async def test_move_rejects_self_and_descendant_parent(test_client, admin_headers):
+    """组织节点不能移动到自身或自身后代之下。"""
+    suffix = uuid.uuid4().hex[:8]
+    parent_id = None
+    child_id = None
+
+    try:
+        parent_id = await _create_node_id(test_client, admin_headers, f"pytest_cycle_parent_{suffix}")
+        child_id = await _create_node_id(
+            test_client, admin_headers, f"pytest_cycle_child_{suffix}", parent_id=parent_id
+        )
+
+        self_response = await test_client.put(
+            f"/api/departments/{parent_id}", json={"parent_id": parent_id}, headers=admin_headers
+        )
+        assert self_response.status_code == 400, self_response.text
+        assert self_response.json()["detail"] == "组织节点不能移动到自身之下"
+
+        descendant_response = await test_client.put(
+            f"/api/departments/{parent_id}", json={"parent_id": child_id}, headers=admin_headers
+        )
+        assert descendant_response.status_code == 400, descendant_response.text
+        assert descendant_response.json()["detail"] == "组织节点不能移动到自身后代之下"
+    finally:
+        await _delete_nodes(test_client, admin_headers, [child_id, parent_id])
+
+
+async def test_move_rejects_empty_and_missing_parent(test_client, admin_headers):
+    """移动请求必须指定一个实际存在的父节点。"""
+    suffix = uuid.uuid4().hex[:8]
+    node_id = None
+
+    try:
+        node_id = await _create_node_id(test_client, admin_headers, f"pytest_move_target_{suffix}")
+
+        empty_response = await test_client.put(
+            f"/api/departments/{node_id}", json={"parent_id": None}, headers=admin_headers
+        )
+        assert empty_response.status_code == 400, empty_response.text
+        assert empty_response.json()["detail"] == "父级组织节点不能为空"
+
+        missing_response = await test_client.put(
+            f"/api/departments/{node_id}", json={"parent_id": 2_147_483_647}, headers=admin_headers
+        )
+        assert missing_response.status_code == 400, missing_response.text
+        assert missing_response.json()["detail"] == "父级组织节点不存在"
+    finally:
+        await _delete_nodes(test_client, admin_headers, [node_id])
+
+
+async def test_move_rejects_group_root(test_client, admin_headers):
+    """集团根不可移动。"""
+    suffix = uuid.uuid4().hex[:8]
+    target_id = None
+
+    try:
+        target_id = await _create_node_id(test_client, admin_headers, f"pytest_root_target_{suffix}")
+
+        response = await test_client.put(
+            f"/api/departments/{ROOT_DEPARTMENT_ID}", json={"parent_id": target_id}, headers=admin_headers
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == "集团根不允许移动"
+    finally:
+        await _delete_nodes(test_client, admin_headers, [target_id])
+
+
+async def test_move_rejects_duplicate_name_under_target_parent(test_client, admin_headers):
+    """移动不会在目标父节点下制造同名组织节点。"""
+    suffix = uuid.uuid4().hex[:8]
+    shared_name = f"pytest_move_dup_{suffix}"
+    first_company_id = None
+    second_company_id = None
+    source_id = None
+    existing_id = None
+
+    try:
+        first_company_id = await _create_node_id(test_client, admin_headers, f"pytest_dup_a_{suffix}")
+        second_company_id = await _create_node_id(test_client, admin_headers, f"pytest_dup_b_{suffix}")
+        source_id = await _create_node_id(test_client, admin_headers, shared_name, parent_id=first_company_id)
+        existing_id = await _create_node_id(test_client, admin_headers, shared_name, parent_id=second_company_id)
+
+        response = await test_client.put(
+            f"/api/departments/{source_id}", json={"parent_id": second_company_id}, headers=admin_headers
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == "同一父级下已存在同名组织节点"
+    finally:
+        await _delete_nodes(
+            test_client,
+            admin_headers,
+            [source_id, existing_id, first_company_id, second_company_id],
+        )
+
+
 async def test_same_name_is_allowed_under_different_parents(test_client, admin_headers):
     suffix = uuid.uuid4().hex[:8]
     shared_name = f"pytest_hr_{suffix}"
@@ -151,9 +293,7 @@ async def test_delete_department_with_children_is_rejected(test_client, admin_he
     child_id = None
 
     try:
-        parent_id = await _create_node_id(
-            test_client, admin_headers, f"pytest_parent_{suffix}", node_type="company"
-        )
+        parent_id = await _create_node_id(test_client, admin_headers, f"pytest_parent_{suffix}", node_type="company")
         child_id = await _create_node_id(test_client, admin_headers, f"pytest_child_{suffix}", parent_id=parent_id)
 
         delete_response = await test_client.delete(f"/api/departments/{parent_id}", headers=admin_headers)
@@ -204,11 +344,16 @@ async def test_superadmin_can_delete_department_with_users(test_client, admin_he
         list_users_response = await test_client.get("/api/auth/users", headers=admin_headers)
         assert list_users_response.status_code == 200, list_users_response.text
         users_before_delete = list_users_response.json()
-        department_admin = next((user for user in users_before_delete if user["uid"] == department_payload["admin_uid"]), None)
+        department_admin = next(
+            (user for user in users_before_delete if user["uid"] == department_payload["admin_uid"]),
+            None,
+        )
         assert department_admin is not None
         department_admin_id = department_admin["id"]
 
-        delete_department_response = await test_client.delete(f"/api/departments/{department_id}", headers=admin_headers)
+        delete_department_response = await test_client.delete(
+            f"/api/departments/{department_id}", headers=admin_headers
+        )
         assert delete_department_response.status_code == 200, delete_department_response.text
         assert delete_department_response.json()["success"] is True
         department_id = None
