@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
@@ -29,19 +30,32 @@ MAX_LOGIN_FAILED_ATTEMPTS = 5
 LOGIN_LOCK_DURATION_SECONDS = 300
 AGENT_RUN_TERMINAL_STATUSES = ("completed", "failed", "cancelled", "interrupted")
 
+# 集团根固定为 id=1：它不可删除，也是组织节点被删除时用户的回落目标
+ROOT_DEPARTMENT_ID = 1
+GROUP_NODE_TYPE = "group"
+DEPARTMENT_NODE_TYPE = "department"
+
 
 class Department(Base):
-    """部门模型"""
+    """组织节点模型：集团、分子公司与部门是同一概念的不同层级，通过 parent_id 组成一棵树"""
 
     __tablename__ = "departments"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(50), nullable=False, unique=True, index=True)
+    name = Column(String(50), nullable=False, index=True)
     description = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=utc_now_naive)
 
+    parent_id = Column(Integer, ForeignKey("departments.id"), nullable=True, index=True)
+    # 仅用于界面展示，不参与权限判定，也不参与父子关系校验
+    node_type = Column(String(16), nullable=False, default=DEPARTMENT_NODE_TYPE)
+    # 物化路径，形如 /1/3/7/，记录从集团根到自身的祖先链，供权限判定零查询地取得祖先集合
+    path = Column(String(512), nullable=False, default="")
+
     # 关联关系
     users = relationship("User", back_populates="department", cascade="all, delete-orphan")
+
+    __table_args__ = (UniqueConstraint("parent_id", "name", name="uq_departments_parent_name"),)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +63,8 @@ class Department(Base):
             "name": self.name,
             "description": self.description,
             "created_at": format_utc_datetime(self.created_at),
+            "parent_id": self.parent_id,
+            "node_type": self.node_type,
         }
 
 

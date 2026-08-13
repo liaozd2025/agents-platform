@@ -906,6 +906,40 @@ class PostgresManager(metaclass=SingletonMeta):
             ON agent_run_requests(uid, agent_slug, conversation_thread_id, status, created_at, id)
             """,
             "CREATE INDEX IF NOT EXISTS ix_agent_run_requests_dispatched_run_id ON agent_run_requests(dispatched_run_id)",  # noqa: E501
+            # 组织节点由扁平表升级为树：加父节点、展示用节点类型与物化路径
+            "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES departments(id)",
+            (
+                "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS "
+                "node_type VARCHAR(16) NOT NULL DEFAULT 'department'"
+            ),
+            "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS path VARCHAR(512) NOT NULL DEFAULT ''",
+            # 集团根原地改造：id=1 升为根，尚未挂靠的存量节点挂到它下面，再回填还没有路径的节点。
+            # 后两条 UPDATE 带幂等条件，重复执行不会覆盖人工调整过的树结构；第一条每次都把根写回
+            # 根形态，因为集团根的层级身份不允许被改动。
+            # 表非空却没有 id=1 时不静默跳过：那意味着树没有根，回填出来的路径全是错的。
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM departments WHERE id = 1) THEN
+                    UPDATE departments
+                    SET parent_id = NULL, node_type = 'group', path = '/1/'
+                    WHERE id = 1;
+
+                    UPDATE departments SET parent_id = 1 WHERE id <> 1 AND parent_id IS NULL;
+
+                    UPDATE departments SET path = '/1/' || id || '/' WHERE id <> 1 AND path = '';
+                ELSIF EXISTS (SELECT 1 FROM departments) THEN
+                    RAISE WARNING
+                        'departments 非空但缺少 id=1 的集团根，组织机构树未完成迁移，祖先链不可用';
+                END IF;
+            END $$;
+            """,
+            # 名称唯一性由全局唯一收敛为同级唯一：不同分子公司可以各有一个「人力资源部」
+            "DROP INDEX IF EXISTS ix_departments_name",
+            "CREATE INDEX IF NOT EXISTS ix_departments_name ON departments(name)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_parent_name ON departments(parent_id, name)",
+            "CREATE INDEX IF NOT EXISTS ix_departments_parent_id ON departments(parent_id)",
+            "CREATE INDEX IF NOT EXISTS ix_departments_path ON departments(path)",
         ]
         async with self.async_engine.begin() as conn:
             # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警

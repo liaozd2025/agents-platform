@@ -29,6 +29,9 @@ class DepartmentSeed(TypedDict):
     normal_count: int
 
 
+GROUP_ROOT_NAME = "示例集团"
+GROUP_ROOT_DESCRIPTION = "种子数据的集团根节点"
+
 DEPARTMENTS: list[DepartmentSeed] = [
     {"name": "研发部", "description": "负责产品研发与技术平台建设", "prefix": "dev", "normal_count": 5},
     {"name": "产品部", "description": "负责产品规划、需求分析与项目推进", "prefix": "prod", "normal_count": 5},
@@ -61,7 +64,8 @@ async def ensure_uninitialized(session) -> None:
 async def seed_initial_users() -> None:
     from yuxi.utils.auth_utils import AuthUtils
     from yuxi.storage.postgres.manager import pg_manager
-    from yuxi.storage.postgres.models_business import Department, User
+    from yuxi.repositories.department_repository import build_child_path
+    from yuxi.storage.postgres.models_business import GROUP_NODE_TYPE, Department, User
     from yuxi.utils.datetime_utils import utc_now_naive
 
     try:
@@ -72,16 +76,31 @@ async def seed_initial_users() -> None:
         async with pg_manager.get_async_session_context() as session:
             await ensure_uninitialized(session)
 
+            # 集团根必须先落库：它要占住固定的 id=1，其余节点都挂在它下面
+            group_root = Department(
+                name=GROUP_ROOT_NAME,
+                description=GROUP_ROOT_DESCRIPTION,
+                parent_id=None,
+                node_type=GROUP_NODE_TYPE,
+            )
+            session.add(group_root)
+            await session.flush()
+            group_root.path = build_child_path("/", group_root.id)
+
             departments: dict[str, Department] = {}
             for department_seed in DEPARTMENTS:
                 department = Department(
                     name=department_seed["name"],
                     description=department_seed["description"],
+                    parent_id=group_root.id,
                 )
                 session.add(department)
                 departments[department_seed["prefix"]] = department
 
             await session.flush()
+
+            for department in departments.values():
+                department.path = build_child_path(group_root.path, department.id)
 
             users = [
                 User(

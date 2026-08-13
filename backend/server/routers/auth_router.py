@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import APIKey, User, Department
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, User, Department
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.repositories.department_repository import DepartmentRepository
 from server.utils.auth_middleware import (
@@ -384,13 +384,11 @@ async def initialize_admin(admin_data: InitializeAdmin, db: AsyncSession = Depen
     # 由于是首次初始化，直接使用输入的user_id
     uid = admin_data.uid
 
-    # 创建默认部门
+    # 创建集团根节点
     dept_repo = DepartmentRepository()
-    default_department = await dept_repo.create(
-        {
-            "name": "默认部门",
-            "description": "系统初始化时创建的默认部门",
-        }
+    group_root = await dept_repo.create_group_root(
+        name="集团",
+        description="系统初始化时创建的集团根节点",
     )
 
     # 创建管理员用户
@@ -403,7 +401,7 @@ async def initialize_admin(admin_data: InitializeAdmin, db: AsyncSession = Depen
             "avatar": None,
             "password_hash": hashed_password,
             "role": "superadmin",
-            "department_id": default_department.id,
+            "department_id": group_root.id,
             "last_login": utc_now_naive(),
         }
     )
@@ -571,14 +569,9 @@ async def create_user(
 
     # 部门分配逻辑
     if current_user.role == "superadmin":
-        # 超级管理员创建用户时，使用指定的部门或默认部门
-        department_id = user_data.department_id
-        if department_id is None:
-            # 获取默认部门
-            dept_repo = DepartmentRepository()
-            departments = await dept_repo.list_departments()
-            default_dept = next((d for d in departments if d.name == "默认部门"), None)
-            department_id = default_dept.id if default_dept else None
+        # 超级管理员创建用户时，使用指定的组织节点，未指定则落到集团根
+        # 集团根按固定 ID 定位：它的名称允许被改成真实集团名，不能按名字找
+        department_id = user_data.department_id if user_data.department_id is not None else ROOT_DEPARTMENT_ID
     else:
         # 普通管理员创建用户时，自动继承该管理员的部门
         department_id = current_user.department_id

@@ -17,9 +17,10 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from yuxi.repositories.department_repository import build_child_path
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.operation_log_service import log_operation
-from yuxi.storage.postgres.models_business import Department, User
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, Department, User
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.logging_config import logger
@@ -442,28 +443,40 @@ async def get_or_create_oidc_department(
     # 最终确定部门描述：优先使用处理后的OIDC部门描述，否则使用默认描述
     final_dept_desc = processed_dept_desc or f"{final_dept_name}部门"
 
+    # 名称升级为同级唯一后，同名节点可能分布在不同分子公司下，这里不能再假设至多一条
     result = await db.execute(select(Department).filter(Department.name == final_dept_name))
-    dept = result.scalar_one_or_none()
+    matched = list(result.scalars().all())
 
-    if dept:
-        # 部门已存在，直接返回
+    if len(matched) == 1:
         logger.info(f"Using existing department: {final_dept_name}")
-        return dept
+        return matched[0]
 
-    # 部门不存在，创建新部门
+    if matched:
+        # 靠名字无法唯一定位组织节点，落集团根而不是猜一个：猜错会让用户看到别家公司的知识库
+        logger.warning(
+            f"Department claim '{final_dept_name}' matched {len(matched)} org nodes, falling back to group root"
+        )
+        return await db.get(Department, ROOT_DEPARTMENT_ID)
+
+    # 组织节点不存在，在集团根下创建
     dept = Department(
         name=final_dept_name,
         description=final_dept_desc,
+        parent_id=ROOT_DEPARTMENT_ID,
     )
     db.add(dept)
     try:
+        await db.flush()
+        dept.path = build_child_path(f"/{ROOT_DEPARTMENT_ID}/", dept.id)
         await db.commit()
         await db.refresh(dept)
         logger.info(f"Created OIDC department: {final_dept_name}")
     except IntegrityError:
-        # 并发创建时部门可能已存在，再次查询
+        # 并发创建时节点可能已存在，再次查询
         await db.rollback()
-        result = await db.execute(select(Department).filter(Department.name == final_dept_name))
+        result = await db.execute(
+            select(Department).filter(Department.name == final_dept_name, Department.parent_id == ROOT_DEPARTMENT_ID)
+        )
         dept = result.scalar_one_or_none()
 
     return dept
