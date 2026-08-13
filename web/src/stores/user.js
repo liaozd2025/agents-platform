@@ -149,8 +149,9 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  function getAuthSignal() {
-    return authSessionController.signal
+  function getAuthSignal(signal) {
+    const authSignal = authSessionController.signal
+    return signal ? AbortSignal.any([signal, authSignal]) : authSignal
   }
 
   // 用户管理功能

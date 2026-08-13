@@ -53,10 +53,7 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       }
 
       Object.assign(requestOptions.headers, userStore.getAuthHeaders())
-      const authSignal = userStore.getAuthSignal()
-      requestOptions.signal = requestOptions.signal
-        ? AbortSignal.any([requestOptions.signal, authSignal])
-        : authSignal
+      requestOptions.signal = userStore.getAuthSignal(requestOptions.signal)
     }
 
     // 发送请求

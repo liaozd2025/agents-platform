@@ -68,13 +68,13 @@ const router = createRouter({
           path: '',
           name: 'EmbedAgent',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, embed: true }
+          meta: { keepAlive: true, requiresAuth: true }
         },
         {
           path: ':thread_id',
           name: 'EmbedAgentWithThreadId',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true, embed: true }
+          meta: { keepAlive: true, requiresAuth: true }
         }
       ]
     },

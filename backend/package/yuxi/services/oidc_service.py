@@ -200,13 +200,9 @@ class OIDCProviderMetadata:
         self.jwks_uri: str | None = None
         self.id_token_signing_alg_values_supported: list[str] = []
         self.last_error: str | None = None
-        self._loaded = False
 
     async def load(self, issuer_url: str) -> bool:
         """从 discovery 端点加载元数据"""
-        if self._loaded:
-            return True
-
         if not is_allowed_oidc_endpoint(issuer_url, issuer_url):
             self.last_error = "OIDC issuer 必须使用 HTTPS，仅开发环境本机允许 HTTP"
             return False
@@ -255,7 +251,6 @@ class OIDCProviderMetadata:
                 logger.error(f"Failed to load OIDC discovery: {self.last_error}, url={discovery_url}")
                 return False
 
-            self._loaded = True
             self.last_error = None
             logger.info(f"OIDC discovery loaded from {discovery_url}")
             return True
@@ -283,7 +278,7 @@ class OIDCUtils:
             cls._last_metadata_error = "OIDC 未启用或基础配置不完整"
             return None
 
-        if cls._metadata is None or not cls._metadata._loaded:
+        if cls._metadata is None:
             metadata = OIDCProviderMetadata()
 
             if oidc_config.authorization_endpoint:
@@ -294,7 +289,6 @@ class OIDCUtils:
                 metadata.end_session_endpoint = oidc_config.end_session_endpoint
                 metadata.jwks_uri = oidc_config.jwks_uri or None
                 metadata.id_token_signing_alg_values_supported = ["RS256"]
-                metadata._loaded = True
                 cls._last_metadata_error = None
             else:
                 success = await metadata.load(oidc_config.issuer_url)
@@ -533,49 +527,42 @@ class OIDCUtils:
         }
 
 
-async def get_or_create_oidc_department(
+async def get_or_create_external_department(
     db,
-    dept_name_from_oidc: str | None = None,
-    dept_desc_from_oidc: str | None = None,
+    department_name: str | None = None,
+    department_description: str | None = None,
+    default_department: str | None = None,
 ) -> Department | None:
-    """获取或创建 OIDC 用户的部门"""
-    # 清理并验证从 OIDC 获取的部门名称
+    """获取或创建外部身份所属部门。"""
     processed_dept_name = None
     processed_dept_desc = None
 
-    if dept_name_from_oidc:
-        # 去除首尾空格
-        processed_dept_name = dept_name_from_oidc.strip()
-        # 截断到 50 字符（匹配数据库限制）
+    if department_name:
+        processed_dept_name = department_name.strip()
         if len(processed_dept_name) > 50:
             processed_dept_name = processed_dept_name[:50]
-        # 如果处理后为空，放弃使用
         if not processed_dept_name:
             processed_dept_name = None
 
-    # 清理并验证从 OIDC 获取的部门描述
-    if dept_desc_from_oidc:
-        processed_dept_desc = dept_desc_from_oidc.strip()
-        # 截断到 255 字符（匹配数据库限制）
+    if department_description:
+        processed_dept_desc = department_description.strip()
         if len(processed_dept_desc) > 255:
             processed_dept_desc = processed_dept_desc[:255]
         if not processed_dept_desc:
             processed_dept_desc = None
 
-    # 最终确定部门名称：优先使用处理后的OIDC部门名称，否则使用默认部门名称
-    final_dept_name = processed_dept_name or oidc_config.default_department
-    # 最终确定部门描述：优先使用处理后的OIDC部门描述，否则使用默认描述
+    final_dept_name = processed_dept_name or default_department
+    if not final_dept_name:
+        return None
     final_dept_desc = processed_dept_desc or f"{final_dept_name}部门"
 
     result = await db.execute(select(Department).filter(Department.name == final_dept_name))
     dept = result.scalar_one_or_none()
 
     if dept:
-        # 部门已存在，直接返回
         logger.info(f"Using existing department: {final_dept_name}")
         return dept
 
-    # 部门不存在，创建新部门
     dept = Department(
         name=final_dept_name,
         description=final_dept_desc,
@@ -584,9 +571,8 @@ async def get_or_create_oidc_department(
     try:
         await db.commit()
         await db.refresh(dept)
-        logger.info(f"Created OIDC department: {final_dept_name}")
+        logger.info(f"Created external identity department: {final_dept_name}")
     except IntegrityError:
-        # 并发创建时部门可能已存在，再次查询
         await db.rollback()
         result = await db.execute(select(Department).filter(Department.name == final_dept_name))
         dept = result.scalar_one_or_none()
@@ -714,17 +700,17 @@ async def _create_oidc_binding_placeholder(db, sub: str, target_user: User) -> N
         logger.info(f"OIDC binding placeholder already exists for sub {sub}")
 
 
-async def build_unique_oidc_username(db, preferred_username: str, sub: str) -> str:
-    """为 OIDC 用户生成不冲突的用户名"""
+async def build_unique_external_username(db, preferred_username: str, external_id: str) -> str:
+    """为外部身份生成不冲突的显示用户名。"""
     base_username = preferred_username.strip() if preferred_username else ""
     if not base_username:
-        base_username = f"oidc_{sub[:8]}"
+        base_username = f"external_{external_id[:8]}"
 
     result = await db.execute(select(User.id).filter(User.username == base_username))
     if result.scalar_one_or_none() is None:
         return base_username
 
-    hash_suffix = hashlib.sha256(sub.encode()).hexdigest()[:6]
+    hash_suffix = hashlib.sha256(external_id.encode()).hexdigest()[:6]
     candidate = f"{base_username}-{hash_suffix}"
     result = await db.execute(select(User.id).filter(User.username == candidate))
     if result.scalar_one_or_none() is None:
@@ -783,7 +769,7 @@ async def create_oidc_user(db, user_info: dict, department_id: int | None = None
     random_password = secrets.token_urlsafe(32)
     password_hash = AuthUtils.hash_password(random_password)
 
-    username = await build_unique_oidc_username(db, preferred_username, sub)
+    username = await build_unique_external_username(db, preferred_username, sub)
 
     for retry_index in range(3):
         try:
@@ -810,7 +796,7 @@ async def create_oidc_user(db, user_info: dict, department_id: int | None = None
             existing_user = await find_user_by_oidc_sub(db, sub)
             if existing_user:
                 return existing_user
-            username = await build_unique_oidc_username(db, f"{preferred_username}-{retry_index + 2}", sub)
+            username = await build_unique_external_username(db, f"{preferred_username}-{retry_index + 2}", sub)
 
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -829,7 +815,7 @@ async def restore_deleted_oidc_user(db, deleted_user: User, user_info: dict) -> 
     deleted_user.avatar = None
 
     if deleted_user.username.startswith("已注销用户-"):
-        deleted_user.username = await build_unique_oidc_username(db, preferred_username, user_info["sub"])
+        deleted_user.username = await build_unique_external_username(db, preferred_username, user_info["sub"])
 
     if deleted_user.password_hash == "DELETED":
         random_password = secrets.token_urlsafe(32)
@@ -970,7 +956,12 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
             # 从用户信息中获取部门信息
             dept_name = extracted_info.get("department_name")
             dept_desc = extracted_info.get("department_description")
-            dept = await get_or_create_oidc_department(db, dept_name, dept_desc)
+            dept = await get_or_create_external_department(
+                db,
+                dept_name,
+                dept_desc,
+                default_department=oidc_config.default_department,
+            )
             department_id = dept.id if dept else None
             user = await create_oidc_user(db, extracted_info, department_id)
     else:

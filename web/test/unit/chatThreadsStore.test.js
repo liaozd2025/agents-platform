@@ -19,7 +19,7 @@ test('OA 重新授权清空会话列表但保留路由中的 thread id', async (
     store.setCurrentThreadId('thread-1')
     store.upsertThread({ id: 'thread-1', title: '原会话' })
 
-    store.reset(true)
+    store.reset()
 
     assert.equal(store.currentThreadId, 'thread-1')
     assert.deepEqual(store.threads, [])

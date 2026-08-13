@@ -1,5 +1,7 @@
 # Yuxi 作为企业 AI 智能体中台底座的可行性分析
 
+> **2026-08-13 实施更新**：本文关于“OA 提供 OIDC”的内容是前期假设，现已确认 OA 只有自定义双 JWT token 与 `GetUserInfo` 接口。S0 生产路径改为服务端校验 OA token 后交换 Yuxi token；OIDC 仅保留为可选身份源，其验签、nonce 与 Redis 多副本问题已修复。当前接入方式以 [OA iframe 接入说明](./oa-embed-integration.md) 和 [S0 实施设计](./2026-08-12-oa-embed-s0.md) 为准。
+
 ## Context
 
 你要建企业内部智能助手，参考 Stripe 在 Deep Agents 上构建 Kai 知识 AI 平台的做法（安全、数据分离、Skill 知识库）。当前 `/Users/ddddup/Codebase/work/Yuxi` 是你选中的开源雏形（`xerrors/Yuxi`，MIT，0.7.1）。本文档回答三件事：**共通之处 / 是否可行 / 注意什么**。这一版只做分析，不含代码改动。
@@ -237,7 +239,7 @@ Milvus 是**一 KB 一 collection**（`implementations/milvus.py:356`），物�
 | 阶段 | 目标 | 关键动作 | 验证方式 |
 |---|---|---|---|
 | **S0' OA 嵌入链路**（新的起点）| 拉通外部依赖 | 嵌入路由复用 `BlankLayout`；nginx 设 `frame-ancestors`；接 OA 的 OIDC 免登录；postMessage 三条消息（校验 origin，禁用 `*`）；**同时修 OIDC 两个硬伤**（`id_token` 验签、`state` 移 Redis）| 从模拟 OA 页面 iframe 进入，免登录发起一轮对话看到流式输出，全程无 Yuxi 登录框 |
-| **S0'' 窄档布局** | 侧边栏/浮动可用 | 校准容器宽度阈值到 ~400px；file panel 接入同一套宽度判断；历史会话抽屉化；产物卡片点击走 `yuxi:expand`；关掉 `AppLayout` 的 GitHub stars 请求（内网离线会一直失败重试）| 400px 与 1920px 两种宽度下都能完成「提问→流式→产物→展开全屏保会话」闭环 |
+| **S0'' 窄档布局** | 侧边栏/浮动可用 | 校准容器宽度阈值到 ~400px；file panel 接入同一套宽度判断；历史会话抽屉化；产物卡片点击请求 `fullscreen`；关掉 `AppLayout` 的 GitHub stars 请求（内网离线会一直失败重试）| 固定、浮窗与全屏模式下都能完成「提问→流式→产物→全屏保会话」闭环 |
 | **S0 Spike**（1–2 周） | 验证底座 | 内网起全量环境；挂 2–3 个真实业务 skill（含一个连内部系统的 MCP）；跑通真实问答链路；**在 `conversations` 单表上做 RLS PoC**，确认 asyncpg 连接池 + `SET LOCAL` + ARQ worker + LangGraph checkpoint 池能跑通 | 一条真实业务问答端到端有引用来源；RLS PoC 下跨部门查询返回空 |
 | **S1 部门隔离底座**（原「租户底座」，见第八节修正）| 隔离名副其实 | 关键表加 `owner_department_id` + RLS policy（变量 `app.current_department`）；session 工厂注入；部门来源取自 OIDC `department_claim`；Milvus collection 命名带部门前缀；Neo4j 定 label 白名单策略；MinIO **把 `images` 从 public 桶迁走**，改预签名 URL | 写一组跨部门越权测试（`backend/test/integration`），每条都必须 403/空 |
 | **S2 安全底座** | 堵越权与凭据 | 统一 authz 模块 + 补齐 46 条 KB 路由；凭据应用层加密 + API 脱敏（`ModelProvider.to_dict()` 是关键点）；沙盒硬化（`internal=True`、`cap_drop`、去掉 `seccomp=unconfined`、资源限额）；token 吊销（`jti` + 黑名单）；禁用/改造 `remote_install` | 越权测试全绿；`docker inspect` 确认沙盒无出网、无多余 capability |
@@ -340,7 +342,9 @@ localUIState.chatContentWidth = chatContentContainerRef.value?.clientWidth || lo
 |---|---|---|
 | OA → Yuxi | `{type:'oa:token', token}` | 下发/刷新登录态 |
 | Yuxi → OA | `{type:'yuxi:auth-required'}` | 登录态失效，请求重新握手（替代跳登录页）|
-| Yuxi → OA | `{type:'yuxi:expand', threadId}` | 窄档「展开」/产物预览请求切全屏，带会话上下文 |
+| Yuxi → OA | `{type:'yuxi:mode-request', mode, threadId?}` | 请求固定、浮窗或全屏，带可选会话上下文 |
+| OA → Yuxi | `{type:'oa:mode-changed', mode}` | 确认父页实际显示模式 |
+| Yuxi → OA | `{type:'yuxi:close-request', threadId?}` | 请求隐藏助手，不销毁 iframe |
 
 全屏侧按 `threadId` 定位**用现成路由即可**：`router/index.js` 已有 `/agent/:thread_id`（`AgentCompWithThreadId`），不用新建。
 

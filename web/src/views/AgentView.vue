@@ -1,5 +1,5 @@
 <template>
-  <div class="agent-view">
+  <div class="agent-view" :data-app-surface="appSurface">
     <div v-if="embedMode && !embedAuthorized" class="embed-auth-waiting" role="status">
       {{ embedStatusMessage }}
     </div>
@@ -11,7 +11,7 @@
           :single-mode="false"
           :embed-mode="embedMode"
           @thread-change="handleThreadChange"
-          @request-expand="sendExpand"
+          @request-fullscreen="requestEmbedFullscreen"
         >
           <template #header-left>
             <button
@@ -24,6 +24,38 @@
             >
               <History :size="16" />
             </button>
+          </template>
+          <template #header-right>
+            <div
+              v-if="embedMode"
+              class="embed-mode-controls"
+              role="group"
+              aria-label="AI 助手显示模式"
+              :aria-busy="!embedModeConfirmed"
+            >
+              <button
+                v-for="option in embedModeOptions"
+                :key="option.value"
+                type="button"
+                class="agent-nav-btn embed-mode-btn"
+                :class="{ active: embedDisplayMode === option.value }"
+                :title="option.label"
+                :aria-label="`切换为${option.label}`"
+                :aria-pressed="embedDisplayMode === option.value"
+                @click="requestEmbedMode(option.value)"
+              >
+                <component :is="option.icon" :size="16" aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                class="agent-nav-btn embed-mode-btn embed-close-btn"
+                title="关闭 AI 助手"
+                aria-label="关闭 AI 助手"
+                @click="requestEmbedClose"
+              >
+                <X :size="16" aria-hidden="true" />
+              </button>
+            </div>
           </template>
           <template #input-actions-left="{ hasActiveThread }">
             <a-dropdown
@@ -151,10 +183,20 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { Settings2, ChevronDown, Check, History, Plus } from 'lucide-vue-next'
+import {
+  Settings2,
+  ChevronDown,
+  Check,
+  History,
+  Maximize2,
+  PanelRight,
+  PictureInPicture2,
+  Plus,
+  X
+} from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { agentApi } from '@/apis/agent_api'
-import { useEmbedMode } from '@/composables/useEmbedMode'
+import { useEmbedContext } from '@/composables/useEmbedMode'
 import { useOAEmbedBridge } from '@/composables/useOAEmbedBridge'
 import { useOutsidePointerdown } from '@/composables/useOutsidePointerdown'
 import AgentChatComponent from '@/components/AgentChatComponent.vue'
@@ -177,11 +219,14 @@ const agentStore = useAgentStore()
 const chatThreadsStore = useChatThreadsStore()
 const route = useRoute()
 const router = useRouter()
-const embedMode = useEmbedMode()
+const { surface: appSurface, isEmbedded: embedMode } = useEmbedContext()
 const {
   isAuthorized: embedAuthorized,
   statusMessage: embedStatusMessage,
-  sendExpand
+  displayMode: embedDisplayMode,
+  modeConfirmed: embedModeConfirmed,
+  requestDisplayMode,
+  requestClose
 } = useOAEmbedBridge(embedMode)
 
 // 从 agentStore 中获取响应式状态
@@ -191,6 +236,15 @@ const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
 
 const syncingRouteThread = ref(false)
 const historyDrawerOpen = ref(false)
+const embedModeOptions = [
+  { value: 'fixed', label: '固定模式', icon: PanelRight },
+  { value: 'floating', label: '浮窗模式', icon: PictureInPicture2 },
+  { value: 'fullscreen', label: '全屏模式', icon: Maximize2 }
+]
+
+const requestEmbedMode = (mode) => requestDisplayMode(mode, currentThreadId.value)
+const requestEmbedFullscreen = (threadId) => requestDisplayMode('fullscreen', threadId)
+const requestEmbedClose = () => requestClose(currentThreadId.value)
 
 const getRouteThreadId = () => {
   const value = route.params.thread_id
@@ -464,6 +518,27 @@ useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdown
 
 .embed-history-btn {
   display: none;
+}
+
+.embed-mode-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.embed-mode-btn {
+  width: 28px;
+  padding: 4px;
+}
+
+.embed-mode-btn.active {
+  color: var(--main-600);
+  background: var(--main-50);
+}
+
+.embed-close-btn {
+  margin-left: 2px;
+  color: var(--gray-600);
 }
 
 .config-dropdown-trigger {

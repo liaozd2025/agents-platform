@@ -17,12 +17,15 @@ export function parseOAEmbedAllowedOrigins(value) {
   ]
 }
 
+const OA_EMBED_MODES = new Set(['fixed', 'floating', 'fullscreen'])
+
 /**
  * 创建 OA iframe 的 postMessage 桥，所有出站消息都绑定到明确 origin。
  */
 export function createOAEmbedBridge({
   allowedOrigins,
   onToken,
+  onModeChanged = () => {},
   browserWindow = window,
   setTimer = setTimeout,
   clearTimer = clearTimeout
@@ -41,6 +44,14 @@ export function createOAEmbedBridge({
 
   const handleMessage = async (event) => {
     if (event.source !== browserWindow.parent || !origins.includes(event.origin)) return
+
+    if (event.data?.type === 'oa:mode-changed') {
+      if (event.origin === parentOrigin && OA_EMBED_MODES.has(event.data.mode)) {
+        onModeChanged(event.data.mode)
+      }
+      return
+    }
+
     if (
       event.data?.type !== 'oa:token' ||
       typeof event.data.token !== 'string' ||
@@ -74,8 +85,13 @@ export function createOAEmbedBridge({
       tokenAccepted = false
       post('yuxi:auth-required')
     },
-    expand(threadId) {
-      if (threadId) post('yuxi:expand', { threadId })
+    requestMode(mode, threadId) {
+      if (!OA_EMBED_MODES.has(mode)) return false
+      post('yuxi:mode-request', { mode, ...(threadId ? { threadId } : {}) })
+      return true
+    },
+    requestClose(threadId) {
+      post('yuxi:close-request', threadId ? { threadId } : {})
     }
   }
 }

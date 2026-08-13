@@ -80,6 +80,23 @@ async function exchangeOIDCCode(code) {
   return response.json()
 }
 
+/** 使用 OA 现有登录凭证交换 Yuxi token。 */
+async function exchangeOAToken(token) {
+  const response = await fetch('/api/auth/oa/exchange-token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ token })
+  })
+
+  if (!response.ok) {
+    const detail = await parseErrorDetail(response, 'OA 免登录失败')
+    throw new Error(detail)
+  }
+  return response.json()
+}
+
 async function getCLIAuthSession(userCode) {
   const encoded = encodeURIComponent(userCode)
   return apiGet(`/api/auth/cli/sessions/${encoded}`)
@@ -95,6 +112,7 @@ export const authApi = {
   getOIDCLoginUrl,
   getUserAccessOptions,
   exchangeOIDCCode,
+  exchangeOAToken,
   getCLIAuthSession,
   approveCLIAuthSession
 }

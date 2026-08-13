@@ -164,9 +164,7 @@ export const agentApi = {
     const response = await fetch(`/api/agent/requests/${requestId}/events`, {
       method: 'GET',
       headers,
-      signal: signal
-        ? AbortSignal.any([signal, userStore.getAuthSignal()])
-        : userStore.getAuthSignal()
+      signal: userStore.getAuthSignal(signal)
     })
     if (response.status === 401) {
       handleUnauthorizedError(new Error('认证失败，请重新登录'))
@@ -216,9 +214,7 @@ export const agentApi = {
     const response = await fetch(`/api/agent/runs/${runId}/events?${params.toString()}`, {
       method: 'GET',
       headers,
-      signal: signal
-        ? AbortSignal.any([signal, userStore.getAuthSignal()])
-        : userStore.getAuthSignal()
+      signal: userStore.getAuthSignal(signal)
     })
     if (response.status === 401) {
       handleUnauthorizedError(new Error('认证失败，请重新登录'))

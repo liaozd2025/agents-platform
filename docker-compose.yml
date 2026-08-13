@@ -33,6 +33,9 @@ x-api-worker-env: &api-worker-env
   RUN_EVENTS_STREAM_TTL_SECONDS: ${RUN_EVENTS_STREAM_TTL_SECONDS:-7200}
   YUXI_CORS_ORIGINS: ${YUXI_CORS_ORIGINS:-}
   YUXI_EMBED_ALLOWED_ORIGINS: ${YUXI_EMBED_ALLOWED_ORIGINS:-}
+  OA_SSO_ENABLED: ${OA_SSO_ENABLED:-false}
+  OA_SSO_USERINFO_URL: ${OA_SSO_USERINFO_URL:-}
+  OA_SSO_COMPANY_CODE: ${OA_SSO_COMPANY_CODE:-}
   YUXI_DATASET_PERSIST_BATCH_SIZE: ${YUXI_DATASET_PERSIST_BATCH_SIZE:-1}
   # 其他环境变量
   NO_PROXY: localhost,127.0.0.1,milvus,graph,minio,milvus-etcd-dev,etcd,mineru,paddlex,sandbox-provisioner,api.siliconflow.cn

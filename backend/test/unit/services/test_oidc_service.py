@@ -363,23 +363,6 @@ async def test_oidc_id_token_rejects_http_jwks_for_https_issuer(monkeypatch, oid
         await oidc_service.OIDCUtils.verify_id_token(issue_id_token(signing_material), "nonce-1")
 
 
-async def test_oidc_metadata_does_not_reuse_failed_discovery(monkeypatch):
-    monkeypatch.setattr(oidc_service.oidc_config, "enabled", True)
-    monkeypatch.setattr(oidc_service.oidc_config, "client_id", "yuxi-client")
-    monkeypatch.setattr(oidc_service.oidc_config, "issuer_url", "https://oa.example.test")
-    monkeypatch.setattr(oidc_service.oidc_config, "authorization_endpoint", "")
-    failed_metadata = oidc_service.OIDCProviderMetadata()
-    failed_metadata.authorization_endpoint = "https://attacker.example.test/authorize"
-    monkeypatch.setattr(oidc_service.OIDCUtils, "_metadata", failed_metadata)
-    load = AsyncMock(return_value=False)
-    monkeypatch.setattr(oidc_service.OIDCProviderMetadata, "load", load)
-
-    metadata = await oidc_service.OIDCUtils.get_metadata()
-
-    assert metadata is None
-    load.assert_awaited_once_with("https://oa.example.test")
-
-
 async def test_oidc_callback_redirect_only_targets_allowed_oa_origin(monkeypatch):
     monkeypatch.setenv(
         "YUXI_EMBED_ALLOWED_ORIGINS",

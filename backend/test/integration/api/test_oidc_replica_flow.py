@@ -1,4 +1,4 @@
-"""OIDC callback 与 code exchange 落在不同 API 副本的真实 HTTP 测试。"""
+"""OA 自定义 SSO 与 OIDC 多副本认证的真实 HTTP 测试。"""
 
 from __future__ import annotations
 
@@ -73,6 +73,9 @@ async def test_oidc_callback_and_exchange_work_across_api_replicas():
         "OIDC_CLIENT_SECRET": "oa-s0-local-secret",
         "OIDC_REDIRECT_URI": f"{api_a}/api/auth/oidc/callback",
         "OIDC_DEPARTMENT_CLAIM": "department",
+        "OA_SSO_ENABLED": "true",
+        "OA_SSO_USERINFO_URL": f"{issuer}/oa-api/User/GetUserInfo",
+        "OA_SSO_COMPANY_CODE": "TEST",
         "YUXI_EMBED_ALLOWED_ORIGINS": "http://localhost:4173",
         "MOCK_OIDC_ISSUER": issuer,
         "MOCK_OIDC_BROWSER_ORIGIN": issuer,
@@ -90,6 +93,18 @@ async def test_oidc_callback_and_exchange_work_across_api_replicas():
             _wait_until_ready(f"{api_b}/api/auth/oidc/config", processes[2]),
         )
         async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+            mock_token_response = await client.get(f"{issuer}/mock-oa-token")
+            oa_exchange_response = await client.post(
+                f"{api_a}/api/auth/oa/exchange-token",
+                json={"token": mock_token_response.json()["token"]},
+            )
+            assert oa_exchange_response.status_code == 200
+            oa_login = oa_exchange_response.json()
+            oa_me_response = await client.get(
+                f"{api_b}/api/auth/me",
+                headers={"Authorization": f"Bearer {oa_login['access_token']}"},
+            )
+
             login_response = await client.get(
                 f"{api_a}/api/auth/oidc/login-url",
                 params={"redirect_path": "http://localhost:4173/oa/callback"},
@@ -111,6 +126,9 @@ async def test_oidc_callback_and_exchange_work_across_api_replicas():
                 json={"code": exchange_code},
             )
 
+        assert oa_login["uid"] == "oa:TEST:oa-s0-user"
+        assert oa_me_response.status_code == 200
+        assert oa_me_response.json()["uid"] == "oa:TEST:oa-s0-user"
         assert exchange_response.status_code == 200
         assert exchange_response.json()["department_name"] == "模拟研发部"
         assert replay_response.status_code == 400

@@ -20,9 +20,8 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     currentThreadId.value = threadId || null
   }
 
-  const reset = (preserveCurrentThreadId = false) => {
+  const reset = () => {
     threads.value = []
-    if (!preserveCurrentThreadId) currentThreadId.value = null
     hasMoreThreads.value = true
     isLoadingMoreThreads.value = false
   }

@@ -1,4 +1,4 @@
-"""仅用于本地 OA S0 验收的最小 OIDC Provider。"""
+"""仅用于本地 OA S0 验收的最小身份服务。"""
 
 import os
 import secrets
@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, Form, Header, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from jwt.algorithms import RSAAlgorithm
 
@@ -16,13 +17,60 @@ BROWSER_ORIGIN = os.environ.get("MOCK_OIDC_BROWSER_ORIGIN", ISSUER).rstrip("/")
 CLIENT_ID = "oa-s0-local-client"
 CLIENT_SECRET = "oa-s0-local-secret"
 SUBJECT = "oa-s0-user"
+OA_COMPANY_CODE = "TEST"
+OA_TOKEN_SECRET = "oa-s0-local-token-secret-32-bytes"
+OA_PARENT_ORIGIN = os.environ.get("MOCK_OA_PARENT_ORIGIN", "http://localhost:4173").rstrip("/")
 
-app = FastAPI(title="OA S0 Mock OIDC Provider")
+app = FastAPI(title="OA S0 Mock Identity Provider")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[OA_PARENT_ORIGIN],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 jwk = RSAAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
 jwk.update({"kid": "oa-s0-local-key", "use": "sig", "alg": "RS256"})
 authorization_codes: dict[str, dict] = {}
 access_tokens: set[str] = set()
+oa_tokens: set[str] = set()
+
+
+@app.get("/mock-oa-token")
+async def issue_mock_oa_token() -> dict[str, str]:
+    """签发本地自定义 OA 双 JWT token。"""
+    issued_at = int(time.time())
+    claims = {"iat": issued_at, "exp": issued_at + 300, "data": {"account": SUBJECT}}
+    first = jwt.encode(claims, OA_TOKEN_SECRET, algorithm="HS256")
+    second = jwt.encode(claims, OA_TOKEN_SECRET, algorithm="HS256")
+    token = f"{first}|{second}"
+    oa_tokens.add(token)
+    return {"token": token}
+
+
+@app.get("/oa-api/User/GetUserInfo")
+async def get_oa_userinfo(Account: str, authorization: str | None = Header(default=None)) -> dict:
+    """校验完整 OA token，并返回模拟的在职用户信息。"""
+    token = authorization.removeprefix("Bearer ") if authorization else ""
+    if token not in oa_tokens or Account != SUBJECT:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid OA token")
+    return {
+        "status": 1,
+        "message": "",
+        "data": {
+            "companyCode": OA_COMPANY_CODE,
+            "account": SUBJECT,
+            "fullName": "OA S0 模拟用户",
+            "userStateCode": "service",
+            "userJobInformationDtos": [
+                {
+                    "pagingSort": 1,
+                    "appointmentDepartmentCode": "mock-department",
+                    "appointmentDepartmentName": "模拟研发部",
+                }
+            ],
+        },
+    }
 
 
 @app.get("/.well-known/openid-configuration")

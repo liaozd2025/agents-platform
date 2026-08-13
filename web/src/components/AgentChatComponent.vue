@@ -797,7 +797,7 @@ const props = defineProps({
   sendDisabled: { type: Boolean, default: false },
   embedMode: { type: Boolean, default: false }
 })
-const emit = defineEmits(['thread-change', 'request-expand'])
+const emit = defineEmits(['thread-change', 'request-fullscreen'])
 
 // ==================== STORE MANAGEMENT ====================
 const agentStore = useAgentStore()
@@ -1116,7 +1116,7 @@ const openPanelPreview = (file, keepTreeOpen = false) => {
 
 const openArtifactPreview = (file) => {
   if (props.embedMode && isNarrowLayout.value) {
-    emit('request-expand', currentChatId.value)
+    emit('request-fullscreen', currentChatId.value)
     return
   }
 

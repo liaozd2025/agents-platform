@@ -1,13 +1,11 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
-/** 判断一组已匹配路由记录是否启用了 OA 嵌入模式。 */
-export function routeUsesEmbedMode(route) {
-  return route.matched.some((record) => record.meta.embed === true)
-}
-
-/** 返回当前路由是否处于 OA 嵌入模式。 */
-export function useEmbedMode() {
+/** 提供当前页面的全局运行形态，独立站不会暴露 OA 控件。 */
+export function useEmbedContext() {
   const route = useRoute()
-  return computed(() => routeUsesEmbedMode(route))
+  const isEmbedded = computed(() => route.matched.some((record) => record.meta.embed === true))
+  const surface = computed(() => (isEmbedded.value ? 'oa-embed' : 'standalone'))
+
+  return { surface, isEmbedded }
 }

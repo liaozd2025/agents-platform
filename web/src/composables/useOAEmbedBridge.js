@@ -1,23 +1,30 @@
 import { onActivated, onDeactivated, onMounted, onUnmounted, ref, unref } from 'vue'
 import { useChatThreadsStore } from '@/stores/chatThreads'
 import { useUserStore } from '@/stores/user'
+import { authApi } from '@/apis/auth_api'
 import { createOAEmbedBridge, parseOAEmbedAllowedOrigins } from '@/utils/oaEmbedBridge'
 import { setOAEmbedAuthRequiredHandler } from '@/utils/oaEmbedSession'
 
-/** 在嵌入路由中等待 OA 下发 Yuxi bearer，并维护授权状态。 */
+/** 在嵌入路由中将 OA 现有 token 交换为 Yuxi 登录态。 */
 export function useOAEmbedBridge(enabled) {
   const userStore = useUserStore()
   const chatThreadsStore = useChatThreadsStore()
   const isAuthorized = ref(false)
   const statusMessage = ref('等待 OA 授权')
+  const displayMode = ref('fixed')
+  const modeConfirmed = ref(false)
   let bridge = null
   let clearAuthRequiredHandler = null
 
-  const requestAuthRequired = () => {
+  const clearAuthorization = (message) => {
     isAuthorized.value = false
-    statusMessage.value = '等待 OA 重新授权'
+    statusMessage.value = message
     userStore.logout()
-    chatThreadsStore.reset(true)
+    chatThreadsStore.reset()
+  }
+
+  const requestAuthRequired = () => {
+    clearAuthorization('等待 OA 重新授权')
     bridge?.requestAuthRequired()
   }
 
@@ -39,12 +46,10 @@ export function useOAEmbedBridge(enabled) {
     bridge = createOAEmbedBridge({
       allowedOrigins,
       onToken: async (token) => {
-        isAuthorized.value = false
-        statusMessage.value = '正在验证 OA 授权'
-        userStore.logout()
-        chatThreadsStore.reset(true)
+        clearAuthorization('正在验证 OA 授权')
         try {
-          await userStore.acceptEmbedToken(token)
+          const loginData = await authApi.exchangeOAToken(token)
+          await userStore.acceptEmbedToken(loginData.access_token)
           isAuthorized.value = true
           statusMessage.value = ''
         } catch (error) {
@@ -52,6 +57,10 @@ export function useOAEmbedBridge(enabled) {
           statusMessage.value = '等待 OA 重新授权'
           throw error
         }
+      },
+      onModeChanged: (mode) => {
+        displayMode.value = mode
+        modeConfirmed.value = true
       }
     })
     clearAuthRequiredHandler = setOAEmbedAuthRequiredHandler(requestAuthRequired)
@@ -64,10 +73,7 @@ export function useOAEmbedBridge(enabled) {
     clearAuthRequiredHandler?.()
     clearAuthRequiredHandler = null
     if (unref(enabled)) {
-      isAuthorized.value = false
-      statusMessage.value = '等待 OA 授权'
-      userStore.logout()
-      chatThreadsStore.reset(true)
+      clearAuthorization('等待 OA 授权')
     }
   }
 
@@ -79,6 +85,13 @@ export function useOAEmbedBridge(enabled) {
   return {
     isAuthorized,
     statusMessage,
-    sendExpand: (threadId) => bridge?.expand(threadId)
+    displayMode,
+    modeConfirmed,
+    requestDisplayMode(mode, threadId) {
+      if (bridge?.requestMode(mode, threadId)) modeConfirmed.value = false
+    },
+    requestClose(threadId) {
+      bridge?.requestClose(threadId)
+    }
   }
 }
