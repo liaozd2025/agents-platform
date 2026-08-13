@@ -182,6 +182,7 @@
               :maxlength="20"
               name="new-department-admin-uid"
               autocomplete="off"
+              @input="departmentManagement.form.uidError = ''"
               @blur="checkAdminUid"
             />
             <div v-if="departmentManagement.form.uidError" class="error-text">
@@ -237,7 +238,7 @@ import { computed, onMounted, reactive, watch } from 'vue'
 import { notification, message, Modal } from 'ant-design-vue'
 import { departmentApi, apiSuperAdminGet } from '@/apis'
 import { Plus, RefreshCw, SquarePen, Trash2 } from 'lucide-vue-next'
-import { buildDepartmentTree, getDepartmentSubtreeIds } from '@/utils/departmentTree'
+import { buildDepartmentTree } from '@/utils/departmentTree'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 
 const ROOT_DEPARTMENT_ID = 1
@@ -247,6 +248,20 @@ const NODE_TYPE_LABELS = {
   department: '部门'
 }
 const treeFieldNames = { children: 'children', label: 'name', value: 'id' }
+
+/** 创建一份组织节点表单初始状态。 */
+const emptyDepartmentForm = () => ({
+  name: '',
+  description: '',
+  parentId: ROOT_DEPARTMENT_ID,
+  nodeType: 'department',
+  adminUid: '',
+  adminPassword: '',
+  adminConfirmPassword: '',
+  adminPhone: '',
+  uidError: '',
+  phoneError: ''
+})
 
 const columns = [
   {
@@ -291,32 +306,18 @@ const departmentManagement = reactive({
   modalTitle: '添加组织节点',
   editMode: false,
   editDepartmentId: null,
-  form: {
-    name: '',
-    description: '',
-    parentId: ROOT_DEPARTMENT_ID,
-    nodeType: 'department',
-    adminUid: '',
-    adminPassword: '',
-    adminConfirmPassword: '',
-    adminPhone: '',
-    uidError: '',
-    phoneError: ''
-  }
+  form: emptyDepartmentForm()
 })
 
 const departmentTree = computed(() => buildDepartmentTree(departmentManagement.departments))
 
 const parentTreeData = computed(() => {
-  const disabledIds =
+  const disabledRootId =
     departmentManagement.editMode && departmentManagement.editDepartmentId !== ROOT_DEPARTMENT_ID
-      ? getDepartmentSubtreeIds(
-          departmentManagement.departments,
-          departmentManagement.editDepartmentId
-        )
-      : new Set()
+      ? departmentManagement.editDepartmentId
+      : null
 
-  return buildDepartmentTree(departmentManagement.departments, disabledIds)
+  return buildDepartmentTree(departmentManagement.departments, disabledRootId)
 })
 
 // 获取组织节点列表
@@ -352,18 +353,7 @@ const showAddDepartmentModal = () => {
   departmentManagement.modalTitle = '添加组织节点'
   departmentManagement.editMode = false
   departmentManagement.editDepartmentId = null
-  departmentManagement.form = {
-    name: '',
-    description: '',
-    parentId: ROOT_DEPARTMENT_ID,
-    nodeType: 'department',
-    adminUid: '',
-    adminPassword: '',
-    adminConfirmPassword: '',
-    adminPhone: '',
-    uidError: '',
-    phoneError: ''
-  }
+  departmentManagement.form = emptyDepartmentForm()
   departmentManagement.modalVisible = true
 }
 
@@ -372,16 +362,10 @@ const showEditDepartmentModal = (department) => {
   departmentManagement.editMode = true
   departmentManagement.editDepartmentId = department.id
   departmentManagement.form = {
+    ...emptyDepartmentForm(),
     name: department.name,
     description: department.description || '',
-    parentId: department.parent_id,
-    nodeType: department.node_type,
-    adminUid: '',
-    adminPassword: '',
-    adminConfirmPassword: '',
-    adminPhone: '',
-    uidError: '',
-    phoneError: ''
+    parentId: department.parent_id
   }
   departmentManagement.modalVisible = true
 }
@@ -393,13 +377,6 @@ const validatePhoneNumber = (phone) => {
   const phoneRegex = /^1[3-9]\d{9}$/
   return phoneRegex.test(phone)
 }
-
-watch(
-  () => departmentManagement.form.adminUid,
-  () => {
-    departmentManagement.form.uidError = ''
-  }
-)
 
 watch(
   () => departmentManagement.form.adminPhone,

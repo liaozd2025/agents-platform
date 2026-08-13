@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import unquote
 
 import pytest
@@ -150,18 +151,17 @@ async def test_oidc_callback_allows_existing_binding_when_sub_contains_colon(oid
         classmethod(lambda cls, state: {"redirect_path": "/"}),
     )
 
-    async def fake_exchange(cls, code):
-        return {"access_token": "token"}
-
-    async def fake_userinfo(cls, access_token):
-        return {"sub": "tenant:user", "preferred_username": "alice", "department": "研发部"}
-
-    async def fake_log_operation(db, user_id, operation, request=None):
-        return None
-
-    monkeypatch.setattr(oidc_service.OIDCUtils, "exchange_code_for_token", classmethod(fake_exchange))
-    monkeypatch.setattr(oidc_service.OIDCUtils, "get_userinfo", classmethod(fake_userinfo))
-    monkeypatch.setattr(oidc_service, "log_operation", fake_log_operation)
+    monkeypatch.setattr(
+        oidc_service.OIDCUtils,
+        "exchange_code_for_token",
+        AsyncMock(return_value={"access_token": "token"}),
+    )
+    monkeypatch.setattr(
+        oidc_service.OIDCUtils,
+        "get_userinfo",
+        AsyncMock(return_value={"sub": "tenant:user", "preferred_username": "alice", "department": "研发部"}),
+    )
+    monkeypatch.setattr(oidc_service, "log_operation", AsyncMock())
 
     response = await oidc_service.oidc_callback_handler("dummy-code", "dummy-state", oidc_session)
 
@@ -193,14 +193,6 @@ async def test_oidc_callback_auto_create_uses_unique_existing_department(oidc_se
         classmethod(lambda cls, state: {"redirect_path": "/"}),
     )
 
-    async def fake_exchange(cls, code):
-        """返回固定的测试访问令牌。"""
-        return {"access_token": "token"}
-
-    async def fake_userinfo(cls, access_token):
-        """返回唯一命中研发部的测试用户信息。"""
-        return {"sub": "new-user", "preferred_username": "new-user", "department": "研发部"}
-
     async def fake_create_user(db, user_info, department_id):
         """在当前测试会话中按回调传入的组织节点创建用户。"""
         user = User(
@@ -216,14 +208,18 @@ async def test_oidc_callback_auto_create_uses_unique_existing_department(oidc_se
         await db.refresh(user)
         return user
 
-    async def fake_log_operation(db, user_id, operation, request=None):
-        """避免单元测试写入未建表的操作日志。"""
-        return None
-
-    monkeypatch.setattr(oidc_service.OIDCUtils, "exchange_code_for_token", classmethod(fake_exchange))
-    monkeypatch.setattr(oidc_service.OIDCUtils, "get_userinfo", classmethod(fake_userinfo))
+    monkeypatch.setattr(
+        oidc_service.OIDCUtils,
+        "exchange_code_for_token",
+        AsyncMock(return_value={"access_token": "token"}),
+    )
+    monkeypatch.setattr(
+        oidc_service.OIDCUtils,
+        "get_userinfo",
+        AsyncMock(return_value={"sub": "new-user", "preferred_username": "new-user", "department": "研发部"}),
+    )
     monkeypatch.setattr(oidc_service, "create_oidc_user", fake_create_user)
-    monkeypatch.setattr(oidc_service, "log_operation", fake_log_operation)
+    monkeypatch.setattr(oidc_service, "log_operation", AsyncMock())
 
     response = await oidc_service.oidc_callback_handler("dummy-code", "dummy-state", oidc_session)
     created_user = await oidc_session.scalar(select(User).where(User.uid == "oidc:new-user"))

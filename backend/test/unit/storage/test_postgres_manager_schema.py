@@ -138,6 +138,27 @@ async def test_ensure_business_schema_creates_generic_config_options_table():
 
 
 @pytest.mark.asyncio
+async def test_ensure_business_schema_fails_when_nonempty_organization_has_no_group_root():
+    """存量组织表缺少固定集团根时应中止迁移，避免继续运行无效树。"""
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager.ensure_business_schema()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+    assert "RAISE EXCEPTION" in statements
+    assert "departments 非空但缺少 id=1 的集团根" in statements
+
+
+@pytest.mark.asyncio
 async def test_ensure_business_schema_adds_run_origin_snapshot_columns():
     manager = PostgresManager()
     original_initialized = manager._initialized

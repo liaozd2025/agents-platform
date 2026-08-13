@@ -145,7 +145,7 @@ async def create_department(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="手机号已存在",
                 )
-    elif department_data.admin_password:
+    elif department_data.admin_password or admin_phone:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="创建管理员时必须提供用户ID")
 
     new_department = await dept_repo.create_child(

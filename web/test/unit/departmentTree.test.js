@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildDepartmentTree, getDepartmentSubtreeIds } from '../../src/utils/departmentTree.js'
+import { buildDepartmentTree } from '../../src/utils/departmentTree.js'
 
 test('组织节点列表可组装为树且移动时禁用自身与后代', () => {
   const departments = [
@@ -10,10 +10,8 @@ test('组织节点列表可组装为树且移动时禁用自身与后代', () =>
     { id: 3, parent_id: 1, name: '华南公司' },
     { id: 2, parent_id: 1, name: '华东公司' }
   ]
-  const disabledIds = getDepartmentSubtreeIds(departments, 2)
-  const tree = buildDepartmentTree(departments, disabledIds)
+  const tree = buildDepartmentTree(departments, 2)
 
-  assert.deepEqual([...disabledIds].sort(), [2, 4])
   assert.deepEqual(tree, [
     {
       id: 1,

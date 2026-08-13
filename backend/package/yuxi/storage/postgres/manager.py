@@ -929,7 +929,7 @@ class PostgresManager(metaclass=SingletonMeta):
 
                     UPDATE departments SET path = '/1/' || id || '/' WHERE id <> 1 AND path = '';
                 ELSIF EXISTS (SELECT 1 FROM departments) THEN
-                    RAISE WARNING
+                    RAISE EXCEPTION
                         'departments 非空但缺少 id=1 的集团根，组织机构树未完成迁移，祖先链不可用';
                 END IF;
             END $$;
