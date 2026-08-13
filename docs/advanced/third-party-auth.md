@@ -8,6 +8,7 @@ Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有�
 - 客户端ID（Client ID）
 - 客户端密钥（Client Secret）
 - ISSUER URL
+- Provider discovery 地址或 JWKS URL
 
 填入回调地址（Redirect URI）：https://<your_yuxi_host>/api/auth/oidc/callback
 
@@ -44,6 +45,9 @@ Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有�
 # UserInfo 端点 (可选，自动从 discovery 获取)
 # OIDC_USERINFO_ENDPOINT=
 
+# JWKS 地址（使用显式端点时必填，discovery 模式自动获取）
+# OIDC_JWKS_URI=
+
 # 登出端点 (可选，自动从 discovery 获取)
 # OIDC_END_SESSION_ENDPOINT=
 
@@ -72,9 +76,6 @@ Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有�
 # 开启后，OIDC 返回的 username 会直接作为业务登录标识 uid 登录，需要管理员提前创建好用户账号
 # OIDC_USE_RAW_USERNAME=false
 
-# 是否从OIDC userinfo 中获取部门信息并自动创建关联部门 (true/false，默认: false)
-# OIDC_FETCH_DEPARTMENT_INFO=false
-
 # 部门名称字段映射 (默认: department)
 # OIDC_DEPARTMENT_CLAIM=department
 
@@ -95,8 +96,11 @@ docker restart api-dev web-dev
 **绑定原理**（无需修改数据库）：  
 系统会创建一个标记为删除的占位用户 `oidc:{sub}:{target_user_id}` 来记录 OIDC sub 与 Yuxi 用户的绑定关系，确保只有绑定过的 OIDC 身份才能登录对应的账号，**防止账号冒用**。其中 `target_user_id` 是数据库中的数值 `users.id`；用户登录标识仍使用字符串 `uid`。
 
-### 自动获取部门信息（OIDC_FETCH_DEPARTMENT_INFO=true）
-开启后，系统会从 OIDC userinfo 中读取部门名称和描述，自动在 Yuxi 中创建部门并将用户关联到该部门。
+### 身份令牌与部门信息
+
+系统会验证 `id_token` 的签名、`iss`、`aud`、`exp`、`iat`、`sub` 和 `nonce`。使用显式端点配置时，必须同时设置 `OIDC_ISSUER_URL` 和 `OIDC_JWKS_URI`；discovery 返回的 `issuer` 必须与 `OIDC_ISSUER_URL` 完全一致。OIDC 端点必须使用 HTTPS，仅 `YUXI_ENV=development` 时允许本机 HTTP Provider。
+
+系统会从 OIDC claims 中读取 `OIDC_DEPARTMENT_CLAIM` 指定的部门名称和描述，自动创建部门并关联用户。
 
 - 对从 OIDC 获取的部门名称会自动做 `strip()` 去空格，并截断到 50 字符
 - 部门描述会自动截断到 255 字符

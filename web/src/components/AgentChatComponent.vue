@@ -4,7 +4,8 @@
       class="chat"
       :class="{
         'has-file-panel': isFilePanelOpen,
-        'is-resizing-file-panel': isResizing
+        'is-resizing-file-panel': isResizing,
+        'is-narrow-layout': isNarrowLayout
       }"
       :style="{ '--file-panel-width': filePanelWidthStyle }"
     >
@@ -94,7 +95,7 @@
                   :artifacts="row.artifacts"
                   :thread-id="currentChatId"
                   @saved="handleArtifactSaved"
-                  @open-preview="openPanelPreview"
+                  @open-preview="openArtifactPreview"
                 />
                 <!-- 显示对话最后一个消息使用的模型 -->
                 <RefsComponent
@@ -573,7 +574,7 @@
                       type="button"
                       class="state-list-item state-list-item--button"
                       :title="`打开 ${file.name}`"
-                      @click="openPanelPreview(file)"
+                      @click="openArtifactPreview(file)"
                     >
                       <FileTypeIcon
                         :name="file.name || file.path"
@@ -793,9 +794,10 @@ import {
 const props = defineProps({
   agentId: { type: String, default: '' },
   singleMode: { type: Boolean, default: true },
-  sendDisabled: { type: Boolean, default: false }
+  sendDisabled: { type: Boolean, default: false },
+  embedMode: { type: Boolean, default: false }
 })
-const emit = defineEmits(['thread-change'])
+const emit = defineEmits(['thread-change', 'request-expand'])
 
 // ==================== STORE MANAGEMENT ====================
 const agentStore = useAgentStore()
@@ -950,15 +952,22 @@ const clampPanelRatio = (ratio, containerWidth = getPanelContainerWidth()) => {
 
 const filePanelWidthStyle = computed(() => {
   if (!isFilePanelOpen.value) return '0px'
-  if (filePanelDragWidth.value !== null) return `${filePanelDragWidth.value}px`
 
   const containerWidth = localUIState.chatContentWidth || getPanelContainerWidth()
   if (!containerWidth) return `${panelRatio.value * 100}%`
 
   const maxWidth = getFilePanelMaxWidth(containerWidth)
+  if (containerWidth <= mobilePanelBreakpoint) return `${maxWidth}px`
+  if (filePanelDragWidth.value !== null) return `${filePanelDragWidth.value}px`
+
   const minWidth = getFilePanelMinWidth(containerWidth, maxWidth)
   const preferredWidth = containerWidth * panelRatio.value
   return `${Math.max(minWidth, Math.min(preferredWidth, maxWidth))}px`
+})
+
+const isNarrowLayout = computed(() => {
+  const containerWidth = localUIState.chatContentWidth || getPanelContainerWidth()
+  return Boolean(containerWidth && containerWidth <= mobilePanelBreakpoint)
 })
 
 const statePanelCanDock = computed(() => {
@@ -1103,6 +1112,15 @@ const openPanelPreview = (file, keepTreeOpen = false) => {
 
   agentPanelActivePreviewPath.value = tab.path
   showFilePanel(keepTreeOpen ? 'tree' : 'preview')
+}
+
+const openArtifactPreview = (file) => {
+  if (props.embedMode && isNarrowLayout.value) {
+    emit('request-expand', currentChatId.value)
+    return
+  }
+
+  openPanelPreview(file)
 }
 
 const closePanelPreviewTab = (path) => {
@@ -3609,6 +3627,27 @@ watch(currentChatId, (threadId, oldThreadId) => {
 
 .chat-content-container.has-file-panel .chat-main {
   margin-right: var(--file-panel-width);
+}
+
+.chat.is-narrow-layout {
+  &.has-file-panel .chat-header {
+    padding-right: 8px;
+  }
+
+  .chat-content-container.has-file-panel .chat-main,
+  .chat-content-container.has-state-panel .chat-main {
+    margin-right: 0;
+    min-width: 0;
+  }
+
+  .side-panel--file {
+    top: calc(var(--header-height) + 4px);
+  }
+
+  .side-panel--file.is-visible {
+    min-width: 0;
+    max-width: calc(100% - 16px);
+  }
 }
 
 .side-panel {

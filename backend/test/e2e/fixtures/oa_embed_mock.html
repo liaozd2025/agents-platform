@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OA S0 嵌入验收页</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 16px;
+        font:
+          14px system-ui,
+          sans-serif;
+        background: #f5f6f8;
+      }
+      header {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      button,
+      input {
+        min-height: 32px;
+      }
+      input {
+        width: 280px;
+        padding: 0 8px;
+      }
+      #frame-shell {
+        width: 400px;
+        height: 720px;
+        overflow: auto;
+        background: white;
+        border: 1px solid #ddd;
+      }
+      iframe {
+        width: 100%;
+        height: 100%;
+        border: 0;
+      }
+      pre {
+        max-height: 180px;
+        overflow: auto;
+        padding: 8px;
+        background: #111;
+        color: #b7f7c3;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <label>Yuxi <input id="yuxi-base" value="http://localhost:5174" /></label>
+      <button id="load" type="button">加载 400px</button>
+      <button id="wide" type="button">切换 1920px</button>
+      <button id="login" type="button">OIDC 免登录</button>
+      <button id="expire" type="button">模拟 token 过期</button>
+    </header>
+    <div id="frame-shell">
+      <iframe
+        id="yuxi-frame"
+        title="Yuxi OA 插件"
+        sandbox="allow-scripts allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox"
+      ></iframe>
+    </div>
+    <pre id="events" aria-live="polite"></pre>
+    <script>
+      const baseInput = document.querySelector('#yuxi-base')
+      const frame = document.querySelector('#yuxi-frame')
+      const shell = document.querySelector('#frame-shell')
+      const events = document.querySelector('#events')
+      let bearer = sessionStorage.getItem('oa-s0-bearer') || ''
+
+      const base = () => baseInput.value.replace(/\/$/, '')
+      const origin = () => new URL(base()).origin
+      const log = (value) => {
+        events.textContent += `${new Date().toISOString()} ${value}\n`
+      }
+      const sendToken = () => {
+        if (!bearer) return
+        frame.contentWindow.postMessage({ type: 'oa:token', token: bearer }, origin())
+        log('OA -> Yuxi: oa:token')
+      }
+      const loadFrame = () => {
+        frame.src = `${base()}/embed`
+      }
+
+      async function startLogin() {
+        const callback = `${location.origin}${location.pathname}?yuxi=${encodeURIComponent(base())}`
+        const response = await fetch(
+          `${base()}/api/auth/oidc/login-url?redirect_path=${encodeURIComponent(callback)}`
+        )
+        const payload = await response.json()
+        location.assign(payload.login_url)
+      }
+
+      async function consumeLoginCode() {
+        const params = new URLSearchParams(location.search)
+        const code = params.get('code')
+        const callbackBase = params.get('yuxi')
+        if (!code || !callbackBase) return
+        baseInput.value = callbackBase
+        const response = await fetch(`${base()}/api/auth/oidc/exchange-code`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code })
+        })
+        const payload = await response.json()
+        bearer = payload.access_token
+        sessionStorage.setItem('oa-s0-bearer', bearer)
+        history.replaceState(null, '', location.pathname)
+      }
+
+      window.addEventListener('message', (event) => {
+        if (event.source !== frame.contentWindow || event.origin !== origin()) return
+        const message = event.data || {}
+        log(`Yuxi -> OA: ${message.type}${message.threadId ? ` (${message.threadId})` : ''}`)
+        if (message.type === 'yuxi:ready') sendToken()
+        if (message.type === 'yuxi:auth-required') startLogin()
+        if (message.type === 'yuxi:expand' && message.threadId) {
+          shell.style.width = '1920px'
+          frame.src = `${base()}/agent/${encodeURIComponent(message.threadId)}`
+        }
+      })
+
+      document.querySelector('#load').addEventListener('click', () => {
+        shell.style.width = '400px'
+        loadFrame()
+      })
+      document.querySelector('#wide').addEventListener('click', () => {
+        shell.style.width = '1920px'
+        loadFrame()
+      })
+      document.querySelector('#login').addEventListener('click', startLogin)
+      document.querySelector('#expire').addEventListener('click', () => {
+        bearer = 'expired-local-test-token'
+        sendToken()
+      })
+
+      consumeLoginCode().then(loadFrame)
+    </script>
+  </body>
+</html>

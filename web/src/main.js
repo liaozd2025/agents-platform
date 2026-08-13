@@ -4,6 +4,7 @@ import piniaPluginPersistedstate from 'pinia-plugin-persistedstate'
 
 import App from './App.vue'
 import router from './router'
+import { routeUsesEmbedMode } from '@/composables/useEmbedMode'
 
 import Antd from 'ant-design-vue'
 import 'ant-design-vue/dist/reset.css'
@@ -20,6 +21,8 @@ app.use(Antd)
 // 预加载信息配置
 import { useInfoStore } from '@/stores/info'
 const infoStore = useInfoStore()
-infoStore.loadInfoConfig()
+if (!routeUsesEmbedMode(router.resolve(window.location.pathname))) {
+  infoStore.loadInfoConfig()
+}
 
 app.mount('#app')

@@ -13,6 +13,7 @@ export const useUserStore = defineStore('user', () => {
   const userRole = ref('')
   const departmentId = ref(null)
   const departmentName = ref('')
+  let authSessionController = new AbortController()
 
   // 计算属性
   const isLoggedIn = computed(() => !!token.value)
@@ -70,6 +71,9 @@ export const useUserStore = defineStore('user', () => {
   }
 
   function logout() {
+    authSessionController.abort()
+    authSessionController = new AbortController()
+
     // 清除状态
     token.value = ''
     userId.value = null
@@ -143,6 +147,10 @@ export const useUserStore = defineStore('user', () => {
     return {
       Authorization: `Bearer ${token.value}`
     }
+  }
+
+  function getAuthSignal() {
+    return authSessionController.signal
   }
 
   // 用户管理功能
@@ -306,12 +314,13 @@ export const useUserStore = defineStore('user', () => {
   }
 
   // 获取当前用户信息
-  async function getCurrentUser() {
+  async function getCurrentUser(signal = authSessionController.signal) {
     try {
       const response = await fetch('/api/auth/me', {
         headers: {
           ...getAuthHeaders()
-        }
+        },
+        signal
       })
 
       if (!response.ok) {
@@ -319,6 +328,7 @@ export const useUserStore = defineStore('user', () => {
       }
 
       const userData = await response.json()
+      signal.throwIfAborted()
 
       // 更新本地状态
       userId.value = userData.id
@@ -333,6 +343,22 @@ export const useUserStore = defineStore('user', () => {
       return userData
     } catch (error) {
       console.error('获取用户信息错误:', error)
+      throw error
+    }
+  }
+
+  /** 接受 OA 下发的 Yuxi bearer，并通过当前用户接口确认其有效性。 */
+  async function acceptEmbedToken(accessToken) {
+    if (typeof accessToken !== 'string' || !accessToken.trim()) {
+      throw new Error('OA 未提供有效访问令牌')
+    }
+
+    token.value = accessToken
+    localStorage.setItem('user_token', accessToken)
+    try {
+      return await getCurrentUser()
+    } catch (error) {
+      if (token.value === accessToken) logout()
       throw error
     }
   }
@@ -394,12 +420,14 @@ export const useUserStore = defineStore('user', () => {
     initialize,
     checkFirstRun,
     getAuthHeaders,
+    getAuthSignal,
     getUsers,
     createUser,
     updateUser,
     deleteUser,
     validateUsernameAndGenerateUid,
     uploadAvatar,
+    acceptEmbedToken,
     getCurrentUser,
     updateProfile
   }

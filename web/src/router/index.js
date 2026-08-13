@@ -59,6 +59,26 @@ const router = createRouter({
       ]
     },
     {
+      path: '/embed',
+      name: 'EmbedMain',
+      component: BlankLayout,
+      meta: { embed: true },
+      children: [
+        {
+          path: '',
+          name: 'EmbedAgent',
+          component: () => import('../views/AgentView.vue'),
+          meta: { keepAlive: true, requiresAuth: true, embed: true }
+        },
+        {
+          path: ':thread_id',
+          name: 'EmbedAgentWithThreadId',
+          component: () => import('../views/AgentView.vue'),
+          meta: { keepAlive: true, requiresAuth: true, embed: true }
+        }
+      ]
+    },
+    {
       path: '/workspace',
       name: 'workspace',
       component: AppLayout,
@@ -159,11 +179,12 @@ router.beforeEach(async (to) => {
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true)
   const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin)
   const requiresSuperAdmin = to.matched.some((record) => record.meta.requiresSuperAdmin)
+  const isEmbedRoute = to.matched.some((record) => record.meta.embed === true)
 
   const userStore = useUserStore()
 
   // 如果有 token 但用户信息未加载，先获取用户信息
-  if (userStore.token && !userStore.userId) {
+  if (!isEmbedRoute && userStore.token && !userStore.userId) {
     try {
       await userStore.getCurrentUser()
     } catch (error) {
@@ -176,6 +197,9 @@ router.beforeEach(async (to) => {
   const isLoggedIn = userStore.isLoggedIn
   const isAdmin = userStore.isAdmin
   const isSuperAdmin = userStore.isSuperAdmin
+
+  // 嵌入页由 postMessage 握手后再渲染业务组件，不能在 yuxi:ready 前请求受保护接口。
+  if (isEmbedRoute) return true
 
   // 如果路由需要认证但用户未登录
   if (requiresAuth && !isLoggedIn) {

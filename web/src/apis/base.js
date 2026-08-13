@@ -1,10 +1,29 @@
 import { useUserStore, checkAdminPermission, checkSuperAdminPermission } from '@/stores/user'
 import { message } from 'ant-design-vue'
+import { requestOAEmbedAuthentication } from '@/utils/oaEmbedSession'
 
 /**
  * 基础API请求封装
  * 提供统一的请求方法，自动处理认证头和错误
  */
+
+/** 统一处理普通请求与流式请求的 401，并在嵌入态请求 OA 刷新令牌。 */
+export function handleUnauthorizedError(error, errorMessage = '认证失败，请重新登录') {
+  const userStore = useUserStore()
+  if (requestOAEmbedAuthentication()) {
+    if (userStore.isLoggedIn) userStore.logout()
+    throw error
+  }
+
+  const isTokenExpired =
+    errorMessage?.includes('令牌已过期') || errorMessage?.includes('token expired')
+  message.error(isTokenExpired ? '登录已过期，请重新登录' : '认证失败，请重新登录')
+  if (userStore.isLoggedIn) userStore.logout()
+  setTimeout(() => {
+    window.location.href = '/login'
+  }, 1500)
+  throw error
+}
 
 /**
  * 发送API请求的基础函数
@@ -34,6 +53,10 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       }
 
       Object.assign(requestOptions.headers, userStore.getAuthHeaders())
+      const authSignal = userStore.getAuthSignal()
+      requestOptions.signal = requestOptions.signal
+        ? AbortSignal.any([requestOptions.signal, authSignal])
+        : authSignal
     }
 
     // 发送请求
@@ -88,26 +111,7 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       }
 
       if (response.status === 401) {
-        // 如果是认证失败，可能需要重新登录
-        const userStore = useUserStore()
-
-        // 检查是否是token过期（errorMessage 已统一为字符串，避免对对象 detail 调用 includes 抛错）
-        const isTokenExpired =
-          errorMessage?.includes('令牌已过期') || errorMessage?.includes('token expired')
-
-        message.error(isTokenExpired ? '登录已过期，请重新登录' : '认证失败，请重新登录')
-
-        // 如果用户当前认为自己已登录，则登出
-        if (userStore.isLoggedIn) {
-          userStore.logout()
-        }
-
-        // 使用setTimeout确保消息显示后再跳转
-        setTimeout(() => {
-          window.location.href = '/login'
-        }, 1500)
-
-        throw error
+        handleUnauthorizedError(error, errorMessage)
       } else if (response.status === 403) {
         error.message = '没有权限执行此操作'
         throw error

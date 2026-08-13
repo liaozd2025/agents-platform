@@ -42,10 +42,6 @@ const { activeCount: activeCountRef, isDrawerOpen } = storeToRefs(taskerStore)
 const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
   storeToRefs(chatThreadsStore)
 
-// Add state for GitHub stars
-const githubStars = ref(0)
-const isLoadingStars = ref(false)
-
 // Add state for debug modal
 const showDebugModal = ref(false)
 
@@ -83,21 +79,6 @@ const getRemoteDatabase = async () => {
   }
 }
 
-// Fetch GitHub stars count
-const fetchGithubStars = async () => {
-  try {
-    isLoadingStars.value = true
-    // 公共API，可以直接使用fetch
-    const response = await fetch('https://api.github.com/repos/xerrors/Yuxi')
-    const data = await response.json()
-    githubStars.value = data.stargazers_count
-  } catch (error) {
-    console.error('获取GitHub stars失败:', error)
-  } finally {
-    isLoadingStars.value = false
-  }
-}
-
 onMounted(async () => {
   // 加载信息配置与知识库数据无依赖，可并行
   await Promise.all([infoStore.loadInfoConfig(), getRemoteDatabase()])
@@ -106,7 +87,6 @@ onMounted(async () => {
   // 仅管理员加载任务中心数据
   if (userStore.isAdmin) {
     taskerStore.loadTasks()
-    fetchGithubStars() // Fetch GitHub stars on mount
   }
 })
 
@@ -379,9 +359,6 @@ provide('settingsModal', {
             <a href="https://github.com/xerrors/Yuxi" target="_blank" class="github-link">
               <GithubOutlined class="icon" />
               <span class="nav-text">GitHub</span>
-              <span v-if="githubStars > 0" class="github-stars">
-                <span class="star-count">{{ (githubStars / 1000).toFixed(1) }}k</span>
-              </span>
             </a>
           </a-tooltip>
         </div>
