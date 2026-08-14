@@ -78,7 +78,10 @@
 
                   <div class="config-dropdown-divider"></div>
 
-                  <div class="config-dropdown-actions">
+                  <div
+                    v-if="userStore.hasPermission('agent:manage')"
+                    class="config-dropdown-actions"
+                  >
                     <button
                       type="button"
                       class="config-dropdown-item action-item"

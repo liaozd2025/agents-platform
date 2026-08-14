@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from sqlalchemy import select, update
@@ -110,9 +110,6 @@ FACT_VERIFIER_SYSTEM_PROMPT = """你是「事实核查员」子智能体，专�
 - 明确标注无法查证或来源相互冲突的论断。
 - 不要编造来源或链接。"""
 
-ADMIN_ROLES = {"admin", "superadmin"}
-
-
 def is_builtin_agent(agent: Agent) -> bool:
     return agent.slug == DEFAULT_AGENT_SLUG
 
@@ -124,24 +121,15 @@ def resolve_agent_is_subagent(backend_id: str, is_subagent: bool | None = None) 
     return expected
 
 
-def get_allowed_agent_access_levels(user: User) -> list[str]:
-    if user.role in ADMIN_ROLES:
-        return ["global", "department", "user"]
-    return ["user"]
-
-
 def normalize_agent_share_config(
     share_config: dict | None,
     *,
-    allowed_access_levels: Collection[str] | None = None,
     department_paths: Mapping[int, str] | None = None,
 ) -> dict:
     """规范化并校验智能体共享配置。"""
 
     return normalize_permission_config(
         share_config or DEFAULT_SHARE_CONFIG,
-        allowed_access_levels=allowed_access_levels,
-        unauthorized_access_level_message="当前用户无权使用该智能体共享范围",
         strict=True,
         department_paths=department_paths,
     )
@@ -153,7 +141,7 @@ def user_can_access_agent(user: User, agent: Agent) -> bool:
 
 def user_can_manage_agent(user: User, agent: Agent) -> bool:
     if is_builtin_agent(agent):
-        return user.role in ADMIN_ROLES
+        return False
     return resolve_agent_permission(user, agent) == ResourcePermission.MANAGE
 
 
@@ -169,8 +157,6 @@ class AgentRepository:
     async def _normalize_share_config_for_save(
         self,
         share_config: dict | None,
-        *,
-        allowed_access_levels: Collection[str] | None,
     ) -> dict:
         """加载组织路径并校验待保存的智能体共享配置。"""
 
@@ -180,7 +166,6 @@ class AgentRepository:
         )
         return normalize_agent_share_config(
             share_config,
-            allowed_access_levels=allowed_access_levels,
             department_paths=department_paths,
         )
 
@@ -342,8 +327,6 @@ class AgentRepository:
             stmt = stmt.where(Agent.is_subagent.is_(False))
         result = await self.db.execute(stmt.order_by(Agent.is_default.desc(), Agent.id.asc()))
         agents = list(result.scalars().all())
-        if user.role == "superadmin":
-            return agents
         return [agent for agent in agents if user_can_access_agent(user, agent)]
 
     async def list_visible_subagents(self, *, user: User) -> list[Agent]:
@@ -351,8 +334,6 @@ class AgentRepository:
             select(Agent).where(Agent.is_subagent.is_(True)).order_by(Agent.name.asc(), Agent.id.asc())
         )
         agents = list(result.scalars().all())
-        if user.role == "superadmin":
-            return agents
         return [agent for agent in agents if user_can_access_agent(user, agent)]
 
     async def get_by_slug(self, slug: str) -> Agent | None:
@@ -431,7 +412,6 @@ class AgentRepository:
         is_default: bool = False,
         is_subagent: bool | None = None,
         created_by: str | None = None,
-        creator: User | None = None,
     ) -> Agent:
         resolved_is_subagent = resolve_agent_is_subagent(backend_id, is_subagent)
         if resolved_is_subagent and is_default:
@@ -446,10 +426,8 @@ class AgentRepository:
             },
             "manage_scope": None,
         }
-        allowed_access_levels = get_allowed_agent_access_levels(creator) if creator else None
         normalized_share_config = await self._normalize_share_config_for_save(
             share_config or default_share_config,
-            allowed_access_levels=allowed_access_levels,
         )
         if is_default and (normalized_share_config.get("read_scope") or {}).get("access_level") != "global":
             raise ValueError("默认智能体必须全局共享")
@@ -489,7 +467,6 @@ class AgentRepository:
         share_config: dict | None = None,
         is_subagent: bool | None = None,
         updated_by: str | None = None,
-        updater: User | None = None,
     ) -> Agent:
         if is_subagent is not None:
             agent.is_subagent = resolve_agent_is_subagent(agent.backend_id, is_subagent)
@@ -507,10 +484,8 @@ class AgentRepository:
             if is_builtin_agent(agent):
                 agent.share_config = DEFAULT_SHARE_CONFIG.copy()
             else:
-                allowed_access_levels = get_allowed_agent_access_levels(updater) if updater else None
                 agent.share_config = await self._normalize_share_config_for_save(
                     share_config,
-                    allowed_access_levels=allowed_access_levels,
                 )
 
         agent.updated_by = updated_by
@@ -528,8 +503,9 @@ class AgentRepository:
         agent: Agent,
         *,
         user: User,
+        can_manage: bool,
         include_configurable_items: bool = False,
-        backend_info_cache: dict[tuple[str, bool, str], dict] | None = None,
+        backend_info_cache: dict[tuple[str, bool, bool], dict] | None = None,
     ) -> dict[str, Any]:
         data = agent.to_dict()
         data["share_config"] = normalize_permission_config(
@@ -537,7 +513,7 @@ class AgentRepository:
         )
         permission = resolve_agent_permission(user, agent)
         is_builtin = is_builtin_agent(agent)
-        data["can_manage"] = user_can_manage_agent(user, agent)
+        data["can_manage"] = can_manage
         data["effective_permission"] = permission.value
         data["is_builtin"] = is_builtin
         data["permission_locked"] = is_builtin
@@ -546,12 +522,12 @@ class AgentRepository:
 
         backend = agent_manager.get_agent(agent.backend_id)
         if backend:
-            cache_key = (agent.backend_id, include_configurable_items, user.role)
+            cache_key = (agent.backend_id, include_configurable_items, can_manage)
             backend_info = backend_info_cache.get(cache_key) if backend_info_cache is not None else None
             if backend_info is None:
                 backend_info = await backend.get_info(
                     include_configurable_items=include_configurable_items,
-                    user_role=user.role,
+                    can_manage=can_manage,
                     db=self.db if include_configurable_items else None,
                     user=user if include_configurable_items else None,
                 )

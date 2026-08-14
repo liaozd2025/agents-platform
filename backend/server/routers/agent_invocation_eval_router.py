@@ -15,7 +15,8 @@ from yuxi.storage.postgres.models_business import User
 from yuxi.utils.hash_utils import hash_id
 from yuxi.utils.logging_config import logger
 
-from server.utils.auth_middleware import get_db, get_required_user
+from server.utils.agent_permissions import require_agent_use_permission
+from server.utils.auth_middleware import get_db
 
 agent_invocation_eval_router = APIRouter(prefix="/agent-invocation/eval", tags=["agent-invocation"])
 
@@ -49,7 +50,7 @@ class AgentEvalRunCreate(BaseModel):
 @agent_invocation_eval_router.post("/runs")
 async def create_agent_eval_run(
     payload: AgentEvalRunCreate,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
     db: AsyncSession = Depends(get_db),
 ):
     """运行一次评估样例，并阻塞等待最终 AgentRun 结果。"""

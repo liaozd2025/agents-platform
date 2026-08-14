@@ -11,12 +11,15 @@ const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 
-const activeTab = ref('agents')
+const activeTab = ref(null)
 const agentPanelRef = ref(null)
 const providerPanelRef = ref(null)
 
 const modelManageTabs = computed(() => {
-  const tabs = [{ key: 'agents', label: '智能体' }]
+  const tabs = []
+  if (['agent:use', 'agent:manage'].some((permission) => userStore.hasPermission(permission))) {
+    tabs.push({ key: 'agents', label: '智能体' })
+  }
   if (userStore.hasPermission('model_provider:manage')) {
     tabs.push({ key: 'providers', label: '模型供应商' })
   }
@@ -31,8 +34,8 @@ const activeLoading = computed(() => activePanel.value?.loading || false)
 const activeStats = computed(() => activePanel.value?.stats || {})
 
 const normalizeTab = (tab) => {
-  if (tab === 'providers' && userStore.hasPermission('model_provider:manage')) return 'providers'
-  return 'agents'
+  if (modelManageTabs.value.some((item) => item.key === tab)) return tab
+  return modelManageTabs.value[0]?.key || null
 }
 
 watch(
@@ -84,7 +87,7 @@ watch(activeTab, (tab) => {
     </PageHeader>
 
     <div class="agent-manage-content">
-      <div v-show="activeTab === 'agents'" class="tab-panel">
+      <div v-if="activeTab === 'agents'" class="tab-panel">
         <AgentManagePanel ref="agentPanelRef" />
       </div>
       <div

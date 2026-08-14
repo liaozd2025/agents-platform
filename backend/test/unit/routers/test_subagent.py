@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from server.utils.auth_middleware import get_authorization_context, get_db
 
 agent_router_module = importlib.import_module("server.routers.agent_router")
 
@@ -26,7 +26,11 @@ def _agent(slug: str, *, backend_id: str = "ChatbotAgent", is_subagent: bool = F
         icon=None,
         pics=[],
         config_json={},
-        share_config={"access_level": "user", "user_uids": ["admin"]},
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "user", "user_uids": ["admin"]},
+            "manage_scope": {"access_level": "user", "user_uids": ["admin"]},
+        },
         is_default=False,
         is_subagent=is_subagent,
         can_manage=True,
@@ -97,12 +101,14 @@ def _build_app(monkeypatch, repo_cls, *, role: str = "admin") -> TestClient:
     async def fake_db():
         return None
 
-    async def fake_user():
-        return _user(role)
+    async def fake_authorization():
+        return SimpleNamespace(
+            user=_user(role),
+            has_permission=lambda permission: permission in {"agent:use", "agent:manage"},
+        )
 
     app.dependency_overrides[get_db] = fake_db
-    app.dependency_overrides[get_required_user] = fake_user
-    app.dependency_overrides[get_admin_user] = fake_user
+    app.dependency_overrides[get_authorization_context] = fake_authorization
     return TestClient(app)
 
 

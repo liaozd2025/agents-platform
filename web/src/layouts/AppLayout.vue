@@ -55,6 +55,7 @@ const settingsInitialTab = ref('')
 
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
 const conversationSearchOpen = ref(false)
+const canUseAgents = computed(() => userStore.hasPermission('agent:use'))
 
 // Provide settings modal methods to child components
 const openSettingsModal = (tab) => {
@@ -102,7 +103,7 @@ const fetchGithubStars = async () => {
 onMounted(async () => {
   // 加载信息配置与知识库数据无依赖，可并行
   await Promise.all([infoStore.loadInfoConfig(), getRemoteDatabase()])
-  await initAgentNavigation()
+  if (canUseAgents.value) await initAgentNavigation()
   await getRemoteConfig()
   // 仅管理员加载任务中心数据
   if (userStore.hasPermission('system_task:manage')) {
@@ -124,23 +125,31 @@ const organizationName = computed(() => {
 
 // 下面是导航菜单部分，添加智能体项
 const mainList = computed(() => {
-  const items = [
-    {
+  const items = []
+
+  if (canUseAgents.value) {
+    items.push({
       name: '新建对话',
       path: '/agent',
       icon: MessageCirclePlus,
       activeIcon: MessageCirclePlus,
       action: true,
       exactActive: true
-    }
-  ]
+    })
+  }
 
-  items.push({
-    name: '智能体',
-    path: '/agent-manage',
-    icon: Box,
-    activeIcon: Box
-  })
+  if (
+    ['agent:use', 'agent:manage', 'model_provider:manage'].some((permission) =>
+      userStore.hasPermission(permission)
+    )
+  ) {
+    items.push({
+      name: '智能体',
+      path: '/agent-manage',
+      icon: Box,
+      activeIcon: Box
+    })
+  }
 
   items.push({
     name: '工作区',
@@ -325,6 +334,7 @@ provide('settingsModal', {
         </RouterLink>
 
         <button
+          v-if="canUseAgents"
           type="button"
           class="nav-item"
           :class="{ active: conversationSearchOpen }"
@@ -360,7 +370,7 @@ provide('settingsModal', {
       </div>
       <div class="fill">
         <ConversationNavSection
-          v-if="!sidebarCollapsed"
+          v-if="canUseAgents && !sidebarCollapsed"
           class="sidebar-conversations"
           :current-chat-id="activeConversationThreadId"
           :chats-list="threads"
@@ -421,6 +431,7 @@ provide('settingsModal', {
     </router-view>
 
     <ConversationSearchModal
+      v-if="canUseAgents"
       v-model:open="conversationSearchOpen"
       :recent-threads="threads"
       @select-thread="handleSearchSelectThread"

@@ -48,7 +48,7 @@ def _load_context_module():
 
 context_module = _load_context_module()
 BaseContext = context_module.BaseContext
-filter_config_by_role = context_module.filter_config_by_role
+filter_agent_config_for_management = context_module.filter_agent_config_for_management
 normalize_agent_context_config = context_module.normalize_agent_context_config
 
 
@@ -58,12 +58,12 @@ class ChatBotContext(BaseContext):
 
 
 @dataclass
-class SuperAdminOnlyContext(BaseContext):
-    secret_setting: str = field(default="hidden", metadata={"name": "Secret", "auth": "superadmin"})
+class ManageOnlyContext(BaseContext):
+    secret_setting: str = field(default="hidden", metadata={"name": "Secret", "manage_only": True})
 
 
-def test_get_configurable_items_filters_admin_fields_for_user():
-    items = BaseContext.get_configurable_items(user_role="user")
+def test_get_configurable_items_filters_manage_fields_without_permission():
+    items = BaseContext.get_configurable_items(can_manage=False)
 
     assert "system_prompt" in items
     assert "summary_threshold" not in items
@@ -73,19 +73,18 @@ def test_get_configurable_items_filters_admin_fields_for_user():
     assert "max_execution_steps" not in items
 
 
-def test_get_configurable_items_allows_admin_and_superadmin_fields():
-    admin_items = BaseContext.get_configurable_items(user_role="admin")
-    superadmin_items = SuperAdminOnlyContext.get_configurable_items(user_role="superadmin")
+def test_get_configurable_items_allows_fields_with_manage_permission():
+    manager_items = ManageOnlyContext.get_configurable_items(can_manage=True)
 
-    assert "summary_threshold" in admin_items
-    assert "summary_keep_messages" in admin_items
-    assert "summary_prompt" in admin_items
-    assert "summary_tool_result_token_limit" in admin_items
-    assert "max_execution_steps" in admin_items
-    assert "secret_setting" in superadmin_items
+    assert "summary_threshold" in manager_items
+    assert "summary_keep_messages" in manager_items
+    assert "summary_prompt" in manager_items
+    assert "summary_tool_result_token_limit" in manager_items
+    assert "max_execution_steps" in manager_items
+    assert "secret_setting" in manager_items
 
 
-def test_filter_config_by_role_removes_unauthorized_context_values():
+def test_filter_agent_config_removes_manage_only_values_without_permission():
     config_json = {
         "context": {
             "system_prompt": "visible",
@@ -99,14 +98,14 @@ def test_filter_config_by_role_removes_unauthorized_context_values():
         "other": {"keep": True},
     }
 
-    filtered = filter_config_by_role(config_json, "user", context_schema=SuperAdminOnlyContext)
+    filtered = filter_agent_config_for_management(config_json, False, context_schema=ManageOnlyContext)
 
     assert filtered == {"context": {"system_prompt": "visible"}, "other": {"keep": True}}
     assert config_json["context"]["summary_threshold"] == 10
 
 
-def test_filter_config_by_role_keeps_admin_context_values_for_admin():
-    filtered = filter_config_by_role(
+def test_filter_agent_config_keeps_manage_only_values_with_permission():
+    filtered = filter_agent_config_for_management(
         {
             "context": {
                 "summary_threshold": 10,
@@ -117,8 +116,8 @@ def test_filter_config_by_role_keeps_admin_context_values_for_admin():
                 "secret_setting": "nope",
             }
         },
-        "admin",
-        context_schema=SuperAdminOnlyContext,
+        True,
+        context_schema=ManageOnlyContext,
     )
 
     assert filtered == {
@@ -128,6 +127,7 @@ def test_filter_config_by_role_keeps_admin_context_values_for_admin():
             "summary_prompt": "custom summary",
             "summary_tool_result_token_limit": 500,
             "max_execution_steps": 50,
+            "secret_setting": "nope",
         }
     }
 
@@ -255,11 +255,11 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
     assert normalized["mcps"] == ["mcp-a"]
     assert normalized["skills"] == []
     assert normalized["subagents"] == ["research-agent"]
-    assert "summary_threshold" not in normalized
-    assert "summary_keep_messages" not in normalized
-    assert "summary_prompt" not in normalized
-    assert "summary_tool_result_token_limit" not in normalized
-    assert "max_execution_steps" not in normalized
+    assert normalized["summary_threshold"] == 10
+    assert normalized["summary_keep_messages"] == 8
+    assert normalized["summary_prompt"] == "custom summary"
+    assert normalized["summary_tool_result_token_limit"] == 500
+    assert normalized["max_execution_steps"] == 50
 
     empty_subagents_normalized = await normalize_agent_context_config(
         {"tools": [], "knowledges": [], "mcps": [], "skills": [], "subagents": []},

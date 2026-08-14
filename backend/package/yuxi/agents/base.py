@@ -133,7 +133,7 @@ class BaseAgent:
     async def get_info(
         self,
         include_configurable_items: bool = True,
-        user_role: str | None = None,
+        can_manage: bool = False,
         db=None,
         user=None,
     ):
@@ -141,7 +141,7 @@ class BaseAgent:
         metadata = self.load_metadata()
         configurable_items = {}
         if include_configurable_items:
-            configurable_items = self.context_schema.get_configurable_items(user_role=user_role)
+            configurable_items = self.context_schema.get_configurable_items(can_manage=can_manage)
             if db is not None and user is not None:
                 resource_fields = {
                     item["kind"]

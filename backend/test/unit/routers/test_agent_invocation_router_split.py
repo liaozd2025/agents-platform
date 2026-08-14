@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from server.utils.auth_middleware import get_db, get_required_user
+from server.utils.auth_middleware import get_authorization_context, get_db
 
 call_module = importlib.import_module("server.routers.agent_invocation_call_router")
 eval_module = importlib.import_module("server.routers.agent_invocation_eval_router")
@@ -23,10 +23,13 @@ def _build_app(*, authenticated: bool = True) -> TestClient:
     app.dependency_overrides[get_db] = fake_db
     if authenticated:
 
-        async def fake_user():
-            return SimpleNamespace(uid="user-1", role="user", department_id=1)
+        async def fake_authorization():
+            return SimpleNamespace(
+                user=SimpleNamespace(uid="user-1", role="user", department_id=1),
+                has_permission=lambda permission: permission == "agent:use",
+            )
 
-        app.dependency_overrides[get_required_user] = fake_user
+        app.dependency_overrides[get_authorization_context] = fake_authorization
     return TestClient(app)
 
 

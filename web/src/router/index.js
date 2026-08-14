@@ -48,13 +48,13 @@ const router = createRouter({
           path: '',
           name: 'AgentComp',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, requiredPermission: 'agent:use' }
         },
         {
           path: ':thread_id',
           name: 'AgentCompWithThreadId',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, requiredPermission: 'agent:use' }
         }
       ]
     },
@@ -93,7 +93,11 @@ const router = createRouter({
           path: '',
           name: 'AgentManageComp',
           component: () => import('../views/AgentManageView.vue'),
-          meta: { keepAlive: false, requiresAuth: true }
+          meta: {
+            keepAlive: false,
+            requiresAuth: true,
+            requiredAnyPermissions: ['agent:use', 'agent:manage', 'model_provider:manage']
+          }
         }
       ]
     },
@@ -221,13 +225,13 @@ router.beforeEach(async (to) => {
   }
 
   if (requiredPermissions.some((permission) => !userStore.hasPermission(permission))) {
-    return '/agent'
+    return userStore.hasPermission('agent:use') ? '/agent' : '/'
   }
   if (
     requiredAnyPermissions.length &&
     !requiredAnyPermissions.some((permission) => userStore.hasPermission(permission))
   ) {
-    return '/agent'
+    return userStore.hasPermission('agent:use') ? '/agent' : '/'
   }
 
   // 如果用户已登录但访问登录页，按 redirect 参数跳转
