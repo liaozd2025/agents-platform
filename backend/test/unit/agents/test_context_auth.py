@@ -25,6 +25,23 @@ def _knowledge_summary(kb_id: str) -> KnowledgeBaseSummary:
     )
 
 
+def _user_with_permissions(*permission_keys: str):
+    role = types.SimpleNamespace(
+        is_active=True,
+        default_scope_type="all",
+        default_departments=[],
+        permissions=[types.SimpleNamespace(permission_key=key) for key in permission_keys],
+    )
+    assignment = types.SimpleNamespace(role=role, scope_mode="inherit")
+    return types.SimpleNamespace(
+        id=1,
+        role="user",
+        uid="u1",
+        department_id=None,
+        role_assignments=[assignment],
+    )
+
+
 def _load_context_module():
     return importlib.import_module("yuxi.agents.context")
 
@@ -130,6 +147,26 @@ async def test_resolve_agent_resource_options_empty_fields_loads_nothing(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_knowledge_options_require_function_permission(monkeypatch):
+    async def fail_if_loaded(_user):
+        raise AssertionError("缺少知识库读取权限时不应加载资源")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "yuxi.knowledge.runtime",
+        types.SimpleNamespace(knowledge_base=types.SimpleNamespace(get_databases_by_user=fail_if_loaded)),
+    )
+
+    options = await context_module.resolve_agent_resource_options(
+        {"knowledges"},
+        db=object(),
+        user=_user_with_permissions(),
+    )
+
+    assert options == {"knowledges": []}
+
+
+@pytest.mark.asyncio
 async def test_normalize_agent_context_config_expands_null_and_filters_explicit_lists(monkeypatch):
     async def fake_get_databases_by_user(_user):
         return [_knowledge_summary("kb-a"), _knowledge_summary("kb-b")]
@@ -209,7 +246,7 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
             "max_execution_steps": 50,
         },
         db=object(),
-        user=types.SimpleNamespace(role="user", uid="u1", department_id=None),
+        user=_user_with_permissions("knowledge_base:read"),
         context_schema=ChatBotContext,
     )
 
@@ -279,7 +316,7 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
     class FakeUserRepository:
         async def get_by_uid_with_db(self, _db, uid):
             assert uid == "u1"
-            return types.SimpleNamespace(role="user", uid="u1", department_id=None)
+            return _user_with_permissions("knowledge_base:read")
 
     class FakeAgentRepository:
         def __init__(self, _db):

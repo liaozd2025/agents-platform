@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -27,13 +26,6 @@ class ShareableResource(Protocol):
     share_config: dict | None
 
 
-@dataclass(frozen=True)
-class ResourcePermissionPolicy:
-    """声明资源类型允许的角色上限，不包含共享范围匹配逻辑。"""
-
-    role_ceiling: dict[str, ResourcePermission]
-
-
 RESOURCE_PERMISSION_ORDER = {
     ResourcePermission.NONE: 0,
     ResourcePermission.READ: 1,
@@ -41,21 +33,6 @@ RESOURCE_PERMISSION_ORDER = {
 }
 
 DEFAULT_SCOPE = {"access_level": "global", "department_ids": [], "user_uids": []}
-KNOWLEDGE_BASE_PERMISSION_POLICY = ResourcePermissionPolicy(
-    role_ceiling={
-        "user": ResourcePermission.READ,
-        "admin": ResourcePermission.MANAGE,
-        "superadmin": ResourcePermission.MANAGE,
-    }
-)
-AGENT_PERMISSION_POLICY = ResourcePermissionPolicy(
-    role_ceiling={
-        "user": ResourcePermission.MANAGE,
-        "admin": ResourcePermission.MANAGE,
-        "superadmin": ResourcePermission.MANAGE,
-    }
-)
-SKILL_PERMISSION_POLICY = AGENT_PERMISSION_POLICY
 
 
 def _normalize_scope(scope: dict | None) -> dict | None:
@@ -209,18 +186,11 @@ def _value(source: Any, key: str, default: Any = None) -> Any:
     return getattr(source, key, default)
 
 
-def _minimum_permission(left: ResourcePermission, right: ResourcePermission) -> ResourcePermission:
-    """按权限等级顺序返回两者中更低的权限。"""
-
-    return left if RESOURCE_PERMISSION_ORDER[left] <= RESOURCE_PERMISSION_ORDER[right] else right
-
-
 def resolve_resource_permission(
     user: Any,
     resource: ShareableResource,
-    policy: ResourcePermissionPolicy,
 ) -> ResourcePermission:
-    """解析资源所有权、共享范围和角色上限后的有效权限。"""
+    """解析资源所有权和共享范围授予的有效权限。"""
 
     if _value(user, "role") == "superadmin":
         return ResourcePermission.MANAGE
@@ -234,14 +204,10 @@ def resolve_resource_permission(
     elif scope_matches(user, config["manage_scope"]) and (
         config["read_scope"] is None or scope_matches(user, config["read_scope"])
     ):
-        granted = ResourcePermission.MANAGE
+        return ResourcePermission.MANAGE
     elif scope_matches(user, config["read_scope"]):
-        granted = ResourcePermission.READ
-    else:
-        granted = ResourcePermission.NONE
-
-    ceiling = policy.role_ceiling.get(_value(user, "role"), ResourcePermission.READ)
-    return _minimum_permission(granted, ceiling)
+        return ResourcePermission.READ
+    return ResourcePermission.NONE
 
 
 def require_resource_permission(
@@ -255,13 +221,9 @@ def require_resource_permission(
 
 
 def resolve_knowledge_base_permission(user: Any, resource: ShareableResource) -> ResourcePermission:
-    """解析知识库权限，普通用户最多只能获得只读权限。"""
+    """解析知识库共享范围授予的权限。"""
 
-    return resolve_resource_permission(
-        user,
-        resource,
-        KNOWLEDGE_BASE_PERMISSION_POLICY,
-    )
+    return resolve_resource_permission(user, resource)
 
 
 def require_knowledge_base_permission(
@@ -279,18 +241,10 @@ def require_knowledge_base_permission(
 def resolve_agent_permission(user: Any, resource: ShareableResource) -> ResourcePermission:
     """解析 Agent 权限。"""
 
-    return resolve_resource_permission(
-        user,
-        resource,
-        AGENT_PERMISSION_POLICY,
-    )
+    return resolve_resource_permission(user, resource)
 
 
 def resolve_skill_permission(user: Any, resource: ShareableResource) -> ResourcePermission:
     """解析 Skill 权限。"""
 
-    return resolve_resource_permission(
-        user,
-        resource,
-        SKILL_PERMISSION_POLICY,
-    )
+    return resolve_resource_permission(user, resource)

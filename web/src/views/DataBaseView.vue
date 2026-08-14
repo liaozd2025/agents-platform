@@ -24,7 +24,7 @@
           </a-select-option>
         </a-select>
       </template>
-      <template #actions>
+      <template v-if="canManageKnowledge" #actions>
         <a-button
           type="primary"
           class="lucide-icon-btn"
@@ -37,6 +37,7 @@
     </PageShoulder>
 
     <a-modal
+      v-if="canManageKnowledge"
       :open="state.openNewDatabaseModel"
       title="新建知识库"
       :confirm-loading="dbState.creating"
@@ -163,7 +164,7 @@
             :require-read-scope="true"
           >
             <template #manage-description>
-              知识库<strong>仅管理员</strong>可以管理知识库；普通用户无法管理。
+              仅同时具有知识库管理权限和资源管理范围的用户可以维护该知识库。
             </template>
           </ShareConfigForm>
         </div>
@@ -194,7 +195,7 @@
       description="创建知识库后，可以上传文件并配置检索、图谱和评估能力。"
       :icon="getKbTypeIcon('milvus')"
     >
-      <template #actions>
+      <template v-if="canManageKnowledge" #actions>
         <a-button
           type="primary"
           size="large"
@@ -232,14 +233,14 @@
                 <span>复制 ID</span>
               </span>
             </a-menu-item>
-            <a-menu-item v-if="database.can_manage" key="edit">
+            <a-menu-item v-if="canManageKnowledge && database.can_manage" key="edit">
               <span class="lucide-menu-item">
                 <Pencil :size="15" />
                 <span>编辑知识库</span>
               </span>
             </a-menu-item>
             <a-menu-divider />
-            <a-menu-item v-if="database.can_manage" key="delete" danger>
+            <a-menu-item v-if="canManageKnowledge && database.can_manage" key="delete" danger>
               <span class="lucide-menu-item">
                 <Trash2 :size="15" />
                 <span>删除知识库</span>
@@ -258,6 +259,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useConfigStore } from '@/stores/config'
 import { useDatabaseStore } from '@/stores/database'
+import { useUserStore } from '@/stores/user'
 import { QuestionCircleOutlined } from '@ant-design/icons-vue'
 import { Copy, Pencil, Plus, Trash2 } from 'lucide-vue-next'
 import { message, Modal } from 'ant-design-vue'
@@ -280,6 +282,8 @@ const route = useRoute()
 const router = useRouter()
 const configStore = useConfigStore()
 const databaseStore = useDatabaseStore()
+const userStore = useUserStore()
+const canManageKnowledge = computed(() => userStore.hasPermission('knowledge_base:manage'))
 const {
   chunkPresetSelectOptions: chunkPresetOptions,
   chunkPresetLoading,

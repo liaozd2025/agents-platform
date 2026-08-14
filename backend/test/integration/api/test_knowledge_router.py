@@ -24,6 +24,13 @@ def _assert_forbidden_response(response):
     assert isinstance(payload["detail"], str)
 
 
+def _assert_not_found_response(response):
+    """验证越出知识库共享范围时不暴露资源存在性。"""
+
+    assert response.status_code == 404
+    assert isinstance(response.json().get("detail"), str)
+
+
 async def _create_test_department(test_client, admin_headers, prefix="pytest_dept", parent_id=None):
     suffix = uuid.uuid4().hex[:8]
     admin_uid = f"deptadmin_{suffix}"
@@ -231,7 +238,7 @@ async def test_update_database_additional_params_merge_keeps_chunk_preset(
     assert info_response.json()["additional_params"]["chunk_preset_id"] == "qa"
 
 
-async def test_knowledge_routes_enforce_permissions(test_client, standard_user, knowledge_database):
+async def test_knowledge_routes_follow_read_and_manage_permissions(test_client, standard_user, knowledge_database):
     kb_id = knowledge_database["kb_id"]
 
     forbidden_create = await test_client.post(
@@ -245,21 +252,29 @@ async def test_knowledge_routes_enforce_permissions(test_client, standard_user, 
     )
     _assert_forbidden_response(forbidden_create)
 
-    forbidden_list = await test_client.get("/api/knowledge/databases", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_list)
+    list_response = await test_client.get("/api/knowledge/databases", headers=standard_user["headers"])
+    assert list_response.status_code == 200, list_response.text
+    assert kb_id in {item["kb_id"] for item in list_response.json()["databases"]}
 
-    forbidden_chunk_presets = await test_client.get("/api/knowledge/chunk-presets", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_chunk_presets)
+    chunk_presets = await test_client.get("/api/knowledge/chunk-presets", headers=standard_user["headers"])
+    assert chunk_presets.status_code == 200, chunk_presets.text
 
-    forbidden_get = await test_client.get(f"/api/knowledge/databases/{kb_id}", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_get)
+    get_response = await test_client.get(f"/api/knowledge/databases/{kb_id}", headers=standard_user["headers"])
+    assert get_response.status_code == 200, get_response.text
 
-    forbidden_exists = await test_client.get(
+    exists_response = await test_client.get(
         f"/api/knowledge/databases/{kb_id}/documents/exists",
         params={"filename": "demo.txt"},
         headers=standard_user["headers"],
     )
-    _assert_forbidden_response(forbidden_exists)
+    assert exists_response.status_code == 200, exists_response.text
+
+    forbidden_update = await test_client.put(
+        f"/api/knowledge/databases/{kb_id}",
+        json={"name": knowledge_database["name"], "description": "Should not succeed"},
+        headers=standard_user["headers"],
+    )
+    _assert_forbidden_response(forbidden_update)
 
 
 async def test_admin_can_create_vector_db_with_reranker(test_client, admin_headers):
@@ -680,12 +695,12 @@ async def test_department_share_config_inherits_to_subtree_and_isolates_siblings
             f"/api/knowledge/databases/{database_b['kb_id']}",
             headers=user_a["headers"],
         )
-        _assert_forbidden_response(response)
+        _assert_not_found_response(response)
         response = await test_client.get(
             f"/api/knowledge/databases/{database_a['kb_id']}",
             headers=user_b["headers"],
         )
-        _assert_forbidden_response(response)
+        _assert_not_found_response(response)
     finally:
         for database in databases:
             await test_client.delete(f"/api/knowledge/databases/{database['kb_id']}", headers=admin_headers)
@@ -901,14 +916,13 @@ async def test_mindmap_permissions(test_client, standard_user, knowledge_databas
     """测试思维导图接口的权限控制"""
     kb_id = knowledge_database["kb_id"]
 
-    # 普通用户应该无法访问
-    forbidden_list = await test_client.get("/api/knowledge/mindmap/databases", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_list)
+    list_response = await test_client.get("/api/knowledge/mindmap/databases", headers=standard_user["headers"])
+    assert list_response.status_code == 200, list_response.text
 
-    forbidden_files = await test_client.get(
+    files_response = await test_client.get(
         f"/api/knowledge/databases/{kb_id}/mindmap/files", headers=standard_user["headers"]
     )
-    _assert_forbidden_response(forbidden_files)
+    assert files_response.status_code == 200, files_response.text
 
     forbidden_generate = await test_client.post(
         f"/api/knowledge/databases/{kb_id}/mindmap/generate",
@@ -949,12 +963,12 @@ async def test_document_search_returns_structure_for_query(test_client, admin_he
     assert payload["has_more"] is False
 
 
-async def test_document_search_requires_admin(test_client, standard_user, knowledge_database):
-    """普通用户不能访问管理端搜索接口。"""
+async def test_document_search_allows_read_permission(test_client, standard_user, knowledge_database):
+    """具有读取功能权限且位于共享范围内的用户可以搜索文档。"""
     kb_id = knowledge_database["kb_id"]
     response = await test_client.get(
         f"/api/knowledge/databases/{kb_id}/documents/search",
         params={"query": "x"},
         headers=standard_user["headers"],
     )
-    _assert_forbidden_response(response)
+    assert response.status_code == 200, response.text

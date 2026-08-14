@@ -11,7 +11,7 @@
     />
 
     <div v-if="!isDetailPage" class="extensions-content">
-      <div v-if="userStore.isAdmin && activeTab === 'knowledge'" class="tab-panel">
+      <div v-if="canAccessKnowledge && activeTab === 'knowledge'" class="tab-panel">
         <DataBaseView ref="knowledgeRef" embedded />
       </div>
       <div v-if="userStore.hasPermission('tool:manage') && activeTab === 'tools'" class="tab-panel">
@@ -47,10 +47,17 @@ const knowledgeRef = ref(null)
 const skillsRef = ref(null)
 const mcpRef = ref(null)
 const toolsRef = ref(null)
+const canAccessKnowledge = computed(() =>
+  ['knowledge_base:read', 'knowledge_base:manage'].some((permission) =>
+    userStore.hasPermission(permission)
+  )
+)
 
 const extensionTabs = computed(() => {
   const tabs = []
-  if (userStore.isAdmin) tabs.push({ key: 'knowledge', label: '知识库' })
+  if (canAccessKnowledge.value) {
+    tabs.push({ key: 'knowledge', label: '知识库' })
+  }
   tabs.push({ key: 'skills', label: '技能' })
   if (userStore.hasPermission('tool:manage')) tabs.push({ key: 'tools', label: '工具' })
   if (userStore.hasPermission('mcp:manage')) tabs.push({ key: 'mcp', label: 'MCP' })
@@ -94,7 +101,7 @@ const activeChildLoading = computed(() => {
 })
 
 watch(
-  () => [route.query.tab, userStore.isAdmin, userStore.effectivePermissions],
+  () => [route.query.tab, userStore.effectivePermissions],
   ([tab]) => {
     const nextTab = normalizeTab(tab)
     if (activeTab.value !== nextTab) activeTab.value = nextTab

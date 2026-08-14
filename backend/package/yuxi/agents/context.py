@@ -450,8 +450,13 @@ async def resolve_agent_resource_options(
         ]
     if "knowledges" in fields_to_load:
         from yuxi.knowledge.runtime import knowledge_base
+        from yuxi.permissions.authorization import build_authorization_context
 
-        databases = await knowledge_base.get_databases_by_user(user)
+        databases = (
+            await knowledge_base.get_databases_by_user(user)
+            if build_authorization_context(user).has_permission("knowledge_base:read")
+            else []
+        )
         options["knowledges"] = [
             _resource_option(item.kb_id, item.name, item.description) for item in databases if item.kb_id
         ]

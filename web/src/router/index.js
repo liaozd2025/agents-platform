@@ -117,7 +117,8 @@ const router = createRouter({
               component: () => import('../views/DataBaseInfoView.vue'),
               meta: {
                 keepAlive: false,
-                requiresAuth: true
+                requiresAuth: true,
+                requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage']
               }
             },
             {
@@ -161,6 +162,9 @@ router.beforeEach(async (to) => {
   const requiredPermissions = to.matched
     .map((record) => record.meta.requiredPermission)
     .filter(Boolean)
+  const requiredAnyPermissions = to.matched.flatMap(
+    (record) => record.meta.requiredAnyPermissions || []
+  )
 
   const userStore = useUserStore()
 
@@ -217,6 +221,12 @@ router.beforeEach(async (to) => {
   }
 
   if (requiredPermissions.some((permission) => !userStore.hasPermission(permission))) {
+    return '/agent'
+  }
+  if (
+    requiredAnyPermissions.length &&
+    !requiredAnyPermissions.some((permission) => userStore.hasPermission(permission))
+  ) {
     return '/agent'
   }
 

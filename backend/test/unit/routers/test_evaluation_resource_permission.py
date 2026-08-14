@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from server.routers import knowledge_eval_router
-from server.utils.auth_middleware import get_required_user
+from server.utils.auth_middleware import get_authorization_context
 from server.utils import knowledge_permissions
 from yuxi.permissions import ResourcePermission
 
@@ -53,19 +53,22 @@ async def test_dataset_manage_route_rejects_admin_without_manage_permission(monk
     with pytest.raises(HTTPException) as exc_info:
         await knowledge_eval_router.require_evaluation_dataset_manage("dataset-1", admin)
 
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == 404
 
 
-def test_evaluation_routes_require_admin_role():
+def test_evaluation_routes_require_function_permission():
     app = FastAPI()
     app.include_router(knowledge_eval_router.evaluation)
 
-    async def fake_required_user():
-        return SimpleNamespace(uid="user-1", role="user", department_id=1)
+    async def fake_authorization():
+        return SimpleNamespace(
+            user=SimpleNamespace(uid="user-1", role="user", department_id=1),
+            has_permission=lambda _permission: False,
+        )
 
-    app.dependency_overrides[get_required_user] = fake_required_user
+    app.dependency_overrides[get_authorization_context] = fake_authorization
 
     response = TestClient(app).get("/evaluation/databases/kb-1/datasets")
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "需要管理员权限"
+    assert response.json()["detail"] == "缺少功能权限: knowledge_evaluation:manage"

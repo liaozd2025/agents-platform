@@ -369,6 +369,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDatabaseStore } from '@/stores/database'
 import { useTaskerStore } from '@/stores/tasker'
+import { useUserStore } from '@/stores/user'
 import {
   ArrowLeft,
   BarChart3,
@@ -412,6 +413,7 @@ const route = useRoute()
 const router = useRouter()
 const store = useDatabaseStore()
 const taskerStore = useTaskerStore()
+const userStore = useUserStore()
 const {
   chunkPresetSelectOptions: chunkPresetOptions,
   chunkPresetLoading,
@@ -421,7 +423,13 @@ const {
 
 const kbId = computed(() => store.kbId)
 const database = computed(() => store.database)
-const canManageDatabase = computed(() => database.value?.can_manage === true)
+const canManageResource = computed(() => database.value?.can_manage === true)
+const canManageDatabase = computed(
+  () => canManageResource.value && userStore.hasPermission('knowledge_base:manage')
+)
+const canManageEvaluation = computed(
+  () => canManageResource.value && userStore.hasPermission('knowledge_evaluation:manage')
+)
 const isCurrentDatabaseLoaded = computed(() => database.value?.kb_id === kbId.value)
 const kbType = computed(() =>
   isCurrentDatabaseLoaded.value ? database.value.kb_type?.toLowerCase() || 'milvus' : ''
@@ -462,9 +470,9 @@ const tabs = computed(() => {
 })
 
 const visibleTabs = computed(() =>
-  canManageDatabase.value
-    ? tabs.value
-    : tabs.value.filter((tab) => ['filetable', 'query', 'graph', 'mindmap'].includes(tab.key))
+  tabs.value.filter(
+    (tab) => !['evaluation', 'benchmarks'].includes(tab.key) || canManageEvaluation.value
+  )
 )
 const activeTab = ref('filetable')
 

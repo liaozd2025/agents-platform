@@ -1254,24 +1254,19 @@ class KnowledgeBaseManager:
             }
         return info
 
-    async def get_statistics(self) -> dict:
-        """获取统计信息"""
-        from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
-        from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+    async def get_statistics(self, user: User | dict) -> dict:
+        """获取当前用户可见知识库的统计信息。"""
 
-        kb_repo = KnowledgeBaseRepository()
-        rows = await kb_repo.get_all()
-
-        stats = {"total_databases": len(rows), "kb_types": {}, "total_files": 0}
+        databases = await self.get_databases_by_user(user)
+        stats = {"total_databases": len(databases), "kb_types": {}, "total_files": 0}
 
         # 按知识库类型统计
-        for row in rows:
-            kb_type = row.kb_type or "milvus"
+        for database in databases:
+            kb_type = database.kb_type or "milvus"
             if kb_type not in stats["kb_types"]:
                 stats["kb_types"][kb_type] = 0
             stats["kb_types"][kb_type] += 1
-
-        stats["total_files"] = await KnowledgeFileRepository().count_all()
+            stats["total_files"] += database.file_count
 
         return stats
 

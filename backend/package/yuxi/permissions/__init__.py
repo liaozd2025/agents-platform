@@ -7,9 +7,6 @@ from yuxi.permissions.authorization import (
     parse_department_ancestor_ids,
 )
 from yuxi.permissions.resource_permission import (
-    AGENT_PERMISSION_POLICY,
-    KNOWLEDGE_BASE_PERMISSION_POLICY,
-    SKILL_PERMISSION_POLICY,
     ResourcePermission,
     ResourcePermissionDenied,
     get_permission_department_ids,
@@ -24,11 +21,8 @@ from yuxi.permissions.resource_permission import (
 )
 
 __all__ = [
-    "AGENT_PERMISSION_POLICY",
     "AuthorizationContext",
     "AuthorizationTarget",
-    "KNOWLEDGE_BASE_PERMISSION_POLICY",
-    "SKILL_PERMISSION_POLICY",
     "ResourcePermission",
     "ResourcePermissionDenied",
     "build_authorization_context",
