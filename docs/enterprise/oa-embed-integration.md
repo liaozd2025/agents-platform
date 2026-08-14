@@ -162,7 +162,7 @@ OIDC_ENABLED=false
 OA_SSO_ENABLED=true
 OA_SSO_USERINFO_URL=http://host.docker.internal:9101/oa-api/User/GetUserInfo
 OA_SSO_COMPANY_CODE=TEST
-YUXI_EMBED_ALLOWED_ORIGINS=http://localhost:4173
+YUXI_EMBED_ALLOWED_ORIGINS=http://127.0.0.1:4173
 ```
 
 再分别启动模拟身份服务和静态父页面：
@@ -178,6 +178,6 @@ docker run --rm --name oa-embed-mock -p 4173:4173 \
   yuxi-api:0.7.1 python -m http.server 4173 --directory /site
 ```
 
-打开 `http://localhost:4173/oa_embed_mock.html`，按固定、浮窗、全屏、关闭后重开、token 过期的顺序验收。模拟服务仅用于本地开发，生产不得启用。
+打开 `http://127.0.0.1:4173/oa_embed_mock.html`，点击“打开 AI 助手”后，按固定、浮窗、全屏、关闭后重开、token 过期的顺序验收。模拟服务仅用于本地开发，生产不得启用。
 
 OIDC 实现仍保留为其他身份系统的可选能力，九典 OA 生产接入使用本文的自定义 SSO 流程，并保持 `OIDC_ENABLED=false`。

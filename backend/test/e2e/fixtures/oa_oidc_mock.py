@@ -19,7 +19,7 @@ CLIENT_SECRET = "oa-s0-local-secret"
 SUBJECT = "oa-s0-user"
 OA_COMPANY_CODE = "TEST"
 OA_TOKEN_SECRET = "oa-s0-local-token-secret-32-bytes"
-OA_PARENT_ORIGIN = os.environ.get("MOCK_OA_PARENT_ORIGIN", "http://localhost:4173").rstrip("/")
+OA_PARENT_ORIGIN = os.environ.get("MOCK_OA_PARENT_ORIGIN", "http://127.0.0.1:4173").rstrip("/")
 
 app = FastAPI(title="OA S0 Mock Identity Provider")
 app.add_middleware(

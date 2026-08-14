@@ -67,15 +67,15 @@
   </head>
   <body>
     <header>
-      <label>Yuxi <input id="yuxi-base" value="http://localhost:5174" /></label>
+      <label>Yuxi <input id="yuxi-base" value="http://127.0.0.1:5174" /></label>
       <label
-        >OA Mock <input id="oa-base" value="http://localhost:9101"
+        >OA Mock <input id="oa-base" value="http://127.0.0.1:9101"
       /></label>
       <button id="open" type="button">打开 AI 助手</button>
       <button id="login" type="button">刷新 OA token</button>
       <button id="expire" type="button">模拟 token 过期</button>
     </header>
-    <div id="frame-shell" data-mode="fixed">
+    <div id="frame-shell" data-mode="fixed" hidden>
       <iframe
         id="yuxi-frame"
         title="Yuxi OA 插件"
@@ -151,7 +151,6 @@
       document.querySelector("#open").addEventListener("click", () => {
         if (!frame.getAttribute("src")) {
           loadFrame();
-          return;
         }
         applyMode("fixed");
       });
@@ -163,7 +162,7 @@
         sendToken();
       });
 
-      refreshOAToken().then(loadFrame);
+      refreshOAToken();
     </script>
   </body>
 </html>
