@@ -15,7 +15,13 @@ from pydantic import BaseModel
 from sqlalchemy import Integer, String, and_, cast, distinct, false, func, or_, select, text, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_db, get_superadmin_user, require_permission
+from server.utils.auth_middleware import get_db, require_permission
+from yuxi.permissions import (
+    ResourcePermission,
+    resolve_agent_permission,
+    resolve_knowledge_base_permission,
+    resolve_skill_permission,
+)
 from yuxi.permissions.authorization import AuthorizationContext, AuthorizationTarget, parse_department_ancestor_ids
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
@@ -26,7 +32,8 @@ from yuxi.services.user_management_service import (
     list_authorized_users,
 )
 from yuxi.storage.minio.client import normalize_public_minio_url
-from yuxi.storage.postgres.models_business import User
+from yuxi.storage.postgres.models_business import Agent, Skill
+from yuxi.storage.postgres.models_knowledge import KnowledgeBase
 from yuxi.utils.datetime_utils import UTC, ensure_shanghai, shanghai_now, utc_now
 from yuxi.utils.logging_config import logger
 
@@ -89,6 +96,45 @@ async def _dashboard_history_filter(
     return and_(visibility, path_column.like(f"%/{department_id}/%"))
 
 
+async def _dashboard_resource_subjects(
+    db: AsyncSession,
+    authorization: AuthorizationContext,
+    department_id: int | None,
+) -> list[dict[str, Any]]:
+    """生成当前 Dashboard 管理域内的用户和组织授权主体。"""
+
+    user_rows = await list_authorized_users(
+        authorization,
+        "dashboard:view",
+        department_id=department_id,
+        db=db,
+    )
+    if user_rows is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
+
+    departments = await list_authorized_departments(authorization, "dashboard:view", db=db)
+    paths = await DepartmentRepository().get_paths_by_ids([item["id"] for item in departments], session=db)
+    selected_path = paths.get(department_id) if department_id is not None else None
+    subjects = [
+        {"uid": user.uid, "role": "user", "department_ancestor_ids": user.department_ancestor_ids}
+        for user, _ in user_rows
+    ]
+    subjects.extend(
+        {
+            "uid": "",
+            "role": "user",
+            "department_ancestor_ids": parse_department_ancestor_ids(paths.get(item["id"])),
+        }
+        for item in departments
+        if authorization.allows(
+            "dashboard:view",
+            AuthorizationTarget(department_ancestor_ids=parse_department_ancestor_ids(paths.get(item["id"]))),
+        )
+        and (selected_path is None or paths[item["id"]].startswith(selected_path))
+    )
+    return subjects
+
+
 def _get_time_group_format(column, time_range: str) -> Any:
     """
     根据数据库类型生成时间分组格式化表达式。
@@ -143,6 +189,23 @@ class KnowledgeStats(BaseModel):
     total_storage_size: int  # 字节
     databases_by_type: dict
     file_type_distribution: dict
+
+
+class ResourceScopeMetric(BaseModel):
+    """一种资源的创建归属和共享可见统计。"""
+
+    creation_count: int
+    shared_visible_count: int
+    contains_inferred_data: bool
+
+
+class ResourceScopeStats(BaseModel):
+    """知识库、智能体和 Skill 的组织口径统计。"""
+
+    knowledge_bases: ResourceScopeMetric
+    agents: ResourceScopeMetric
+    skills: ResourceScopeMetric
+    contains_inferred_data: bool
 
 
 class AgentAnalytics(BaseModel):
@@ -580,16 +643,71 @@ async def get_tool_call_stats(
 
 
 # =============================================================================
-# 知识库统计（超级管理员权限）
+# 资源创建归属与共享可见统计
+# =============================================================================
+
+
+@dashboard.get("/stats/resources", response_model=ResourceScopeStats)
+async def get_resource_scope_stats(
+    department_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
+):
+    """分别统计资源创建组织和当前共享可见范围。"""
+
+    subjects = await _dashboard_resource_subjects(db, authorization, department_id)
+
+    async def summarize(model, resolver) -> ResourceScopeMetric:
+        """按资源主键去重后汇总一种资源。"""
+
+        resources = list(await db.scalars(select(model)))
+        created_resources = []
+        shared_resources = []
+        # ponytail: 直接复用现有 ACL；资源或组织主体量出现慢查询后再下推为 SQL。
+        for resource in resources:
+            ancestor_ids = parse_department_ancestor_ids(resource.organization_path_snapshot)
+            target = AuthorizationTarget(
+                owner_user_id=authorization.user.id if resource.created_by == authorization.user.uid else None,
+                department_ancestor_ids=ancestor_ids,
+            )
+            if (department_id is None or department_id in ancestor_ids) and authorization.allows(
+                "dashboard:view", target
+            ):
+                created_resources.append(resource)
+            if any(resolver(subject, resource) != ResourcePermission.NONE for subject in subjects):
+                shared_resources.append(resource)
+
+        return ResourceScopeMetric(
+            creation_count=len(created_resources),
+            shared_visible_count=len(shared_resources),
+            contains_inferred_data=any(
+                resource.organization_snapshot_inferred for resource in created_resources + shared_resources
+            ),
+        )
+
+    knowledge_bases = await summarize(KnowledgeBase, resolve_knowledge_base_permission)
+    agents = await summarize(Agent, resolve_agent_permission)
+    skills = await summarize(Skill, resolve_skill_permission)
+    return ResourceScopeStats(
+        knowledge_bases=knowledge_bases,
+        agents=agents,
+        skills=skills,
+        contains_inferred_data=any(metric.contains_inferred_data for metric in (knowledge_bases, agents, skills)),
+    )
+
+
+# =============================================================================
+# 知识库共享可见统计
 # =============================================================================
 
 
 @dashboard.get("/stats/knowledge", response_model=KnowledgeStats)
 async def get_knowledge_stats(
+    department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
 ):
-    """获取知识库统计（超级管理员权限）"""
+    """按当前管理域内的共享可见知识库统计文件和容量。"""
     try:
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
         from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
@@ -597,7 +715,12 @@ async def get_knowledge_stats(
         kb_repo = KnowledgeBaseRepository()
         file_repo = KnowledgeFileRepository()
 
-        kb_rows = await kb_repo.get_all()
+        subjects = await _dashboard_resource_subjects(db, authorization, department_id)
+        kb_rows = [
+            kb
+            for kb in await kb_repo.get_all()
+            if any(resolve_knowledge_base_permission(subject, kb) != ResourcePermission.NONE for subject in subjects)
+        ]
         total_databases = len(kb_rows)
 
         databases_by_type: dict[str, int] = {}
@@ -661,6 +784,8 @@ async def get_knowledge_stats(
             file_type_distribution=files_by_type,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting knowledge stats: {e}")
         logger.error(traceback.format_exc())

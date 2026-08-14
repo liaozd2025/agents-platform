@@ -1168,6 +1168,66 @@ class PostgresManager(metaclass=SingletonMeta):
                 END LOOP;
             END $$;
             """,
+            # 可共享资源保存创建者的组织快照；共享范围仍由各资源原有 share_config 决定。
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY['knowledge_bases', 'agents', 'skills'] LOOP
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_id_snapshot INTEGER', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_path_snapshot VARCHAR(512)', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_snapshot_inferred BOOLEAN', target_table
+                    );
+                END LOOP;
+            END $$;
+            """,
+            """
+            UPDATE knowledge_bases AS resource
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE agents AS resource
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE skills AS resource
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL
+            """,
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY['knowledge_bases', 'agents', 'skills'] LOOP
+                    EXECUTE format(
+                        'UPDATE %I SET organization_snapshot_inferred = TRUE '
+                        'WHERE organization_snapshot_inferred IS NULL', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET DEFAULT FALSE', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET NOT NULL', target_table
+                    );
+                END LOOP;
+            END $$;
+            """,
         ]
         async with self.async_engine.begin() as conn:
             # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警

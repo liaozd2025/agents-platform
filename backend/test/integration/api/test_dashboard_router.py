@@ -9,10 +9,14 @@ import uuid
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select
+from yuxi.agents.skills.repository import SkillRepository
+from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
+from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
     ROOT_DEPARTMENT_ID,
+    Agent,
     Department,
     Conversation,
     ConversationStats,
@@ -21,10 +25,12 @@ from yuxi.storage.postgres.models_business import (
     OperationLog,
     Role,
     RolePermission,
+    Skill,
     ToolCall,
     User,
     UserRoleAssignment,
 )
+from yuxi.storage.postgres.models_knowledge import KnowledgeBase
 from yuxi.utils.auth_utils import AuthUtils
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -120,25 +126,26 @@ async def dashboard_scope_users(test_client):
             "department_child_path": department_child_path,
             "department_b_path": department_b_path,
             "manager_a_id": user_ids[0],
+            "manager_b_id": user_ids[1],
+            "manager_b_uid": user_uids[1],
             "child_user_id": user_ids[2],
             "child_user_uid": user_uids[2],
         }
     finally:
         async with pg_manager.get_async_session_context() as session:
+            await session.execute(delete(KnowledgeBase).where(KnowledgeBase.created_by.in_(user_uids)))
+            await session.execute(delete(Agent).where(Agent.created_by.in_(user_uids)))
+            await session.execute(delete(Skill).where(Skill.created_by.in_(user_uids)))
             conversation_ids = list(
                 await session.scalars(select(Conversation.id).where(Conversation.uid.in_(user_uids)))
             )
             if conversation_ids:
                 message_ids = list(
-                    await session.scalars(
-                        select(Message.id).where(Message.conversation_id.in_(conversation_ids))
-                    )
+                    await session.scalars(select(Message.id).where(Message.conversation_id.in_(conversation_ids)))
                 )
                 if message_ids:
                     await session.execute(delete(ToolCall).where(ToolCall.message_id.in_(message_ids)))
-                    await session.execute(
-                        delete(MessageFeedback).where(MessageFeedback.message_id.in_(message_ids))
-                    )
+                    await session.execute(delete(MessageFeedback).where(MessageFeedback.message_id.in_(message_ids)))
                     await session.execute(delete(Message).where(Message.id.in_(message_ids)))
                 await session.execute(
                     delete(ConversationStats).where(ConversationStats.conversation_id.in_(conversation_ids))
@@ -282,9 +289,7 @@ async def test_historical_stats_keep_write_time_organization_and_mark_inferred_d
         )
         await session.commit()
         await session.refresh(before_move)
-        feedback = await session.scalar(
-            select(MessageFeedback).where(MessageFeedback.message_id == before_message.id)
-        )
+        feedback = await session.scalar(select(MessageFeedback).where(MessageFeedback.message_id == before_message.id))
         login_log = await session.scalar(
             select(OperationLog)
             .where(OperationLog.user_id == dashboard_scope_users["manager_a_id"])
@@ -333,3 +338,117 @@ async def test_historical_stats_keep_write_time_organization_and_mark_inferred_d
     assert a_timeseries.json()["total_count"] == 1
     assert b_timeseries.json()["total_count"] == 2
     assert hidden_history.status_code == 404
+
+
+async def test_resource_stats_separate_creation_snapshot_from_shared_visibility(
+    test_client,
+    dashboard_scope_users,
+):
+    """资源创建归属保持不变，共享可见随共享范围和当前人员关系计算。"""
+
+    a_before = (await test_client.get("/api/dashboard/stats/resources", headers=dashboard_scope_users["a"])).json()
+    b_before = (await test_client.get("/api/dashboard/stats/resources", headers=dashboard_scope_users["b"])).json()
+
+    shared_to_b = {
+        "version": 2,
+        "read_scope": {
+            "access_level": "department",
+            "department_ids": [dashboard_scope_users["department_b"]],
+            "user_uids": [],
+        },
+        "manage_scope": None,
+    }
+    global_share = {
+        "version": 2,
+        "read_scope": {"access_level": "global", "department_ids": [], "user_uids": []},
+        "manage_scope": None,
+    }
+    suffix = uuid.uuid4().hex[:10]
+    kb = await KnowledgeBaseRepository().create(
+        {
+            "kb_id": f"kb_pytest_{suffix}",
+            "name": f"pytest-kb-{suffix}",
+            "kb_type": "milvus",
+            "share_config": shared_to_b,
+            "created_by": dashboard_scope_users["child_user_uid"],
+        }
+    )
+
+    async with pg_manager.get_async_session_context() as session:
+        agent = await AgentRepository(session).create(
+            name=f"pytest-agent-{suffix}",
+            backend_id="ChatbotAgent",
+            slug=f"pytest-agent-{suffix}",
+            share_config=shared_to_b,
+            created_by=dashboard_scope_users["child_user_uid"],
+        )
+        skill = await SkillRepository(session).create(
+            slug=f"pytest-skill-{suffix}",
+            name=f"pytest-skill-{suffix}",
+            description="Dashboard 资源统计集成测试",
+            source_type="upload",
+            tool_dependencies=[],
+            mcp_dependencies=[],
+            skill_dependencies=[],
+            dir_path=f"skills/pytest-skill-{suffix}",
+            share_config=global_share,
+            created_by=dashboard_scope_users["child_user_uid"],
+        )
+        inferred_kb = KnowledgeBase(
+            kb_id=f"kb_pytest_inferred_{suffix}",
+            name=f"pytest-kb-inferred-{suffix}",
+            kb_type="milvus",
+            share_config=global_share,
+            created_by=dashboard_scope_users["child_user_uid"],
+            organization_id_snapshot=dashboard_scope_users["department_child"],
+            organization_path_snapshot=dashboard_scope_users["department_child_path"],
+            organization_snapshot_inferred=True,
+        )
+        session.add(inferred_kb)
+        await session.commit()
+
+        child_user = await session.get(User, dashboard_scope_users["child_user_id"])
+        child_user.department_id = dashboard_scope_users["department_b"]
+        await session.commit()
+        await session.refresh(agent)
+        await session.refresh(skill)
+
+        assert kb.organization_path_snapshot == dashboard_scope_users["department_child_path"]
+        assert agent.organization_path_snapshot == dashboard_scope_users["department_child_path"]
+        assert skill.organization_path_snapshot == dashboard_scope_users["department_child_path"]
+        assert agent.organization_snapshot_inferred is False
+        assert skill.organization_snapshot_inferred is False
+
+    a_after_response = await test_client.get("/api/dashboard/stats/resources", headers=dashboard_scope_users["a"])
+    b_after_response = await test_client.get("/api/dashboard/stats/resources", headers=dashboard_scope_users["b"])
+    hidden_response = await test_client.get(
+        f"/api/dashboard/stats/resources?department_id={dashboard_scope_users['department_b']}",
+        headers=dashboard_scope_users["a"],
+    )
+    a_knowledge = await test_client.get("/api/dashboard/stats/knowledge", headers=dashboard_scope_users["a"])
+    b_knowledge = await test_client.get("/api/dashboard/stats/knowledge", headers=dashboard_scope_users["b"])
+
+    assert a_after_response.status_code == 200, a_after_response.text
+    assert b_after_response.status_code == 200, b_after_response.text
+    assert hidden_response.status_code == 404
+    assert a_knowledge.status_code == 200, a_knowledge.text
+    assert b_knowledge.status_code == 200, b_knowledge.text
+    a_after = a_after_response.json()
+    b_after = b_after_response.json()
+
+    assert a_after["knowledge_bases"]["creation_count"] == a_before["knowledge_bases"]["creation_count"] + 2
+    assert a_after["agents"]["creation_count"] == a_before["agents"]["creation_count"] + 1
+    assert a_after["skills"]["creation_count"] == a_before["skills"]["creation_count"] + 1
+    assert b_after["knowledge_bases"]["creation_count"] == b_before["knowledge_bases"]["creation_count"]
+    assert b_after["agents"]["creation_count"] == b_before["agents"]["creation_count"]
+    assert b_after["skills"]["creation_count"] == b_before["skills"]["creation_count"]
+
+    assert a_after["knowledge_bases"]["shared_visible_count"] == a_before["knowledge_bases"]["shared_visible_count"] + 1
+    assert a_after["agents"]["shared_visible_count"] == a_before["agents"]["shared_visible_count"]
+    assert a_after["skills"]["shared_visible_count"] == a_before["skills"]["shared_visible_count"] + 1
+    assert b_after["knowledge_bases"]["shared_visible_count"] == b_before["knowledge_bases"]["shared_visible_count"] + 2
+    assert b_after["agents"]["shared_visible_count"] == b_before["agents"]["shared_visible_count"] + 1
+    assert b_after["skills"]["shared_visible_count"] == b_before["skills"]["shared_visible_count"] + 1
+    assert a_after["knowledge_bases"]["contains_inferred_data"] is True
+    assert a_knowledge.json()["total_databases"] == a_before["knowledge_bases"]["shared_visible_count"] + 1
+    assert b_knowledge.json()["total_databases"] == b_before["knowledge_bases"]["shared_visible_count"] + 2

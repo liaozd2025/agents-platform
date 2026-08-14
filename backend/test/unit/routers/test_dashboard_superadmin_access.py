@@ -177,11 +177,8 @@ async def test_dashboard_current_organization_uses_permission_dependency():
     assert dashboard_routes
     for route in dashboard_routes:
         dependency_calls = {dependency.call for dependency in route.dependant.dependencies}
-        if route.path != "/dashboard/stats/knowledge":
-            assert get_superadmin_user not in dependency_calls
-            assert any(call.__name__ == "check_permission" for call in dependency_calls)
-        else:
-            assert get_superadmin_user in dependency_calls
+        assert get_superadmin_user not in dependency_calls
+        assert any(call.__name__ == "check_permission" for call in dependency_calls)
 
 
 async def test_dashboard_dependency_rejects_department_admin(dashboard_session):

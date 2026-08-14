@@ -1,4 +1,4 @@
-import { apiAdminGet, apiGet } from './base'
+import { apiGet } from './base'
 
 const withDepartment = (path, departmentId) => {
   if (departmentId == null) return path
@@ -93,8 +93,12 @@ export const dashboardApi = {
    * 获取知识库统计
    * @returns {Promise<Object>} - 知识库统计信息
    */
-  getKnowledgeStats: () => {
-    return apiAdminGet('/api/dashboard/stats/knowledge')
+  getKnowledgeStats: (departmentId = null) => {
+    return apiGet(withDepartment('/api/dashboard/stats/knowledge', departmentId))
+  },
+
+  getResourceStats: (departmentId = null) => {
+    return apiGet(withDepartment('/api/dashboard/stats/resources', departmentId))
   },
 
   /**
@@ -111,19 +115,23 @@ export const dashboardApi = {
    */
   getAllStats: async (departmentId = null) => {
     try {
-      const [basicStats, userStats, toolStats, agentStats] = await Promise.all([
-        apiGet(withDepartment('/api/dashboard/stats', departmentId)),
-        apiGet(withDepartment('/api/dashboard/stats/users', departmentId)),
-        apiGet(withDepartment('/api/dashboard/stats/tools', departmentId)),
-        apiGet(withDepartment('/api/dashboard/stats/agents', departmentId))
-      ])
+      const [basicStats, userStats, toolStats, knowledgeStats, agentStats, resourceStats] =
+        await Promise.all([
+          apiGet(withDepartment('/api/dashboard/stats', departmentId)),
+          apiGet(withDepartment('/api/dashboard/stats/users', departmentId)),
+          apiGet(withDepartment('/api/dashboard/stats/tools', departmentId)),
+          apiGet(withDepartment('/api/dashboard/stats/knowledge', departmentId)),
+          apiGet(withDepartment('/api/dashboard/stats/agents', departmentId)),
+          apiGet(withDepartment('/api/dashboard/stats/resources', departmentId))
+        ])
 
       return {
         basic: basicStats,
         users: userStats,
         tools: toolStats,
-        knowledge: null,
-        agents: agentStats
+        knowledge: knowledgeStats,
+        agents: agentStats,
+        resources: resourceStats
       }
     } catch (error) {
       console.error('批量获取统计数据失败:', error)

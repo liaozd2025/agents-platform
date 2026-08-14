@@ -15,6 +15,7 @@ from yuxi.permissions import (
     resolve_agent_permission,
 )
 from yuxi.repositories.department_repository import DepartmentRepository
+from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
 from yuxi.storage.postgres.models_business import Agent, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
@@ -109,6 +110,7 @@ FACT_VERIFIER_SYSTEM_PROMPT = """你是「事实核查员」子智能体，专�
 - 关键依据后使用 <cite source="$URL" type="url">$INDEX</cite> 标注来源，$INDEX 从 1 开始递增。
 - 明确标注无法查证或来源相互冲突的论断。
 - 不要编造来源或链接。"""
+
 
 def is_builtin_agent(agent: Agent) -> bool:
     return agent.slug == DEFAULT_AGENT_SLUG
@@ -206,6 +208,7 @@ class AgentRepository:
             updated_by=created_by,
             created_at=utc_now_naive(),
             updated_at=utc_now_naive(),
+            **await get_user_organization_snapshot(self.db, uid=created_by),
         )
         self.db.add(agent)
         await self.db.commit()
@@ -232,6 +235,7 @@ class AgentRepository:
             updated_by=created_by,
             created_at=utc_now_naive(),
             updated_at=utc_now_naive(),
+            **await get_user_organization_snapshot(self.db, uid=created_by),
         )
         self.db.add(agent)
         await self.db.commit()
@@ -280,6 +284,7 @@ class AgentRepository:
             updated_by=created_by,
             created_at=utc_now_naive(),
             updated_at=utc_now_naive(),
+            **await get_user_organization_snapshot(self.db, uid=created_by),
         )
         self.db.add(agent)
         await self.db.commit()
@@ -447,6 +452,7 @@ class AgentRepository:
             updated_by=created_by,
             created_at=utc_now_naive(),
             updated_at=utc_now_naive(),
+            **await get_user_organization_snapshot(self.db, uid=created_by),
         )
         self.db.add(agent)
         await self.db.commit()

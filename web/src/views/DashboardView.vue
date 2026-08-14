@@ -26,12 +26,28 @@
     </div>
 
     <a-alert
-      v-if="basicStats.contains_inferred_data"
+      v-if="containsInferredData"
       class="inferred-warning"
       type="warning"
       show-icon
-      message="当前结果包含迁移前数据，组织归属按用户当前关系推算。"
+      message="当前结果包含迁移前数据，组织归属按创建者或用户当前关系推算。"
     />
+
+    <a-card title="资源归属与共享可见" class="resource-scope-card" :loading="loading">
+      <div class="resource-scope-hint">
+        创建归属按创建时组织；共享可见按当前共享范围，均包含所选组织的下级组织。
+      </div>
+      <div class="resource-scope-grid">
+        <div v-for="item in resourceMetrics" :key="item.key" class="resource-scope-item">
+          <div class="resource-name">
+            {{ item.name }}
+            <a-tag v-if="item.metric.contains_inferred_data" color="orange">含推算</a-tag>
+          </div>
+          <a-statistic title="创建归属" :value="item.metric.creation_count" />
+          <a-statistic title="共享可见" :value="item.metric.shared_visible_count" />
+        </div>
+      </div>
+    </a-card>
 
     <!-- 现代化顶部统计栏 -->
     <div class="modern-stats-header">
@@ -123,15 +139,27 @@ const departmentTree = computed(() =>
     }))
   )
 )
-
 // 统计数据 - 使用新的响应式结构
 const basicStats = ref({})
 const allStatsData = ref({
   users: null,
   tools: null,
   knowledge: null,
-  agents: null
+  agents: null,
+  resources: null
 })
+const resourceMetrics = computed(() => {
+  const resources = allStatsData.value.resources || {}
+  return [
+    { key: 'knowledge_bases', name: '知识库', metric: resources.knowledge_bases || {} },
+    { key: 'agents', name: '智能体', metric: resources.agents || {} },
+    { key: 'skills', name: 'Skill', metric: resources.skills || {} }
+  ]
+})
+const containsInferredData = computed(
+  () =>
+    basicStats.value.contains_inferred_data || allStatsData.value.resources?.contains_inferred_data
+)
 
 // 对话列表
 const loading = ref(false)
@@ -174,7 +202,8 @@ const loadAllStats = async () => {
       users: response.users,
       tools: response.tools,
       knowledge: response.knowledge,
-      agents: response.agents
+      agents: response.agents,
+      resources: response.resources
     }
 
     console.log('Dashboard 数据加载完成:', response)
@@ -243,6 +272,39 @@ onUnmounted(() => {
 
 .inferred-warning {
   margin: 12px var(--page-padding) 0;
+}
+
+.resource-scope-card {
+  margin: 12px var(--page-padding) 0;
+}
+
+.resource-scope-hint {
+  margin-bottom: 12px;
+  color: var(--gray-500);
+  font-size: 12px;
+}
+
+.resource-scope-grid,
+.resource-scope-item {
+  display: grid;
+  gap: 16px;
+}
+
+.resource-scope-grid {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.resource-scope-item {
+  grid-template-columns: 1fr 1fr 1fr;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+}
+
+.resource-name {
+  color: var(--gray-900);
+  font-weight: 600;
 }
 
 .filter-title {
