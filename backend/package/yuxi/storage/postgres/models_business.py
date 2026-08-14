@@ -253,6 +253,26 @@ class UserRoleAssignmentDepartment(Base):
     assignment = relationship("UserRoleAssignment", back_populates="scope_departments")
 
 
+class SecurityAudit(Base):
+    """保存权限模型变更前后值的结构化安全审计。"""
+
+    __tablename__ = "security_audits"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    action = Column(String(64), nullable=False)
+    target_type = Column(String(32), nullable=False)
+    target_id = Column(Integer, nullable=False)
+    target_code = Column(String(64), nullable=False)
+    before_value = Column(JSON_VALUE, nullable=True)
+    after_value = Column(JSON_VALUE, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+    actor = relationship("User")
+
+    __table_args__ = (Index("ix_security_audits_target", "target_type", "target_id"),)
+
+
 class AgentEnv(Base):
     """用户级 Agent 沙盒环境变量"""
 

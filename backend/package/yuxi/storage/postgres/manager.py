@@ -583,9 +583,24 @@ class PostgresManager(metaclass=SingletonMeta):
                 PRIMARY KEY (assignment_id, department_id)
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS security_audits (
+                id SERIAL PRIMARY KEY,
+                actor_user_id INTEGER NOT NULL REFERENCES users(id),
+                action VARCHAR(64) NOT NULL,
+                target_type VARCHAR(32) NOT NULL,
+                target_id INTEGER NOT NULL,
+                target_code VARCHAR(64) NOT NULL,
+                before_value JSONB,
+                after_value JSONB,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS ix_roles_is_active ON roles(is_active)",
             "CREATE INDEX IF NOT EXISTS ix_user_role_assignments_user_id ON user_role_assignments(user_id)",
             "CREATE INDEX IF NOT EXISTS ix_user_role_assignments_role_id ON user_role_assignments(role_id)",
+            "CREATE INDEX IF NOT EXISTS ix_security_audits_actor_user_id ON security_audits(actor_user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_security_audits_target ON security_audits(target_type, target_id)",
             f"""
             INSERT INTO roles (code, name, description, is_builtin, is_active, default_scope_type)
             VALUES {builtin_role_values}

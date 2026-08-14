@@ -161,6 +161,7 @@ async def test_ensure_business_schema_backfills_builtin_role_assignments_idempot
         "role_default_departments",
         "user_role_assignments",
         "user_role_assignment_departments",
+        "security_audits",
     ):
         assert f"CREATE TABLE IF NOT EXISTS {table_name}" in statements
 
@@ -168,10 +169,7 @@ async def test_ensure_business_schema_backfills_builtin_role_assignments_idempot
     assert "'superadmin'" in statements
     assert "'admin'" in statements
     assert "'user'" in statements
-    assert (
-        "('superadmin', '超级管理员', '拥有全部功能权限和全部数据范围', "
-        "TRUE, TRUE, 'all')"
-    ) in statements
+    assert ("('superadmin', '超级管理员', '拥有全部功能权限和全部数据范围', TRUE, TRUE, 'all')") in statements
     assert "INSERT INTO user_role_assignments" in statements
     assert "ON CONFLICT (user_id, role_id) DO NOTHING" in statements
     assert "DROP COLUMN IF EXISTS role" not in statements

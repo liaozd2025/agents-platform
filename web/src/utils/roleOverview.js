@@ -23,3 +23,17 @@ export function groupRolePermissions(catalog, permissionKeys) {
 export function getDataScopeLabel(scopeTypes, scopeType) {
   return scopeTypes.find((item) => item.key === scopeType)?.label || '未知范围'
 }
+
+/**
+ * 返回安全审计动作的中文名称。
+ */
+export function getRoleAuditActionLabel(action) {
+  return (
+    {
+      'role.create': '创建角色',
+      'role.copy': '复制角色',
+      'role.update': '修改角色',
+      'role.deactivate': '停用角色'
+    }[action] || action
+  )
+}
