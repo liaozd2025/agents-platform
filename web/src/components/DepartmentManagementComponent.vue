@@ -17,7 +17,12 @@
             ><RefreshCw :size="16" :class="{ spin: departmentManagement.refreshing }"
           /></template>
         </a-button>
-        <a-button type="primary" @click="showAddDepartmentModal" class="add-btn lucide-icon-btn">
+        <a-button
+          v-if="canCreateDepartments"
+          type="primary"
+          @click="showAddDepartmentModal"
+          class="add-btn lucide-icon-btn"
+        >
           <template #icon><Plus :size="16" /></template>
           添加组织节点
         </a-button>
@@ -73,6 +78,7 @@
                 <a-space>
                   <a-tooltip title="编辑组织节点">
                     <a-button
+                      v-if="canUpdateDepartments"
                       type="text"
                       size="small"
                       @click="showEditDepartmentModal(record)"
@@ -83,6 +89,7 @@
                   </a-tooltip>
                   <a-tooltip :title="getDeleteDisabledReason(record) || '删除组织节点'">
                     <a-button
+                      v-if="canDeleteDepartments"
                       type="text"
                       size="small"
                       danger
@@ -176,14 +183,14 @@
           />
         </a-form-item>
 
-        <a-divider v-if="!departmentManagement.editMode" />
+        <a-divider v-if="!departmentManagement.editMode && canCreateDepartmentAdmin" />
 
-        <template v-if="!departmentManagement.editMode">
+        <template v-if="!departmentManagement.editMode && canCreateDepartmentAdmin">
           <a-alert
             class="admin-section-hint"
             type="warning"
-            message="管理员账号可选"
-            description="填写后创建的是全局管理员，权限不限于该节点；全部留空可只创建组织节点。"
+            message="同节点管理员账号可选"
+            description="填写后创建内置管理员，默认管理该节点及下级；全部留空可只创建组织节点。"
             show-icon
           />
 
@@ -249,7 +256,7 @@
 <script setup>
 import { computed, onMounted, reactive, watch } from 'vue'
 import { notification, message, Modal } from 'ant-design-vue'
-import { departmentApi, apiSuperAdminGet } from '@/apis'
+import { departmentApi, apiGet } from '@/apis'
 import { ChevronsDown, ChevronsUp, Plus, RefreshCw, SquarePen, Trash2 } from 'lucide-vue-next'
 import {
   buildDepartmentTree,
@@ -257,6 +264,7 @@ import {
   updateDepartmentExpandedKeys
 } from '@/utils/departmentTree'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
+import { useUserStore } from '@/stores/user'
 
 const ROOT_DEPARTMENT_ID = 1
 const NODE_TYPE_LABELS = {
@@ -265,6 +273,13 @@ const NODE_TYPE_LABELS = {
   department: '部门'
 }
 const treeFieldNames = { children: 'children', label: 'name', value: 'id' }
+const userStore = useUserStore()
+const canCreateDepartments = computed(() => userStore.hasPermission('department:create'))
+const canUpdateDepartments = computed(() => userStore.hasPermission('department:update'))
+const canDeleteDepartments = computed(() => userStore.hasPermission('department:delete'))
+const canCreateDepartmentAdmin = computed(
+  () => userStore.hasPermission('user:create') && userStore.hasPermission('user:role_assign')
+)
 
 /** 创建一份组织节点表单初始状态。 */
 const emptyDepartmentForm = () => ({
@@ -453,7 +468,7 @@ const checkAdminUid = async () => {
 
   // 检查是否已存在
   try {
-    const result = await apiSuperAdminGet(`/api/auth/check-uid/${uid}`)
+    const result = await apiGet(`/api/auth/check-uid/${uid}`)
     if (!result.is_available) {
       departmentManagement.form.uidError = '该UID已被使用'
     }
@@ -568,7 +583,7 @@ const handleDepartmentFormSubmit = async () => {
       await departmentApi.createDepartment(payload)
 
       message.success(
-        shouldCreateAdmin ? `组织节点创建成功，全局管理员 “${adminUid}” 已创建` : '组织节点创建成功'
+        shouldCreateAdmin ? `组织节点创建成功，管理员 “${adminUid}” 已创建` : '组织节点创建成功'
       )
     }
 

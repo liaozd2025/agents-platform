@@ -46,14 +46,12 @@ async def platform_permission_users(test_client):
                 username=f"pytest-platform-admin-{suffix}",
                 uid=f"pytest_platform_admin_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
-                role="superadmin",
                 department_id=root.id,
             ),
             User(
                 username=f"pytest-platform-standard-{suffix}",
                 uid=f"pytest_platform_standard_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
-                role="user",
                 department_id=root.id,
             ),
         ]

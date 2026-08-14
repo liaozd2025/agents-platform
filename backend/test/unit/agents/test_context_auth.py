@@ -35,7 +35,6 @@ def _user_with_permissions(*permission_keys: str):
     assignment = types.SimpleNamespace(role=role, scope_mode="inherit")
     return types.SimpleNamespace(
         id=1,
-        role="user",
         uid="u1",
         department_id=None,
         role_assignments=[assignment],
@@ -284,7 +283,7 @@ async def test_normalize_agent_context_config_expands_null_and_filters_explicit_
     empty_subagents_normalized = await normalize_agent_context_config(
         {"tools": [], "knowledges": [], "mcps": [], "skills": [], "subagents": []},
         db=object(),
-        user=types.SimpleNamespace(role="user", uid="u1", department_id=None),
+        user=types.SimpleNamespace(uid="u1", department_id=None),
         context_schema=ChatBotContext,
     )
 

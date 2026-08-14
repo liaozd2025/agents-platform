@@ -1,4 +1,4 @@
-import { useUserStore, checkAdminPermission, checkSuperAdminPermission } from '@/stores/user'
+import { useUserStore } from '@/stores/user'
 import { message } from 'ant-design-vue'
 
 /**
@@ -154,16 +154,6 @@ export function apiGet(url, options = {}, requiresAuth = true, responseType = 'j
   return apiRequest(url, { method: 'GET', ...options }, requiresAuth, responseType)
 }
 
-export function apiAdminGet(url, options = {}, responseType = 'json') {
-  checkAdminPermission()
-  return apiGet(url, options, true, responseType)
-}
-
-export function apiSuperAdminGet(url, options = {}, responseType = 'json') {
-  checkSuperAdminPermission()
-  return apiGet(url, options, true, responseType)
-}
-
 /**
  * 发送POST请求
  * @param {string} url - API端点
@@ -184,16 +174,6 @@ export function apiPost(url, data = {}, options = {}, requiresAuth = true, respo
     requiresAuth,
     responseType
   )
-}
-
-export function apiAdminPost(url, data = {}, options = {}, responseType = 'json') {
-  checkAdminPermission()
-  return apiPost(url, data, options, true, responseType)
-}
-
-export function apiSuperAdminPost(url, data = {}, options = {}, responseType = 'json') {
-  checkSuperAdminPermission()
-  return apiPost(url, data, options, true, responseType)
 }
 
 /**
@@ -218,16 +198,6 @@ export function apiPut(url, data = {}, options = {}, requiresAuth = true, respon
   )
 }
 
-export function apiAdminPut(url, data = {}, options = {}, responseType = 'json') {
-  checkAdminPermission()
-  return apiPut(url, data, options, true, responseType)
-}
-
-export function apiSuperAdminPut(url, data = {}, options = {}, responseType = 'json') {
-  checkSuperAdminPermission()
-  return apiPut(url, data, options, true, responseType)
-}
-
 /**
  * 发送DELETE请求
  * @param {string} url - API端点
@@ -238,14 +208,4 @@ export function apiSuperAdminPut(url, data = {}, options = {}, responseType = 'j
  */
 export function apiDelete(url, options = {}, requiresAuth = true, responseType = 'json') {
   return apiRequest(url, { method: 'DELETE', ...options }, requiresAuth, responseType)
-}
-
-export function apiAdminDelete(url, options = {}) {
-  checkAdminPermission()
-  return apiDelete(url, options, true)
-}
-
-export function apiSuperAdminDelete(url, options = {}) {
-  checkSuperAdminPermission()
-  return apiDelete(url, options, true)
 }

@@ -23,7 +23,7 @@ async def test_dataset_only_manage_route_checks_the_dataset_knowledge_base(monke
 
     monkeypatch.setattr(knowledge_eval_router.EvaluationRepository, "get_dataset", fake_get_dataset)
     monkeypatch.setattr(knowledge_eval_router, "ensure_knowledge_base_permission", fake_ensure_permission)
-    admin = SimpleNamespace(uid="admin-1", role="admin", department_id=1)
+    admin = SimpleNamespace(uid="admin-1", department_id=1)
 
     result = await knowledge_eval_router.require_evaluation_dataset_manage("dataset-1", admin)
 
@@ -48,7 +48,7 @@ async def test_dataset_manage_route_rejects_admin_without_manage_permission(monk
 
     monkeypatch.setattr(knowledge_eval_router.EvaluationRepository, "get_dataset", fake_get_dataset)
     monkeypatch.setattr(knowledge_permissions.knowledge_base, "get_database_info", fake_get_database_info)
-    admin = SimpleNamespace(uid="other-admin", role="admin", department_id=1)
+    admin = SimpleNamespace(uid="other-admin", department_id=1)
 
     with pytest.raises(HTTPException) as exc_info:
         await knowledge_eval_router.require_evaluation_dataset_manage("dataset-1", admin)
@@ -62,7 +62,7 @@ def test_evaluation_routes_require_function_permission():
 
     async def fake_authorization():
         return SimpleNamespace(
-            user=SimpleNamespace(uid="user-1", role="user", department_id=1),
+            user=SimpleNamespace(uid="user-1", department_id=1),
             has_permission=lambda _permission: False,
         )
 

@@ -32,9 +32,11 @@ def serialize_user_roles(user: User) -> list[dict[str, Any]]:
     roles = []
     for assignment in sorted(user.role_assignments, key=lambda item: item.role.id):
         role = assignment.role
-        default_department_ids = sorted(item.department_id for item in role.default_departments)
-        override_department_ids = sorted(item.department_id for item in assignment.scope_departments)
         inherited = assignment.scope_mode == "inherit"
+        default_department_ids = sorted(item.department_id for item in role.default_departments)
+        override_department_ids = (
+            [] if inherited else sorted(item.department_id for item in assignment.scope_departments)
+        )
         effective_scope_type = role.default_scope_type if inherited else assignment.override_scope_type
         effective_department_ids = default_department_ids if inherited else override_department_ids
         roles.append(
@@ -58,7 +60,7 @@ def serialize_user_roles(user: User) -> list[dict[str, Any]]:
 
 
 def serialize_user(user: User, department_name: str | None = None) -> dict[str, Any]:
-    """序列化用户基本信息和多角色分配，迁移期保留旧角色字段。"""
+    """序列化用户基本信息和多角色分配。"""
 
     return {**user.to_dict(), "department_name": department_name, "roles": serialize_user_roles(user)}
 
@@ -118,10 +120,10 @@ def _scope_is_within_default(
     return False
 
 
-def _is_superadmin(user: User) -> bool:
-    """判断用户是否拥有有效超级管理员角色。"""
+def has_active_role(user: User, role_code: str) -> bool:
+    """判断用户是否拥有指定的有效角色。"""
 
-    return any(item.role.is_active and item.role.code == "superadmin" for item in user.role_assignments)
+    return any(item.role.is_active and item.role.code == role_code for item in user.role_assignments)
 
 
 def _operator_scope_covers(
@@ -233,7 +235,7 @@ async def get_assignable_role_constraints(
     paths = {department.id: department.path for department in departments}
     constraints = {}
     for role in roles:
-        if not role.is_active or (role.code == "superadmin" and not _is_superadmin(authorization.user)):
+        if not role.is_active or (role.code == "superadmin" and not has_active_role(authorization.user, "superadmin")):
             continue
 
         default_department_ids = [item.department_id for item in role.default_departments]
@@ -321,7 +323,7 @@ async def replace_user_role_assignments(
     had_superadmin = any(item["code"] == "superadmin" for item in before["roles"])
     normalized_reason = (reason or "").strip()
     if had_superadmin != has_superadmin:
-        if not _is_superadmin(actor):
+        if not has_active_role(actor, "superadmin"):
             raise UserRoleAuthorizationError("只有超级管理员可以授予或撤销 superadmin")
         if not normalized_reason:
             raise ValueError("授予或撤销 superadmin 必须填写原因")
@@ -398,7 +400,7 @@ async def replace_user_role_assignments(
         ):
             raise ValueError("个性化覆盖范围不能超过角色默认范围")
 
-    if not _is_superadmin(actor):
+    if not has_active_role(actor, "superadmin"):
         grants_to_check = list(normalized_assignments)
         if check_existing:
             grants_to_check.extend(
@@ -445,7 +447,6 @@ async def replace_user_role_assignments(
         next_assignments.append(assignment)
     target.role_assignments = next_assignments
 
-    target.role = "superadmin" if has_superadmin else "admin" if "admin" in assigned_codes else "user"
     after = _assignment_snapshot(target)
     if before != after:
         db.add(

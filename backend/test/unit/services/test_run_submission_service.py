@@ -58,7 +58,7 @@ async def test_submit_run_command_rejects_overlong_origin_before_repository_acce
 @pytest.mark.asyncio
 async def test_submit_run_command_shares_conversation_intake_and_finalize(monkeypatch: pytest.MonkeyPatch):
     calls: dict[str, object] = {}
-    current_user = SimpleNamespace(uid="user-1", role="user")
+    current_user = SimpleNamespace(uid="user-1")
 
     class Db:
         @asynccontextmanager
@@ -164,7 +164,7 @@ async def test_submit_run_command_shares_conversation_intake_and_finalize(monkey
 async def test_submit_run_command_requires_existing_conversation_for_web_chat(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    current_user = SimpleNamespace(uid="user-1", role="user")
+    current_user = SimpleNamespace(uid="user-1")
 
     class AgentRepo:
         def __init__(self, db):

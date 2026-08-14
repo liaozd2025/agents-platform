@@ -29,6 +29,10 @@ def _database_detail(**stats) -> KnowledgeBaseDetail:
     )
 
 
+async def _allow_knowledge_manage(_kb_id: str | None, _user) -> None:
+    """让非权限单测专注各自的文件主路径。"""
+
+
 class FakeTaskContext:
     def __init__(self):
         self.result = None
@@ -154,6 +158,7 @@ async def test_upload_file_rejects_jsonl_uploads():
 
 async def test_upload_file_rejects_oversized_file(monkeypatch):
     monkeypatch.setattr(knowledge_router, "MAX_UPLOAD_SIZE_BYTES", 5)
+    monkeypatch.setattr(knowledge_router, "_require_manage_permission_if_kb_id", _allow_knowledge_manage)
 
     async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
         return None
@@ -175,6 +180,7 @@ async def test_upload_file_rejects_oversized_file(monkeypatch):
 
 async def test_upload_file_invalid_kb_fails_before_read_or_minio(monkeypatch):
     calls = {"read": 0, "upload": 0}
+    monkeypatch.setattr(knowledge_router, "_require_manage_permission_if_kb_id", _allow_knowledge_manage)
 
     async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
         raise HTTPException(status_code=404, detail=f"知识库 {kb_id} 不存在")
@@ -206,6 +212,7 @@ async def test_upload_file_invalid_kb_fails_before_read_or_minio(monkeypatch):
 
 async def test_upload_file_read_only_kb_fails_before_read_or_minio(monkeypatch):
     calls = {"read": 0, "upload": 0}
+    monkeypatch.setattr(knowledge_router, "_require_manage_permission_if_kb_id", _allow_knowledge_manage)
 
     async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
         raise HTTPException(status_code=400, detail="只支持检索，不支持文档上传")

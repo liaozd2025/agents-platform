@@ -115,14 +115,10 @@ async def _dashboard_resource_subjects(
     departments = await list_authorized_departments(authorization, "dashboard:view", db=db)
     paths = await DepartmentRepository().get_paths_by_ids([item["id"] for item in departments], session=db)
     selected_path = paths.get(department_id) if department_id is not None else None
-    subjects = [
-        {"uid": user.uid, "role": "user", "department_ancestor_ids": user.department_ancestor_ids}
-        for user, _ in user_rows
-    ]
+    subjects = [{"uid": user.uid, "department_ancestor_ids": user.department_ancestor_ids} for user, _ in user_rows]
     subjects.extend(
         {
             "uid": "",
-            "role": "user",
             "department_ancestor_ids": parse_department_ancestor_ids(paths.get(item["id"])),
         }
         for item in departments

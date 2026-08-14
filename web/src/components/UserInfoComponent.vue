@@ -14,7 +14,6 @@
             :alt="userStore.username"
             class="avatar-image"
           />
-          <!-- <div class="user-role-badge" :class="userRoleClass"></div> -->
         </div>
         <div v-if="showRole" class="user-name">{{ userStore.username }}</div>
         <div v-if="slots.actions" class="user-info-actions">
@@ -28,7 +27,7 @@
               <div class="user-menu-username">{{ userStore.username }}</div>
               <div class="user-menu-details">
                 <span class="user-menu-info">ID: {{ userStore.uid }}</span>
-                <span class="user-menu-role">{{ userRoleText }}</span>
+                <span class="user-menu-role">{{ assignedRolesText }}</span>
               </div>
             </div>
           </a-menu-item>
@@ -108,19 +107,9 @@ defineProps({
   }
 })
 
-// 用户角色显示文本
-const userRoleText = computed(() => {
-  switch (userStore.userRole) {
-    case 'superadmin':
-      return '超级管理员'
-    case 'admin':
-      return '管理员'
-    case 'user':
-      return '普通用户'
-    default:
-      return '未知角色'
-  }
-})
+const assignedRolesText = computed(
+  () => userStore.userRoles.map((role) => role.name).join('、') || '未分配角色'
+)
 
 // 退出登录
 const logout = () => {

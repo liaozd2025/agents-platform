@@ -1,7 +1,4 @@
-"""
-组织机构管理路由
-提供组织节点的增删改查接口，仅超级管理员可访问
-"""
+"""组织机构管理路由。"""
 
 import re
 from typing import Literal
@@ -11,18 +8,31 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete as sqlalchemy_delete, select, func, update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Department, User
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Department, Role, User
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.user_repository import UserRepository
-from server.utils.auth_middleware import get_authorization_context, get_superadmin_user, get_db
+from server.utils.auth_middleware import get_authorization_context, get_db, require_permission
 from yuxi.permissions.authorization import AuthorizationContext
-from yuxi.services.user_management_service import list_authorized_departments
+from yuxi.services.user_management_service import department_is_accessible, list_authorized_departments
+from yuxi.services.user_role_service import UserRoleAuthorizationError, replace_user_role_assignments
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.services.operation_log_service import log_operation
 from yuxi.services.user_identity_service import is_valid_phone_number
 
 # 创建路由器
 department = APIRouter(prefix="/departments", tags=["department"])
+
+
+async def _ensure_department_access(
+    db: AsyncSession,
+    authorization: AuthorizationContext,
+    permission_key: str,
+    department_id: int,
+) -> None:
+    """确认组织节点位于当前功能权限的管理域内。"""
+
+    if not await department_is_accessible(authorization, permission_key, department_id, db=db):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
 
 
 # =============================================================================
@@ -37,7 +47,7 @@ class DepartmentCreate(BaseModel):
     description: str | None = None
     parent_id: int | None = None  # 不传时挂在集团根下
     node_type: Literal["group", "company", "department"] = "department"
-    # 可选的管理员信息；填写时创建的是全局管理员，其权限不限于该节点
+    # 可选的管理员信息
     admin_uid: str | None = None
     admin_password: str | None = Field(default=None, min_length=8)
     admin_phone: str | None = None
@@ -86,9 +96,15 @@ async def get_departments(
 
 @department.get("/{department_id}", response_model=DepartmentResponse)
 async def get_department(
-    department_id: int, current_user: User = Depends(get_superadmin_user), db: AsyncSession = Depends(get_db)
+    department_id: int,
+    authorization: AuthorizationContext = Depends(get_authorization_context),
+    db: AsyncSession = Depends(get_db),
 ):
     """获取指定部门详情"""
+    permission_key = "department:read_all" if authorization.has_permission("department:read_all") else "department:read"
+    if not authorization.has_permission(permission_key):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="缺少功能权限: department:read")
+    await _ensure_department_access(db, authorization, permission_key, department_id)
     result = await db.execute(select(Department).filter(Department.id == department_id))
     department = result.scalar_one_or_none()
 
@@ -108,14 +124,16 @@ async def get_department(
 async def create_department(
     department_data: DepartmentCreate,
     request: Request,
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("department:create")),
     db: AsyncSession = Depends(get_db),
 ):
     """在指定父节点下创建组织节点，可选地同时创建一个管理员账号"""
     dept_repo = DepartmentRepository()
     user_repo = UserRepository()
+    current_user = authorization.user
 
     parent_id = department_data.parent_id if department_data.parent_id is not None else ROOT_DEPARTMENT_ID
+    await _ensure_department_access(db, authorization, "department:create", parent_id)
     parent = await dept_repo.get_by_id(parent_id)
     if parent is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="父级组织节点不存在")
@@ -127,6 +145,12 @@ async def create_department(
     admin_uid = department_data.admin_uid
     admin_phone = department_data.admin_phone
     if admin_uid:
+        for permission_key in ("user:create", "user:role_assign"):
+            if not authorization.has_permission(permission_key):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"缺少功能权限: {permission_key}",
+                )
         if not department_data.admin_password:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="创建管理员时必须提供密码")
 
@@ -160,6 +184,7 @@ async def create_department(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="创建管理员时必须提供用户ID")
 
     new_department = await dept_repo.create_child(
+        db,
         name=department_data.name,
         description=department_data.description,
         parent=parent,
@@ -170,16 +195,30 @@ async def create_department(
         await log_operation(db, current_user.id, "创建组织节点", f"创建组织节点: {department_data.name}", request)
         return {**new_department.to_dict(), "user_count": 0}
 
-    await user_repo.create(
+    await _ensure_department_access(db, authorization, "user:create", new_department.id)
+    new_user = await user_repo.create_with_db(
+        db,
         {
             "username": admin_uid,
             "uid": admin_uid,
             "phone_number": admin_phone,
             "password_hash": AuthUtils.hash_password(department_data.admin_password),
-            "role": "admin",
             "department_id": new_department.id,
-        }
+        },
     )
+    admin_role_id = await db.scalar(select(Role.id).where(Role.code == "admin", Role.is_active.is_(True)))
+    if admin_role_id is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="系统缺少有效的 admin 角色")
+    try:
+        await replace_user_role_assignments(
+            db,
+            authorization=authorization,
+            target=new_user,
+            assignments=[{"role_id": admin_role_id, "scope_mode": "inherit"}],
+            check_existing=False,
+        )
+    except UserRoleAuthorizationError as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
 
     await log_operation(
         db,
@@ -197,11 +236,13 @@ async def update_department(
     department_id: int,
     department_data: DepartmentUpdate,
     request: Request,
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("department:update")),
     db: AsyncSession = Depends(get_db),
 ):
     """更新组织节点信息，并在父节点变化时移动整棵子树"""
     dept_repo = DepartmentRepository()
+    current_user = authorization.user
+    await _ensure_department_access(db, authorization, "department:update", department_id)
     result = await db.execute(select(Department).filter(Department.id == department_id))
     department = result.scalar_one_or_none()
 
@@ -219,6 +260,7 @@ async def update_department(
         if department_data.parent_id == department.id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="组织节点不能移动到自身之下")
 
+        await _ensure_department_access(db, authorization, "department:update", department_data.parent_id)
         target_parent = await dept_repo.get_by_id(department_data.parent_id)
         if target_parent is None:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="父级组织节点不存在")
@@ -259,10 +301,12 @@ async def update_department(
 async def delete_department(
     department_id: int,
     request: Request,
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("department:delete")),
     db: AsyncSession = Depends(get_db),
 ):
     """删除组织节点"""
+    current_user = authorization.user
+    await _ensure_department_access(db, authorization, "department:delete", department_id)
     result = await db.execute(select(Department).filter(Department.id == department_id))
     department = result.scalar_one_or_none()
 

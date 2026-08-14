@@ -11,7 +11,7 @@ const SETTINGS_NAVIGATION_GROUPS = [
     items: [
       { id: 'base', label: '基本设置', access: 'systemConfig' },
       { id: 'user', label: '用户管理', access: 'userRead' },
-      { id: 'department', label: '组织机构', access: 'superadmin' },
+      { id: 'department', label: '组织机构', access: 'departmentRead' },
       { id: 'role', label: '角色与权限', access: 'roleRead' }
     ]
   },
@@ -30,11 +30,13 @@ const SETTINGS_NAVIGATION_GROUPS = [
 export function getSettingsNavigationGroups(permissions, searchQuery = '') {
   const access = {
     loggedIn: permissions.isLoggedIn,
-    superadmin: permissions.isSuperAdmin,
     systemConfig: permissions.effectivePermissions.includes('system_config:manage'),
     ocrManage: permissions.effectivePermissions.includes('ocr:manage'),
     userRead: permissions.effectivePermissions.includes('user:read'),
-    roleRead: permissions.effectivePermissions.includes('role:read')
+    roleRead: permissions.effectivePermissions.includes('role:read'),
+    departmentRead: ['department:read', 'department:read_all'].some((permission) =>
+      permissions.effectivePermissions.includes(permission)
+    )
   }
   const query = searchQuery.trim().toLowerCase()
 

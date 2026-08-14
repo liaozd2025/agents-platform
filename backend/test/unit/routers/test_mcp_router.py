@@ -23,7 +23,6 @@ def _build_app(*, can_manage: bool = True) -> FastAPI:
             username="manager" if can_manage else "user",
             uid="manager" if can_manage else "user",
             password_hash="x",
-            role="user",
         )
         return SimpleNamespace(
             user=user,

@@ -15,8 +15,6 @@ from yuxi.services.role_service import (
 )
 from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.services.user_management_service import get_authorized_user
-from yuxi.storage.postgres.models_business import User
-
 from server.utils.auth_middleware import get_authorization_context, get_db, require_permission
 
 roles = APIRouter(prefix="/roles", tags=["roles"])
@@ -61,17 +59,6 @@ def _raise_role_error(error: ValueError) -> None:
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
 
-async def _get_role_manager(
-    authorization: AuthorizationContext = Depends(require_permission("role:manage")),
-) -> User:
-    """保持角色定义仅允许超级管理员修改。"""
-
-    current_user = authorization.user
-    if current_user.role != "superadmin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有超级管理员可以管理角色定义")
-    return current_user
-
-
 @roles.get("/overview")
 async def read_role_overview(
     target_user_id: int | None = None,
@@ -96,13 +83,13 @@ async def read_role_overview(
 @roles.post("", status_code=status.HTTP_201_CREATED)
 async def create_role(
     payload: RoleDefinitionRequest,
-    current_user: User = Depends(_get_role_manager),
+    authorization: AuthorizationContext = Depends(require_permission("role:manage")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """创建自定义角色。"""
 
     try:
-        return await create_custom_role(db, current_user, **payload.model_dump())
+        return await create_custom_role(db, authorization.user, **payload.model_dump())
     except ValueError as error:
         _raise_role_error(error)
 
@@ -111,13 +98,13 @@ async def create_role(
 async def copy_existing_role(
     role_id: int,
     payload: RoleCopyRequest,
-    current_user: User = Depends(_get_role_manager),
+    authorization: AuthorizationContext = Depends(require_permission("role:manage")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """复制已有角色为独立自定义角色。"""
 
     try:
-        return await copy_role(db, current_user, role_id, **payload.model_dump())
+        return await copy_role(db, authorization.user, role_id, **payload.model_dump())
     except ValueError as error:
         _raise_role_error(error)
 
@@ -126,13 +113,13 @@ async def copy_existing_role(
 async def update_role(
     role_id: int,
     payload: RoleUpdateRequest,
-    current_user: User = Depends(_get_role_manager),
+    authorization: AuthorizationContext = Depends(require_permission("role:manage")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """修改自定义角色。"""
 
     try:
-        return await update_custom_role(db, current_user, role_id, **payload.model_dump())
+        return await update_custom_role(db, authorization.user, role_id, **payload.model_dump())
     except ValueError as error:
         _raise_role_error(error)
 
@@ -140,12 +127,12 @@ async def update_role(
 @roles.post("/{role_id}/deactivate")
 async def deactivate_role(
     role_id: int,
-    current_user: User = Depends(_get_role_manager),
+    authorization: AuthorizationContext = Depends(require_permission("role:manage")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """停用没有有效成员的自定义角色。"""
 
     try:
-        return await deactivate_custom_role(db, current_user, role_id)
+        return await deactivate_custom_role(db, authorization.user, role_id)
     except ValueError as error:
         _raise_role_error(error)

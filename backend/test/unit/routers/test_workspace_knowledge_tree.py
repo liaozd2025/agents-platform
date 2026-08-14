@@ -75,7 +75,7 @@ def _build_client(monkeypatch, fake_kb: FakeKnowledgeBase) -> TestClient:
     app.include_router(workspace, prefix="/api")
 
     async def fake_required_user():
-        return User(username="user", uid="user", password_hash="x", role="user", department_id=1)
+        return User(username="user", uid="user", password_hash="x", department_id=1)
 
     app.dependency_overrides[workspace_router.require_knowledge_base_read] = fake_required_user
     monkeypatch.setattr(workspace_router, "knowledge_base", fake_kb)

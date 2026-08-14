@@ -49,14 +49,12 @@ async def user_management_test_users(test_client):
                 username=f"pytest-user-admin-{suffix}",
                 uid=f"pytest_user_admin_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
-                role="superadmin",
                 department_id=root.id,
             ),
             User(
                 username=f"pytest-user-standard-{suffix}",
                 uid=f"pytest_user_standard_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
-                role="user",
                 department_id=root.id,
             ),
         ]
@@ -89,7 +87,7 @@ async def user_management_test_users(test_client):
 async def _require_superadmin(test_client, headers):
     response = await test_client.get("/api/auth/me", headers=headers)
     assert response.status_code == 200, response.text
-    if response.json()["role"] != "superadmin":
+    if "superadmin" not in {role["code"] for role in response.json()["roles"]}:
         pytest.fail("This test requires TEST_USERNAME to be a superadmin account.")
 
 
@@ -169,7 +167,6 @@ async def _create_custom_user(
             username=f"pytest-user-scope-{suffix}",
             uid=f"pytest_user_scope_{suffix}",
             password_hash=AuthUtils.hash_password(password),
-            role="user",
             department_id=department_id,
         )
         session.add_all([role, user])
@@ -180,10 +177,14 @@ async def _create_custom_user(
 
     response = await test_client.post("/api/auth/token", data={"username": user.uid, "password": password})
     assert response.status_code == 200, response.text
+    login_payload = response.json()
+    assert "role" not in login_payload
+    assert [item["code"] for item in login_payload["roles"]] == [role.code]
+    assert set(login_payload["effective_permissions"]) == set(permission_keys)
     return {
         "user_id": user_id,
         "role_id": role_id,
-        "headers": {"Authorization": f"Bearer {response.json()['access_token']}"},
+        "headers": {"Authorization": f"Bearer {login_payload['access_token']}"},
     }
 
 
@@ -197,13 +198,23 @@ async def _cleanup_custom_user(user_id: int, role_id: int) -> None:
         await session.execute(delete(Role).where(Role.id == role_id))
 
 
-async def _create_user(test_client, headers, label: str, role: str = "user", department_id: int | None = None) -> dict:
+async def _create_user(
+    test_client,
+    headers,
+    label: str,
+    role_code: str = "user",
+    department_id: int | None = None,
+) -> dict:
     suffix = uuid.uuid4().hex[:8]
     payload = {
         "username": f"u{label}_{suffix}",
         "password": f"Pw!{suffix}",
-        "role": role,
     }
+    if role_code != "user":
+        overview = await test_client.get("/api/roles/overview", headers=headers)
+        assert overview.status_code == 200, overview.text
+        role = next(item for item in overview.json()["roles"] if item["code"] == role_code)
+        payload["role_assignments"] = [{"role_id": role["id"], "scope_mode": "inherit"}]
     if department_id is not None:
         payload["department_id"] = department_id
 
@@ -254,7 +265,6 @@ async def test_admin_can_login_and_fetch_profile(test_client, admin_headers):
     profile_response = await test_client.get("/api/auth/me", headers=admin_headers)
     assert profile_response.status_code == 200
     data = profile_response.json()
-    assert data["role"] in {"admin", "superadmin"}
     assert data["username"]
     assert data["id"]
     assert data["roles"]
@@ -272,14 +282,13 @@ async def test_admin_can_create_and_delete_user(test_client, admin_headers):
     payload = {
         "username": f"rtu_{suffix}",
         "password": "routerTest123!",
-        "role": "user",
     }
     create_response = await test_client.post("/api/auth/users", json=payload, headers=admin_headers)
     assert create_response.status_code == 200, create_response.text
 
     created_user = create_response.json()
     assert created_user["username"] == payload["username"]
-    assert created_user["role"] == payload["role"]
+    assert "role" not in created_user
     assert [role["code"] for role in created_user["roles"]] == ["user"]
 
     delete_response = await test_client.delete(f"/api/auth/users/{created_user['id']}", headers=admin_headers)
@@ -294,7 +303,7 @@ async def test_admin_password_mutations_reject_passwords_shorter_than_eight_char
 ):
     create_response = await test_client.post(
         "/api/auth/users",
-        json={"username": f"weak_{uuid.uuid4().hex[:8]}", "password": "short", "role": "user"},
+        json={"username": f"weak_{uuid.uuid4().hex[:8]}", "password": "short"},
         headers=admin_headers,
     )
     assert create_response.status_code == 422, create_response.text
@@ -335,7 +344,7 @@ async def test_user_management_follows_authorized_organization_subtree(test_clie
             test_client,
             admin_headers,
             "a_admin",
-            role="admin",
+            role_code="admin",
             department_id=department_a["id"],
         )
         user_ids.append(backup_admin["id"])
@@ -371,7 +380,6 @@ async def test_user_management_follows_authorized_organization_subtree(test_clie
             json={
                 "username": f"ux_{uuid.uuid4().hex[:8]}",
                 "password": "routerTest123!",
-                "role": "user",
                 "department_id": department_b["id"],
             },
             headers=dept_a["admin_headers"],
@@ -644,7 +652,6 @@ async def test_role_delegation_requires_atomic_permissions_and_scope(test_client
                 username=f"pytest-delegate-split-{suffix}",
                 uid=f"pytest_delegate_split_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
-                role="user",
                 department_id=department_a["id"],
             )
             session.add(split_actor)

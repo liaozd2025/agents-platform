@@ -344,10 +344,6 @@ class KnowledgeBaseManager:
         Returns:
             bool: 是否有权限
         """
-        # 超级管理员有权访问所有
-        if user.get("role") == "superadmin":
-            return True
-
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
         kb_repo = KnowledgeBaseRepository()
@@ -404,18 +400,15 @@ class KnowledgeBaseManager:
         else:
             user_info = {
                 "uid": user.uid,
-                "role": user.role,
                 "department_id": user.department_id,
                 "department_ancestor_ids": getattr(user, "department_ancestor_ids", ()),
             }
 
-        user_role = user_info.get("role")
         user_dept = user_info.get("department_id")
-        logger.info(f"Getting databases for user with role {user_role} and department {user_dept}")
+        logger.info(f"Getting databases for user in department {user_dept}")
 
         all_databases = await self.get_databases()
 
-        # 超级管理员可以看到所有知识库
         filtered_databases: list[KnowledgeBaseSummary] = []
         for database in all_databases:
             permission = resolve_knowledge_base_permission(user_info, database)

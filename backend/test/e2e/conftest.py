@@ -74,8 +74,10 @@ def cleanup_e2e_test_resources(e2e_base_url: str):
             current_user = await client.get("/api/auth/me", headers=headers)
             if current_user.status_code != 200:
                 raise RuntimeError(f"E2E cleanup failed to read current user: {current_user.text}")
-            if current_user.json().get("role") not in {"admin", "superadmin"}:
-                raise RuntimeError("E2E cleanup credentials must belong to an admin or superadmin")
+            permissions = set(current_user.json().get("effective_permissions") or [])
+            required_permissions = {"agent:manage", "knowledge_base:manage"}
+            if not required_permissions.issubset(permissions):
+                raise RuntimeError("E2E cleanup credentials lack agent or knowledge base management permission")
 
             cleanup_uid = str(current_user.json().get("uid") or "")
             if not cleanup_uid:

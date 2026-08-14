@@ -38,7 +38,7 @@ class _FakeDB:
 
     async def execute(self, stmt):
         del stmt
-        return SimpleNamespace(scalar_one_or_none=lambda: SimpleNamespace(uid="user-1", role="user"))
+        return SimpleNamespace(scalar_one_or_none=lambda: SimpleNamespace(uid="user-1"))
 
     def add(self, item):
         self.added.append(item)
@@ -282,10 +282,19 @@ def _patch_run_record_creation(
             )
             return self.db.created_run
 
+    class UserRepo:
+        """为 Run 创建单测提供已授权的当前用户。"""
+
+        async def get_by_uid_with_db(self, _db, uid: str):
+            """返回请求中的当前用户。"""
+
+            return SimpleNamespace(uid=uid)
+
     monkeypatch.setattr(agent_run_service.agent_manager, "get_agent", lambda backend_id: _FakeBackend())
     monkeypatch.setattr(agent_run_service, "ConversationRepository", ConvRepo)
     monkeypatch.setattr(agent_run_service, "AgentRepository", AgentRepo)
     monkeypatch.setattr(agent_run_service, "AgentRunRepository", RunRepo)
+    monkeypatch.setattr(agent_run_service, "UserRepository", UserRepo)
 
 
 def _fake_create_run_record(captured: dict[str, object], *, run_id: str = "child-run"):

@@ -258,8 +258,8 @@ async def test_get_databases_by_user_sets_permission_and_redacts_readonly_secret
     )
     manager = KnowledgeBaseManager("/tmp/yuxi-test")
 
-    readonly = await manager.get_databases_by_user({"uid": "user_2", "role": "admin", "department_id": None})
-    owner = await manager.get_databases_by_user({"uid": "user_1", "role": "admin", "department_id": None})
+    readonly = await manager.get_databases_by_user({"uid": "user_2", "department_id": None})
+    owner = await manager.get_databases_by_user({"uid": "user_1", "department_id": None})
 
     assert readonly[0].effective_permission == ResourcePermission.READ
     assert readonly[0].can_manage is False

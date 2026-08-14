@@ -98,14 +98,9 @@
               </template>
 
               <template #status>
-                <div
-                  v-if="user.role === 'admin' || user.role === 'superadmin' || user.department_name"
-                  class="role-dept-badge"
-                >
-                  <span class="role-icon-wrapper" :class="getRoleClass(user.role)">
-                    <UserLock v-if="user.role === 'superadmin'" :size="14" />
-                    <UserStar v-else-if="user.role === 'admin'" :size="14" />
-                    <User v-else :size="14" />
+                <div v-if="user.department_name" class="role-dept-badge">
+                  <span class="role-icon-wrapper">
+                    <User :size="14" />
                   </span>
                   <span v-if="user.department_name" class="dept-text">
                     {{ user.department_name }}
@@ -252,16 +247,6 @@
           </a-form-item>
         </template>
 
-        <a-form-item
-          v-if="!canEditRoleAssignments && !userManagement.editMode"
-          label="角色"
-          class="form-item"
-        >
-          <a-select v-model:value="userManagement.form.role">
-            <a-select-option value="user">普通用户</a-select-option>
-          </a-select>
-        </a-form-item>
-
         <a-form-item v-if="canEditRoleAssignments" label="角色分配" required class="form-item">
           <div class="role-assignment-list">
             <section
@@ -304,7 +289,9 @@
                 >
                   <a-radio
                     value="inherit"
-                    :disabled="getRoleById(assignment.role_id)?.assignment_constraints?.can_inherit === false"
+                    :disabled="
+                      getRoleById(assignment.role_id)?.assignment_constraints?.can_inherit === false
+                    "
                   >
                     继承角色默认范围
                   </a-radio>
@@ -373,16 +360,7 @@ import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis'
 import { getRoleOverview } from '@/apis/role_api'
-import {
-  Plus,
-  SquarePen,
-  Trash2,
-  User,
-  UserLock,
-  UserStar,
-  RefreshCw,
-  Search
-} from 'lucide-vue-next'
+import { Plus, SquarePen, Trash2, User, RefreshCw, Search } from 'lucide-vue-next'
 import { formatDateTime } from '@/utils/time'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
@@ -392,10 +370,7 @@ import {
   isDepartmentSelectionCovered,
   normalizeDepartmentSelection
 } from '@/utils/departmentTree'
-import {
-  getAssignableScopeTypes,
-  resetRoleAssignmentScope
-} from '@/utils/roleOverview'
+import { getAssignableScopeTypes, resetRoleAssignmentScope } from '@/utils/roleOverview'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 
@@ -423,7 +398,6 @@ const userManagement = reactive({
     phoneNumber: '', // 手机号
     password: '',
     confirmPassword: '',
-    role: 'user', // 默认角色
     roleAssignments: [],
     reason: '',
     departmentId: null, // 部门ID
@@ -446,7 +420,7 @@ const canUpdateUsers = computed(() => userStore.hasPermission('user:update'))
 const canAssignRoles = computed(() => userStore.hasPermission('user:role_assign'))
 const canDeleteUsers = computed(() => userStore.hasPermission('user:delete'))
 const canEditRoleAssignments = computed(
-  () => userStore.isSuperAdmin || (userManagement.editMode && canAssignRoles.value)
+  () => canAssignRoles.value && (userManagement.editMode || userStore.hasPermission('role:read'))
 )
 const canChooseUserDepartment = computed(() =>
   userManagement.editMode ? canUpdateUsers.value : canCreateUsers.value
@@ -455,11 +429,11 @@ const activeRoles = computed(() => roleOverview.roles.filter((role) => role.is_a
 const roleFilterOptions = computed(() =>
   activeRoles.value.length
     ? activeRoles.value
-    : [
-        { code: 'superadmin', name: '超级管理员' },
-        { code: 'admin', name: '管理员' },
-        { code: 'user', name: '普通用户' }
-      ]
+    : Array.from(
+        new Map(
+          userManagement.users.flatMap((user) => user.roles || []).map((role) => [role.code, role])
+        ).values()
+      )
 )
 const hasSuperadminAssignment = computed(() =>
   userManagement.form.roleAssignments.some(
@@ -519,15 +493,15 @@ const fetchDepartments = async () => {
 }
 
 const fetchRoleOptions = async (force = false, targetUserId = null) => {
-  const assignmentTargetId = userStore.isSuperAdmin ? null : targetUserId
-  if (!userStore.isSuperAdmin && (!canAssignRoles.value || assignmentTargetId == null)) return
-  if (!force && roleOverview.roles.length && roleOverview.targetUserId === assignmentTargetId) return
+  if (targetUserId == null && !userStore.hasPermission('role:read')) return
+  if (targetUserId != null && !canAssignRoles.value) return
+  if (!force && roleOverview.roles.length && roleOverview.targetUserId === targetUserId) return
 
   try {
-    const overview = await getRoleOverview(assignmentTargetId)
+    const overview = await getRoleOverview(targetUserId)
     roleOverview.roles = overview.roles
     roleOverview.dataScopeTypes = overview.data_scope_types
-    roleOverview.targetUserId = assignmentTargetId
+    roleOverview.targetUserId = targetUserId
   } catch (error) {
     console.error('获取角色列表失败:', error)
     message.error(error.message || '获取角色列表失败')
@@ -538,8 +512,7 @@ const fetchRoleOptions = async (force = false, targetUserId = null) => {
 const getRoleById = (roleId) => roleOverview.roles.find((role) => role.id === roleId)
 const getScopeLabel = (scopeType) =>
   roleOverview.dataScopeTypes.find((scope) => scope.key === scopeType)?.label || scopeType
-const getUserRoleNames = (user) =>
-  (user.roles || []).map((role) => role.name).join('、') || user.role || '-'
+const getUserRoleNames = (user) => (user.roles || []).map((role) => role.name).join('、') || '-'
 
 const makeRoleAssignment = (role, existing = null) => ({
   role_id: role?.id ?? existing?.id ?? null,
@@ -549,8 +522,8 @@ const makeRoleAssignment = (role, existing = null) => ({
 })
 
 const getDefaultRoleAssignments = () => {
-  const userRole = roleOverview.roles.find((role) => role.code === 'user')
-  return userRole ? [makeRoleAssignment(userRole)] : []
+  const defaultRole = roleOverview.roles.find((role) => role.code === 'user')
+  return defaultRole ? [makeRoleAssignment(defaultRole)] : []
 }
 
 const getOverrideScopeOptions = (roleId) => {
@@ -739,8 +712,7 @@ const formatTime = (timeStr) => formatDateTime(timeStr)
 const getUserDefaultAvatarSrc = (user) => (user.uid ? generatePixelAvatar(user.uid) : '')
 
 const isUserDeleteDisabled = (user) =>
-  user.id === userStore.userId ||
-  (user.role === 'superadmin' && userStore.userRole !== 'superadmin')
+  user.id === userStore.userId || (user.roles || []).some((role) => role.code === 'superadmin')
 
 // 获取用户列表
 const fetchUsers = async () => {
@@ -788,7 +760,6 @@ const showAddUserModal = async () => {
     phoneNumber: '',
     password: '',
     confirmPassword: '',
-    role: 'user', // 默认角色为普通用户
     roleAssignments: getDefaultRoleAssignments(),
     reason: '',
     departmentId: userStore.departmentId,
@@ -828,7 +799,6 @@ const showEditUserModal = async (user) => {
     phoneNumber: user.phone_number || '',
     password: '',
     confirmPassword: '',
-    role: user.role,
     roleAssignments,
     reason: '',
     departmentId: user.department_id || null,
@@ -957,11 +927,9 @@ const handleUserFormSubmit = async () => {
         password: userManagement.form.password
       }
 
-      if (userStore.isSuperAdmin) {
+      if (canEditRoleAssignments.value) {
         createData.role_assignments = roleAssignments
         if (requiresSuperadminReason.value) createData.reason = userManagement.form.reason.trim()
-      } else {
-        createData.role = userManagement.form.role
       }
 
       if (canCreateUsers.value && userManagement.form.departmentId) {
@@ -1018,19 +986,6 @@ const confirmDeleteUser = (user) => {
       }
     }
   })
-}
-
-const getRoleClass = (role) => {
-  switch (role) {
-    case 'superadmin':
-      return 'role-superadmin'
-    case 'admin':
-      return 'role-admin'
-    case 'user':
-      return 'role-user'
-    default:
-      return 'role-default'
-  }
 }
 
 // 在组件挂载时获取用户列表
@@ -1200,16 +1155,7 @@ onMounted(async () => {
               justify-content: center;
               width: 16px;
               height: 16px;
-
-              &.role-superadmin {
-                color: var(--color-error-700);
-              }
-              &.role-admin {
-                color: var(--color-info-700);
-              }
-              &.role-user {
-                color: var(--color-success-700);
-              }
+              color: var(--gray-600);
             }
 
             .dept-text {

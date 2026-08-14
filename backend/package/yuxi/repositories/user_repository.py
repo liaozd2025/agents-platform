@@ -88,16 +88,12 @@ class UserRepository:
             result = await session.execute(select(User).where(User.phone_number == phone))
             return result.scalar_one_or_none()
 
-    async def list_users(
-        self, skip: int = 0, limit: int = 100, department_id: int | None = None, role: str | None = None
-    ) -> list[User]:
+    async def list_users(self, skip: int = 0, limit: int = 100, department_id: int | None = None) -> list[User]:
         """获取用户列表"""
         async with pg_manager.get_async_session_context() as session:
             query = select(User).where(User.is_deleted == 0)
             if department_id is not None:
                 query = query.where(User.department_id == department_id)
-            if role is not None:
-                query = query.where(User.role == role)
             query = query.order_by(User.id.asc()).offset(skip).limit(limit)
             result = await session.execute(query)
             return list(result.scalars().all())
@@ -107,7 +103,6 @@ class UserRepository:
         skip: int = 0,
         limit: int | None = 100,
         department_id: int | None = None,
-        role: str | None = None,
         *,
         session: AsyncSession | None = None,
     ) -> Annotated[list[tuple[User, str | None]], "用户列表，包含组织名称并挂载祖先路径"]:
@@ -130,8 +125,6 @@ class UserRepository:
         )
         if department_id is not None:
             query = query.where(User.department_id == department_id)
-        if role is not None:
-            query = query.where(User.role == role)
         query = query.order_by(User.id.asc()).offset(skip)
         if limit is not None:
             query = query.limit(limit)
@@ -144,27 +137,34 @@ class UserRepository:
             result = await managed_session.execute(query)
             return [(_attach_department_ancestors(user, path), name) for user, name, path in result.all()]
 
-    async def create(self, data: dict[str, Any]) -> User:
+    async def create(self, data: dict[str, Any], *, default_role_code: str = "user") -> User:
         """创建用户"""
         async with pg_manager.get_async_session_context() as session:
-            user = await self.create_with_db(session, data)
+            user = await self.create_with_db(session, data, default_role_code=default_role_code)
             await session.commit()
             await session.refresh(user)
         return user
 
-    async def create_with_db(self, db: AsyncSession, data: dict[str, Any]) -> User:
-        """在调用方事务中创建用户并立即绑定迁移期默认角色。"""
-
-        user = User(**data)
-        db.add(user)
-        await db.flush()
+    async def create_with_db(
+        self,
+        db: AsyncSession,
+        data: dict[str, Any],
+        *,
+        default_role_code: str = "user",
+    ) -> User:
+        """在调用方事务中创建用户并绑定默认角色。"""
 
         role = await db.scalar(
-            select(Role).options(selectinload(Role.default_departments)).where(Role.code == user.role)
+            select(Role).options(selectinload(Role.default_departments)).where(Role.code == default_role_code)
         )
         if role is None:
-            raise ValueError(f"用户角色 {user.role} 不存在")
-        db.add(UserRoleAssignment(user=user, role=role, scope_mode="inherit"))
+            raise ValueError(f"用户角色 {default_role_code} 不存在")
+
+        user = User(
+            **data,
+            role_assignments=[UserRoleAssignment(role=role, scope_mode="inherit")],
+        )
+        db.add(user)
         await db.flush()
         return user
 
@@ -228,14 +228,3 @@ class UserRepository:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(select(User.uid))
             return [uid for (uid,) in result.all()]
-
-    async def get_admin_count_in_department(self, department_id: int, exclude_user_id: int | None = None) -> int:
-        """统计部门中管理员数量"""
-        async with pg_manager.get_async_session_context() as session:
-            query = select(func.count(User.id)).where(
-                User.department_id == department_id, User.role == "admin", User.is_deleted == 0
-            )
-            if exclude_user_id is not None:
-                query = query.where(User.id != exclude_user_id)
-            result = await session.execute(query)
-            return result.scalar() or 0

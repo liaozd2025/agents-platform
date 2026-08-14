@@ -103,7 +103,7 @@
               :alt="userStore.username"
             />
             <span class="summary-name">{{ userStore.username || userStore.uid }}</span>
-            <span class="summary-role">{{ userRoleText }}</span>
+            <span class="summary-role">{{ assignedRolesText }}</span>
           </div>
         </div>
       </aside>
@@ -164,7 +164,13 @@
             <UserManagementComponent />
           </div>
 
-          <div v-show="activeTab === 'department'" v-if="userStore.isSuperAdmin">
+          <div
+            v-show="activeTab === 'department'"
+            v-if="
+              userStore.hasPermission('department:read') ||
+              userStore.hasPermission('department:read_all')
+            "
+          >
             <DepartmentManagementComponent />
           </div>
 
@@ -235,12 +241,6 @@ const settingsTabIcons = {
   apiKeys: Key,
   ocr: ScanText
 }
-const roleLabels = {
-  superadmin: '超级管理员',
-  admin: '管理员',
-  user: '普通用户'
-}
-
 const userStore = useUserStore()
 const activeTab = ref('account')
 const settingsSearch = ref('')
@@ -255,8 +255,6 @@ const visible = computed({
 })
 const permissions = computed(() => ({
   isLoggedIn: userStore.isLoggedIn,
-  isAdmin: userStore.isAdmin,
-  isSuperAdmin: userStore.isSuperAdmin,
   effectivePermissions: userStore.effectivePermissions
 }))
 const allNavigationGroups = computed(() => getSettingsNavigationGroups(permissions.value))
@@ -267,7 +265,9 @@ const mobileNavigationItems = computed(() =>
   allNavigationGroups.value.flatMap((group) => group.items)
 )
 const availableTabs = computed(() => mobileNavigationItems.value.map((item) => item.id))
-const userRoleText = computed(() => roleLabels[userStore.userRole] || '普通用户')
+const assignedRolesText = computed(
+  () => userStore.userRoles.map((role) => role.name).join('、') || '未分配角色'
+)
 
 const setActiveTab = (preferredTab) => {
   if (preferredTab && availableTabs.value.includes(preferredTab)) {

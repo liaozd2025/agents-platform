@@ -61,7 +61,6 @@ async def _create_test_user(test_client, admin_headers, department_id):
         json={
             "username": f"pytest_user_{suffix}",
             "password": password,
-            "role": "user",
             "department_id": department_id,
         },
         headers=admin_headers,

@@ -624,22 +624,62 @@ class PostgresManager(metaclass=SingletonMeta):
             """,
             """
             DO $$
+            DECLARE
+                has_unknown_role BOOLEAN;
             BEGIN
-                IF EXISTS (SELECT 1 FROM users WHERE role NOT IN ('superadmin', 'admin', 'user')) THEN
-                    RAISE EXCEPTION 'users.role 存在未知角色，无法安全回填用户角色分配';
+                IF EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'users'
+                      AND column_name = 'role'
+                ) THEN
+                    EXECUTE 'SELECT EXISTS (
+                        SELECT 1 FROM users WHERE role NOT IN (''superadmin'', ''admin'', ''user'')
+                    )' INTO has_unknown_role;
+                    IF has_unknown_role THEN
+                        RAISE EXCEPTION 'users.role 存在未知角色，无法安全回填用户角色分配';
+                    END IF;
+
+                    EXECUTE 'INSERT INTO user_role_assignments (user_id, role_id, scope_mode)
+                        SELECT users.id, roles.id, ''inherit''
+                        FROM users
+                        JOIN roles ON roles.code = users.role
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM user_role_assignments existing
+                            WHERE existing.user_id = users.id
+                        )
+                        ON CONFLICT (user_id, role_id) DO NOTHING';
+                    EXECUTE 'ALTER TABLE users DROP COLUMN role';
+                END IF;
+
+                IF EXISTS (
+                    SELECT 1
+                    FROM users
+                    WHERE users.is_deleted = 0
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM user_role_assignments assignments
+                          JOIN roles ON roles.id = assignments.role_id AND roles.is_active IS TRUE
+                          WHERE assignments.user_id = users.id
+                      )
+                ) THEN
+                    RAISE EXCEPTION '有效用户缺少有效角色分配';
+                END IF;
+
+                IF EXISTS (SELECT 1 FROM users WHERE is_deleted = 0)
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM users
+                       JOIN user_role_assignments assignments ON assignments.user_id = users.id
+                       JOIN roles ON roles.id = assignments.role_id
+                       WHERE users.is_deleted = 0
+                         AND roles.is_active IS TRUE
+                         AND roles.code = 'superadmin'
+                   ) THEN
+                    RAISE EXCEPTION '系统必须至少保留一个有效超级管理员';
                 END IF;
             END $$;
-            """,
-            """
-            INSERT INTO user_role_assignments (user_id, role_id, scope_mode)
-            SELECT users.id, roles.id, 'inherit'
-            FROM users
-            JOIN roles ON roles.code = users.role
-            WHERE NOT EXISTS (
-                SELECT 1 FROM user_role_assignments existing
-                WHERE existing.user_id = users.id
-            )
-            ON CONFLICT (user_id, role_id) DO NOTHING
             """,
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS mcp_dependencies JSONB DEFAULT '[]'::jsonb",

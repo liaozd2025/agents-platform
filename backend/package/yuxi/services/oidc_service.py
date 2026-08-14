@@ -17,8 +17,10 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from yuxi.permissions.authorization import build_authorization_context
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.operation_log_service import log_operation
+from yuxi.services.user_role_service import serialize_user
 from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, Department, User
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -517,7 +519,6 @@ async def _create_oidc_binding_placeholder(db, sub: str, target_user: User) -> N
         phone_number=None,
         avatar=None,
         password_hash=password_hash,
-        role=target_user.role,
         department_id=target_user.department_id,
         is_deleted=1,  # 标记为deleted，不参与实际登录
         last_login=utc_now_naive(),
@@ -615,7 +616,6 @@ async def create_oidc_user(db, user_info: dict, department_id: int | None = None
                     "phone_number": None,
                     "avatar": None,
                     "password_hash": password_hash,
-                    "role": "user",
                     "department_id": department_id,
                     "last_login": utc_now_naive(),
                 }
@@ -793,6 +793,10 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
     if user.is_deleted:
         return _redirect_to_login_with_error("该账户已注销")
 
+    user = await UserRepository().get_by_id_with_db(db, user.id)
+    if user is None:
+        return _redirect_to_login_with_error("用户账户不存在")
+
     token_data = {"sub": str(user.id)}
     jwt_token = AuthUtils.create_access_token(token_data)
 
@@ -807,13 +811,8 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
         "access_token": jwt_token,
         "token_type": "bearer",
         "user_id": user.id,
-        "username": user.username,
-        "uid": user.uid,
-        "phone_number": user.phone_number,
-        "avatar": user.avatar,
-        "role": user.role,
-        "department_id": user.department_id,
-        "department_name": department_name,
+        **serialize_user(user, department_name),
+        "effective_permissions": list(build_authorization_context(user).effective_permissions),
     }
 
     exchange_code = OIDCUtils.generate_login_code(response_data)

@@ -10,7 +10,7 @@ from server.routers.skill_router import skills, user_skills
 from server.utils.auth_middleware import get_authorization_context, get_db
 
 
-def _build_app(*, role: str = "admin", permissions: set[str] | None = None) -> FastAPI:
+def _build_app(*, uid: str = "admin", permissions: set[str] | None = None) -> FastAPI:
     app = FastAPI()
     app.include_router(skills, prefix="/api")
     app.include_router(user_skills, prefix="/api")
@@ -21,10 +21,9 @@ def _build_app(*, role: str = "admin", permissions: set[str] | None = None) -> F
 
     async def fake_authorization_context():
         user = User(
-            username=role,
-            uid=role,
+            username=uid,
+            uid=uid,
             password_hash="x",
-            role=role,
             department_id=1,
         )
         return SimpleNamespace(
@@ -96,7 +95,7 @@ def test_list_visible_skills_route_allows_normal_user_readonly_items(monkeypatch
         fake_list_visible_skills_for_management,
     )
 
-    client = TestClient(_build_app(role="user", permissions={"skill:use"}))
+    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
     resp = client.get("/api/system/skills")
 
     assert resp.status_code == 200, resp.text
@@ -116,7 +115,7 @@ def test_list_accessible_skills_route(monkeypatch):
 
     monkeypatch.setattr("server.routers.skill_router.list_accessible_skills", fake_list_accessible_skills)
 
-    client = TestClient(_build_app(role="user", permissions={"skill:use"}))
+    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
     resp = client.get("/api/skills/accessible")
 
     assert resp.status_code == 200, resp.text
@@ -137,7 +136,7 @@ def test_list_skill_cards_route_forces_personal_refresh(monkeypatch):
 
     monkeypatch.setattr("server.routers.skill_router.list_skill_cards_for_user", fake_list_skill_cards)
 
-    client = TestClient(_build_app(role="user", permissions={"skill:use"}))
+    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
     resp = client.get("/api/skills?refresh_personal=true")
 
     assert resp.status_code == 200, resp.text
@@ -162,7 +161,7 @@ def test_personal_skill_confirm_and_delete_routes(monkeypatch):
     monkeypatch.setattr("server.routers.skill_router.confirm_personal_skill_install_draft", fake_confirm)
     monkeypatch.setattr("server.routers.skill_router.delete_personal_skill", fake_delete)
 
-    client = TestClient(_build_app(role="user", permissions={"skill:use"}))
+    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
     confirm_resp = client.post(
         "/api/skills/personal/install-drafts/draft-1/confirm",
         json={"slugs": ["demo-v2"]},
@@ -185,7 +184,7 @@ def test_prepare_skill_upload_route(monkeypatch):
 
     monkeypatch.setattr("server.routers.skill_router.prepare_skill_upload", fake_prepare_skill_upload)
 
-    client = TestClient(_build_app(role="user", permissions={"skill:use"}))
+    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
     resp = client.post(
         "/api/skills/import/prepare",
         files={"file": ("SKILL.md", b"---\nname: demo\ndescription: demo skill\n---\n", "text/markdown")},
@@ -222,7 +221,7 @@ def test_remote_skill_prepare_and_shared_confirm_use_function_permissions(monkey
     monkeypatch.setattr("server.routers.skill_router.prepare_remote_skill_install", fake_prepare_remote_skill_install)
     monkeypatch.setattr("server.routers.skill_router.confirm_skill_install_draft", fake_confirm_skill_install_draft)
 
-    client = TestClient(_build_app(role="user", permissions={"skill:manage"}))
+    client = TestClient(_build_app(uid="user", permissions={"skill:manage"}))
     prepare_resp = client.post(
         "/api/skills/remote/prepare",
         json={"source": "anthropics/skills", "skills": ["frontend-design"]},
@@ -261,7 +260,7 @@ def test_remote_skill_list_route_reads_policy_independently(monkeypatch):
 
     monkeypatch.setattr("server.routers.skill_router.list_remote_skills", fake_list_remote_skills)
 
-    response = TestClient(_build_app(role="user", permissions={"skill:use"})).post(
+    response = TestClient(_build_app(uid="user", permissions={"skill:use"})).post(
         "/api/skills/remote/list",
         json={"source": "owner/repo"},
     )
@@ -277,7 +276,7 @@ def test_normal_user_cannot_confirm_shared_skill_install(monkeypatch):
 
     monkeypatch.setattr("server.routers.skill_router.confirm_skill_install_draft", unexpected_confirm)
 
-    client = TestClient(_build_app(role="user", permissions={"skill:use"}))
+    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
     response = client.post(
         "/api/skills/install-drafts/draft-remote/confirm",
         json={"share_config": None, "slugs": ["frontend-design"]},
@@ -287,7 +286,7 @@ def test_normal_user_cannot_confirm_shared_skill_install(monkeypatch):
 
 
 def test_skill_routes_return_403_without_function_permission():
-    client = TestClient(_build_app(role="user", permissions=set()))
+    client = TestClient(_build_app(uid="user", permissions=set()))
 
     assert client.get("/api/skills").status_code == 403
     assert client.get("/api/system/skills").status_code == 403
@@ -299,7 +298,7 @@ def test_skill_manage_route_returns_404_for_invisible_resource(monkeypatch):
 
     monkeypatch.setattr("server.routers.skill_router.update_skill_enabled", fake_update_skill_enabled)
 
-    response = TestClient(_build_app(role="user", permissions={"skill:manage"})).put(
+    response = TestClient(_build_app(uid="user", permissions={"skill:manage"})).put(
         "/api/system/skills/hidden/enabled",
         json={"enabled": True},
     )
@@ -316,7 +315,7 @@ def test_discard_skill_draft_route(monkeypatch):
 
     monkeypatch.setattr("server.routers.skill_router.discard_skill_install_draft", fake_discard_skill_install_draft)
 
-    client = TestClient(_build_app(role="user", permissions={"skill:use"}))
+    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
     resp = client.delete("/api/skills/install-drafts/draft-1")
 
     assert resp.status_code == 200, resp.text
@@ -368,7 +367,7 @@ def test_skill_tree_and_file_routes_check_management_read_permission(monkeypatch
     monkeypatch.setattr("server.routers.skill_router.get_skill_tree", fake_get_skill_tree)
     monkeypatch.setattr("server.routers.skill_router.read_skill_file", fake_read_skill_file)
 
-    client = TestClient(_build_app(role="user", permissions={"skill:use"}))
+    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
     tree_resp = client.get("/api/system/skills/demo/tree")
     file_resp = client.get("/api/system/skills/demo/file?path=SKILL.md")
 
@@ -448,7 +447,7 @@ def test_update_skill_dependencies_route_passes_operator(monkeypatch):
 
 
 def test_builtin_routes_require_manage_permission():
-    client = TestClient(_build_app(role="admin", permissions={"skill:use"}))
+    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
 
     resp = client.get("/api/system/skills/builtin")
 

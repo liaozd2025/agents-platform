@@ -183,7 +183,7 @@ async def test_create_agent_allows_same_explicit_share_scope_for_normal_user(mon
 
 
 def test_user_shared_agent_is_manageable_for_normal_user():
-    user = User(username="user", uid="user", password_hash="x", role="user", department_id=1)
+    user = User(username="user", uid="user", password_hash="x", department_id=1)
     agent = Agent(
         slug="shared-bot",
         name="Shared Bot",

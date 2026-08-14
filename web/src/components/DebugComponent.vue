@@ -19,7 +19,10 @@
           >
           </a-button>
           <a-button @click="clearLogs" :icon="h(ClearOutlined)" class="icon-only"> </a-button>
-          <a-button v-if="userStore.hasPermission('system_config:manage')" @click="printSystemConfig">
+          <a-button
+            v-if="userStore.hasPermission('system_config:manage')"
+            @click="printSystemConfig"
+          >
             <template #icon><SettingOutlined /></template>
             系统配置
           </a-button>
@@ -122,7 +125,10 @@
         <a-list item-layout="horizontal" :data-source="state.users">
           <template #renderItem="{ item }">
             <a-list-item @click="switchToUser(item)" style="cursor: pointer">
-              <a-list-item-meta :title="item.username" :description="item.role" />
+              <a-list-item-meta
+                :title="item.username"
+                :description="(item.roles || []).map((role) => role.name).join('、')"
+              />
             </a-list-item>
           </template>
           <template #empty>
@@ -421,10 +427,9 @@ const printUserInfo = () => {
     uid: userStore.uid,
     phoneNumber: userStore.phoneNumber,
     avatar: userStore.avatar,
-    userRole: userStore.userRole,
-    isLoggedIn: userStore.isLoggedIn,
-    isAdmin: userStore.isAdmin,
-    isSuperAdmin: userStore.isSuperAdmin
+    userRoles: userStore.userRoles,
+    effectivePermissions: userStore.effectivePermissions,
+    isLoggedIn: userStore.isLoggedIn
   }
   console.log(JSON.stringify(userInfo, null, 2))
 }
@@ -498,7 +503,7 @@ const printAgentConfig = async () => {
       })
 
       // 当前智能体配置（仅管理员可见）
-      if (userStore.isAdmin) {
+      if (userStore.hasPermission('agent:manage')) {
         console.log('当前智能体配置:', {
           current: toRaw(agentStore.agentConfig),
           original: toRaw(agentStore.originalAgentConfig),
@@ -517,7 +522,7 @@ const printAgentConfig = async () => {
     })
 
     // 配置项信息（管理员可见）
-    if (userStore.isAdmin && agentStore.selectedAgent) {
+    if (userStore.hasPermission('agent:manage') && agentStore.selectedAgent) {
       console.log('可配置项:', toRaw(agentStore.configurableItems))
     }
   } catch (error) {

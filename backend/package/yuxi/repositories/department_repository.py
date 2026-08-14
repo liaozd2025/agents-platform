@@ -101,6 +101,7 @@ class DepartmentRepository:
 
     async def create_child(
         self,
+        session: AsyncSession,
         *,
         name: str,
         description: str | None,
@@ -108,17 +109,16 @@ class DepartmentRepository:
         node_type: str = DEPARTMENT_NODE_TYPE,
     ) -> Department:
         """在指定父节点下创建组织节点，落库后回填物化路径"""
-        async with pg_manager.get_async_session_context() as session:
-            department = Department(
-                name=name,
-                description=description,
-                parent_id=parent.id,
-                node_type=node_type,
-            )
-            session.add(department)
-            # 路径依赖自增主键，须先 flush 拿到 ID 再拼接
-            await session.flush()
-            department.path = build_child_path(parent.path, department.id)
+        department = Department(
+            name=name,
+            description=description,
+            parent_id=parent.id,
+            node_type=node_type,
+        )
+        session.add(department)
+        # 路径依赖自增主键，须先 flush 拿到 ID 再拼接
+        await session.flush()
+        department.path = build_child_path(parent.path, department.id)
         return department
 
     async def create_group_root(self, *, name: str, description: str | None) -> Department:

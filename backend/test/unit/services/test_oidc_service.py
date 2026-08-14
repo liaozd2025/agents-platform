@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
 
 import pytest
 import pytest_asyncio
@@ -13,7 +13,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 os.environ.setdefault("OPENAI_API_KEY", "dummy")
 
 from yuxi.services import oidc_service
-from yuxi.storage.postgres.models_business import GROUP_NODE_TYPE, ROOT_DEPARTMENT_ID, Department, User
+from yuxi.storage.postgres.models_business import (
+    Base,
+    GROUP_NODE_TYPE,
+    ROOT_DEPARTMENT_ID,
+    Department,
+    Role,
+    User,
+    UserRoleAssignment,
+)
 
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
@@ -23,8 +31,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 async def oidc_session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        await conn.run_sync(Department.__table__.create)
-        await conn.run_sync(User.__table__.create)
+        await conn.run_sync(Base.metadata.create_all)
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
@@ -37,6 +44,15 @@ async def oidc_session():
                 path=f"/{ROOT_DEPARTMENT_ID}/",
             )
         )
+        session.add(
+            Role(
+                code="user",
+                name="普通用户",
+                is_builtin=True,
+                is_active=True,
+                default_scope_type="self",
+            )
+        )
         await session.commit()
         yield session
 
@@ -44,8 +60,10 @@ async def oidc_session():
 
 
 async def _create_user(session, uid: str = "alice") -> User:
-    user = User(username="alice", uid=uid, password_hash="x", role="user", is_deleted=0)
+    role = await session.scalar(select(Role).where(Role.code == "user"))
+    user = User(username="alice", uid=uid, password_hash="x", is_deleted=0)
     session.add(user)
+    session.add(UserRoleAssignment(user=user, role=role, scope_mode="inherit"))
     await session.commit()
     await session.refresh(user)
     return user
@@ -69,14 +87,13 @@ async def test_create_oidc_user_always_uses_builtin_user_role(monkeypatch):
     monkeypatch.setattr(oidc_service.oidc_config, "use_raw_username", False)
     monkeypatch.setattr(oidc_service, "build_unique_oidc_username", AsyncMock(return_value="新用户"))
 
-    user = await oidc_service.create_oidc_user(
+    await oidc_service.create_oidc_user(
         AsyncMock(),
         {"sub": "new-sub", "name": "新用户", "username": "new-user"},
         ROOT_DEPARTMENT_ID,
     )
 
-    assert user.role == "user"
-    assert captured["role"] == "user"
+    assert "role" not in captured
 
 
 async def test_resolve_oidc_department_returns_unique_exact_match(oidc_session):
@@ -195,6 +212,11 @@ async def test_oidc_callback_allows_existing_binding_when_sub_contains_colon(oid
 
     assert response.status_code == 302
     assert unquote(response.headers["location"]).startswith("/auth/oidc/callback?code=")
+    exchange_code = parse_qs(urlparse(response.headers["location"]).query)["code"][0]
+    login_payload = await oidc_service.oidc_exchange_code_handler(exchange_code)
+    assert "role" not in login_payload
+    assert [role["code"] for role in login_payload["roles"]] == ["user"]
+    assert login_payload["effective_permissions"] == []
     await oidc_session.refresh(user)
     assert user.department_id == department.id
 
@@ -227,11 +249,12 @@ async def test_oidc_callback_auto_create_uses_unique_existing_department(oidc_se
             username=user_info["username"],
             uid=f"oidc:{user_info['sub']}",
             password_hash="x",
-            role="user",
             department_id=department_id,
             is_deleted=0,
         )
         db.add(user)
+        role = await db.scalar(select(Role).where(Role.code == "user"))
+        db.add(UserRoleAssignment(user=user, role=role, scope_mode="inherit"))
         await db.commit()
         await db.refresh(user)
         return user

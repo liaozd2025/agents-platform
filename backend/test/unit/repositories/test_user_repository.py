@@ -45,12 +45,11 @@ async def test_create_user_adds_matching_role_assignment_in_same_transaction(mon
             "username": "new-user",
             "uid": "new-user",
             "password_hash": "unused",
-            "role": "user",
         }
     )
 
     assert session.added[0] is user
-    assignment = session.added[1]
+    assignment = user.role_assignments[0]
     assert isinstance(assignment, UserRoleAssignment)
     assert assignment.user is user
     assert assignment.role is role

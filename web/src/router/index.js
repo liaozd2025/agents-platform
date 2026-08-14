@@ -2,7 +2,6 @@ import { createRouter, createWebHistory } from 'vue-router'
 import AppLayout from '@/layouts/AppLayout.vue'
 import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
-import { useAgentStore } from '@/stores/agent'
 import { sanitizeRedirect } from '@/utils/oidcAutoStart'
 
 const router = createRouter({
@@ -162,8 +161,6 @@ const router = createRouter({
 router.beforeEach(async (to) => {
   // 检查路由是否需要认证
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true)
-  const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin)
-  const requiresSuperAdmin = to.matched.some((record) => record.meta.requiresSuperAdmin)
   const requiredPermissions = to.matched
     .map((record) => record.meta.requiredPermission)
     .filter(Boolean)
@@ -185,44 +182,12 @@ router.beforeEach(async (to) => {
   }
 
   const isLoggedIn = userStore.isLoggedIn
-  const isAdmin = userStore.isAdmin
-  const isSuperAdmin = userStore.isSuperAdmin
 
   // 如果路由需要认证但用户未登录
   if (requiresAuth && !isLoggedIn) {
     // 保存尝试访问的路径，登录后跳转
     sessionStorage.setItem('redirect', to.fullPath)
     return '/login'
-  }
-
-  // 如果路由需要管理员权限但用户不是管理员
-  if (requiresAdmin && !isAdmin) {
-    // 如果是普通用户，跳转到聊天页空态
-    try {
-      const agentStore = useAgentStore()
-      // 等待 store 初始化完成
-      if (!agentStore.isInitialized) {
-        await agentStore.initialize()
-      }
-      return '/agent'
-    } catch (error) {
-      console.error('获取智能体信息失败:', error)
-      return '/agent'
-    }
-  }
-
-  // 如果路由需要超级管理员权限但用户不是超级管理员
-  if (requiresSuperAdmin && !isSuperAdmin) {
-    try {
-      const agentStore = useAgentStore()
-      if (!agentStore.isInitialized) {
-        await agentStore.initialize()
-      }
-      return '/agent'
-    } catch (error) {
-      console.error('获取智能体信息失败:', error)
-      return '/agent'
-    }
   }
 
   if (requiredPermissions.some((permission) => !userStore.hasPermission(permission))) {

@@ -17,7 +17,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 async def test_superadmin_can_view_builtin_roles_permissions_scopes_and_members(test_client, admin_headers):
     profile_response = await test_client.get("/api/auth/me", headers=admin_headers)
     assert profile_response.status_code == 200, profile_response.text
-    if profile_response.json()["role"] != "superadmin":
+    if "superadmin" not in {role["code"] for role in profile_response.json()["roles"]}:
         pytest.fail("This test requires TEST_USERNAME to be a superadmin account.")
 
     response = await test_client.get("/api/roles/overview", headers=admin_headers)
@@ -67,6 +67,7 @@ async def test_role_read_permission_changes_take_effect_on_next_request(test_cli
     admin_headers = role_test_users["admin_headers"]
     standard = role_test_users["standard"]
     role_code = f"pytest_live_auth_{uuid.uuid4().hex[:10]}"
+    delegated_role_code = f"pytest_delegated_manage_{uuid.uuid4().hex[:8]}"
     role_id = None
     user_role_id = None
     try:
@@ -107,11 +108,11 @@ async def test_role_read_permission_changes_take_effect_on_next_request(test_cli
         assert profile.status_code == 200, profile.text
         assert profile.json()["effective_permissions"] == ["role:read", "role:manage"]
 
-        forbidden_manage = await test_client.post(
+        delegated_manage = await test_client.post(
             "/api/roles",
             json={
-                "code": f"pytest_forbidden_manage_{uuid.uuid4().hex[:8]}",
-                "name": "不应创建的角色",
+                "code": delegated_role_code,
+                "name": "权限管理域角色",
                 "description": "",
                 "permission_keys": [],
                 "default_scope_type": "none",
@@ -119,7 +120,7 @@ async def test_role_read_permission_changes_take_effect_on_next_request(test_cli
             },
             headers=standard["headers"],
         )
-        assert forbidden_manage.status_code == 403, forbidden_manage.text
+        assert delegated_manage.status_code == 201, delegated_manage.text
 
         updated = await test_client.put(
             f"/api/roles/{role_id}",
@@ -146,7 +147,7 @@ async def test_role_read_permission_changes_take_effect_on_next_request(test_cli
                 json={"role_assignments": [{"role_id": user_role_id, "scope_mode": "inherit"}]},
                 headers=admin_headers,
             )
-        await _cleanup_custom_roles([role_code])
+        await _cleanup_custom_roles([role_code, delegated_role_code])
 
 
 async def _cleanup_custom_roles(role_codes: list[str]) -> None:
@@ -186,13 +187,11 @@ async def role_test_users(test_client):
                 username=f"pytest-role-admin-{suffix}",
                 uid=f"pytest_role_admin_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
-                role="superadmin",
             ),
             User(
                 username=f"pytest-role-user-{suffix}",
                 uid=f"pytest_role_user_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
-                role="user",
             ),
         ]
         session.add_all(users)
@@ -458,7 +457,7 @@ async def test_superadmin_can_assign_multiple_roles_with_narrower_scope(test_cli
 
         assert response.status_code == 200, response.text
         payload = response.json()
-        assert payload["role"] == "admin"
+        assert "role" not in payload
         assert {role["code"] for role in payload["roles"]} == {"admin", "user"}
         admin_assignment = next(role for role in payload["roles"] if role["code"] == "admin")
         assert admin_assignment["scope_mode"] == "override"
@@ -541,7 +540,7 @@ async def test_role_assignments_reject_expansion_and_protect_superadmin_changes(
         headers=admin_headers,
     )
     assert grant_response.status_code == 200, grant_response.text
-    assert grant_response.json()["role"] == "superadmin"
+    assert "role" not in grant_response.json()
     assert [role["code"] for role in grant_response.json()["roles"]] == ["superadmin"]
 
     revoke_without_reason = await test_client.put(
@@ -561,7 +560,7 @@ async def test_role_assignments_reject_expansion_and_protect_superadmin_changes(
         headers=admin_headers,
     )
     assert revoke_response.status_code == 200, revoke_response.text
-    assert revoke_response.json()["role"] == "user"
+    assert "role" not in revoke_response.json()
 
     async with pg_manager.get_async_session_context() as session:
         audits = list(

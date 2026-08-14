@@ -10,6 +10,10 @@ from server.routers import knowledge_router
 pytestmark = pytest.mark.asyncio
 
 
+async def _allow_knowledge_manage(_kb_id: str | None, _user) -> None:
+    """让工作区导入单测专注文件处理主路径。"""
+
+
 async def test_import_workspace_files_uploads_workspace_file_to_minio(tmp_path, monkeypatch):
     source = tmp_path / "note.md"
     source.write_text("# workspace note\n", encoding="utf-8")
@@ -39,6 +43,7 @@ async def test_import_workspace_files_uploads_workspace_file_to_minio(tmp_path, 
         "_ensure_database_supports_documents",
         fake_ensure_database_supports_documents,
     )
+    monkeypatch.setattr(knowledge_router, "_require_manage_permission_if_kb_id", _allow_knowledge_manage)
     monkeypatch.setattr(knowledge_router, "resolve_workspace_file_path", lambda **_kwargs: source)
     monkeypatch.setattr(knowledge_router.knowledge_base, "file_existed_in_db", fake_file_existed_in_db)
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_same_name_files", fake_get_same_name_files)
@@ -73,6 +78,7 @@ async def test_import_workspace_files_rejects_directory(tmp_path, monkeypatch):
         "_ensure_database_supports_documents",
         fake_ensure_database_supports_documents,
     )
+    monkeypatch.setattr(knowledge_router, "_require_manage_permission_if_kb_id", _allow_knowledge_manage)
     monkeypatch.setattr(knowledge_router, "resolve_workspace_file_path", fake_resolve_workspace_file_path)
 
     with pytest.raises(HTTPException) as exc_info:

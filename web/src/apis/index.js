@@ -19,20 +19,7 @@ export * from './user_config_api' // 用户配置 API
 export * from './role_api' // 角色与权限 API
 
 // 导出基础工具函数
-export {
-  apiGet,
-  apiPost,
-  apiPut,
-  apiDelete,
-  apiAdminGet,
-  apiAdminPost,
-  apiAdminPut,
-  apiAdminDelete,
-  apiSuperAdminGet,
-  apiSuperAdminPost,
-  apiSuperAdminPut,
-  apiSuperAdminDelete
-} from './base'
+export { apiGet, apiPost, apiPut, apiDelete } from './base'
 
 /**
  * API模块说明:

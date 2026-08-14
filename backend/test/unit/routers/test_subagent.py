@@ -11,9 +11,8 @@ from server.utils.auth_middleware import get_authorization_context, get_db
 agent_router_module = importlib.import_module("server.routers.agent_router")
 
 
-def _user(role: str = "admin"):
-    uid = "admin" if role in {"admin", "superadmin"} else "user"
-    return SimpleNamespace(uid=uid, role=role, department_id=1)
+def _user(uid: str = "admin"):
+    return SimpleNamespace(uid=uid, department_id=1)
 
 
 def _agent(slug: str, *, backend_id: str = "ChatbotAgent", is_subagent: bool = False):
@@ -91,7 +90,7 @@ class _RejectingCreateRepo(_ListRepo):
         raise ValueError("SubAgentBackend 与 is_subagent 必须保持一致")
 
 
-def _build_app(monkeypatch, repo_cls, *, role: str = "admin") -> TestClient:
+def _build_app(monkeypatch, repo_cls, *, uid: str = "admin") -> TestClient:
     monkeypatch.setattr(agent_router_module, "agent_manager", _FakeAgentManager())
     monkeypatch.setattr(agent_router_module, "AgentRepository", repo_cls)
 
@@ -103,7 +102,7 @@ def _build_app(monkeypatch, repo_cls, *, role: str = "admin") -> TestClient:
 
     async def fake_authorization():
         return SimpleNamespace(
-            user=_user(role),
+            user=_user(uid),
             has_permission=lambda permission: permission in {"agent:use", "agent:manage"},
         )
 
@@ -151,7 +150,7 @@ def test_agent_detail_can_load_subagent_definition(monkeypatch):
 
 def test_normal_user_can_create_agent(monkeypatch):
     _CreateRepo.created_payload = None
-    client = _build_app(monkeypatch, _CreateRepo, role="user")
+    client = _build_app(monkeypatch, _CreateRepo, uid="user")
 
     response = client.post(
         "/api/agent",

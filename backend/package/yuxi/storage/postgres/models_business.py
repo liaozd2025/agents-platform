@@ -80,7 +80,6 @@ class User(Base):
     phone_number = Column(String, nullable=True, unique=True, index=True)  # 手机号
     avatar = Column(String, nullable=True)  # 头像URL
     password_hash = Column(String, nullable=False)
-    role = Column(String, nullable=False, default="user")  # 角色: superadmin, admin, user
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)  # 部门ID
     created_at = Column(DateTime, default=utc_now_naive)
     last_login = Column(DateTime, nullable=True)
@@ -114,7 +113,6 @@ class User(Base):
             "uid": self.uid,
             "phone_number": self.phone_number,
             "avatar": normalize_public_minio_url(self.avatar),
-            "role": self.role,
             "department_id": self.department_id,
             "created_at": format_utc_datetime(self.created_at),
             "last_login": format_utc_datetime(self.last_login),

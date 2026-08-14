@@ -192,9 +192,6 @@ def resolve_resource_permission(
 ) -> ResourcePermission:
     """解析资源所有权和共享范围授予的有效权限。"""
 
-    if _value(user, "role") == "superadmin":
-        return ResourcePermission.MANAGE
-
     raw_share_config = _value(resource, "share_config")
     config = normalize_permission_config(
         raw_share_config,

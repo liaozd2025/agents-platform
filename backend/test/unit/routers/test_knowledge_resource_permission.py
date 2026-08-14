@@ -14,7 +14,7 @@ def test_knowledge_read_combines_function_permission_and_resource_scope(monkeypa
     """功能权限缺失返回 403，越出资源范围返回 404。"""
 
     state = {"permissions": set(), "shared": True}
-    user = SimpleNamespace(uid="reader", role="user", department_id=2)
+    user = SimpleNamespace(uid="reader", department_id=2)
 
     async def fake_authorization():
         return SimpleNamespace(
@@ -24,9 +24,7 @@ def test_knowledge_read_combines_function_permission_and_resource_scope(monkeypa
 
     async def fake_get_database_info(_kb_id):
         read_scope = (
-            {"access_level": "global"}
-            if state["shared"]
-            else {"access_level": "user", "user_uids": ["another-user"]}
+            {"access_level": "global"} if state["shared"] else {"access_level": "user", "user_uids": ["another-user"]}
         )
         return {"created_by": "owner", "share_config": {"version": 2, "read_scope": read_scope}}
 
@@ -96,7 +94,7 @@ async def test_database_detail_only_exposes_credentials_with_function_and_resour
         return database
 
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
-    user = SimpleNamespace(uid="reader", role="user", department_id=None)
+    user = SimpleNamespace(uid="reader", department_id=None)
 
     readonly = await knowledge_router.get_database_info(
         "kb-1",
@@ -130,7 +128,7 @@ async def test_readonly_admin_can_read_but_cannot_update_knowledge_base(monkeypa
         return database
 
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
-    admin = SimpleNamespace(uid="admin-1", role="admin", department_id=2)
+    admin = SimpleNamespace(uid="admin-1", department_id=2)
 
     assert await knowledge_router.require_knowledge_base_read("kb-1", admin) is admin
 
@@ -152,7 +150,7 @@ async def test_regular_user_cannot_manage_knowledge_base(monkeypatch):
         }
 
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
-    owner = SimpleNamespace(uid="other-user", role="user", department_id=2)
+    owner = SimpleNamespace(uid="other-user", department_id=2)
 
     with pytest.raises(HTTPException) as exc_info:
         await knowledge_router.require_knowledge_base_manage("kb-1", owner)
@@ -174,12 +172,10 @@ async def test_query_parameter_routes_apply_knowledge_base_acl(monkeypatch):
         return database
 
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
-    readonly_admin = SimpleNamespace(uid="admin-1", role="admin", department_id=2)
+    readonly_admin = SimpleNamespace(uid="admin-1", department_id=2)
 
     assert await knowledge_router.require_knowledge_base_read("kb-1", readonly_admin) is readonly_admin
 
     with pytest.raises(HTTPException) as exc_info:
-        await knowledge_router.require_knowledge_base_read(
-            "kb-1", SimpleNamespace(uid="admin-2", role="admin", department_id=2)
-        )
+        await knowledge_router.require_knowledge_base_read("kb-1", SimpleNamespace(uid="admin-2", department_id=2))
     assert exc_info.value.status_code == 404

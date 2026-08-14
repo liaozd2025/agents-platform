@@ -76,21 +76,18 @@ async def dashboard_scope_users(test_client):
                 username=f"Dashboard A {suffix}",
                 uid=f"pytest_dashboard_a_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
-                role="user",
                 department=department_a,
             ),
             User(
                 username=f"Dashboard B {suffix}",
                 uid=f"pytest_dashboard_b_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
-                role="user",
                 department=department_b,
             ),
             User(
                 username=f"Dashboard Child {suffix}",
                 uid=f"pytest_dashboard_child_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
-                role="user",
                 department=department_child,
             ),
         ]

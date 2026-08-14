@@ -15,7 +15,7 @@ def test_agent_manage_combines_function_permission_and_resource_scope(monkeypatc
     """功能权限缺失返回 403，超出资源范围返回 404。"""
 
     state = {"permissions": set(), "can_manage_resource": False}
-    user = SimpleNamespace(uid="manager", role="user", department_id=None)
+    user = SimpleNamespace(uid="manager", department_id=None)
     item = SimpleNamespace(
         slug="shared-agent",
         backend_id="ChatbotAgent",

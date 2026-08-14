@@ -242,7 +242,6 @@ async def test_department_list_counts_active_users_only(test_client, admin_heade
                 json={
                     "username": f"cu_{suffix}_{index}",
                     "password": "RouterUser123!",
-                    "role": "user",
                     "department_id": department_id,
                 },
                 headers=admin_headers,
@@ -316,7 +315,6 @@ async def test_delete_department_with_direct_users_is_rejected(test_client, admi
     user_payload = {
         "username": f"dept_user_{suffix}",
         "password": "RouterUser123!",
-        "role": "user",
     }
 
     department_id = None
@@ -348,6 +346,8 @@ async def test_delete_department_with_direct_users_is_rejected(test_client, admi
             None,
         )
         assert department_admin is not None
+        assert "role" not in department_admin
+        assert [role["code"] for role in department_admin["roles"]] == ["admin"]
         department_admin_id = department_admin["id"]
 
         delete_department_response = await test_client.delete(

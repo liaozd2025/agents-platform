@@ -56,16 +56,13 @@ async def ensure_uninitialized(session) -> None:
     if user_count:
         raise SeedError(f"系统已初始化：users 表已有 {user_count} 个用户，脚本已退出。")
 
-    superadmin_count = await session.scalar(select(func.count(User.id)).where(User.role == "superadmin"))
-    if superadmin_count:
-        raise SeedError("系统已初始化：已存在超级管理员，脚本已退出。")
-
 
 async def seed_initial_users() -> None:
     from yuxi.utils.auth_utils import AuthUtils
     from yuxi.storage.postgres.manager import pg_manager
     from yuxi.repositories.department_repository import build_child_path
-    from yuxi.storage.postgres.models_business import GROUP_NODE_TYPE, Department, User
+    from yuxi.repositories.user_repository import UserRepository
+    from yuxi.storage.postgres.models_business import GROUP_NODE_TYPE, Department
     from yuxi.utils.datetime_utils import utc_now_naive
 
     try:
@@ -102,42 +99,43 @@ async def seed_initial_users() -> None:
             for department in departments.values():
                 department.path = build_child_path(group_root.path, department.id)
 
-            users = [
-                User(
-                    username=SUPERADMIN_NAME,
-                    uid=SUPERADMIN_UID,
-                    phone_number=SUPERADMIN_PHONE_NUMBER,
-                    password_hash=AuthUtils.hash_password(SUPERADMIN_PASSWORD),
-                    role="superadmin",
-                    department_id=departments["dev"].id,
-                    last_login=utc_now_naive(),
-                )
-            ]
+            user_repo = UserRepository()
+            await user_repo.create_with_db(
+                session,
+                {
+                    "username": SUPERADMIN_NAME,
+                    "uid": SUPERADMIN_UID,
+                    "phone_number": SUPERADMIN_PHONE_NUMBER,
+                    "password_hash": AuthUtils.hash_password(SUPERADMIN_PASSWORD),
+                    "department_id": departments["dev"].id,
+                    "last_login": utc_now_naive(),
+                },
+                default_role_code="superadmin",
+            )
 
             for department_seed in DEPARTMENTS:
                 department = departments[department_seed["prefix"]]
                 for index in range(1, 3):
-                    users.append(
-                        User(
-                            username=f"{department_seed['name']}管理员{index}",
-                            uid=f"{department_seed['prefix']}_admin_{index}",
-                            password_hash=AuthUtils.hash_password(DEFAULT_USER_PASSWORD),
-                            role="admin",
-                            department_id=department.id,
-                        )
+                    await user_repo.create_with_db(
+                        session,
+                        {
+                            "username": f"{department_seed['name']}管理员{index}",
+                            "uid": f"{department_seed['prefix']}_admin_{index}",
+                            "password_hash": AuthUtils.hash_password(DEFAULT_USER_PASSWORD),
+                            "department_id": department.id,
+                        },
+                        default_role_code="admin",
                     )
                 for index in range(1, department_seed["normal_count"] + 1):
-                    users.append(
-                        User(
-                            username=f"{department_seed['name']}用户{index}",
-                            uid=f"{department_seed['prefix']}_user_{index:02d}",
-                            password_hash=AuthUtils.hash_password(DEFAULT_USER_PASSWORD),
-                            role="user",
-                            department_id=department.id,
-                        )
+                    await user_repo.create_with_db(
+                        session,
+                        {
+                            "username": f"{department_seed['name']}用户{index}",
+                            "uid": f"{department_seed['prefix']}_user_{index:02d}",
+                            "password_hash": AuthUtils.hash_password(DEFAULT_USER_PASSWORD),
+                            "department_id": department.id,
+                        },
                     )
-
-            session.add_all(users)
     finally:
         await pg_manager.close()
 

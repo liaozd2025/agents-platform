@@ -54,7 +54,8 @@ async function getOIDCLoginUrl(redirectPath = '/') {
  *   uid: string,
  *   phone_number: string | null,
  *   avatar: string | null,
- *   role: string,
+ *   roles: Array,
+ *   effective_permissions: string[],
  *   department_id: number | null,
  *   department_name: string | null
  * }>}

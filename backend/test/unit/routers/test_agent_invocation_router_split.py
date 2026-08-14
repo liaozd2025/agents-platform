@@ -25,7 +25,7 @@ def _build_app(*, authenticated: bool = True) -> TestClient:
 
         async def fake_authorization():
             return SimpleNamespace(
-                user=SimpleNamespace(uid="user-1", role="user", department_id=1),
+                user=SimpleNamespace(uid="user-1", department_id=1),
                 has_permission=lambda permission: permission == "agent:use",
             )
 

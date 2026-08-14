@@ -230,7 +230,7 @@ class _FakeBackend:
 
 class _UserResult:
     def scalar_one_or_none(self):
-        return SimpleNamespace(uid="user-1", role="user")
+        return SimpleNamespace(uid="user-1")
 
 
 class _CreateRunDb:
@@ -1429,7 +1429,7 @@ def _patch_agent_run_creation(
         async def get_by_uid_with_db(self, db_session, uid):
             assert db_session is db
             assert uid == "user-1"
-            return SimpleNamespace(uid=uid, role="user", department_ancestor_ids=(1, 2))
+            return SimpleNamespace(uid=uid, department_ancestor_ids=(1, 2))
 
     class Queue:
         async def enqueue_job(self, job_name: str, run_id: str, _job_id: str):

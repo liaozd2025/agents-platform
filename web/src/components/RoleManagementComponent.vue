@@ -293,9 +293,7 @@ const selectedScopeSummary = computed(() => {
 const editorTitle = computed(
   () => ({ create: '创建角色', copy: '复制角色', edit: '编辑角色' })[editorMode.value]
 )
-const canManageRoles = computed(
-  () => userStore.isSuperAdmin && userStore.hasPermission('role:manage')
-)
+const canManageRoles = computed(() => userStore.hasPermission('role:manage'))
 
 const loadOverview = async (preferredRoleId = selectedRoleId.value) => {
   loading.value = true

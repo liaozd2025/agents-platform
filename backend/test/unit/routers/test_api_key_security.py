@@ -50,28 +50,24 @@ async def session():
             username="Super Admin",
             uid="superadmin",
             password_hash="$argon2id$placeholder",
-            role="superadmin",
             department=dept_a,
         )
         dept_b_admin = User(
             username="Dept B Admin",
             uid="dept_b_admin",
             password_hash="$argon2id$placeholder",
-            role="admin",
             department=dept_b,
         )
         regular_user = User(
             username="Regular",
             uid="regular",
             password_hash="$argon2id$placeholder",
-            role="user",
             department=dept_a,
         )
         deleted_user = User(
             username="Deleted",
             uid="deleted",
             password_hash="$argon2id$placeholder",
-            role="user",
             department=dept_a,
             is_deleted=1,
         )
@@ -135,7 +131,7 @@ async def test_api_key_user_loads_department_ancestor_ids(session):
 
 async def test_user_repository_rejects_bound_user_without_materialized_path(session):
     department = Department(name="Broken Department")
-    user = User(username="Broken", uid="broken", password_hash="x", role="user", department=department)
+    user = User(username="Broken", uid="broken", password_hash="x", department=department)
     session["db"].add_all([department, user])
     await session["db"].commit()
 
@@ -144,7 +140,7 @@ async def test_user_repository_rejects_bound_user_without_materialized_path(sess
 
 
 async def test_required_user_allows_user_without_valid_department():
-    user = User(username="Unbound", uid="unbound", password_hash="x", role="user", department_id=None)
+    user = User(username="Unbound", uid="unbound", password_hash="x", department_id=None)
 
     assert await get_required_user(user) is user
 
@@ -208,6 +204,7 @@ async def test_delete_user_disables_owned_api_keys(session, monkeypatch):
     db.add(api_key)
     await db.commit()
     await db.refresh(api_key)
+    await db.refresh(session["regular_user"], ["role_assignments"])
 
     async def get_target_user(*_args, **_kwargs):
         """隔离本用例无关的管理域查询。"""

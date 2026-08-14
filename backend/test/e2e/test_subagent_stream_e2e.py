@@ -192,8 +192,8 @@ async def test_subagent_stream_records_run_and_shares_output_files(
     me_response = await e2e_client.get("/api/auth/me", headers=e2e_headers)
     _assert_ok(me_response)
     me = me_response.json()
-    if me.get("role") not in {"admin", "superadmin"}:
-        pytest.skip("Subagent E2E needs an admin user to create temporary agents.")
+    if "agent:manage" not in set(me.get("effective_permissions") or []):
+        pytest.skip("Subagent E2E needs agent:manage to create temporary agents.")
     uid = str(me.get("uid") or "")
     assert uid, me
 
