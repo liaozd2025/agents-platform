@@ -17,7 +17,7 @@
       <div v-if="userStore.hasPermission('tool:manage') && activeTab === 'tools'" class="tab-panel">
         <ToolsCardList ref="toolsRef" />
       </div>
-      <div v-if="activeTab === 'skills'" class="tab-panel">
+      <div v-if="canAccessSkills && activeTab === 'skills'" class="tab-panel">
         <SkillCardList ref="skillsRef" />
       </div>
       <div v-if="userStore.hasPermission('mcp:manage') && activeTab === 'mcp'" class="tab-panel">
@@ -52,19 +52,22 @@ const canAccessKnowledge = computed(() =>
     userStore.hasPermission(permission)
   )
 )
+const canAccessSkills = computed(() =>
+  ['skill:use', 'skill:manage'].some((permission) => userStore.hasPermission(permission))
+)
 
 const extensionTabs = computed(() => {
   const tabs = []
   if (canAccessKnowledge.value) {
     tabs.push({ key: 'knowledge', label: '知识库' })
   }
-  tabs.push({ key: 'skills', label: '技能' })
+  if (canAccessSkills.value) tabs.push({ key: 'skills', label: '技能' })
   if (userStore.hasPermission('tool:manage')) tabs.push({ key: 'tools', label: '工具' })
   if (userStore.hasPermission('mcp:manage')) tabs.push({ key: 'mcp', label: 'MCP' })
   return tabs
 })
 const allowedTabKeys = computed(() => extensionTabs.value.map((tab) => tab.key))
-const defaultTabKey = computed(() => extensionTabs.value[0]?.key || 'skills')
+const defaultTabKey = computed(() => extensionTabs.value[0]?.key || '')
 
 const normalizeTab = (tab) => {
   if (allowedTabKeys.value.includes(tab)) return tab

@@ -167,6 +167,26 @@ async def test_knowledge_options_require_function_permission(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_skill_options_require_function_permission(monkeypatch):
+    async def fail_if_loaded(_db, _user):
+        raise AssertionError("缺少 Skill 使用权限时不应加载资源")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "yuxi.agents.skills.service",
+        types.SimpleNamespace(list_accessible_skills=fail_if_loaded),
+    )
+
+    options = await context_module.resolve_agent_resource_options(
+        {"skills"},
+        db=object(),
+        user=_user_with_permissions(),
+    )
+
+    assert options == {"skills": []}
+
+
+@pytest.mark.asyncio
 async def test_normalize_agent_context_config_expands_null_and_filters_explicit_lists(monkeypatch):
     async def fake_get_databases_by_user(_user):
         return [_knowledge_summary("kb-a"), _knowledge_summary("kb-b")]
@@ -316,7 +336,7 @@ async def test_prepare_agent_runtime_context_filters_resources_and_derives_runti
     class FakeUserRepository:
         async def get_by_uid_with_db(self, _db, uid):
             assert uid == "u1"
-            return _user_with_permissions("knowledge_base:read")
+            return _user_with_permissions("knowledge_base:read", "skill:use")
 
     class FakeAgentRepository:
         def __init__(self, _db):

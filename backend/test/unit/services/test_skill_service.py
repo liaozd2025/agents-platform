@@ -24,12 +24,6 @@ def _user(uid: str = "root", role: str = "admin") -> User:
     return User(username=uid, uid=uid, password_hash="x", role=role, department_id=1)
 
 
-def test_allowed_skill_access_levels_by_role():
-    assert svc.get_allowed_skill_access_levels(_user(role="user")) == ["user"]
-    assert svc.get_allowed_skill_access_levels(_user(role="admin")) == ["global", "department", "user"]
-    assert svc.get_allowed_skill_access_levels(_user(role="superadmin")) == ["global", "department", "user"]
-
-
 @pytest.mark.asyncio
 async def test_prepare_remote_skill_install_stages_success_and_failure(
     tmp_path: Path,
@@ -272,9 +266,7 @@ async def test_runtime_access_still_excludes_disabled_shared_skill(monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_normal_user_skill_upload_draft_defaults_to_personal_read_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+async def test_skill_upload_draft_defaults_to_creator_read_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(svc.sys_config, "save_dir", str(tmp_path))
 
     class FakeRepo:
@@ -298,7 +290,7 @@ async def test_normal_user_skill_upload_draft_defaults_to_personal_read_scope(
         "read_scope": {"access_level": "user", "department_ids": [], "user_uids": ["normal-user"]},
         "manage_scope": None,
     }
-    assert draft["allowed_access_levels"] == ["user"]
+    assert draft["allowed_access_levels"] == ["global", "department", "user"]
 
 
 @pytest.mark.parametrize(
@@ -316,45 +308,16 @@ async def test_normal_user_skill_upload_draft_defaults_to_personal_read_scope(
         },
     ],
 )
-@pytest.mark.asyncio
-async def test_normal_user_confirm_skill_draft_rejects_wider_share_scope(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    share_config: dict,
-):
-    monkeypatch.setattr(svc.sys_config, "save_dir", str(tmp_path))
+def test_skill_share_config_accepts_function_authorized_scope(share_config: dict):
+    department_paths = {1: "/1/"} if share_config["read_scope"]["access_level"] == "department" else {}
 
-    async def fake_department_paths(_repository, department_ids, **_kwargs):
-        return {department_id: f"/1/{department_id}/" for department_id in department_ids}
-
-    monkeypatch.setattr(svc.DepartmentRepository, "get_paths_by_ids", fake_department_paths)
-
-    class FakeRepo:
-        def __init__(self, _db):
-            pass
-
-        async def exists_slug(self, _slug: str) -> bool:
-            return False
-
-        async def create(self, **_kwargs) -> Skill:
-            raise AssertionError("普通用户的越权共享范围应在创建前被拒绝")
-
-    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
-    operator = _user("normal-user", role="user")
-    draft = await svc.prepare_skill_upload(
-        None,
-        filename="SKILL.md",
-        file_bytes=b"---\nname: demo\ndescription: demo skill\n---\n# Demo\n",
-        operator=operator,
+    normalized = svc.normalize_skill_share_config(
+        share_config,
+        operator_uid="operator",
+        department_paths=department_paths,
     )
 
-    with pytest.raises(ValueError, match="无权使用该 Skill 共享范围"):
-        await svc.confirm_skill_install_draft(
-            None,
-            draft_id=draft["draft_id"],
-            share_config=share_config,
-            operator=operator,
-        )
+    assert normalized["read_scope"]["access_level"] == share_config["read_scope"]["access_level"]
 
 
 @pytest.mark.asyncio
@@ -1128,6 +1091,50 @@ def test_skill_dependency_scope_covers_read_and_manage_audiences():
     )
 
     assert svc.can_skill_depend_on(parent, dependency) is True
+
+
+@pytest.mark.parametrize(
+    ("parent_department_id", "dependency_department_id", "expected"),
+    [
+        (2, 1, True),
+        (1, 2, False),
+        (2, 3, False),
+    ],
+)
+def test_skill_dependency_department_scope_uses_organization_ancestors(
+    parent_department_id: int,
+    dependency_department_id: int,
+    expected: bool,
+):
+    parent = Skill(
+        slug="parent",
+        name="parent",
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [parent_department_id]},
+            "manage_scope": None,
+        },
+        enabled=True,
+    )
+    dependency = Skill(
+        slug="dependency",
+        name="dependency",
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [dependency_department_id]},
+            "manage_scope": None,
+        },
+        enabled=True,
+    )
+
+    assert (
+        svc.can_skill_depend_on(
+            parent,
+            dependency,
+            department_paths={1: "/1/", 2: "/1/2/", 3: "/1/3/"},
+        )
+        is expected
+    )
 
 
 def test_owner_only_skill_can_depend_on_visible_skill():

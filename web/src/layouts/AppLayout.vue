@@ -56,6 +56,16 @@ const settingsInitialTab = ref('')
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
 const conversationSearchOpen = ref(false)
 const canUseAgents = computed(() => userStore.hasPermission('agent:use'))
+const canAccessExtensions = computed(() =>
+  [
+    'knowledge_base:read',
+    'knowledge_base:manage',
+    'skill:use',
+    'skill:manage',
+    'tool:manage',
+    'mcp:manage'
+  ].some((permission) => userStore.hasPermission(permission))
+)
 
 // Provide settings modal methods to child components
 const openSettingsModal = (tab) => {
@@ -158,13 +168,15 @@ const mainList = computed(() => {
     activeIcon: FolderKanban
   })
 
-  items.push({
-    name: '知识库 · 技能',
-    path: '/extensions',
-    activePaths: ['/extensions'],
-    icon: LibraryBig,
-    activeIcon: LibraryBig
-  })
+  if (canAccessExtensions.value) {
+    items.push({
+      name: '知识库 · 技能',
+      path: '/extensions',
+      activePaths: ['/extensions'],
+      icon: LibraryBig,
+      activeIcon: LibraryBig
+    })
+  }
 
   if (userStore.isSuperAdmin) {
     items.push({

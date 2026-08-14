@@ -458,8 +458,13 @@ async def resolve_agent_resource_options(
         ]
     if "skills" in fields_to_load:
         from yuxi.agents.skills.service import list_accessible_skills
+        from yuxi.permissions.authorization import build_authorization_context
 
-        skills = await list_accessible_skills(db, user)
+        skills = (
+            await list_accessible_skills(db, user)
+            if build_authorization_context(user).has_permission("skill:use")
+            else []
+        )
         options["skills"] = [
             _resource_option(skill.slug, skill.name, skill.description) for skill in skills if skill.slug
         ]
