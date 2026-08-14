@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OA S0 嵌入验收页</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 16px;
+        font:
+          14px system-ui,
+          sans-serif;
+        background: #f5f6f8;
+      }
+      header {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      button,
+      input {
+        min-height: 32px;
+      }
+      input {
+        width: 280px;
+        padding: 0 8px;
+      }
+      #frame-shell {
+        width: 400px;
+        height: 720px;
+        margin-left: auto;
+        overflow: auto;
+        background: white;
+        border: 1px solid #ddd;
+      }
+      #frame-shell[data-mode="floating"] {
+        position: fixed;
+        right: 24px;
+        bottom: 24px;
+        z-index: 10;
+        height: 640px;
+        box-shadow: 0 12px 36px rgb(0 0 0 / 18%);
+      }
+      #frame-shell[data-mode="fullscreen"] {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        width: 100vw;
+        height: 100vh;
+        border: 0;
+      }
+      iframe {
+        width: 100%;
+        height: 100%;
+        border: 0;
+      }
+      pre {
+        max-height: 180px;
+        overflow: auto;
+        padding: 8px;
+        background: #111;
+        color: #b7f7c3;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <label>Yuxi <input id="yuxi-base" value="http://127.0.0.1:5174" /></label>
+      <label
+        >OA Mock <input id="oa-base" value="http://127.0.0.1:9101"
+      /></label>
+      <button id="open" type="button">打开 AI 助手</button>
+      <button id="login" type="button">刷新 OA token</button>
+      <button id="expire" type="button">模拟 token 过期</button>
+    </header>
+    <div id="frame-shell" data-mode="fixed" hidden>
+      <iframe
+        id="yuxi-frame"
+        title="Yuxi OA 插件"
+        sandbox="allow-scripts allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox"
+      ></iframe>
+    </div>
+    <pre id="events" aria-live="polite"></pre>
+    <script>
+      const baseInput = document.querySelector("#yuxi-base");
+      const oaBaseInput = document.querySelector("#oa-base");
+      const frame = document.querySelector("#yuxi-frame");
+      const shell = document.querySelector("#frame-shell");
+      const events = document.querySelector("#events");
+      const modes = new Set(["fixed", "floating", "fullscreen"]);
+      let oaToken = "";
+
+      const base = () => baseInput.value.replace(/\/$/, "");
+      const oaBase = () => oaBaseInput.value.replace(/\/$/, "");
+      const origin = () => new URL(base()).origin;
+      const log = (value) => {
+        events.textContent += `${new Date().toISOString()} ${value}\n`;
+      };
+      const sendToken = () => {
+        if (!oaToken) return;
+        frame.contentWindow.postMessage(
+          { type: "oa:token", token: oaToken },
+          origin(),
+        );
+        log("OA -> Yuxi: oa:token");
+      };
+      const loadFrame = () => {
+        frame.src = `${base()}/embed`;
+      };
+      const applyMode = (mode) => {
+        if (!modes.has(mode)) return;
+        shell.hidden = false;
+        shell.dataset.mode = mode;
+        frame.contentWindow.postMessage(
+          { type: "oa:mode-changed", mode },
+          origin(),
+        );
+        log(`OA -> Yuxi: oa:mode-changed (${mode})`);
+      };
+
+      async function refreshOAToken() {
+        const response = await fetch(`${oaBase()}/mock-oa-token`);
+        if (!response.ok) throw new Error("获取模拟 OA token 失败");
+        const payload = await response.json();
+        oaToken = payload.token;
+        sendToken();
+      }
+
+      window.addEventListener("message", (event) => {
+        if (event.source !== frame.contentWindow || event.origin !== origin())
+          return;
+        const message = event.data || {};
+        log(
+          `Yuxi -> OA: ${message.type}${message.threadId ? ` (${message.threadId})` : ""}`,
+        );
+        if (message.type === "yuxi:ready") {
+          sendToken();
+          applyMode("fixed");
+        }
+        if (message.type === "yuxi:auth-required") refreshOAToken();
+        if (message.type === "yuxi:mode-request") {
+          applyMode(message.mode);
+        }
+        if (message.type === "yuxi:close-request") {
+          shell.hidden = true;
+        }
+      });
+
+      document.querySelector("#open").addEventListener("click", () => {
+        if (!frame.getAttribute("src")) {
+          loadFrame();
+        }
+        applyMode("fixed");
+      });
+      document
+        .querySelector("#login")
+        .addEventListener("click", refreshOAToken);
+      document.querySelector("#expire").addEventListener("click", () => {
+        oaToken = "expired-local-test-token";
+        sendToken();
+      });
+
+      refreshOAToken();
+    </script>
+  </body>
+</html>

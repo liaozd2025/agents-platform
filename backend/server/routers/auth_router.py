@@ -21,6 +21,7 @@ from server.utils.auth_middleware import (
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.services.user_identity_service import generate_unique_uid, validate_username, is_valid_phone_number
 from yuxi.services.operation_log_service import log_operation
+from yuxi.services.oa_sso_service import MAX_OA_TOKEN_LENGTH, exchange_oa_token_handler
 from yuxi.services.auth_service import (
     CLI_AUTH_POLL_INTERVAL_SECONDS,
     CLI_AUTH_SESSION_TTL_SECONDS,
@@ -141,6 +142,12 @@ class OIDCLoginResponse(BaseModel):
     role: str
     department_id: int | None = None
     department_name: str | None = None
+
+
+class OASSOTokenRequest(BaseModel):
+    """OA 页面下发的现有登录凭证。"""
+
+    token: str = Field(min_length=1, max_length=MAX_OA_TOKEN_LENGTH)
 
 
 class CLIAuthSessionCreate(BaseModel):
@@ -976,6 +983,17 @@ async def impersonate_user(
         "department_id": target_user.department_id,
         "department_name": department_name,
     }
+
+
+# =============================================================================
+# === OA 自定义 SSO 分组 ===
+# =============================================================================
+
+
+@auth.post("/oa/exchange-token", response_model=Token)
+async def exchange_oa_token(data: OASSOTokenRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """验证 OA 现有 token 并签发 Yuxi 登录凭证。"""
+    return await exchange_oa_token_handler(data.token, db, request)
 
 
 # =============================================================================
