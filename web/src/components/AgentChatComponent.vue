@@ -2747,12 +2747,22 @@ const { startRunStream, resumeActiveRunForThread, stopRunStreamSubscription } = 
   onInterruptDetected: ({ threadId }) => {
     restorePendingInterruptForThread(threadId)
     void resumeQueuedRequestsForThread(threadId)
+    if (threadId === chatState.currentThreadId) {
+      void chatThreadsStore.markThreadViewed(threadId)
+    }
   },
-  onTerminalDetected: ({ threadId, touchedThreadIds = [] }) => {
+  onTerminalDetected: ({ threadId, runId, touchedThreadIds = [] }) => {
     if (approvalState.threadId === threadId || touchedThreadIds.includes(approvalState.threadId)) {
       hideApprovalState()
     }
     void resumeQueuedRequestsForThread(threadId)
+    // 仅当终态事件属于当前正在查看的线程时才自动标记已读；后台线程保留 ready 态
+    if (runId && threadId === chatState.currentThreadId) {
+      void chatThreadsStore.markThreadViewed(threadId)
+    }
+  },
+  onRunStarted: ({ threadId }) => {
+    chatThreadsStore.setThreadStatus(threadId, 'loading')
   }
 })
 const {
@@ -2893,6 +2903,7 @@ const selectChat = async (chatId) => {
   chatUIStore.isLoadingMessages = true
   try {
     await fetchThreadMessages({ agentId: targetAgentId, threadId: chatId })
+    void chatThreadsStore.markThreadViewed(chatId)
   } catch (error) {
     handleChatError(error, 'load')
   } finally {

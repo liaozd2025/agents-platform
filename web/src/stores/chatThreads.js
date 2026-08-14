@@ -36,6 +36,41 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     threads.value = [thread, ...threads.value]
   }
 
+  const setThreadStatus = (threadId, status) => {
+    if (!threadId) return
+    const index = threads.value.findIndex((item) => item.id === threadId)
+    if (index >= 0) {
+      threads.value[index] = { ...threads.value[index], thread_status: status }
+    }
+  }
+
+  const markThreadViewed = async (threadId) => {
+    if (!threadId) return
+    try {
+      const updatedThread = await threadApi.markThreadViewed(threadId)
+      upsertThread(updatedThread)
+      return updatedThread
+    } catch (error) {
+      console.warn(`Failed to mark thread viewed: ${threadId}`, error)
+      return null
+    }
+  }
+
+  const syncThreadStatuses = async (agentId = null) => {
+    try {
+      const fetchedThreads = await threadApi.getThreads(agentId, PAGE_SIZE, 0)
+      if (!fetchedThreads) return
+      const statusById = new Map(fetchedThreads.map((thread) => [thread.id, thread.thread_status]))
+      threads.value = threads.value.map((thread) => {
+        const latestStatus = statusById.get(thread.id)
+        if (!latestStatus) return thread
+        return { ...thread, thread_status: latestStatus }
+      })
+    } catch (error) {
+      console.warn('Failed to sync thread statuses:', error)
+    }
+  }
+
   const loadThreads = async (agentId = null) => {
     try {
       const fetchedThreads = await threadApi.getThreads(agentId, PAGE_SIZE, 0)
@@ -142,6 +177,9 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     reset,
     setCurrentThreadId,
     upsertThread,
+    setThreadStatus,
+    markThreadViewed,
+    syncThreadStatuses,
     loadThreads,
     loadMoreThreads,
     createThread,

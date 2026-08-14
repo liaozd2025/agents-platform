@@ -28,6 +28,9 @@ JSON_VALUE = JSON().with_variant(JSONB, "postgresql")
 MAX_LOGIN_FAILED_ATTEMPTS = 5
 LOGIN_LOCK_DURATION_SECONDS = 300
 AGENT_RUN_TERMINAL_STATUSES = ("completed", "failed", "cancelled", "interrupted")
+# 新建线程的初始已查看标记，用于区分"尚无任何 Run"与"上线前的历史会话"，
+# 避免 startup 回填把后续新产生的未读状态误清为已读。不会与真实 Run id 冲突。
+UNVIEWED_RUN_MARKER = "__unviewed__"
 
 
 class Department(Base):
@@ -289,6 +292,7 @@ class Conversation(Base):
     title = Column(String(255), nullable=True, comment="Conversation title")
     status = Column(String(20), default="active", comment="Status: active/archived/deleted")
     is_pinned = Column(Boolean, default=False, nullable=False, index=True, comment="Is pinned to top")
+    last_viewed_run_id = Column(String(64), nullable=True, comment="Latest top-level run id viewed by user")
     created_at = Column(DateTime, default=utc_now_naive, comment="Creation time")
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, comment="Update time")
     extra_metadata = Column(JSON, nullable=True, comment="Additional metadata")
