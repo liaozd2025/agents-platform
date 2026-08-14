@@ -16,6 +16,20 @@ async function parseErrorDetail(response, fallbackMessage) {
   return text || fallbackMessage
 }
 
+/** 使用一次性凭证交换 Yuxi 登录态。 */
+async function exchangeLoginCredential(url, payload, fallbackMessage) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+
+  if (!response.ok) {
+    throw new Error(await parseErrorDetail(response, fallbackMessage))
+  }
+  return response.json()
+}
+
 /**
  * 获取 OIDC 配置
  * @returns {Promise<{enabled: boolean, provider_name?: string}>}
@@ -64,20 +78,12 @@ async function getUserAccessOptions() {
 }
 
 async function exchangeOIDCCode(code) {
-  const response = await fetch('/api/auth/oidc/exchange-code', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ code })
-  })
+  return exchangeLoginCredential('/api/auth/oidc/exchange-code', { code }, 'OIDC 登录失败')
+}
 
-  if (!response.ok) {
-    const detail = await parseErrorDetail(response, 'OIDC 登录失败')
-    throw new Error(detail)
-  }
-
-  return response.json()
+/** 使用 OA 现有登录凭证交换 Yuxi token。 */
+async function exchangeOAToken(token) {
+  return exchangeLoginCredential('/api/auth/oa/exchange-token', { token }, 'OA 免登录失败')
 }
 
 async function getCLIAuthSession(userCode) {
@@ -95,6 +101,7 @@ export const authApi = {
   getOIDCLoginUrl,
   getUserAccessOptions,
   exchangeOIDCCode,
+  exchangeOAToken,
   getCLIAuthSession,
   approveCLIAuthSession
 }

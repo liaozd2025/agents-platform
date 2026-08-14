@@ -634,6 +634,8 @@ onMounted(async () => {
     return
   }
 
+  await infoStore.loadInfoConfig()
+
   // 显示 OIDC 认证失败的错误信息（由后端重定向携带）
   if (route.query.oidc_error) {
     errorMessage.value = String(route.query.oidc_error)

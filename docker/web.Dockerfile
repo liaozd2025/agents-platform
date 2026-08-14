@@ -24,6 +24,8 @@ EXPOSE 5173
 # 生产阶段
 FROM node:24-alpine AS build-stage
 WORKDIR /app
+ARG VITE_YUXI_EMBED_ALLOWED_ORIGINS
+ENV VITE_YUXI_EMBED_ALLOWED_ORIGINS=${VITE_YUXI_EMBED_ALLOWED_ORIGINS}
 
 # 安装 pnpm
 RUN npm install -g pnpm@10.11.0
@@ -37,6 +39,8 @@ RUN pnpm install --frozen-lockfile --registry=https://registry.npmmirror.com
 
 # 复制源代码并构建
 COPY ./web .
+COPY ./docker/nginx/default.conf /tmp/default.conf
+RUN node --input-type=module -e 'import fs from "node:fs"; import { parseOAEmbedAllowedOrigins } from "./src/utils/oaEmbedBridge.js"; const raw = process.env.VITE_YUXI_EMBED_ALLOWED_ORIGINS || ""; const values = raw.split(/[\s,]+/).filter(Boolean); const origins = parseOAEmbedAllowedOrigins(raw); if (values.some((value) => !origins.includes(value))) throw new Error("YUXI_EMBED_ALLOWED_ORIGINS must contain exact HTTP origins"); const placeholder = "$" + "{YUXI_EMBED_ALLOWED_ORIGINS}"; fs.writeFileSync("/tmp/default.conf", fs.readFileSync("/tmp/default.conf", "utf8").replace(placeholder, origins.join(" ")));'
 RUN pnpm run build
 
 # 生产环境运行阶段
@@ -45,6 +49,6 @@ COPY --from=build-stage /app/dist /usr/share/nginx/html
 RUN find /usr/share/nginx/html -type d -exec chmod 755 {} \; \
     && find /usr/share/nginx/html -type f -exec chmod 644 {} \;
 COPY ./docker/nginx/nginx.conf /etc/nginx/nginx.conf
-COPY ./docker/nginx/default.conf /etc/nginx/conf.d/default.conf
+COPY --from=build-stage /tmp/default.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]

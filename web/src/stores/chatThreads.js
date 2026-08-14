@@ -20,6 +20,12 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     currentThreadId.value = threadId || null
   }
 
+  const reset = () => {
+    threads.value = []
+    hasMoreThreads.value = true
+    isLoadingMoreThreads.value = false
+  }
+
   const upsertThread = (thread) => {
     if (!thread?.id) return
     const index = threads.value.findIndex((item) => item.id === thread.id)
@@ -133,6 +139,7 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     currentThread,
     hasMoreThreads,
     isLoadingMoreThreads,
+    reset,
     setCurrentThreadId,
     upsertThread,
     loadThreads,

@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiDelete, apiPut, apiRequest } from './base'
+import { apiGet, apiPost, apiDelete, apiPut, apiRequest, handleUnauthorizedError } from './base'
 import { useUserStore } from '@/stores/user'
 
 /**
@@ -157,14 +157,19 @@ export const agentApi = {
   /**
    * 打开 Request 事件 SSE 连接（调用方负责关闭）
    */
-  streamRequestEvents: (requestId, options = {}) => {
+  streamRequestEvents: async (requestId, options = {}) => {
     const { signal } = options
-    const headers = { ...useUserStore().getAuthHeaders() }
-    return fetch(`/api/agent/requests/${requestId}/events`, {
+    const userStore = useUserStore()
+    const headers = { ...userStore.getAuthHeaders() }
+    const response = await fetch(`/api/agent/requests/${requestId}/events`, {
       method: 'GET',
       headers,
-      signal
+      signal: userStore.getAuthSignal(signal)
     })
+    if (response.status === 401) {
+      handleUnauthorizedError(new Error('认证失败，请重新登录'))
+    }
+    return response
   },
 
   /**
@@ -195,21 +200,26 @@ export const agentApi = {
    * @param {Object} options - { signal, verbose }
    * @returns {Promise<Response>}
    */
-  streamAgentRunEvents: (runId, afterSeq = '0-0', options = {}) => {
+  streamAgentRunEvents: async (runId, afterSeq = '0-0', options = {}) => {
     const { signal, verbose = false } = options
+    const userStore = useUserStore()
     const headers = {
-      ...useUserStore().getAuthHeaders()
+      ...userStore.getAuthHeaders()
     }
     const cursor = String(afterSeq || '0-0')
     if (cursor && cursor !== '0-0') {
       headers['Last-Event-ID'] = cursor
     }
     const params = new URLSearchParams({ verbose: String(verbose) })
-    return fetch(`/api/agent/runs/${runId}/events?${params.toString()}`, {
+    const response = await fetch(`/api/agent/runs/${runId}/events?${params.toString()}`, {
       method: 'GET',
       headers,
-      signal
+      signal: userStore.getAuthSignal(signal)
     })
+    if (response.status === 401) {
+      handleUnauthorizedError(new Error('认证失败，请重新登录'))
+    }
+    return response
   }
 }
 

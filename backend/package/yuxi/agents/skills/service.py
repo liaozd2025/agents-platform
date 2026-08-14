@@ -1819,7 +1819,11 @@ async def init_builtin_skills(db: AsyncSession, *, created_by: str = "system") -
                 mcp_dependencies=spec["mcp_dependencies"],
                 skill_dependencies=spec["skill_dependencies"],
                 dir_path=_build_builtin_skill_dir_path(slug),
-                share_config=BUILTIN_SKILL_SHARE_CONFIG.copy(),
+                share_config=normalize_skill_share_config(
+                    None,
+                    operator_uid=created_by or BUILTIN_SKILL_OPERATOR,
+                    source_type="builtin",
+                ),
                 enabled=True,
                 version=spec["version"],
                 content_hash=spec["content_hash"],
