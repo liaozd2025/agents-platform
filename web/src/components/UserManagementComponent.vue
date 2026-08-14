@@ -19,7 +19,12 @@
             <RefreshCw :size="16" :class="{ spin: userManagement.refreshing }" />
           </template>
         </a-button>
-        <a-button type="primary" @click="showAddUserModal" class="add-btn lucide-icon-btn">
+        <a-button
+          v-if="canCreateUsers"
+          type="primary"
+          @click="showAddUserModal"
+          class="add-btn lucide-icon-btn"
+        >
           <template #icon><Plus :size="16" /></template>
           添加用户
         </a-button>
@@ -108,15 +113,16 @@
                 </div>
               </template>
 
-              <template #card-more-action-corner>
+              <template v-if="canUpdateUsers || canDeleteUsers" #card-more-action-corner>
                 <a-menu>
-                  <a-menu-item key="edit" @click.stop="showEditUserModal(user)">
+                  <a-menu-item v-if="canUpdateUsers" key="edit" @click.stop="showEditUserModal(user)">
                     <span class="lucide-menu-item">
                       <SquarePen :size="14" />
                       <span>编辑用户</span>
                     </span>
                   </a-menu-item>
                   <a-menu-item
+                    v-if="canDeleteUsers"
                     key="delete"
                     :disabled="isUserDeleteDisabled(user)"
                     :danger="!isUserDeleteDisabled(user)"
@@ -325,8 +331,7 @@
           />
         </a-form-item>
 
-        <!-- 组织机构选择器（仅超级管理员可见） -->
-        <a-form-item v-if="userStore.isSuperAdmin" label="所属组织机构" class="form-item">
+        <a-form-item v-if="canChooseUserDepartment" label="所属组织机构" class="form-item">
           <a-tree-select
             v-model:value="userManagement.form.departmentId"
             :tree-data="departmentTree"
@@ -366,6 +371,7 @@ import { generatePixelAvatar } from '@/utils/pixelAvatar'
 import {
   buildDepartmentScopeTree,
   buildDepartmentTree,
+  isDepartmentSelectionCovered,
   normalizeDepartmentSelection
 } from '@/utils/departmentTree'
 import { getAssignableScopeTypes, resetRoleAssignmentScope } from '@/utils/roleOverview'
@@ -414,6 +420,12 @@ const roleOverview = reactive({ roles: [], dataScopeTypes: [] })
 
 const treeFieldNames = { children: 'children', label: 'name', value: 'id' }
 const departmentTree = computed(() => buildDepartmentTree(departmentManagement.departments))
+const canCreateUsers = computed(() => userStore.hasPermission('user:create'))
+const canUpdateUsers = computed(() => userStore.hasPermission('user:update'))
+const canDeleteUsers = computed(() => userStore.hasPermission('user:delete'))
+const canChooseUserDepartment = computed(() =>
+  userManagement.editMode ? canUpdateUsers.value : canCreateUsers.value
+)
 const activeRoles = computed(() => roleOverview.roles.filter((role) => role.is_active))
 const roleFilterOptions = computed(() =>
   activeRoles.value.length
@@ -451,7 +463,11 @@ const filteredUsers = computed(() => {
       )
     const matchesDepartment =
       userManagement.departmentFilter == null ||
-      Number(user.department_id) === Number(userManagement.departmentFilter)
+      isDepartmentSelectionCovered(
+        departmentManagement.departments,
+        [userManagement.departmentFilter],
+        [user.department_id]
+      )
     const matchesRole =
       !userManagement.roleFilter ||
       (user.roles || []).some((role) => role.code === userManagement.roleFilter)
@@ -468,11 +484,12 @@ const paginatedUsers = computed(() => {
 
 // 获取组织机构列表
 const fetchDepartments = async () => {
+  departmentManagement.departments = []
   try {
-    const departments = await departmentApi.getDepartments()
-    departmentManagement.departments = departments
+    departmentManagement.departments = await departmentApi.getDepartments()
   } catch (error) {
-    console.error('获取组织机构列表失败:', error)
+    message.error(error.message || '获取组织机构列表失败')
+    throw error
   }
 }
 
@@ -698,7 +715,6 @@ const handleRefresh = async () => {
     message.success('刷新成功')
   } catch (error) {
     console.error('刷新失败:', error)
-    message.error('刷新失败')
   } finally {
     userManagement.refreshing = false
   }
@@ -706,7 +722,7 @@ const handleRefresh = async () => {
 
 // 打开添加用户模态框
 const showAddUserModal = async () => {
-  await fetchRoleOptions()
+  await Promise.all([fetchDepartments(), fetchRoleOptions()])
   userManagement.modalTitle = '添加用户'
   userManagement.editMode = false
   userManagement.editUserId = null
@@ -720,7 +736,7 @@ const showAddUserModal = async () => {
     role: 'user', // 默认角色为普通用户
     roleAssignments: getDefaultRoleAssignments(),
     reason: '',
-    departmentId: null,
+    departmentId: userStore.departmentId,
     usernameError: '',
     phoneError: ''
   }
@@ -730,7 +746,7 @@ const showAddUserModal = async () => {
 
 // 打开编辑用户模态框
 const showEditUserModal = async (user) => {
-  await fetchRoleOptions()
+  await Promise.all([fetchDepartments(), fetchRoleOptions()])
   userManagement.modalTitle = '编辑用户'
   userManagement.editMode = true
   userManagement.editUserId = user.id
@@ -851,8 +867,7 @@ const handleUserFormSubmit = async () => {
         updateData.phone_number = userManagement.form.phoneNumber
       }
 
-      // 超级管理员可以修改部门
-      if (userStore.isSuperAdmin && userManagement.form.departmentId) {
+      if (canUpdateUsers.value && userManagement.form.departmentId) {
         updateData.department_id = userManagement.form.departmentId
       }
 
@@ -882,8 +897,7 @@ const handleUserFormSubmit = async () => {
         createData.role = userManagement.form.role
       }
 
-      // 超级管理员可以指定部门
-      if (userStore.isSuperAdmin && userManagement.form.departmentId) {
+      if (canCreateUsers.value && userManagement.form.departmentId) {
         createData.department_id = userManagement.form.departmentId
       }
 

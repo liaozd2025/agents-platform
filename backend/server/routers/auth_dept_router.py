@@ -14,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Department, User
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.user_repository import UserRepository
-from server.utils.auth_middleware import get_superadmin_user, get_admin_user, get_db
+from server.utils.auth_middleware import get_authorization_context, get_superadmin_user, get_db
+from yuxi.permissions.authorization import AuthorizationContext
+from yuxi.services.user_management_service import list_authorized_departments
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.services.operation_log_service import log_operation
 from yuxi.services.user_identity_service import is_valid_phone_number
@@ -67,10 +69,19 @@ class DepartmentResponse(BaseModel):
 
 
 @department.get("", response_model=list[DepartmentResponse])
-async def get_departments(current_user: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
-    """获取所有部门列表（管理员可访问）"""
-    dept_repo = DepartmentRepository()
-    return await dept_repo.list_with_user_count()
+async def get_departments(
+    authorization: AuthorizationContext = Depends(get_authorization_context),
+):
+    """返回完整集团目录或当前授权子树及必要祖先。"""
+
+    can_read_all = authorization.has_permission("department:read_all")
+    if not can_read_all and not authorization.has_permission("department:read"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="缺少功能权限: department:read",
+        )
+
+    return await list_authorized_departments(authorization)
 
 
 @department.get("/{department_id}", response_model=DepartmentResponse)

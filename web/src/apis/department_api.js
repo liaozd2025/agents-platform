@@ -3,7 +3,7 @@
  */
 
 import {
-  apiAdminGet,
+  apiGet,
   apiSuperAdminGet,
   apiSuperAdminPost,
   apiSuperAdminPut,
@@ -13,11 +13,11 @@ import {
 const BASE_URL = '/api/departments'
 
 /**
- * 获取部门列表（普通管理员可访问）
+ * 获取当前用户有权读取的组织列表
  * @returns {Promise<Array>} 部门列表
  */
 export const getDepartments = () => {
-  return apiAdminGet(BASE_URL)
+  return apiGet(BASE_URL)
 }
 
 /**

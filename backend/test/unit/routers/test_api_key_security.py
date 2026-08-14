@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -194,7 +195,7 @@ async def test_create_api_key_allows_current_user_department(session):
     assert response.secret.startswith(response.api_key.key_prefix)
 
 
-async def test_delete_user_disables_owned_api_keys(session):
+async def test_delete_user_disables_owned_api_keys(session, monkeypatch):
     db = session["db"]
     _secret, key_hash, key_prefix = AuthUtils.generate_api_key()
     api_key = APIKey(
@@ -208,7 +209,14 @@ async def test_delete_user_disables_owned_api_keys(session):
     await db.commit()
     await db.refresh(api_key)
 
-    result = await delete_user(session["regular_user"].id, None, session["superadmin"], db)
+    async def get_target_user(*_args, **_kwargs):
+        """隔离本用例无关的管理域查询。"""
+
+        return session["regular_user"]
+
+    monkeypatch.setattr("server.routers.auth_router._get_authorized_user", get_target_user)
+    authorization = SimpleNamespace(user=session["superadmin"])
+    result = await delete_user(session["regular_user"].id, None, authorization, db)
     await db.refresh(api_key)
 
     assert result["success"] is True

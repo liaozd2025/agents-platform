@@ -18,6 +18,18 @@ def _utc_now() -> dt:
     return dt.now(UTC).replace(tzinfo=None)
 
 
+def _attach_department_ancestors(user: User, department_path: str | None) -> User:
+    """校验并挂载用户所属组织的祖先链。"""
+
+    if user.department_id is not None and not department_path:
+        raise ValueError(f"用户 {user.uid} 所属组织节点缺少有效物化路径")
+    ancestor_ids = parse_department_ancestor_ids(department_path)
+    if user.department_id is not None and (not ancestor_ids or ancestor_ids[-1] != user.department_id):
+        raise ValueError(f"用户 {user.uid} 所属组织节点的物化路径无效")
+    user.department_ancestor_ids = ancestor_ids
+    return user
+
+
 async def _get_user_with_department_ancestors(db: AsyncSession, criterion: Any) -> User | None:
     """查询用户并一次带出其组织节点祖先链。"""
     result = await db.execute(
@@ -36,14 +48,7 @@ async def _get_user_with_department_ancestors(db: AsyncSession, criterion: Any) 
     if row is None:
         return None
 
-    user, department_path = row
-    if user.department_id is not None and not department_path:
-        raise ValueError(f"用户 {user.uid} 所属组织节点缺少有效物化路径")
-    ancestor_ids = parse_department_ancestor_ids(department_path)
-    if user.department_id is not None and (not ancestor_ids or ancestor_ids[-1] != user.department_id):
-        raise ValueError(f"用户 {user.uid} 所属组织节点的物化路径无效")
-    user.department_ancestor_ids = ancestor_ids
-    return user
+    return _attach_department_ancestors(*row)
 
 
 class UserRepository:
@@ -98,12 +103,21 @@ class UserRepository:
             return list(result.scalars().all())
 
     async def list_with_department(
-        self, skip: int = 0, limit: int = 100, department_id: int | None = None, role: str | None = None
-    ) -> Annotated[list[tuple[User, str | None]], "用户列表，包含部门名称"]:
-        """获取用户列表，包含部门名称"""
+        self,
+        skip: int = 0,
+        limit: int | None = 100,
+        department_id: int | None = None,
+        role: str | None = None,
+    ) -> Annotated[list[tuple[User, str | None]], "用户列表，包含组织名称并挂载祖先路径"]:
+        """获取用户列表，并带出授权过滤所需的组织名称和路径。"""
+
         async with pg_manager.get_async_session_context() as session:
             query = (
-                select(User, Department.name.label("department_name"))
+                select(
+                    User,
+                    Department.name.label("department_name"),
+                    Department.path.label("department_path"),
+                )
                 .options(
                     selectinload(User.role_assignments).selectinload(UserRoleAssignment.scope_departments),
                     selectinload(User.role_assignments)
@@ -117,9 +131,11 @@ class UserRepository:
                 query = query.where(User.department_id == department_id)
             if role is not None:
                 query = query.where(User.role == role)
-            query = query.order_by(User.id.asc()).offset(skip).limit(limit)
+            query = query.order_by(User.id.asc()).offset(skip)
+            if limit is not None:
+                query = query.limit(limit)
             result = await session.execute(query)
-            return list(result.all())
+            return [(_attach_department_ancestors(user, path), name) for user, name, path in result.all()]
 
     async def create(self, data: dict[str, Any]) -> User:
         """创建用户"""

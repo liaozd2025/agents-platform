@@ -9,7 +9,7 @@ test('设置导航按权限分组并支持搜索', () => {
       isLoggedIn: true,
       isAdmin: true,
       isSuperAdmin: true,
-      effectivePermissions: ['role:read', 'role:manage']
+      effectivePermissions: ['role:read', 'role:manage', 'user:read']
     },
     ''
   )
@@ -39,7 +39,7 @@ test('设置导航按权限分组并支持搜索', () => {
       isLoggedIn: true,
       isAdmin: true,
       isSuperAdmin: false,
-      effectivePermissions: ['role:read']
+      effectivePermissions: ['role:read', 'user:read']
     },
     ''
   )
@@ -57,7 +57,7 @@ test('设置导航按权限分组并支持搜索', () => {
       isLoggedIn: true,
       isAdmin: true,
       isSuperAdmin: true,
-      effectivePermissions: ['role:read', 'role:manage']
+      effectivePermissions: ['role:read', 'role:manage', 'user:read']
     },
     '组织'
   )
@@ -71,7 +71,7 @@ test('设置导航按权限分组并支持搜索', () => {
         isLoggedIn: true,
         isAdmin: true,
         isSuperAdmin: true,
-        effectivePermissions: ['role:read', 'role:manage']
+        effectivePermissions: ['role:read', 'role:manage', 'user:read']
       },
       '角色'
     ),
@@ -100,6 +100,24 @@ test('角色入口只依赖服务端有效权限', () => {
     [
       ['个人', ['account', 'agentEnv']],
       ['系统', ['role']],
+      ['平台能力', ['apiKeys']]
+    ]
+  )
+})
+
+test('用户管理入口只依赖服务端有效权限', () => {
+  const groups = getSettingsNavigationGroups({
+    isLoggedIn: true,
+    isAdmin: false,
+    isSuperAdmin: false,
+    effectivePermissions: ['user:read']
+  })
+
+  assert.deepEqual(
+    groups.map((group) => [group.label, group.items.map((item) => item.id)]),
+    [
+      ['个人', ['account', 'agentEnv']],
+      ['系统', ['user']],
       ['平台能力', ['apiKeys']]
     ]
   )

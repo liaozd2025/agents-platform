@@ -160,7 +160,7 @@
             <OCRSettingsSection />
           </div>
 
-          <div v-if="activeTab === 'user' && userStore.isAdmin">
+          <div v-if="activeTab === 'user' && userStore.hasPermission('user:read')">
             <UserManagementComponent />
           </div>
 
@@ -274,7 +274,7 @@ const setActiveTab = (preferredTab) => {
     activeTab.value = preferredTab
     return
   }
-  activeTab.value = userStore.isAdmin ? 'base' : availableTabs.value[0]
+  activeTab.value = availableTabs.value.includes('base') ? 'base' : availableTabs.value[0]
 }
 
 const handleClose = () => {
