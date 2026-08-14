@@ -8,8 +8,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete as sqlalchemy_delete, select, func, update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Department, Role, User
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Department, User
 from yuxi.repositories.department_repository import DepartmentRepository
+from yuxi.repositories.role_repository import RoleRepository
 from yuxi.repositories.user_repository import UserRepository
 from server.utils.auth_middleware import get_authorization_context, get_db, require_permission
 from yuxi.permissions.authorization import AuthorizationContext
@@ -206,15 +207,15 @@ async def create_department(
             "department_id": new_department.id,
         },
     )
-    admin_role_id = await db.scalar(select(Role.id).where(Role.code == "admin", Role.is_active.is_(True)))
-    if admin_role_id is None:
+    admin_role = await RoleRepository(db).get_by_code("admin")
+    if admin_role is None or not admin_role.is_active:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="系统缺少有效的 admin 角色")
     try:
         await replace_user_role_assignments(
             db,
             authorization=authorization,
             target=new_user,
-            assignments=[{"role_id": admin_role_id, "scope_mode": "inherit"}],
+            assignments=[{"role_id": admin_role.id, "scope_mode": "inherit"}],
             check_existing=False,
         )
     except UserRoleAuthorizationError as error:

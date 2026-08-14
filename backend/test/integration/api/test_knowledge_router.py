@@ -971,3 +971,9 @@ async def test_document_search_allows_read_permission(test_client, standard_user
         headers=standard_user["headers"],
     )
     assert response.status_code == 200, response.text
+    payload = response.json()
+    assert isinstance(payload.get("files"), list)
+    assert payload["offset"] == 0
+    assert payload["limit"] == 100
+    assert isinstance(payload["total"], int)
+    assert payload["has_more"] is (payload["total"] > payload["limit"])

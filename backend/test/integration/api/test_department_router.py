@@ -144,8 +144,8 @@ async def test_move_rejects_empty_and_missing_parent(test_client, admin_headers,
     missing_response = await test_client.put(
         f"/api/departments/{node_id}", json={"parent_id": 2_147_483_647}, headers=admin_headers
     )
-    assert missing_response.status_code == 400, missing_response.text
-    assert missing_response.json()["detail"] == "父级组织节点不存在"
+    assert missing_response.status_code == 404, missing_response.text
+    assert missing_response.json()["detail"] == "组织节点不存在"
 
 
 async def test_move_rejects_group_root(test_client, admin_headers, created_node_ids):

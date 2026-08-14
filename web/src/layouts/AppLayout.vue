@@ -114,7 +114,7 @@ onMounted(async () => {
   // 加载信息配置与知识库数据无依赖，可并行
   await Promise.all([infoStore.loadInfoConfig(), getRemoteDatabase()])
   if (canUseAgents.value) await initAgentNavigation()
-  await getRemoteConfig()
+  if (userStore.hasPermission('system_config:manage')) await getRemoteConfig()
   // 仅管理员加载任务中心数据
   if (userStore.hasPermission('system_task:manage')) {
     taskerStore.loadTasks()

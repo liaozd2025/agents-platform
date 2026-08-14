@@ -84,8 +84,11 @@ async def discovery():
 
 
 @system.get("/config")
-async def get_config(current_user: User = Depends(get_required_user)):
-    """获取系统配置"""
+async def get_config(
+    _authorization: AuthorizationContext = Depends(require_permission("system_config:manage")),
+):
+    """返回当前管理员可维护的系统配置。"""
+
     return config.dump_config()
 
 

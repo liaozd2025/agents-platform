@@ -139,6 +139,7 @@ async def test_platform_capabilities_follow_effective_permissions(
         cross_key_id = cross_key.json()["api_key"]["id"]
 
         denied_requests = [
+            ("get", "/api/system/config", {}),
             ("post", "/api/system/config", {"json": {"key": "unknown", "value": False}}),
             ("get", "/api/system/logs", {}),
             ("get", "/api/tasks", {}),
@@ -165,13 +166,7 @@ async def test_platform_capabilities_follow_effective_permissions(
         assert assigned.status_code == 200, assigned.text
 
         capabilities = [
-            (
-                "system_config:manage",
-                "post",
-                "/api/system/config",
-                {"json": {"key": "unknown", "value": False}},
-                400,
-            ),
+            ("system_config:manage", "get", "/api/system/config", {}, 200),
             ("system_log:read", "get", "/api/system/logs", {}, 200),
             ("system_task:manage", "get", "/api/tasks", {}, 200),
             ("model_provider:manage", "get", "/api/system/model-providers", {}, 200),
@@ -210,6 +205,13 @@ async def test_platform_capabilities_follow_effective_permissions(
 
             response = await test_client.request(method, path, headers=headers, **kwargs)
             assert response.status_code == expected_status, (path, response.text)
+            if permission == "system_config:manage":
+                update_response = await test_client.post(
+                    "/api/system/config",
+                    headers=headers,
+                    json={"key": "unknown", "value": False},
+                )
+                assert update_response.status_code == 400, update_response.text
             previous_permission = permission
 
         all_keys = await test_client.get("/api/user/apikey/", headers=headers)

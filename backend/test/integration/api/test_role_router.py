@@ -67,7 +67,6 @@ async def test_role_read_permission_changes_take_effect_on_next_request(test_cli
     admin_headers = role_test_users["admin_headers"]
     standard = role_test_users["standard"]
     role_code = f"pytest_live_auth_{uuid.uuid4().hex[:10]}"
-    delegated_role_code = f"pytest_delegated_manage_{uuid.uuid4().hex[:8]}"
     role_id = None
     user_role_id = None
     try:
@@ -111,7 +110,7 @@ async def test_role_read_permission_changes_take_effect_on_next_request(test_cli
         delegated_manage = await test_client.post(
             "/api/roles",
             json={
-                "code": delegated_role_code,
+                "code": f"pytest_delegated_manage_{uuid.uuid4().hex[:8]}",
                 "name": "权限管理域角色",
                 "description": "",
                 "permission_keys": [],
@@ -120,7 +119,7 @@ async def test_role_read_permission_changes_take_effect_on_next_request(test_cli
             },
             headers=standard["headers"],
         )
-        assert delegated_manage.status_code == 201, delegated_manage.text
+        assert delegated_manage.status_code == 403, delegated_manage.text
 
         updated = await test_client.put(
             f"/api/roles/{role_id}",
@@ -147,7 +146,7 @@ async def test_role_read_permission_changes_take_effect_on_next_request(test_cli
                 json={"role_assignments": [{"role_id": user_role_id, "scope_mode": "inherit"}]},
                 headers=admin_headers,
             )
-        await _cleanup_custom_roles([role_code, delegated_role_code])
+        await _cleanup_custom_roles([role_code])
 
 
 async def _cleanup_custom_roles(role_codes: list[str]) -> None:

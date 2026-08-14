@@ -256,7 +256,8 @@
 <script setup>
 import { computed, onMounted, reactive, watch } from 'vue'
 import { notification, message, Modal } from 'ant-design-vue'
-import { departmentApi, apiGet } from '@/apis'
+import { departmentApi } from '@/apis'
+import { authApi } from '@/apis/auth_api'
 import { ChevronsDown, ChevronsUp, Plus, RefreshCw, SquarePen, Trash2 } from 'lucide-vue-next'
 import {
   buildDepartmentTree,
@@ -468,7 +469,7 @@ const checkAdminUid = async () => {
 
   // 检查是否已存在
   try {
-    const result = await apiGet(`/api/auth/check-uid/${uid}`)
+    const result = await authApi.checkUidAvailability(uid)
     if (!result.is_available) {
       departmentManagement.form.uidError = '该UID已被使用'
     }

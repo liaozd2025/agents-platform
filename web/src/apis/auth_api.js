@@ -64,6 +64,10 @@ async function getUserAccessOptions() {
   return apiGet('/api/auth/users/access-options')
 }
 
+async function checkUidAvailability(uid) {
+  return apiGet(`/api/auth/check-uid/${encodeURIComponent(uid)}`)
+}
+
 async function exchangeOIDCCode(code) {
   const response = await fetch('/api/auth/oidc/exchange-code', {
     method: 'POST',
@@ -95,6 +99,7 @@ export const authApi = {
   getOIDCConfig,
   getOIDCLoginUrl,
   getUserAccessOptions,
+  checkUidAvailability,
   exchangeOIDCCode,
   getCLIAuthSession,
   approveCLIAuthSession

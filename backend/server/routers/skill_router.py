@@ -137,7 +137,7 @@ def _can_manage_skill(authorization: AuthorizationContext, item) -> bool:
     """同时校验 Skill 管理功能权限与资源管理范围。"""
 
     if getattr(item, "source_scope", None) == "personal":
-        return authorization.has_permission("skill:use") and user_can_manage_skill(authorization.user, item)
+        return authorization.has_permission("skill:use")
     return authorization.has_permission("skill:manage") and user_can_manage_skill(authorization.user, item)
 
 
@@ -145,12 +145,16 @@ def _serialize_skill_for_user(item, authorization: AuthorizationContext) -> dict
     user = authorization.user
     data = item.to_dict()
     data["can_manage"] = _can_manage_skill(authorization, item)
-    data["effective_permission"] = resolve_skill_permission(user, item).value
+    data["effective_permission"] = (
+        "manage" if getattr(item, "source_scope", None) == "personal" else resolve_skill_permission(user, item).value
+    )
     data["is_builtin"] = is_builtin_skill(item)
     return data
 
 
 def _allowed_skill_access_levels(authorization: AuthorizationContext) -> list[str]:
+    """返回当前用户可写入共享范围的层级。"""
+
     if authorization.has_permission("skill:manage"):
         return ["global", "department", "user"]
     return ["user"]

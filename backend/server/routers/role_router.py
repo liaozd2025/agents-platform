@@ -13,6 +13,7 @@ from yuxi.services.role_service import (
     get_role_overview,
     update_custom_role,
 )
+from yuxi.services.user_role_service import has_active_role
 from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.services.user_management_service import get_authorized_user
 from server.utils.auth_middleware import get_authorization_context, get_db, require_permission
@@ -59,6 +60,16 @@ def _raise_role_error(error: ValueError) -> None:
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
 
+def require_role_definition_manager(
+    authorization: AuthorizationContext = Depends(require_permission("role:manage")),
+) -> AuthorizationContext:
+    """仅允许新角色模型中的超级管理员维护角色定义。"""
+
+    if not has_active_role(authorization.user, "superadmin"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有超级管理员可以维护角色定义")
+    return authorization
+
+
 @roles.get("/overview")
 async def read_role_overview(
     target_user_id: int | None = None,
@@ -83,7 +94,7 @@ async def read_role_overview(
 @roles.post("", status_code=status.HTTP_201_CREATED)
 async def create_role(
     payload: RoleDefinitionRequest,
-    authorization: AuthorizationContext = Depends(require_permission("role:manage")),
+    authorization: AuthorizationContext = Depends(require_role_definition_manager),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """创建自定义角色。"""
@@ -98,7 +109,7 @@ async def create_role(
 async def copy_existing_role(
     role_id: int,
     payload: RoleCopyRequest,
-    authorization: AuthorizationContext = Depends(require_permission("role:manage")),
+    authorization: AuthorizationContext = Depends(require_role_definition_manager),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """复制已有角色为独立自定义角色。"""
@@ -113,7 +124,7 @@ async def copy_existing_role(
 async def update_role(
     role_id: int,
     payload: RoleUpdateRequest,
-    authorization: AuthorizationContext = Depends(require_permission("role:manage")),
+    authorization: AuthorizationContext = Depends(require_role_definition_manager),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """修改自定义角色。"""
@@ -127,7 +138,7 @@ async def update_role(
 @roles.post("/{role_id}/deactivate")
 async def deactivate_role(
     role_id: int,
-    authorization: AuthorizationContext = Depends(require_permission("role:manage")),
+    authorization: AuthorizationContext = Depends(require_role_definition_manager),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """停用没有有效成员的自定义角色。"""
