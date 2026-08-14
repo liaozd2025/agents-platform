@@ -554,6 +554,277 @@ async def test_user_management_follows_authorized_organization_subtree(test_clie
             await _cleanup_department(test_client, admin_headers, department_id)
 
 
+async def test_role_delegation_requires_atomic_permissions_and_scope(test_client, user_management_test_users):
+    """非超级管理员只能在同一授权分配完整覆盖时转授角色。"""
+
+    super_headers = user_management_test_users["admin_headers"]
+    suffix = uuid.uuid4().hex[:8]
+    password = f"Pw!{uuid.uuid4().hex}"
+    user_ids: list[int] = []
+    role_ids: list[int] = []
+    department_ids: list[int] = []
+
+    try:
+        dept_a = await _create_department_with_admin(test_client, super_headers, "da")
+        dept_b = await _create_department_with_admin(test_client, super_headers, "db")
+        department_a = dept_a["department"]
+        department_b = dept_b["department"]
+        department_ids.extend([department_a["id"], department_b["id"]])
+        user_ids.extend([dept_a["admin_id"], dept_b["admin_id"]])
+
+        target_a = await _create_user(test_client, dept_a["admin_headers"], "da")
+        target_b = await _create_user(test_client, dept_b["admin_headers"], "db")
+        user_ids.extend([target_a["id"], target_b["id"]])
+
+        async with pg_manager.get_async_session_context() as session:
+            role_definitions = [
+                (
+                    f"pytest_delegate_legal_{suffix}",
+                    "合法转授角色",
+                    "organization_and_descendants",
+                    ["user:read"],
+                    [],
+                ),
+                (
+                    f"pytest_delegate_high_{suffix}",
+                    "超功能权限角色",
+                    "self",
+                    ["api_key:manage_all"],
+                    [],
+                ),
+                (
+                    f"pytest_delegate_wide_{suffix}",
+                    "超数据范围角色",
+                    "all",
+                    ["user:read"],
+                    [],
+                ),
+                (
+                    f"pytest_delegate_assign_{suffix}",
+                    "仅转授权限角色",
+                    "selected_organizations_and_descendants",
+                    ["user:role_assign"],
+                    [department_a["id"]],
+                ),
+                (
+                    f"pytest_delegate_none_{suffix}",
+                    "无范围转授角色",
+                    "none",
+                    ["user:role_assign", "user:read"],
+                    [],
+                ),
+                (
+                    f"pytest_delegate_target_{suffix}",
+                    "无范围目标角色",
+                    "none",
+                    ["user:read"],
+                    [],
+                ),
+            ]
+            roles = []
+            for code, name, scope_type, permission_keys, default_department_ids in role_definitions:
+                role = Role(
+                    code=code,
+                    name=name,
+                    description="",
+                    is_builtin=False,
+                    is_active=True,
+                    default_scope_type=scope_type,
+                    permissions=[RolePermission(permission_key=key) for key in permission_keys],
+                    default_departments=[
+                        RoleDefaultDepartment(department_id=department_id) for department_id in default_department_ids
+                    ],
+                )
+                session.add(role)
+                roles.append(role)
+            await session.flush()
+            role_ids.extend(role.id for role in roles)
+
+            split_actor = User(
+                username=f"pytest-delegate-split-{suffix}",
+                uid=f"pytest_delegate_split_{suffix}",
+                password_hash=AuthUtils.hash_password(password),
+                role="user",
+                department_id=department_a["id"],
+            )
+            session.add(split_actor)
+            await session.flush()
+            session.add_all(
+                [
+                    UserRoleAssignment(user=split_actor, role=roles[3], scope_mode="inherit"),
+                    UserRoleAssignment(user=split_actor, role=roles[4], scope_mode="inherit"),
+                ]
+            )
+            split_actor_id = split_actor.id
+            user_ids.append(split_actor_id)
+
+        login_response = await test_client.post(
+            "/api/auth/token",
+            data={"username": f"pytest_delegate_split_{suffix}", "password": password},
+        )
+        assert login_response.status_code == 200, login_response.text
+        split_headers = {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+
+        super_overview = await test_client.get("/api/roles/overview", headers=super_headers)
+        assert super_overview.status_code == 200, super_overview.text
+        builtin_roles = {role["code"]: role for role in super_overview.json()["roles"]}
+        legal_role_id, high_role_id, wide_role_id = role_ids[:3]
+
+        overview_response = await test_client.get(
+            f"/api/roles/overview?target_user_id={target_a['id']}",
+            headers=dept_a["admin_headers"],
+        )
+        assert overview_response.status_code == 200, overview_response.text
+        assignable_roles = {role["id"]: role for role in overview_response.json()["roles"]}
+        assert legal_role_id in assignable_roles
+        assert high_role_id not in assignable_roles
+        assert builtin_roles["superadmin"]["id"] not in assignable_roles
+        assert assignable_roles[wide_role_id]["assignment_constraints"]["can_inherit"] is False
+        assert department_a["id"] in assignable_roles[wide_role_id]["assignment_constraints"]["override_department_ids"]
+
+        legal_grant = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={"role_assignments": [{"role_id": legal_role_id, "scope_mode": "inherit"}]},
+            headers=dept_a["admin_headers"],
+        )
+        assert legal_grant.status_code == 200, legal_grant.text
+
+        legal_revoke = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={"role_assignments": [{"role_id": builtin_roles["user"]["id"], "scope_mode": "inherit"}]},
+            headers=dept_a["admin_headers"],
+        )
+        assert legal_revoke.status_code == 200, legal_revoke.text
+
+        cross_scope = await test_client.put(
+            f"/api/auth/users/{target_b['id']}",
+            json={"role_assignments": [{"role_id": legal_role_id, "scope_mode": "inherit"}]},
+            headers=dept_a["admin_headers"],
+        )
+        assert cross_scope.status_code == 404, cross_scope.text
+
+        super_cross_grant = await test_client.put(
+            f"/api/auth/users/{target_b['id']}",
+            json={"role_assignments": [{"role_id": legal_role_id, "scope_mode": "inherit"}]},
+            headers=super_headers,
+        )
+        assert super_cross_grant.status_code == 200, super_cross_grant.text
+        cross_revoke = await test_client.put(
+            f"/api/auth/users/{target_b['id']}",
+            json={"role_assignments": [{"role_id": builtin_roles["user"]["id"], "scope_mode": "inherit"}]},
+            headers=dept_a["admin_headers"],
+        )
+        assert cross_revoke.status_code == 404, cross_revoke.text
+
+        high_permission = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={"role_assignments": [{"role_id": high_role_id, "scope_mode": "inherit"}]},
+            headers=dept_a["admin_headers"],
+        )
+        assert high_permission.status_code == 403, high_permission.text
+
+        wide_scope = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={"role_assignments": [{"role_id": wide_role_id, "scope_mode": "inherit"}]},
+            headers=dept_a["admin_headers"],
+        )
+        assert wide_scope.status_code == 403, wide_scope.text
+
+        narrowed_scope = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={
+                "role_assignments": [
+                    {
+                        "role_id": wide_role_id,
+                        "scope_mode": "override",
+                        "override_scope_type": "selected_organizations_and_descendants",
+                        "override_department_ids": [department_a["id"]],
+                    }
+                ]
+            },
+            headers=dept_a["admin_headers"],
+        )
+        assert narrowed_scope.status_code == 200, narrowed_scope.text
+
+        superadmin_grant = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={
+                "reason": "越权测试",
+                "role_assignments": [{"role_id": builtin_roles["superadmin"]["id"], "scope_mode": "inherit"}],
+            },
+            headers=dept_a["admin_headers"],
+        )
+        assert superadmin_grant.status_code == 403, superadmin_grant.text
+
+        atomic_split = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={"role_assignments": [{"role_id": legal_role_id, "scope_mode": "inherit"}]},
+            headers=split_headers,
+        )
+        assert atomic_split.status_code == 403, atomic_split.text
+
+        atomic_target_split = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={"role_assignments": [{"role_id": role_ids[5], "scope_mode": "inherit"}]},
+            headers=split_headers,
+        )
+        assert atomic_target_split.status_code == 403, atomic_target_split.text
+
+        super_grant = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={
+                "reason": "测试超级管理员撤销保护",
+                "role_assignments": [{"role_id": builtin_roles["superadmin"]["id"], "scope_mode": "inherit"}],
+            },
+            headers=super_headers,
+        )
+        assert super_grant.status_code == 200, super_grant.text
+        super_revoke = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={"role_assignments": [{"role_id": legal_role_id, "scope_mode": "inherit"}]},
+            headers=dept_a["admin_headers"],
+        )
+        assert super_revoke.status_code == 403, super_revoke.text
+        super_restore = await test_client.put(
+            f"/api/auth/users/{target_a['id']}",
+            json={
+                "reason": "恢复测试用户角色",
+                "role_assignments": [{"role_id": builtin_roles["user"]["id"], "scope_mode": "inherit"}],
+            },
+            headers=super_headers,
+        )
+        assert super_restore.status_code == 200, super_restore.text
+
+        async with pg_manager.get_async_session_context() as session:
+            audits = list(
+                (
+                    await session.scalars(
+                        select(SecurityAudit).where(
+                            SecurityAudit.target_type == "user",
+                            SecurityAudit.target_id == target_a["id"],
+                        )
+                    )
+                ).all()
+            )
+            assert len(audits) >= 3
+            assert all(audit.before_value != audit.after_value for audit in audits)
+    finally:
+        async with pg_manager.get_async_session_context() as session:
+            if user_ids:
+                await session.execute(
+                    delete(SecurityAudit).where(
+                        (SecurityAudit.actor_user_id.in_(user_ids))
+                        | ((SecurityAudit.target_type == "user") & SecurityAudit.target_id.in_(user_ids))
+                    )
+                )
+                await session.execute(delete(OperationLog).where(OperationLog.user_id.in_(user_ids)))
+                await session.execute(delete(User).where(User.id.in_(user_ids)))
+            if role_ids:
+                await session.execute(delete(Role).where(Role.id.in_(role_ids)))
+        for department_id in department_ids:
+            await _cleanup_department(test_client, super_headers, department_id)
+
+
 async def test_invalid_token_is_rejected(test_client):
     headers = {"Authorization": "Bearer not-a-real-token"}
     response = await test_client.get("/api/auth/me", headers=headers)

@@ -4,11 +4,13 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.permissions.role_catalog import DATA_SCOPE_CATALOG
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.role_repository import RoleRepository
 from yuxi.storage.postgres.models_business import (
     SecurityAudit,
+    Role,
     User,
     UserRoleAssignment,
     UserRoleAssignmentDepartment,
@@ -17,6 +19,10 @@ from yuxi.storage.postgres.models_business import (
 
 class UserRoleConflictError(ValueError):
     """用户角色状态违反必须保留的系统约束。"""
+
+
+class UserRoleAuthorizationError(ValueError):
+    """操作者无权授予或撤销请求中的角色范围。"""
 
 
 def serialize_user_roles(user: User) -> list[dict[str, Any]]:
@@ -111,15 +117,184 @@ def _scope_is_within_default(
     return False
 
 
-async def replace_user_role_assignments(
-    db: AsyncSession,
+def _is_superadmin(user: User) -> bool:
+    """判断用户是否拥有有效超级管理员角色。"""
+
+    return any(item.role.is_active and item.role.code == "superadmin" for item in user.role_assignments)
+
+
+def _operator_scope_covers(
+    operator_assignment: Any,
     *,
     actor: User,
     target: User,
+    delegated_scope_type: str,
+    delegated_department_ids: list[int],
+    paths: dict[int, str],
+) -> bool:
+    """判断操作者的一条角色分配是否完整覆盖待转授范围。"""
+
+    if delegated_scope_type == "none":
+        return True
+    if operator_assignment.scope_type == "all":
+        return True
+    if delegated_scope_type == "all" or operator_assignment.scope_type == "none":
+        return False
+
+    target_path = paths.get(target.department_id) if target.department_id is not None else None
+    if delegated_scope_type == "self":
+        if operator_assignment.scope_type == "self":
+            return actor.id == target.id
+        delegated_paths = [target_path] if target_path else []
+    elif delegated_scope_type == "organization_and_descendants":
+        delegated_paths = [target_path] if target_path else []
+    else:
+        delegated_paths = [paths.get(department_id) for department_id in delegated_department_ids]
+
+    if not delegated_paths or any(path is None for path in delegated_paths):
+        return False
+    if operator_assignment.scope_type == "self":
+        return False
+    if operator_assignment.scope_type == "organization_and_descendants":
+        operator_ids = [actor.department_id] if actor.department_id is not None else []
+    elif operator_assignment.scope_type == "selected_organizations_and_descendants":
+        operator_ids = list(operator_assignment.department_ids)
+    else:
+        return False
+
+    operator_paths = [paths.get(department_id) for department_id in operator_ids]
+    return bool(operator_paths) and all(
+        any(delegated_path.startswith(operator_path) for operator_path in operator_paths if operator_path)
+        for delegated_path in delegated_paths
+    )
+
+
+def _can_delegate_role_scope(
+    authorization: AuthorizationContext,
+    target: User,
+    role: Role,
+    scope_type: str,
+    department_ids: list[int],
+    paths: dict[int, str],
+) -> bool:
+    """要求同一条操作者分配同时覆盖转授权限与数据范围。"""
+
+    required_permissions = {"user:role_assign", *(item.permission_key for item in role.permissions)}
+    return any(
+        required_permissions.issubset(assignment.permission_keys)
+        and _operator_scope_covers(
+            assignment,
+            actor=authorization.user,
+            target=target,
+            delegated_scope_type="self",
+            delegated_department_ids=[],
+            paths=paths,
+        )
+        and _operator_scope_covers(
+            assignment,
+            actor=authorization.user,
+            target=target,
+            delegated_scope_type=scope_type,
+            delegated_department_ids=department_ids,
+            paths=paths,
+        )
+        for assignment in authorization.assignments
+    )
+
+
+def _role_scope_is_within_default(
+    role: Role,
+    target: User,
+    scope_type: str,
+    department_ids: list[int],
+    paths: dict[int, str],
+) -> bool:
+    """判断待转授范围是否不超过角色定义。"""
+
+    return _scope_is_within_default(
+        default_scope_type=role.default_scope_type,
+        default_department_ids=[item.department_id for item in role.default_departments],
+        override_scope_type=scope_type,
+        override_department_ids=department_ids,
+        user_department_id=target.department_id,
+        paths=paths,
+    )
+
+
+async def get_assignable_role_constraints(
+    authorization: AuthorizationContext,
+    target: User,
+    roles: list[Role],
+) -> dict[int, dict[str, Any]]:
+    """返回当前操作者对目标用户可合法保存的角色与范围。"""
+
+    departments = await DepartmentRepository().list_departments()
+    paths = {department.id: department.path for department in departments}
+    constraints = {}
+    for role in roles:
+        if not role.is_active or (role.code == "superadmin" and not _is_superadmin(authorization.user)):
+            continue
+
+        default_department_ids = [item.department_id for item in role.default_departments]
+        can_inherit = _can_delegate_role_scope(
+            authorization,
+            target,
+            role,
+            role.default_scope_type,
+            default_department_ids,
+            paths,
+        )
+        override_scope_types = []
+        override_department_ids = []
+        for scope in DATA_SCOPE_CATALOG:
+            if scope.key == "selected_organizations_and_descendants":
+                override_department_ids = [
+                    department.id
+                    for department in departments
+                    if _role_scope_is_within_default(role, target, scope.key, [department.id], paths)
+                    and _can_delegate_role_scope(
+                        authorization,
+                        target,
+                        role,
+                        scope.key,
+                        [department.id],
+                        paths,
+                    )
+                ]
+                if override_department_ids:
+                    override_scope_types.append(scope.key)
+                continue
+            if _role_scope_is_within_default(role, target, scope.key, [], paths) and _can_delegate_role_scope(
+                authorization,
+                target,
+                role,
+                scope.key,
+                [],
+                paths,
+            ):
+                override_scope_types.append(scope.key)
+
+        if can_inherit or override_scope_types:
+            constraints[role.id] = {
+                "can_inherit": can_inherit,
+                "override_scope_types": override_scope_types,
+                "override_department_ids": override_department_ids,
+            }
+    return constraints
+
+
+async def replace_user_role_assignments(
+    db: AsyncSession,
+    *,
+    authorization: AuthorizationContext,
+    target: User,
     assignments: list[dict[str, Any]],
     reason: str | None = None,
+    check_existing: bool = True,
 ) -> None:
     """完整替换有效用户的角色分配，并在同一事务中记录安全审计。"""
+
+    actor = authorization.user
 
     if not assignments:
         raise ValueError("每个有效用户至少需要一个角色")
@@ -145,8 +320,8 @@ async def replace_user_role_assignments(
     had_superadmin = any(item["code"] == "superadmin" for item in before["roles"])
     normalized_reason = (reason or "").strip()
     if had_superadmin != has_superadmin:
-        if actor.role != "superadmin":
-            raise ValueError("只有超级管理员可以授予或撤销 superadmin")
+        if not _is_superadmin(actor):
+            raise UserRoleAuthorizationError("只有超级管理员可以授予或撤销 superadmin")
         if not normalized_reason:
             raise ValueError("授予或撤销 superadmin 必须填写原因")
 
@@ -190,6 +365,14 @@ async def replace_user_role_assignments(
 
     if target.department_id is not None:
         department_ids.add(target.department_id)
+    if actor.department_id is not None:
+        department_ids.add(actor.department_id)
+    for operator_assignment in authorization.assignments:
+        department_ids.update(operator_assignment.department_ids)
+    if check_existing:
+        for assignment in target.role_assignments:
+            department_ids.update(item.department_id for item in assignment.role.default_departments)
+            department_ids.update(item.department_id for item in assignment.scope_departments)
     paths = await DepartmentRepository().get_paths_by_ids(department_ids, session=db)
     if len(paths) != len(department_ids):
         raise ValueError("角色范围引用了不存在或已删除的组织节点")
@@ -213,6 +396,39 @@ async def replace_user_role_assignments(
             paths=paths,
         ):
             raise ValueError("个性化覆盖范围不能超过角色默认范围")
+
+    if not _is_superadmin(actor):
+        grants_to_check = list(normalized_assignments)
+        if check_existing:
+            grants_to_check.extend(
+                {
+                    "role": assignment.role,
+                    "scope_mode": assignment.scope_mode,
+                    "override_scope_type": assignment.override_scope_type,
+                    "override_department_ids": [item.department_id for item in assignment.scope_departments],
+                }
+                for assignment in target.role_assignments
+            )
+        for item in grants_to_check:
+            role = item["role"]
+            if role.code == "superadmin":
+                raise UserRoleAuthorizationError("只有超级管理员可以授予或撤销 superadmin")
+            inherited = item["scope_mode"] == "inherit"
+            scope_type = role.default_scope_type if inherited else item["override_scope_type"]
+            scope_department_ids = (
+                [entry.department_id for entry in role.default_departments]
+                if inherited
+                else item["override_department_ids"]
+            )
+            if not _can_delegate_role_scope(
+                authorization,
+                target,
+                role,
+                scope_type,
+                scope_department_ids,
+                paths,
+            ):
+                raise UserRoleAuthorizationError("角色权限或数据范围超出当前操作者可转授范围")
 
     existing_by_role_id = {assignment.role.id: assignment for assignment in target.role_assignments}
     next_assignments = []

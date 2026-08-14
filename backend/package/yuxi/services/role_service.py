@@ -13,6 +13,7 @@ from yuxi.permissions.authorization import (
 from yuxi.permissions.role_catalog import DATA_SCOPE_CATALOG, PERMISSION_CATALOG
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.role_repository import RoleRepository
+from yuxi.services.user_role_service import get_assignable_role_constraints
 from yuxi.storage.postgres.models_business import (
     Role,
     RoleDefaultDepartment,
@@ -211,7 +212,11 @@ async def _get_serialized_role(db: AsyncSession, role_id: int) -> dict[str, Any]
     return _serialize_role(role, audits[role_id])
 
 
-async def get_role_overview(db: AsyncSession, authorization: AuthorizationContext) -> dict[str, Any]:
+async def get_role_overview(
+    db: AsyncSession,
+    authorization: AuthorizationContext,
+    assignment_target: User | None = None,
+) -> dict[str, Any]:
     """返回角色定义以及当前数据范围内的成员和审计。"""
 
     repository = RoleRepository(db)
@@ -246,13 +251,22 @@ async def get_role_overview(db: AsyncSession, authorization: AuthorizationContex
     scope_department_ids = {item.department_id for role in roles for item in role.default_departments}
     scope_department_names = await department_repository.get_names_by_ids(scope_department_ids, session=db)
 
+    serialized_roles = [_serialize_role(role, audits[role.id], visible_user_ids) for role in roles]
+    if assignment_target is not None:
+        constraints = await get_assignable_role_constraints(authorization, assignment_target, roles)
+        serialized_roles = [
+            {**role, "assignment_constraints": constraints[role["id"]]}
+            for role in serialized_roles
+            if role["id"] in constraints
+        ]
+
     return {
         "permissions": [asdict(item) for item in PERMISSION_CATALOG],
         "data_scope_types": [asdict(item) for item in DATA_SCOPE_CATALOG],
         "scope_departments": [
             {"id": department_id, "name": name} for department_id, name in scope_department_names.items()
         ],
-        "roles": [_serialize_role(role, audits[role.id], visible_user_ids) for role in roles],
+        "roles": serialized_roles,
     }
 
 

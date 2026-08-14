@@ -1,8 +1,11 @@
 /** 角色与权限管理 API。 */
 
-import { apiSuperAdminGet, apiSuperAdminPost, apiSuperAdminPut } from './base'
+import { apiGet, apiSuperAdminPost, apiSuperAdminPut } from './base'
 
-export const getRoleOverview = () => apiSuperAdminGet('/api/roles/overview')
+export const getRoleOverview = (targetUserId = null) => {
+  const query = targetUserId == null ? '' : `?target_user_id=${encodeURIComponent(targetUserId)}`
+  return apiGet(`/api/roles/overview${query}`)
+}
 
 export const createRole = (data) => apiSuperAdminPost('/api/roles', data)
 

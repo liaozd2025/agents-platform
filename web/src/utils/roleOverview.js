@@ -48,7 +48,8 @@ export function getAssignableScopeTypes(
   scopeTypes,
   departments = [],
   targetDepartmentId = null,
-  defaultDepartmentIds = []
+  defaultDepartmentIds = [],
+  constraints = null
 ) {
   let allowedScopes = {
     none: ['none'],
@@ -82,7 +83,10 @@ export function getAssignableScopeTypes(
     )
   }
 
-  return scopeTypes.filter((scope) => allowedScopes?.includes(scope.key))
+  const constrainedScopes = constraints ? new Set(constraints.override_scope_types) : null
+  return scopeTypes.filter(
+    (scope) => allowedScopes?.includes(scope.key) && (!constrainedScopes || constrainedScopes.has(scope.key))
+  )
 }
 
 /**

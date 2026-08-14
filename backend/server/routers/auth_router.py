@@ -29,6 +29,7 @@ from yuxi.utils.auth_utils import AuthUtils
 from yuxi.services.user_identity_service import generate_unique_uid, validate_username, is_valid_phone_number
 from yuxi.services.operation_log_service import log_operation
 from yuxi.services.user_role_service import (
+    UserRoleAuthorizationError,
     UserRoleConflictError,
     replace_user_role_assignments,
     serialize_user,
@@ -245,6 +246,8 @@ def _raise_cli_auth_error(exc: CLIAuthError) -> None:
 def _raise_user_role_error(error: ValueError) -> None:
     """将角色分配校验错误映射为稳定的用户管理状态码。"""
 
+    if isinstance(error, UserRoleAuthorizationError):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
     if isinstance(error, UserRoleConflictError):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
@@ -654,7 +657,7 @@ async def create_user(
     if requested_assignments is not None and current_user.role != "superadmin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="只有超级管理员可以配置用户角色",
+            detail="只有超级管理员可以在创建用户时配置角色",
         )
 
     # 旧单角色字段仅用于尚未迁移的调用方。
@@ -664,7 +667,7 @@ async def create_user(
             detail="创建超级管理员请使用角色分配数组并填写原因",
         )
 
-    # 非超级管理员的角色转授由 #25 单独开放；本任务只允许创建普通用户。
+    # 旧单角色字段仍只允许非超级管理员创建普通用户。
     if requested_assignments is None and current_user.role != "superadmin" and user_data.role != "user":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -692,10 +695,11 @@ async def create_user(
         try:
             await replace_user_role_assignments(
                 db,
-                actor=current_user,
+                authorization=authorization,
                 target=new_user,
                 assignments=[item.model_dump() for item in requested_assignments],
                 reason=user_data.reason,
+                check_existing=False,
             )
         except ValueError as error:
             _raise_user_role_error(error)
@@ -784,25 +788,46 @@ async def update_user(
     user_id: int,
     user_data: UserUpdate,
     request: Request,
-    authorization: AuthorizationContext = Depends(require_permission("user:update")),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
     """修改管理域内用户，并限制新的组织归属。"""
 
+    required_permissions = []
+    if user_data.role_assignments is not None:
+        required_permissions.append("user:role_assign")
+    if (
+        any(
+            value is not None
+            for value in (
+                user_data.username,
+                user_data.password,
+                user_data.phone_number,
+                user_data.avatar,
+                user_data.department_id,
+            )
+        )
+        or not required_permissions
+    ):
+        required_permissions.append("user:update")
+
+    for permission_key in required_permissions:
+        if not authorization.has_permission(permission_key):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"缺少功能权限: {permission_key}",
+            )
+    user = await _get_authorized_user(db, authorization, required_permissions[0], user_id)
+    for permission_key in required_permissions[1:]:
+        user = await _get_authorized_user(db, authorization, permission_key, user_id)
+
     current_user = authorization.user
-    user = await _get_authorized_user(db, authorization, "user:update", user_id)
 
     # 检查权限
     if user.role == "superadmin" and current_user.role != "superadmin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="只有超级管理员才能修改超级管理员账户",
-        )
-
-    if user_data.role_assignments is not None and current_user.role != "superadmin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="只有超级管理员可以配置用户角色",
         )
 
     # 更新信息
@@ -859,7 +884,7 @@ async def update_user(
         try:
             await replace_user_role_assignments(
                 db,
-                actor=current_user,
+                authorization=authorization,
                 target=user,
                 assignments=[item.model_dump() for item in user_data.role_assignments],
                 reason=user_data.reason,

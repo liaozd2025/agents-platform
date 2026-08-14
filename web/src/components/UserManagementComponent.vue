@@ -113,9 +113,16 @@
                 </div>
               </template>
 
-              <template v-if="canUpdateUsers || canDeleteUsers" #card-more-action-corner>
+              <template
+                v-if="canUpdateUsers || canAssignRoles || canDeleteUsers"
+                #card-more-action-corner
+              >
                 <a-menu>
-                  <a-menu-item v-if="canUpdateUsers" key="edit" @click.stop="showEditUserModal(user)">
+                  <a-menu-item
+                    v-if="canUpdateUsers || canAssignRoles"
+                    key="edit"
+                    @click.stop="showEditUserModal(user)"
+                  >
                     <span class="lucide-menu-item">
                       <SquarePen :size="14" />
                       <span>编辑用户</span>
@@ -190,6 +197,7 @@
             placeholder="请输入用户名（2-20个字符）"
             @blur="validateAndGenerateUid"
             :maxlength="20"
+            :disabled="userManagement.editMode && !canUpdateUsers"
           />
           <div v-if="userManagement.form.usernameError" class="error-text">
             {{ userManagement.form.usernameError }}
@@ -208,13 +216,14 @@
             v-model:value="userManagement.form.phoneNumber"
             placeholder="请输入手机号（可选，可用于登录）"
             :maxlength="11"
+            :disabled="userManagement.editMode && !canUpdateUsers"
           />
           <div v-if="userManagement.form.phoneError" class="error-text">
             {{ userManagement.form.phoneError }}
           </div>
         </a-form-item>
 
-        <template v-if="userManagement.editMode">
+        <template v-if="userManagement.editMode && canUpdateUsers">
           <div class="password-toggle">
             <a-checkbox v-model:checked="userManagement.displayPasswordFields">
               修改密码
@@ -222,7 +231,11 @@
           </div>
         </template>
 
-        <template v-if="!userManagement.editMode || userManagement.displayPasswordFields">
+        <template
+          v-if="
+            !userManagement.editMode || (canUpdateUsers && userManagement.displayPasswordFields)
+          "
+        >
           <a-form-item label="密码" required class="form-item">
             <a-input-password
               v-model:value="userManagement.form.password"
@@ -240,7 +253,7 @@
         </template>
 
         <a-form-item
-          v-if="!userStore.isSuperAdmin && !userManagement.editMode"
+          v-if="!canEditRoleAssignments && !userManagement.editMode"
           label="角色"
           class="form-item"
         >
@@ -249,7 +262,7 @@
           </a-select>
         </a-form-item>
 
-        <a-form-item v-if="userStore.isSuperAdmin" label="角色分配" required class="form-item">
+        <a-form-item v-if="canEditRoleAssignments" label="角色分配" required class="form-item">
           <div class="role-assignment-list">
             <section
               v-for="(assignment, index) in userManagement.form.roleAssignments"
@@ -289,7 +302,12 @@
                   v-model:value="assignment.scope_mode"
                   @change="handleScopeModeChange(assignment)"
                 >
-                  <a-radio value="inherit">继承角色默认范围</a-radio>
+                  <a-radio
+                    value="inherit"
+                    :disabled="getRoleById(assignment.role_id)?.assignment_constraints?.can_inherit === false"
+                  >
+                    继承角色默认范围
+                  </a-radio>
                   <a-radio value="override">个性化收窄</a-radio>
                 </a-radio-group>
 
@@ -374,7 +392,10 @@ import {
   isDepartmentSelectionCovered,
   normalizeDepartmentSelection
 } from '@/utils/departmentTree'
-import { getAssignableScopeTypes, resetRoleAssignmentScope } from '@/utils/roleOverview'
+import {
+  getAssignableScopeTypes,
+  resetRoleAssignmentScope
+} from '@/utils/roleOverview'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 
@@ -416,13 +437,17 @@ const userManagement = reactive({
 const departmentManagement = reactive({
   departments: []
 })
-const roleOverview = reactive({ roles: [], dataScopeTypes: [] })
+const roleOverview = reactive({ roles: [], dataScopeTypes: [], targetUserId: null })
 
 const treeFieldNames = { children: 'children', label: 'name', value: 'id' }
 const departmentTree = computed(() => buildDepartmentTree(departmentManagement.departments))
 const canCreateUsers = computed(() => userStore.hasPermission('user:create'))
 const canUpdateUsers = computed(() => userStore.hasPermission('user:update'))
+const canAssignRoles = computed(() => userStore.hasPermission('user:role_assign'))
 const canDeleteUsers = computed(() => userStore.hasPermission('user:delete'))
+const canEditRoleAssignments = computed(
+  () => userStore.isSuperAdmin || (userManagement.editMode && canAssignRoles.value)
+)
 const canChooseUserDepartment = computed(() =>
   userManagement.editMode ? canUpdateUsers.value : canCreateUsers.value
 )
@@ -493,16 +518,20 @@ const fetchDepartments = async () => {
   }
 }
 
-const fetchRoleOptions = async (force = false) => {
-  if (!userStore.isSuperAdmin || (!force && roleOverview.roles.length)) return
+const fetchRoleOptions = async (force = false, targetUserId = null) => {
+  const assignmentTargetId = userStore.isSuperAdmin ? null : targetUserId
+  if (!userStore.isSuperAdmin && (!canAssignRoles.value || assignmentTargetId == null)) return
+  if (!force && roleOverview.roles.length && roleOverview.targetUserId === assignmentTargetId) return
 
   try {
-    const overview = await getRoleOverview()
+    const overview = await getRoleOverview(assignmentTargetId)
     roleOverview.roles = overview.roles
     roleOverview.dataScopeTypes = overview.data_scope_types
+    roleOverview.targetUserId = assignmentTargetId
   } catch (error) {
     console.error('获取角色列表失败:', error)
     message.error(error.message || '获取角色列表失败')
+    throw error
   }
 }
 
@@ -526,21 +555,34 @@ const getDefaultRoleAssignments = () => {
 
 const getOverrideScopeOptions = (roleId) => {
   const role = getRoleById(roleId)
-  return getAssignableScopeTypes(
+  const scopes = getAssignableScopeTypes(
     role?.default_scope_type,
     roleOverview.dataScopeTypes,
     departmentManagement.departments,
     userManagement.form.departmentId,
-    role?.default_department_ids
-  ).map((scope) => ({ value: scope.key, label: scope.label }))
+    role?.default_department_ids,
+    role?.assignment_constraints
+  )
+  return scopes.map((scope) => ({
+    value: scope.key,
+    label: scope.label
+  }))
 }
 
 const getOverrideDepartmentTree = (roleId) => {
   const role = getRoleById(roleId)
-  let allowedRootIds = null
-  if (role?.default_scope_type === 'organization_and_descendants') {
+  let allowedRootIds = role?.assignment_constraints
+    ? normalizeDepartmentSelection(
+        departmentManagement.departments,
+        role.assignment_constraints.override_department_ids
+      )
+    : null
+  if (allowedRootIds === null && role?.default_scope_type === 'organization_and_descendants') {
     allowedRootIds = userManagement.form.departmentId ? [userManagement.form.departmentId] : []
-  } else if (role?.default_scope_type === 'selected_organizations_and_descendants') {
+  } else if (
+    allowedRootIds === null &&
+    role?.default_scope_type === 'selected_organizations_and_descendants'
+  ) {
     allowedRootIds = role.default_department_ids
   }
   return buildDepartmentScopeTree(departmentManagement.departments, allowedRootIds)
@@ -556,7 +598,10 @@ const addRoleAssignment = () => {
   const role = activeRoles.value.find(
     (item) => !selected.has(item.id) && item.code !== 'superadmin'
   )
-  if (role) userManagement.form.roleAssignments.push(makeRoleAssignment(role))
+  if (role) {
+    userManagement.form.roleAssignments.push(makeRoleAssignment(role))
+    handleRoleChange(userManagement.form.roleAssignments.length - 1)
+  }
 }
 
 const removeRoleAssignment = (index) => {
@@ -565,12 +610,18 @@ const removeRoleAssignment = (index) => {
 
 const handleRoleChange = (index) => {
   const assignment = userManagement.form.roleAssignments[index]
-  const isSuperadmin = getRoleById(assignment.role_id)?.code === 'superadmin'
+  const role = getRoleById(assignment.role_id)
+  const isSuperadmin = role?.code === 'superadmin'
   userManagement.form.roleAssignments = resetRoleAssignmentScope(
     userManagement.form.roleAssignments,
     index,
     isSuperadmin
   )
+  const changed = userManagement.form.roleAssignments[isSuperadmin ? 0 : index]
+  if (role?.assignment_constraints?.can_inherit === false) {
+    changed.scope_mode = 'override'
+    changed.override_scope_type = getOverrideScopeOptions(role.id)[0]?.value || null
+  }
 }
 
 const handleScopeModeChange = (assignment) => {
@@ -711,7 +762,11 @@ const handleRefresh = async () => {
   if (userManagement.refreshing) return
   userManagement.refreshing = true
   try {
-    await Promise.all([fetchUsers(), fetchDepartments(), fetchRoleOptions(true)])
+    await Promise.all([
+      fetchUsers(),
+      fetchDepartments(),
+      fetchRoleOptions(true, userManagement.editMode ? userManagement.editUserId : null)
+    ])
     message.success('刷新成功')
   } catch (error) {
     console.error('刷新失败:', error)
@@ -746,13 +801,27 @@ const showAddUserModal = async () => {
 
 // 打开编辑用户模态框
 const showEditUserModal = async (user) => {
-  await Promise.all([fetchDepartments(), fetchRoleOptions()])
   userManagement.modalTitle = '编辑用户'
   userManagement.editMode = true
   userManagement.editUserId = user.id
+  await Promise.all([fetchDepartments(), fetchRoleOptions(false, user.id)])
   userManagement.originalHadSuperadmin = (user.roles || []).some(
     (role) => role.code === 'superadmin'
   )
+  const roleAssignments = (user.roles || [])
+    .filter((role) => getRoleById(role.id))
+    .map((role) => makeRoleAssignment(null, role))
+  for (const assignment of roleAssignments) {
+    const role = getRoleById(assignment.role_id)
+    if (
+      assignment.scope_mode === 'inherit' &&
+      role?.assignment_constraints?.can_inherit === false
+    ) {
+      assignment.scope_mode = 'override'
+      assignment.override_scope_type = getOverrideScopeOptions(role.id)[0]?.value || null
+      assignment.override_department_ids = []
+    }
+  }
   userManagement.form = {
     username: user.username,
     generatedUid: user.uid || '', // 编辑模式显示现有的uid
@@ -760,7 +829,7 @@ const showEditUserModal = async (user) => {
     password: '',
     confirmPassword: '',
     role: user.role,
-    roleAssignments: (user.roles || []).map((role) => makeRoleAssignment(null, role)),
+    roleAssignments,
     reason: '',
     departmentId: user.department_id || null,
     usernameError: '',
@@ -811,7 +880,7 @@ const handleUserFormSubmit = async () => {
       }
     }
 
-    if (userStore.isSuperAdmin) {
+    if (canEditRoleAssignments.value) {
       if (!userManagement.form.roleAssignments.length) {
         message.error('请至少分配一个角色')
         return
@@ -858,20 +927,18 @@ const handleUserFormSubmit = async () => {
     // 根据模式决定创建还是更新用户
     if (userManagement.editMode) {
       // 创建更新数据对象
-      const updateData = {
-        username: userManagement.form.username.trim()
+      const updateData = {}
+      if (canUpdateUsers.value) {
+        updateData.username = userManagement.form.username.trim()
+        if (userManagement.form.phoneNumber) {
+          updateData.phone_number = userManagement.form.phoneNumber
+        }
+        if (userManagement.form.departmentId) {
+          updateData.department_id = userManagement.form.departmentId
+        }
       }
 
-      // 添加手机号字段
-      if (userManagement.form.phoneNumber) {
-        updateData.phone_number = userManagement.form.phoneNumber
-      }
-
-      if (canUpdateUsers.value && userManagement.form.departmentId) {
-        updateData.department_id = userManagement.form.departmentId
-      }
-
-      if (userStore.isSuperAdmin) {
+      if (canEditRoleAssignments.value) {
         updateData.role_assignments = roleAssignments
         if (requiresSuperadminReason.value) updateData.reason = userManagement.form.reason.trim()
       }

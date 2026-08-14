@@ -53,7 +53,7 @@ class RoleRepository:
             (
                 await self.db.scalars(
                     select(Role)
-                    .options(selectinload(Role.default_departments))
+                    .options(selectinload(Role.permissions), selectinload(Role.default_departments))
                     .where(Role.id.in_(role_ids))
                     .order_by(Role.id)
                     .with_for_update()

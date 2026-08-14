@@ -14,9 +14,10 @@ from yuxi.services.role_service import (
     update_custom_role,
 )
 from yuxi.permissions.authorization import AuthorizationContext
+from yuxi.services.user_management_service import get_authorized_user
 from yuxi.storage.postgres.models_business import User
 
-from server.utils.auth_middleware import get_db, require_permission
+from server.utils.auth_middleware import get_authorization_context, get_db, require_permission
 
 roles = APIRouter(prefix="/roles", tags=["roles"])
 
@@ -73,12 +74,23 @@ async def _get_role_manager(
 
 @roles.get("/overview")
 async def read_role_overview(
-    authorization: AuthorizationContext = Depends(require_permission("role:read")),
+    target_user_id: int | None = None,
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """返回当前用户有权查看的角色、权限、范围、成员和审计。"""
 
-    return await get_role_overview(db, authorization)
+    if target_user_id is None:
+        if not authorization.has_permission("role:read"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="缺少功能权限: role:read")
+        return await get_role_overview(db, authorization)
+
+    if not authorization.has_permission("user:role_assign"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="缺少功能权限: user:role_assign")
+    target = await get_authorized_user(db, authorization, "user:role_assign", target_user_id)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
+    return await get_role_overview(db, authorization, assignment_target=target)
 
 
 @roles.post("", status_code=status.HTTP_201_CREATED)

@@ -79,6 +79,29 @@ test("角色分配只提供不超过默认范围的选项", () => {
   );
 });
 
+test("非超级管理员角色选项遵守服务端转授约束", () => {
+  const scopes = ["none", "self", "organization_and_descendants", "all"].map(
+    (key) => ({ key }),
+  );
+  const departments = [
+    { id: 1, parent_id: null },
+    { id: 2, parent_id: 1 },
+    { id: 3, parent_id: 2 },
+    { id: 4, parent_id: 1 },
+  ];
+  const constraints = {
+    override_scope_types: ["none", "self", "selected_organizations_and_descendants"],
+    override_department_ids: [2, 3],
+  };
+
+  assert.deepEqual(
+    getAssignableScopeTypes("all", scopes, departments, 2, [], constraints).map(
+      (scope) => scope.key,
+    ),
+    ["none", "self"],
+  );
+});
+
 test("选择超级管理员会清空旧范围并移除其他角色", () => {
   const assignments = [
     { role_id: 1, scope_mode: "inherit", override_department_ids: [] },
