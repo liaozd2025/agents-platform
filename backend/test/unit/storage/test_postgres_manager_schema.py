@@ -224,6 +224,42 @@ async def test_ensure_business_schema_adds_run_origin_snapshot_columns():
 
 
 @pytest.mark.asyncio
+async def test_ensure_business_schema_backfills_historical_organization_snapshots_idempotently():
+    """旧历史事件应只按当前组织关系推算一次，并保留明确标记。"""
+
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager.ensure_business_schema()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+    for table_name in (
+        "conversations",
+        "tool_calls",
+        "message_feedbacks",
+        "operation_logs",
+        "security_audits",
+    ):
+        assert table_name in statements
+    assert "organization_id_snapshot INTEGER" in statements
+    assert "organization_path_snapshot VARCHAR(512)" in statements
+    assert "organization_snapshot_inferred = TRUE" in statements
+    assert "organization_snapshot_inferred IS NULL" in statements
+    assert "ALTER COLUMN organization_snapshot_inferred SET DEFAULT FALSE" in statements
+    assert statements.index("ADD COLUMN IF NOT EXISTS organization_id_snapshot") < statements.index(
+        "organization_snapshot_inferred = TRUE"
+    )
+
+
+@pytest.mark.asyncio
 async def test_ensure_business_schema_removes_unbound_api_keys_before_requiring_user_id():
     manager = PostgresManager()
     original_initialized = manager._initialized

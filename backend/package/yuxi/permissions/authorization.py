@@ -52,6 +52,15 @@ class AuthorizationContext:
             for assignment in self.assignments
         )
 
+    def permission_scopes(self, permission_key: str) -> tuple[tuple[str, frozenset[int]], ...]:
+        """返回授予指定功能权限的各条分配范围，供历史快照查询保持原子授权。"""
+
+        return tuple(
+            (assignment.scope_type, assignment.department_ids)
+            for assignment in self.assignments
+            if permission_key in assignment.permission_keys
+        )
+
     def _scope_matches(self, assignment: _EffectiveAssignment, target: AuthorizationTarget) -> bool:
         """判断一条分配的数据范围是否覆盖目标。"""
 

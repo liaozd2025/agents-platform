@@ -59,6 +59,19 @@ def test_unassigned_permission_is_denied_by_default():
     assert context.allows("role:read") is False
 
 
+def test_permission_scopes_keep_each_assignment_intact():
+    """历史查询只能读取真正授予该功能权限的分配范围。"""
+
+    context = _context(
+        _assignment(["dashboard:view"], "selected_organizations_and_descendants", [2]),
+        _assignment(["user:read"], "all"),
+    )
+
+    assert context.permission_scopes("dashboard:view") == (
+        ("selected_organizations_and_descendants", frozenset({2})),
+    )
+
+
 @pytest.mark.asyncio
 async def test_authorization_context_is_reused_only_within_request():
     """授权上下文仅在同一请求内复用。"""

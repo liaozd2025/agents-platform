@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
+from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
 from yuxi.storage.postgres.models_business import Conversation, ConversationStats, Message, ToolCall
 from yuxi.utils import logger
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -97,6 +98,7 @@ class ConversationRepository:
         metadata.setdefault("attachments", [])
 
         normalized_title = self._normalize_title(title)
+        organization_snapshot = await get_user_organization_snapshot(self.db, uid=str(uid))
 
         conversation = Conversation(
             thread_id=thread_id,
@@ -105,6 +107,7 @@ class ConversationRepository:
             title=normalized_title or "New Conversation",
             status="active",
             extra_metadata=metadata,
+            **organization_snapshot,
         )
 
         self.db.add(conversation)
@@ -250,6 +253,15 @@ class ConversationRepository:
                 )
                 return existing
 
+        uid = await self.db.scalar(
+            select(Conversation.uid)
+            .join(Message, Message.conversation_id == Conversation.id)
+            .where(Message.id == message_id)
+        )
+        if uid is None:
+            raise ValueError("工具调用对应的消息或对话不存在")
+        organization_snapshot = await get_user_organization_snapshot(self.db, uid=uid)
+
         tool_call = ToolCall(
             message_id=message_id,
             tool_name=tool_name,
@@ -258,6 +270,7 @@ class ConversationRepository:
             status=status,
             error_message=error_message,
             langgraph_tool_call_id=langgraph_tool_call_id,
+            **organization_snapshot,
         )
 
         self.db.add(tool_call)

@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import Integer, String, cast, distinct, func, select, text
+from sqlalchemy import Integer, String, and_, cast, distinct, false, func, or_, select, text, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_db, get_superadmin_user, require_permission
@@ -20,7 +20,11 @@ from yuxi.permissions.authorization import AuthorizationContext, AuthorizationTa
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.department_repository import DepartmentRepository
-from yuxi.services.user_management_service import list_authorized_departments, list_authorized_users
+from yuxi.services.user_management_service import (
+    department_is_accessible,
+    list_authorized_departments,
+    list_authorized_users,
+)
 from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.datetime_utils import UTC, ensure_shanghai, shanghai_now, utc_now
@@ -28,6 +32,61 @@ from yuxi.utils.logging_config import logger
 
 
 dashboard = APIRouter(prefix="/dashboard", tags=["Dashboard"])
+
+
+def _historical_visibility_filter(
+    authorization: AuthorizationContext,
+    path_column,
+    *,
+    owner_user_id_column=None,
+    owner_uid_column=None,
+):
+    """把同一角色分配的 Dashboard 数据范围转换为历史快照 SQL 条件。"""
+
+    conditions = []
+    for scope_type, department_ids in authorization.permission_scopes("dashboard:view"):
+        if scope_type == "all":
+            return true()
+        if scope_type == "self":
+            if owner_user_id_column is not None:
+                conditions.append(owner_user_id_column == authorization.user.id)
+            elif owner_uid_column is not None:
+                conditions.append(owner_uid_column == authorization.user.uid)
+        elif scope_type == "organization_and_descendants" and authorization.user.department_id is not None:
+            conditions.append(path_column.like(f"%/{authorization.user.department_id}/%"))
+        elif scope_type == "selected_organizations_and_descendants":
+            conditions.extend(path_column.like(f"%/{department_id}/%") for department_id in department_ids)
+    return or_(*conditions) if conditions else false()
+
+
+async def _dashboard_history_filter(
+    db: AsyncSession,
+    authorization: AuthorizationContext,
+    path_column,
+    department_id: int | None,
+    *,
+    owner_user_id_column=None,
+    owner_uid_column=None,
+):
+    """生成历史事件可见条件，并隐藏越出当前管理域的筛选目标。"""
+
+    if department_id is not None and not await department_is_accessible(
+        authorization,
+        "dashboard:view",
+        department_id,
+        db=db,
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
+
+    visibility = _historical_visibility_filter(
+        authorization,
+        path_column,
+        owner_user_id_column=owner_user_id_column,
+        owner_uid_column=owner_uid_column,
+    )
+    if department_id is None:
+        return visibility
+    return and_(visibility, path_column.like(f"%/{department_id}/%"))
 
 
 def _get_time_group_format(column, time_range: str) -> Any:
@@ -201,16 +260,26 @@ async def get_all_conversations(
     status: str = "active",
     limit: int = 100,
     offset: int = 0,
+    department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
 ):
-    """获取所有对话（超级管理员权限）"""
+    """按事件组织快照获取可见对话。"""
     from yuxi.storage.postgres.models_business import Conversation, ConversationStats
 
     try:
         # Build query
         query = select(Conversation, ConversationStats).outerjoin(
             ConversationStats, Conversation.id == ConversationStats.conversation_id
+        )
+        query = query.filter(
+            await _dashboard_history_filter(
+                db,
+                authorization,
+                Conversation.organization_path_snapshot,
+                department_id,
+                owner_uid_column=Conversation.uid,
+            )
         )
 
         # Apply filters
@@ -240,6 +309,8 @@ async def get_all_conversations(
             }
             for conv, stats in results
         ]
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting conversations: {e}")
         logger.error(traceback.format_exc())
@@ -249,15 +320,30 @@ async def get_all_conversations(
 @dashboard.get("/conversations/{thread_id}", response_model=ConversationDetailResponse)
 async def get_conversation_detail(
     thread_id: str,
+    department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
 ):
-    """获取指定对话详情（超级管理员权限）"""
+    """获取管理域内的指定对话详情。"""
     try:
         conv_manager = ConversationRepository(db)
         conversation = await conv_manager.get_conversation_by_thread_id(thread_id)
 
         if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        target = AuthorizationTarget(
+            owner_user_id=authorization.user.id if conversation.uid == authorization.user.uid else None,
+            department_ancestor_ids=parse_department_ancestor_ids(conversation.organization_path_snapshot),
+        )
+        selected_matches = department_id is None or department_id in target.department_ancestor_ids
+        if not selected_matches or not authorization.allows("dashboard:view", target):
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if department_id is not None and not await department_is_accessible(
+            authorization,
+            "dashboard:view",
+            department_id,
+            db=db,
+        ):
             raise HTTPException(status_code=404, detail="Conversation not found")
 
         # Get messages and stats
@@ -317,10 +403,11 @@ async def get_conversation_detail(
 
 @dashboard.get("/stats/users", response_model=UserActivityStats)
 async def get_user_activity_stats(
+    department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
 ):
-    """获取用户活动统计（超级管理员权限）"""
+    """按历史组织快照获取用户活动统计。"""
     try:
         from yuxi.storage.postgres.models_business import Conversation, User
 
@@ -331,17 +418,30 @@ async def get_user_activity_stats(
         # Conversations may store either the numeric user primary key or the login uid string.
         # Join condition accounts for both representations.
         user_join_condition = Conversation.uid == User.uid
+        history_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            Conversation.organization_path_snapshot,
+            department_id,
+            owner_uid_column=Conversation.uid,
+        )
 
-        # 基础用户统计（排除已删除用户）
-        total_users_result = await db.execute(select(func.count(User.id)).filter(User.is_deleted == 0))
-        total_users = total_users_result.scalar() or 0
+        current_users = await list_authorized_users(
+            authorization,
+            "dashboard:view",
+            department_id=department_id,
+            db=db,
+        )
+        if current_users is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
+        total_users = len(current_users)
 
         # 不同时间段的活跃用户数（基于对话活动，排除已删除用户）
         active_users_24h_result = await db.execute(
             select(func.count(distinct(User.id)))
             .select_from(Conversation)
             .join(User, user_join_condition)
-            .filter(Conversation.updated_at >= naive_now - timedelta(days=1), User.is_deleted == 0)
+            .filter(Conversation.updated_at >= naive_now - timedelta(days=1), User.is_deleted == 0, history_filter)
         )
         active_users_24h = active_users_24h_result.scalar() or 0
 
@@ -349,7 +449,7 @@ async def get_user_activity_stats(
             select(func.count(distinct(User.id)))
             .select_from(Conversation)
             .join(User, user_join_condition)
-            .filter(Conversation.updated_at >= naive_now - timedelta(days=30), User.is_deleted == 0)
+            .filter(Conversation.updated_at >= naive_now - timedelta(days=30), User.is_deleted == 0, history_filter)
         )
         active_users_30d = active_users_30d_result.scalar() or 0
         # 最近7天每日活跃用户（排除已删除用户）
@@ -362,7 +462,12 @@ async def get_user_activity_stats(
                 select(func.count(distinct(User.id)))
                 .select_from(Conversation)
                 .join(User, user_join_condition)
-                .filter(Conversation.updated_at >= day_start, Conversation.updated_at < day_end, User.is_deleted == 0)
+                .filter(
+                    Conversation.updated_at >= day_start,
+                    Conversation.updated_at < day_end,
+                    User.is_deleted == 0,
+                    history_filter,
+                )
             )
             active_count = active_count_result.scalar() or 0
 
@@ -375,6 +480,8 @@ async def get_user_activity_stats(
             daily_active_users=list(reversed(daily_active_users)),  # 按时间正序
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting user activity stats: {e}")
         logger.error(traceback.format_exc())
@@ -388,22 +495,31 @@ async def get_user_activity_stats(
 
 @dashboard.get("/stats/tools", response_model=ToolCallStats)
 async def get_tool_call_stats(
+    department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
 ):
-    """获取工具调用统计（超级管理员权限）"""
+    """按历史组织快照获取工具调用统计。"""
     try:
         from yuxi.storage.postgres.models_business import ToolCall
 
         now = utc_now()
         # PostgreSQL with asyncpg requires naive datetime for naive DateTime columns
         naive_now = now.replace(tzinfo=None)
+        history_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            ToolCall.organization_path_snapshot,
+            department_id,
+        )
 
         # 基础工具调用统计
-        total_calls_result = await db.execute(select(func.count(ToolCall.id)))
+        total_calls_result = await db.execute(select(func.count(ToolCall.id)).filter(history_filter))
         total_calls = total_calls_result.scalar() or 0
 
-        successful_calls_result = await db.execute(select(func.count(ToolCall.id)).filter(ToolCall.status == "success"))
+        successful_calls_result = await db.execute(
+            select(func.count(ToolCall.id)).filter(ToolCall.status == "success", history_filter)
+        )
         successful_calls = successful_calls_result.scalar() or 0
         failed_calls = total_calls - successful_calls
         success_rate = round((successful_calls / total_calls * 100), 2) if total_calls > 0 else 0
@@ -411,6 +527,7 @@ async def get_tool_call_stats(
         # 最常用工具
         most_used_tools_result = await db.execute(
             select(ToolCall.tool_name, func.count(ToolCall.id).label("count"))
+            .filter(history_filter)
             .group_by(ToolCall.tool_name)
             .order_by(func.count(ToolCall.id).desc())
             .limit(10)
@@ -421,7 +538,7 @@ async def get_tool_call_stats(
         # 工具错误分布
         tool_errors_result = await db.execute(
             select(ToolCall.tool_name, func.count(ToolCall.id).label("error_count"))
-            .filter(ToolCall.status == "error")
+            .filter(ToolCall.status == "error", history_filter)
             .group_by(ToolCall.tool_name)
         )
         tool_errors = tool_errors_result.all()
@@ -434,7 +551,11 @@ async def get_tool_call_stats(
             day_end = naive_now - timedelta(days=i)
 
             daily_count_result = await db.execute(
-                select(func.count(ToolCall.id)).filter(ToolCall.created_at >= day_start, ToolCall.created_at < day_end)
+                select(func.count(ToolCall.id)).filter(
+                    ToolCall.created_at >= day_start,
+                    ToolCall.created_at < day_end,
+                    history_filter,
+                )
             )
             daily_count = daily_count_result.scalar() or 0
 
@@ -450,6 +571,8 @@ async def get_tool_call_stats(
             daily_tool_calls=list(reversed(daily_tool_calls)),
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting tool call stats: {e}")
         logger.error(traceback.format_exc())
@@ -551,18 +674,40 @@ async def get_knowledge_stats(
 
 @dashboard.get("/stats/agents", response_model=AgentAnalytics)
 async def get_agent_analytics(
+    department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
 ):
-    """获取智能体分析（超级管理员权限）"""
+    """按历史组织快照获取智能体分析。"""
     try:
         from yuxi.storage.postgres.models_business import Conversation, Message, MessageFeedback, ToolCall
 
+        conversation_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            Conversation.organization_path_snapshot,
+            department_id,
+            owner_uid_column=Conversation.uid,
+        )
+        feedback_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            MessageFeedback.organization_path_snapshot,
+            department_id,
+            owner_uid_column=MessageFeedback.uid,
+        )
+        tool_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            ToolCall.organization_path_snapshot,
+            department_id,
+        )
+
         # 获取所有智能体
         agents_result = await db.execute(
-            select(Conversation.agent_id, func.count(Conversation.id).label("conversation_count")).group_by(
-                Conversation.agent_id
-            )
+            select(Conversation.agent_id, func.count(Conversation.id).label("conversation_count"))
+            .filter(conversation_filter)
+            .group_by(Conversation.agent_id)
         )
         agents = agents_result.all()
 
@@ -576,7 +721,7 @@ async def get_agent_analytics(
                 select(func.count(MessageFeedback.id))
                 .join(Message, MessageFeedback.message_id == Message.id)
                 .join(Conversation, Message.conversation_id == Conversation.id)
-                .filter(Conversation.agent_id == agent_id)
+                .filter(Conversation.agent_id == agent_id, feedback_filter)
             )
             total_feedbacks = total_feedbacks_result.scalar() or 0
 
@@ -584,7 +729,7 @@ async def get_agent_analytics(
                 select(func.count(MessageFeedback.id))
                 .join(Message, MessageFeedback.message_id == Message.id)
                 .join(Conversation, Message.conversation_id == Conversation.id)
-                .filter(Conversation.agent_id == agent_id, MessageFeedback.rating == "like")
+                .filter(Conversation.agent_id == agent_id, MessageFeedback.rating == "like", feedback_filter)
             )
             positive_feedbacks = positive_feedbacks_result.scalar() or 0
 
@@ -601,7 +746,7 @@ async def get_agent_analytics(
                 select(func.count(ToolCall.id))
                 .join(Message, ToolCall.message_id == Message.id)
                 .join(Conversation, Message.conversation_id == Conversation.id)
-                .filter(Conversation.agent_id == agent_id)
+                .filter(Conversation.agent_id == agent_id, tool_filter)
             )
             tool_usage_count = tool_usage_count_result.scalar() or 0
 
@@ -642,6 +787,8 @@ async def get_agent_analytics(
             agent_names=agent_names,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting agent analytics: {e}")
         logger.error(traceback.format_exc())
@@ -655,50 +802,122 @@ async def get_agent_analytics(
 
 @dashboard.get("/stats")
 async def get_dashboard_stats(
+    department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
 ):
-    """获取基础统计（超级管理员权限）"""
-    from yuxi.storage.postgres.models_business import Conversation, Message, MessageFeedback
+    """按当前人员关系和历史事件快照获取基础统计。"""
+    from yuxi.storage.postgres.models_business import (
+        Conversation,
+        Message,
+        MessageFeedback,
+        OperationLog,
+        SecurityAudit,
+        ToolCall,
+    )
 
     try:
+        conversation_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            Conversation.organization_path_snapshot,
+            department_id,
+            owner_uid_column=Conversation.uid,
+        )
+        feedback_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            MessageFeedback.organization_path_snapshot,
+            department_id,
+            owner_uid_column=MessageFeedback.uid,
+        )
+        tool_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            ToolCall.organization_path_snapshot,
+            department_id,
+        )
+        operation_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            OperationLog.organization_path_snapshot,
+            department_id,
+            owner_user_id_column=OperationLog.user_id,
+        )
+        audit_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            SecurityAudit.organization_path_snapshot,
+            department_id,
+            owner_user_id_column=SecurityAudit.actor_user_id,
+        )
+
         # Basic counts
-        total_conversations_result = await db.execute(select(func.count(Conversation.id)))
+        total_conversations_result = await db.execute(select(func.count(Conversation.id)).filter(conversation_filter))
         total_conversations = total_conversations_result.scalar() or 0
 
         active_conversations_result = await db.execute(
-            select(func.count(Conversation.id)).filter(Conversation.status == "active")
+            select(func.count(Conversation.id)).filter(Conversation.status == "active", conversation_filter)
         )
         active_conversations = active_conversations_result.scalar() or 0
 
-        total_messages_result = await db.execute(select(func.count(Message.id)))
+        total_messages_result = await db.execute(
+            select(func.count(Message.id))
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .filter(conversation_filter)
+        )
         total_messages = total_messages_result.scalar() or 0
 
-        total_users_result = await db.execute(select(func.count(User.id)).filter(User.is_deleted == 0))
-        total_users = total_users_result.scalar() or 0
+        current_users = await list_authorized_users(
+            authorization,
+            "dashboard:view",
+            department_id=department_id,
+            db=db,
+        )
+        if current_users is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
+        total_users = len(current_users)
 
         # Feedback statistics
-        total_feedbacks_result = await db.execute(select(func.count(MessageFeedback.id)))
+        total_feedbacks_result = await db.execute(select(func.count(MessageFeedback.id)).filter(feedback_filter))
         total_feedbacks = total_feedbacks_result.scalar() or 0
 
         like_count_result = await db.execute(
-            select(func.count(MessageFeedback.id)).filter(MessageFeedback.rating == "like")
+            select(func.count(MessageFeedback.id)).filter(MessageFeedback.rating == "like", feedback_filter)
         )
         like_count = like_count_result.scalar() or 0
 
         # Calculate satisfaction rate
         satisfaction_rate = round((like_count / total_feedbacks * 100), 2) if total_feedbacks > 0 else 100
+        inferred_checks = (
+            (Conversation, conversation_filter),
+            (ToolCall, tool_filter),
+            (MessageFeedback, feedback_filter),
+            (OperationLog, operation_filter),
+            (SecurityAudit, audit_filter),
+        )
+        contains_inferred_data = False
+        for model, scope_filter in inferred_checks:
+            inferred_id = await db.scalar(
+                select(model.id).filter(scope_filter, model.organization_snapshot_inferred.is_(True)).limit(1)
+            )
+            if inferred_id is not None:
+                contains_inferred_data = True
+                break
 
         return {
             "total_conversations": total_conversations,
             "active_conversations": active_conversations,
             "total_messages": total_messages,
             "total_users": total_users,
+            "contains_inferred_data": contains_inferred_data,
             "feedback_stats": {
                 "total_feedbacks": total_feedbacks,
                 "satisfaction_rate": satisfaction_rate,
             },
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting dashboard stats: {e}")
         logger.error(traceback.format_exc())
@@ -729,10 +948,11 @@ class FeedbackListItem(BaseModel):
 async def get_all_feedbacks(
     rating: str | None = None,
     agent_id: str | None = None,
+    department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
 ):
-    """获取所有反馈记录（超级管理员权限）"""
+    """按历史组织快照获取反馈记录。"""
     from yuxi.storage.postgres.models_business import Conversation, Message, MessageFeedback, User
 
     try:
@@ -741,6 +961,15 @@ async def get_all_feedbacks(
             .join(Message, MessageFeedback.message_id == Message.id)
             .join(Conversation, Message.conversation_id == Conversation.id)
             .outerjoin(User, MessageFeedback.uid == User.uid)
+        )
+        query = query.filter(
+            await _dashboard_history_filter(
+                db,
+                authorization,
+                MessageFeedback.organization_path_snapshot,
+                department_id,
+                owner_uid_column=MessageFeedback.uid,
+            )
         )
 
         # Apply filters
@@ -775,6 +1004,8 @@ async def get_all_feedbacks(
             }
             for feedback, message, conversation, user in results
         ]
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting feedbacks: {e}")
         logger.error(traceback.format_exc())
@@ -802,12 +1033,27 @@ class TimeSeriesStats(BaseModel):
 async def get_call_timeseries_stats(
     type: str = "models",  # models/agents/tokens/tools
     time_range: str = "14days",  # 14hours/14days/14weeks
+    department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_superadmin_user),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
 ):
-    """获取调用分析时间序列统计（超级管理员权限）"""
+    """按历史组织快照获取调用分析时间序列。"""
     try:
         from yuxi.storage.postgres.models_business import Conversation, Message, ToolCall
+
+        conversation_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            Conversation.organization_path_snapshot,
+            department_id,
+            owner_uid_column=Conversation.uid,
+        )
+        tool_filter = await _dashboard_history_filter(
+            db,
+            authorization,
+            ToolCall.organization_path_snapshot,
+            department_id,
+        )
 
         # 计算时间范围（使用北京时间 UTC+8）
         now = utc_now()
@@ -850,8 +1096,9 @@ async def get_call_timeseries_stats(
                     func.count(Message.id).label("count"),
                     category_expr.label("category"),
                 )
+                .join(Conversation, Message.conversation_id == Conversation.id)
                 .filter(Message.role == "assistant", Message.created_at >= query_start_time)
-                .filter(Message.extra_metadata.isnot(None))
+                .filter(Message.extra_metadata.isnot(None), conversation_filter)
                 .group_by(group_format, category_expr)
                 .order_by(group_format)
             )
@@ -867,7 +1114,7 @@ async def get_call_timeseries_stats(
                     func.count(Conversation.id).label("count"),
                     Conversation.agent_id.label("category"),
                 )
-                .filter(Conversation.updated_at.isnot(None))
+                .filter(Conversation.updated_at.isnot(None), conversation_filter)
                 .filter(Conversation.updated_at >= query_start_time)
                 .group_by(conv_group_format, Conversation.agent_id)
                 .order_by(conv_group_format)
@@ -888,10 +1135,12 @@ async def get_call_timeseries_stats(
                     ).label("count"),
                     literal("input_tokens").label("category"),
                 )
+                .join(Conversation, Message.conversation_id == Conversation.id)
                 .filter(
                     Message.created_at >= query_start_time,
                     Message.extra_metadata.isnot(None),
                     Message.extra_metadata["usage_metadata"].isnot(None),
+                    conversation_filter,
                 )
                 .group_by(group_format)
                 .order_by(group_format)
@@ -909,10 +1158,12 @@ async def get_call_timeseries_stats(
                     ).label("count"),
                     literal("output_tokens").label("category"),
                 )
+                .join(Conversation, Message.conversation_id == Conversation.id)
                 .filter(
                     Message.created_at >= query_start_time,
                     Message.extra_metadata.isnot(None),
                     Message.extra_metadata["usage_metadata"].isnot(None),
+                    conversation_filter,
                 )
                 .group_by(group_format)
                 .order_by(group_format)
@@ -934,7 +1185,7 @@ async def get_call_timeseries_stats(
                     func.count(ToolCall.id).label("count"),
                     ToolCall.tool_name.label("category"),
                 )
-                .filter(ToolCall.created_at >= query_start_time)
+                .filter(ToolCall.created_at >= query_start_time, tool_filter)
                 .group_by(tool_group_format, ToolCall.tool_name)
                 .order_by(tool_group_format)
             )
@@ -1030,7 +1281,7 @@ async def get_call_timeseries_stats(
             # 对于工具调用，显示所有时间的总数（与ToolStatsComponent保持一致）
             from yuxi.storage.postgres.models_business import ToolCall
 
-            total_count_result = await db.execute(select(func.count(ToolCall.id)))
+            total_count_result = await db.execute(select(func.count(ToolCall.id)).filter(tool_filter))
             total_count = total_count_result.scalar() or 0
         else:
             # 其他类型使用时间序列数据的总和

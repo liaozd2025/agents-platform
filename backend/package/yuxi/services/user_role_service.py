@@ -8,6 +8,7 @@ from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.permissions.role_catalog import DATA_SCOPE_CATALOG
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.role_repository import RoleRepository
+from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
 from yuxi.storage.postgres.models_business import (
     SecurityAudit,
     Role,
@@ -457,6 +458,7 @@ async def replace_user_role_assignments(
                 reason=normalized_reason or None,
                 before_value=before,
                 after_value=after,
+                **await get_user_organization_snapshot(db, user_id=actor.id),
             )
         )
     await db.flush()

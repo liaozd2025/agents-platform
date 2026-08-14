@@ -13,7 +13,7 @@
         tree-default-expand-all
         allow-clear
         placeholder="全部授权组织"
-        @change="loadCurrentStats"
+        @change="handleDepartmentChange"
       />
       <div class="current-stat">
         <span>人员</span>
@@ -25,6 +25,14 @@
       </div>
     </div>
 
+    <a-alert
+      v-if="basicStats.contains_inferred_data"
+      class="inferred-warning"
+      type="warning"
+      show-icon
+      message="当前结果包含迁移前数据，组织归属按用户当前关系推算。"
+    />
+
     <!-- 现代化顶部统计栏 -->
     <div class="modern-stats-header">
       <StatusBar />
@@ -34,7 +42,11 @@
     <!-- Grid布局的主要内容区域 -->
     <div class="dashboard-grid">
       <!-- 调用统计模块 - 占据2x1网格 -->
-      <CallStatsComponent :loading="loading" ref="callStatsRef" />
+      <CallStatsComponent
+        :loading="loading"
+        :department-id="selectedDepartmentId"
+        ref="callStatsRef"
+      />
 
       <!-- 用户活跃度分析 - 占据1x1网格 -->
       <div class="grid-item user-stats">
@@ -74,7 +86,7 @@
     </div>
 
     <!-- 反馈模态框 -->
-    <FeedbackModalComponent ref="feedbackModal" />
+    <FeedbackModalComponent ref="feedbackModal" :department-id="selectedDepartmentId" />
   </div>
 </template>
 
@@ -142,12 +154,17 @@ const loadCurrentStats = async () => {
   }
 }
 
+const handleDepartmentChange = () => {
+  loadCurrentStats()
+  loadAllStats()
+}
+
 // 加载统计数据 - 使用并行API调用
 const loadAllStats = async () => {
   loading.value = true
   try {
     // 使用并行API调用获取所有统计数据
-    const response = await dashboardApi.getAllStats()
+    const response = await dashboardApi.getAllStats(selectedDepartmentId.value)
 
     // 更新基础统计数据
     basicStats.value = response.basic
@@ -168,7 +185,7 @@ const loadAllStats = async () => {
 
     // 如果并行请求失败，尝试单独加载基础数据
     try {
-      const basicResponse = await dashboardApi.getStats()
+      const basicResponse = await dashboardApi.getStats(selectedDepartmentId.value)
       basicStats.value = basicResponse
       message.warning('详细数据加载失败，仅显示基础统计')
     } catch (basicError) {
@@ -222,6 +239,10 @@ onUnmounted(() => {
   border: 1px solid var(--gray-200);
   border-radius: 8px;
   background: var(--gray-0);
+}
+
+.inferred-warning {
+  margin: 12px var(--page-padding) 0;
 }
 
 .filter-title {

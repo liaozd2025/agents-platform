@@ -11,7 +11,7 @@ from yuxi.repositories.conversation_repository import (
     INVOCATION_CONVERSATION_SOURCES,
     MAX_CONVERSATION_TITLE_LENGTH,
 )
-from yuxi.storage.postgres.models_business import Base, Conversation, Message
+from yuxi.storage.postgres.models_business import Base, Conversation, Department, Message, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = pytest.mark.unit
@@ -45,6 +45,37 @@ def test_normalize_title_trims_spaces():
     normalized = repo._normalize_title("   hello world   ")
 
     assert normalized == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_conversation_and_tool_call_capture_organization_at_each_write(conversation_session):
+    root = Department(name="集团", path="/1/", node_type="group")
+    conversation_session.add(root)
+    await conversation_session.flush()
+    department_a = Department(name="甲组织", parent_id=root.id)
+    department_b = Department(name="乙组织", parent_id=root.id)
+    conversation_session.add_all([department_a, department_b])
+    await conversation_session.flush()
+    department_a.path = f"{root.path}{department_a.id}/"
+    department_b.path = f"{root.path}{department_b.id}/"
+    user = User(username="快照用户", uid="snapshot-user", password_hash="x", department=department_a)
+    conversation_session.add(user)
+    await conversation_session.flush()
+
+    repository = ConversationRepository(conversation_session)
+    conversation = await repository.add_conversation(uid=user.uid, agent_id="agent-a")
+    user.department = department_b
+    message = Message(conversation=conversation, role="assistant", content="done")
+    conversation_session.add(message)
+    await conversation_session.flush()
+    tool_call = await repository.add_tool_call(message.id, "search", status="success")
+
+    assert conversation.organization_id_snapshot == department_a.id
+    assert conversation.organization_path_snapshot == department_a.path
+    assert conversation.organization_snapshot_inferred is False
+    assert tool_call.organization_id_snapshot == department_b.id
+    assert tool_call.organization_path_snapshot == department_b.path
+    assert tool_call.organization_snapshot_inferred is False
 
 
 @pytest.mark.asyncio

@@ -94,6 +94,8 @@ async def dashboard_session():
             status="active",
             created_at=now,
             updated_at=now,
+            organization_id_snapshot=dept_a.id,
+            organization_path_snapshot=dept_a.path,
         )
         conversation_b = Conversation(
             thread_id="thread-b",
@@ -103,11 +105,27 @@ async def dashboard_session():
             status="active",
             created_at=now,
             updated_at=now,
+            organization_id_snapshot=dept_b.id,
+            organization_path_snapshot=dept_b.path,
         )
         message_a = Message(conversation=conversation_a, role="assistant", content="A", created_at=now)
         message_b = Message(conversation=conversation_b, role="assistant", content="B", created_at=now)
-        tool_call_a = ToolCall(message=message_a, tool_name="dept_a_tool", status="success", created_at=now)
-        tool_call_b = ToolCall(message=message_b, tool_name="dept_b_tool", status="success", created_at=now)
+        tool_call_a = ToolCall(
+            message=message_a,
+            tool_name="dept_a_tool",
+            status="success",
+            created_at=now,
+            organization_id_snapshot=dept_a.id,
+            organization_path_snapshot=dept_a.path,
+        )
+        tool_call_b = ToolCall(
+            message=message_b,
+            tool_name="dept_b_tool",
+            status="success",
+            created_at=now,
+            organization_id_snapshot=dept_b.id,
+            organization_path_snapshot=dept_b.path,
+        )
         db.add_all(
             [
                 dept_a,
@@ -145,6 +163,7 @@ async def dashboard_session():
             "db": db,
             "superadmin": superadmin,
             "admin_a": admin_a,
+            "user_a": user_a,
             "dept_a": dept_a,
             "dept_b": dept_b,
             "child_a": child_a,
@@ -158,7 +177,7 @@ async def test_dashboard_current_organization_uses_permission_dependency():
     assert dashboard_routes
     for route in dashboard_routes:
         dependency_calls = {dependency.call for dependency in route.dependant.dependencies}
-        if route.path == "/dashboard/stats/current-organization":
+        if route.path != "/dashboard/stats/knowledge":
             assert get_superadmin_user not in dependency_calls
             assert any(call.__name__ == "check_permission" for call in dependency_calls)
         else:
@@ -173,23 +192,26 @@ async def test_dashboard_dependency_rejects_department_admin(dashboard_session):
 
 
 async def test_conversation_list_superadmin_sees_all_departments(dashboard_session):
-    response = await get_all_conversations(db=dashboard_session["db"], current_user=dashboard_session["superadmin"])
+    authorization = _authorization(dashboard_session["superadmin"], ["dashboard:view"], "all")
+    response = await get_all_conversations(db=dashboard_session["db"], authorization=authorization)
 
     assert {item["thread_id"] for item in response} == {"thread-a", "thread-b"}
 
 
 async def test_conversation_detail_superadmin_can_view_other_department(dashboard_session):
+    authorization = _authorization(dashboard_session["superadmin"], ["dashboard:view"], "all")
     response = await get_conversation_detail(
         "thread-b",
         db=dashboard_session["db"],
-        current_user=dashboard_session["superadmin"],
+        authorization=authorization,
     )
 
     assert response["thread_id"] == "thread-b"
 
 
 async def test_user_activity_stats_superadmin_include_all_departments(dashboard_session):
-    stats = await get_user_activity_stats(db=dashboard_session["db"], current_user=dashboard_session["superadmin"])
+    authorization = _authorization(dashboard_session["superadmin"], ["dashboard:view"], "all")
+    stats = await get_user_activity_stats(db=dashboard_session["db"], authorization=authorization)
 
     assert stats.total_users == 6
     assert stats.active_users_24h == 2
@@ -197,7 +219,8 @@ async def test_user_activity_stats_superadmin_include_all_departments(dashboard_
 
 
 async def test_tool_stats_superadmin_include_all_departments(dashboard_session):
-    stats = await get_tool_call_stats(db=dashboard_session["db"], current_user=dashboard_session["superadmin"])
+    authorization = _authorization(dashboard_session["superadmin"], ["dashboard:view"], "all")
+    stats = await get_tool_call_stats(db=dashboard_session["db"], authorization=authorization)
 
     assert stats.total_calls == 2
     assert stats.successful_calls == 2
@@ -216,6 +239,7 @@ def _authorization(user, permission_keys, scope_type):
     assignment = SimpleNamespace(role=role, scope_mode="inherit", scope_departments=[])
     authorization_user = SimpleNamespace(
         id=user.id,
+        uid=user.uid,
         department_id=user.department_id,
         role_assignments=[assignment],
     )
@@ -269,3 +293,22 @@ async def test_current_organization_stats_hide_out_of_scope_target(dashboard_ses
         )
 
     assert exc.value.status_code == 404
+
+
+async def test_historical_tool_stats_keep_event_organization_after_user_move(dashboard_session):
+    authorization = _authorization(
+        dashboard_session["admin_a"],
+        ["dashboard:view"],
+        "organization_and_descendants",
+    )
+    dashboard_session["user_a"].department_id = dashboard_session["dept_b"].id
+    await dashboard_session["db"].flush()
+
+    stats = await get_tool_call_stats(
+        department_id=dashboard_session["dept_a"].id,
+        authorization=authorization,
+        db=dashboard_session["db"],
+    )
+
+    assert stats.total_calls == 1
+    assert stats.most_used_tools == [{"tool_name": "dept_a_tool", "count": 1}]

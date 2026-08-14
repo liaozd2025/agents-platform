@@ -14,6 +14,7 @@ from yuxi.permissions.role_catalog import DATA_SCOPE_CATALOG, PERMISSION_CATALOG
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.role_repository import RoleRepository
 from yuxi.services.user_role_service import get_assignable_role_constraints
+from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
 from yuxi.storage.postgres.models_business import (
     Role,
     RoleDefaultDepartment,
@@ -177,7 +178,7 @@ def _apply_definition(role: Role, definition: dict[str, Any]) -> None:
     ]
 
 
-def _add_audit(
+async def _add_audit(
     db: AsyncSession,
     *,
     actor: User,
@@ -197,6 +198,7 @@ def _add_audit(
             target_code=role.code,
             before_value=before,
             after_value=after,
+            **await get_user_organization_snapshot(db, user_id=actor.id),
         )
     )
 
@@ -301,7 +303,7 @@ async def create_custom_role(
     db.add(role)
     await db.flush()
 
-    _add_audit(db, actor=actor, action=audit_action, role=role, before=None, after=_role_snapshot(role))
+    await _add_audit(db, actor=actor, action=audit_action, role=role, before=None, after=_role_snapshot(role))
     await db.flush()
     return await _get_serialized_role(db, role.id)
 
@@ -365,7 +367,7 @@ async def update_custom_role(
     _apply_definition(role, definition)
     after = _role_snapshot(role)
     if before != after:
-        _add_audit(db, actor=actor, action="role.update", role=role, before=before, after=after)
+        await _add_audit(db, actor=actor, action="role.update", role=role, before=before, after=after)
 
     await db.flush()
     return await _get_serialized_role(db, role.id)
@@ -387,6 +389,6 @@ async def deactivate_custom_role(db: AsyncSession, actor: User, role_id: int) ->
 
     before = _role_snapshot(role)
     role.is_active = False
-    _add_audit(db, actor=actor, action="role.deactivate", role=role, before=before, after=_role_snapshot(role))
+    await _add_audit(db, actor=actor, action="role.deactivate", role=role, before=before, after=_role_snapshot(role))
     await db.flush()
     return await _get_serialized_role(db, role.id)

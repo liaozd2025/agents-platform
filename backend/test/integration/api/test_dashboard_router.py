@@ -9,13 +9,19 @@ import uuid
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select
+from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
     ROOT_DEPARTMENT_ID,
     Department,
+    Conversation,
+    ConversationStats,
+    Message,
+    MessageFeedback,
     OperationLog,
     Role,
     RolePermission,
+    ToolCall,
     User,
     UserRoleAssignment,
 )
@@ -92,8 +98,11 @@ async def dashboard_scope_users(test_client):
             ]
         )
         user_ids = [user.id for user in users]
+        user_uids = [user.uid for user in users]
         department_ids = [department_child.id, department_a.id, department_b.id]
         role_id = role.id
+        department_child_path = department_child.path
+        department_b_path = department_b.path
 
     headers = []
     for user in users:
@@ -108,9 +117,33 @@ async def dashboard_scope_users(test_client):
             "without_permission": headers[2],
             "department_b": department_b.id,
             "department_child": department_child.id,
+            "department_child_path": department_child_path,
+            "department_b_path": department_b_path,
+            "manager_a_id": user_ids[0],
+            "child_user_id": user_ids[2],
+            "child_user_uid": user_uids[2],
         }
     finally:
         async with pg_manager.get_async_session_context() as session:
+            conversation_ids = list(
+                await session.scalars(select(Conversation.id).where(Conversation.uid.in_(user_uids)))
+            )
+            if conversation_ids:
+                message_ids = list(
+                    await session.scalars(
+                        select(Message.id).where(Message.conversation_id.in_(conversation_ids))
+                    )
+                )
+                if message_ids:
+                    await session.execute(delete(ToolCall).where(ToolCall.message_id.in_(message_ids)))
+                    await session.execute(
+                        delete(MessageFeedback).where(MessageFeedback.message_id.in_(message_ids))
+                    )
+                    await session.execute(delete(Message).where(Message.id.in_(message_ids)))
+                await session.execute(
+                    delete(ConversationStats).where(ConversationStats.conversation_id.in_(conversation_ids))
+                )
+                await session.execute(delete(Conversation).where(Conversation.id.in_(conversation_ids)))
             await session.execute(delete(OperationLog).where(OperationLog.user_id.in_(user_ids)))
             await session.execute(delete(User).where(User.id.in_(user_ids)))
             await session.execute(delete(Role).where(Role.id == role_id))
@@ -199,3 +232,104 @@ async def test_current_organization_stats_follow_dashboard_management_scope(test
     assert child_response.json()["total_users"] == 1
     assert hidden_response.status_code == 404
     assert forbidden_response.status_code == 403
+
+
+async def test_historical_stats_keep_write_time_organization_and_mark_inferred_data(
+    test_client,
+    dashboard_scope_users,
+):
+    async with pg_manager.get_async_session_context() as session:
+        repository = ConversationRepository(session)
+        before_move = await repository.add_conversation(
+            uid=dashboard_scope_users["child_user_uid"],
+            agent_id="pytest-dashboard-agent",
+            thread_id=f"pytest-dashboard-before-{uuid.uuid4().hex}",
+        )
+        before_message = Message(conversation=before_move, role="assistant", content="before")
+        session.add(before_message)
+        await session.flush()
+        await repository.add_tool_call(before_message.id, "before_move", status="success")
+
+        feedback_response = await test_client.post(
+            f"/api/chat/message/{before_message.id}/feedback",
+            json={"rating": "like", "reason": None},
+            headers=dashboard_scope_users["without_permission"],
+        )
+        assert feedback_response.status_code == 200, feedback_response.text
+
+        child_user = await session.get(User, dashboard_scope_users["child_user_id"])
+        child_user.department_id = dashboard_scope_users["department_b"]
+        await session.commit()
+
+        after_move = await repository.add_conversation(
+            uid=dashboard_scope_users["child_user_uid"],
+            agent_id="pytest-dashboard-agent",
+            thread_id=f"pytest-dashboard-after-{uuid.uuid4().hex}",
+        )
+        after_message = Message(conversation=after_move, role="assistant", content="after")
+        session.add(after_message)
+        await session.flush()
+        await repository.add_tool_call(after_message.id, "after_move", status="success")
+        session.add(
+            ToolCall(
+                message=after_message,
+                tool_name="legacy_inferred",
+                status="success",
+                organization_id_snapshot=dashboard_scope_users["department_b"],
+                organization_path_snapshot=dashboard_scope_users["department_b_path"],
+                organization_snapshot_inferred=True,
+            )
+        )
+        await session.commit()
+        await session.refresh(before_move)
+        feedback = await session.scalar(
+            select(MessageFeedback).where(MessageFeedback.message_id == before_message.id)
+        )
+        login_log = await session.scalar(
+            select(OperationLog)
+            .where(OperationLog.user_id == dashboard_scope_users["manager_a_id"])
+            .order_by(OperationLog.id.desc())
+        )
+        assert before_move.organization_path_snapshot == dashboard_scope_users["department_child_path"]
+        assert feedback.organization_path_snapshot == dashboard_scope_users["department_child_path"]
+        assert feedback.organization_snapshot_inferred is False
+        assert login_log.organization_snapshot_inferred is False
+
+    a_tools = await test_client.get("/api/dashboard/stats/tools", headers=dashboard_scope_users["a"])
+    b_tools = await test_client.get("/api/dashboard/stats/tools", headers=dashboard_scope_users["b"])
+    a_current = await test_client.get(
+        "/api/dashboard/stats/current-organization",
+        headers=dashboard_scope_users["a"],
+    )
+    b_current = await test_client.get(
+        "/api/dashboard/stats/current-organization",
+        headers=dashboard_scope_users["b"],
+    )
+    b_basic = await test_client.get("/api/dashboard/stats", headers=dashboard_scope_users["b"])
+    a_feedback = await test_client.get("/api/dashboard/feedbacks", headers=dashboard_scope_users["a"])
+    b_feedback = await test_client.get("/api/dashboard/feedbacks", headers=dashboard_scope_users["b"])
+    a_timeseries = await test_client.get(
+        "/api/dashboard/stats/calls/timeseries?type=tools&time_range=14days",
+        headers=dashboard_scope_users["a"],
+    )
+    b_timeseries = await test_client.get(
+        "/api/dashboard/stats/calls/timeseries?type=tools&time_range=14days",
+        headers=dashboard_scope_users["b"],
+    )
+    hidden_history = await test_client.get(
+        f"/api/dashboard/stats/tools?department_id={dashboard_scope_users['department_b']}",
+        headers=dashboard_scope_users["a"],
+    )
+
+    assert a_tools.status_code == 200, a_tools.text
+    assert b_tools.status_code == 200, b_tools.text
+    assert a_tools.json()["total_calls"] == 1
+    assert b_tools.json()["total_calls"] == 2
+    assert a_current.json()["total_users"] == 1
+    assert b_current.json()["total_users"] == 2
+    assert b_basic.json()["contains_inferred_data"] is True
+    assert len(a_feedback.json()) == 1
+    assert b_feedback.json() == []
+    assert a_timeseries.json()["total_count"] == 1
+    assert b_timeseries.json()["total_count"] == 2
+    assert hidden_history.status_code == 404

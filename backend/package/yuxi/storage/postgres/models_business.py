@@ -267,6 +267,9 @@ class SecurityAudit(Base):
     reason = Column(Text, nullable=True)
     before_value = Column(JSON_VALUE, nullable=True)
     after_value = Column(JSON_VALUE, nullable=True)
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)
 
     actor = relationship("User")
@@ -429,6 +432,9 @@ class Conversation(Base):
     created_at = Column(DateTime, default=utc_now_naive, comment="Creation time")
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, comment="Update time")
     extra_metadata = Column(JSON, nullable=True, comment="Additional metadata")
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
 
     # Relationships
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
@@ -552,6 +558,9 @@ class ToolCall(Base):
     tool_output = Column(Text, nullable=True, comment="Tool execution result")
     status = Column(String(20), default="pending", comment="Status: pending/success/error")
     error_message = Column(Text, nullable=True, comment="Error message if failed")
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=utc_now_naive, comment="Creation time")
 
     # Relationships
@@ -613,6 +622,9 @@ class OperationLog(Base):
     operation = Column(String, nullable=False)
     details = Column(Text, nullable=True)
     ip_address = Column(String, nullable=True)
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     timestamp = Column(DateTime, default=utc_now_naive)
 
     # 关联用户
@@ -641,6 +653,9 @@ class MessageFeedback(Base):
     uid = Column(String(64), nullable=False, index=True, comment="UID who provided feedback")
     rating = Column(String(10), nullable=False, comment="Feedback rating: like or dislike")
     reason = Column(Text, nullable=True, comment="Optional reason for dislike feedback")
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=utc_now_naive, comment="Feedback creation time")
 
     # Relationships

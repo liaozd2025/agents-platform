@@ -1085,6 +1085,89 @@ class PostgresManager(metaclass=SingletonMeta):
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_parent_name ON departments(parent_id, name)",
             "CREATE INDEX IF NOT EXISTS ix_departments_parent_id ON departments(parent_id)",
             "CREATE INDEX IF NOT EXISTS ix_departments_path ON departments(path)",
+            # 历史事件保存写入时组织路径；旧记录按当前用户归属回填，并显式标记为推算。
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY[
+                    'conversations', 'tool_calls', 'message_feedbacks', 'operation_logs', 'security_audits'
+                ] LOOP
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_id_snapshot INTEGER', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_path_snapshot VARCHAR(512)', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_snapshot_inferred BOOLEAN', target_table
+                    );
+                END LOOP;
+            END $$;
+            """,
+            """
+            UPDATE conversations AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.uid = users.uid AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE tool_calls AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM messages
+            JOIN conversations ON conversations.id = messages.conversation_id
+            JOIN users ON users.uid = conversations.uid
+            LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.message_id = messages.id AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE message_feedbacks AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.uid = users.uid AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE operation_logs AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.user_id = users.id AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE security_audits AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.actor_user_id = users.id AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY[
+                    'conversations', 'tool_calls', 'message_feedbacks', 'operation_logs', 'security_audits'
+                ] LOOP
+                    EXECUTE format(
+                        'UPDATE %I SET organization_snapshot_inferred = TRUE '
+                        'WHERE organization_snapshot_inferred IS NULL', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET DEFAULT FALSE', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET NOT NULL', target_table
+                    );
+                END LOOP;
+            END $$;
+            """,
         ]
         async with self.async_engine.begin() as conn:
             # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警
