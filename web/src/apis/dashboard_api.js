@@ -1,4 +1,4 @@
-import { apiAdminGet } from './base'
+import { apiAdminGet, apiGet } from './base'
 
 /**
  * Dashboard API模块
@@ -6,6 +6,11 @@ import { apiAdminGet } from './base'
  */
 
 export const dashboardApi = {
+  getCurrentOrganizationStats: (departmentId = null) => {
+    const query = departmentId == null ? '' : `?department_id=${departmentId}`
+    return apiGet(`/api/dashboard/stats/current-organization${query}`)
+  },
+
   /**
    * 获取所有对话记录
    * @param {Object} params - 查询参数

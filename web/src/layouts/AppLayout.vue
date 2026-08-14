@@ -178,7 +178,7 @@ const mainList = computed(() => {
     })
   }
 
-  if (userStore.isSuperAdmin) {
+  if (userStore.hasPermission('dashboard:view')) {
     items.push({
       name: '数据总览',
       path: '/dashboard',

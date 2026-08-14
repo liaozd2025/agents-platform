@@ -108,33 +108,40 @@ class UserRepository:
         limit: int | None = 100,
         department_id: int | None = None,
         role: str | None = None,
+        *,
+        session: AsyncSession | None = None,
     ) -> Annotated[list[tuple[User, str | None]], "用户列表，包含组织名称并挂载祖先路径"]:
         """获取用户列表，并带出授权过滤所需的组织名称和路径。"""
 
-        async with pg_manager.get_async_session_context() as session:
-            query = (
-                select(
-                    User,
-                    Department.name.label("department_name"),
-                    Department.path.label("department_path"),
-                )
-                .options(
-                    selectinload(User.role_assignments).selectinload(UserRoleAssignment.scope_departments),
-                    selectinload(User.role_assignments)
-                    .selectinload(UserRoleAssignment.role)
-                    .selectinload(Role.default_departments),
-                )
-                .outerjoin(Department, User.department_id == Department.id)
-                .where(User.is_deleted == 0)
+        query = (
+            select(
+                User,
+                Department.name.label("department_name"),
+                Department.path.label("department_path"),
             )
-            if department_id is not None:
-                query = query.where(User.department_id == department_id)
-            if role is not None:
-                query = query.where(User.role == role)
-            query = query.order_by(User.id.asc()).offset(skip)
-            if limit is not None:
-                query = query.limit(limit)
+            .options(
+                selectinload(User.role_assignments).selectinload(UserRoleAssignment.scope_departments),
+                selectinload(User.role_assignments)
+                .selectinload(UserRoleAssignment.role)
+                .selectinload(Role.default_departments),
+            )
+            .outerjoin(Department, User.department_id == Department.id)
+            .where(User.is_deleted == 0)
+        )
+        if department_id is not None:
+            query = query.where(User.department_id == department_id)
+        if role is not None:
+            query = query.where(User.role == role)
+        query = query.order_by(User.id.asc()).offset(skip)
+        if limit is not None:
+            query = query.limit(limit)
+
+        if session is not None:
             result = await session.execute(query)
+            return [(_attach_department_ancestors(user, path), name) for user, name, path in result.all()]
+
+        async with pg_manager.get_async_session_context() as managed_session:
+            result = await managed_session.execute(query)
             return [(_attach_department_ancestors(user, path), name) for user, name, path in result.all()]
 
     async def create(self, data: dict[str, Any]) -> User:

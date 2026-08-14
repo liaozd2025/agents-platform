@@ -81,17 +81,22 @@ class DepartmentRepository:
             result = await managed_session.execute(statement)
             return dict(result.all())
 
-    async def list_with_user_count(self) -> list[dict[str, Any]]:
+    async def list_with_user_count(self, *, session: AsyncSession | None = None) -> list[dict[str, Any]]:
         """获取所有组织节点，按物化路径排序并附带用户数量"""
-        async with pg_manager.get_async_session_context() as session:
-            from yuxi.storage.postgres.models_business import User
+        from yuxi.storage.postgres.models_business import User
 
-            result = await session.execute(
-                select(Department, func.count(User.id))
-                .outerjoin(User, (User.department_id == Department.id) & (User.is_deleted == 0))
-                .group_by(Department.id)
-                .order_by(Department.path)
-            )
+        statement = (
+            select(Department, func.count(User.id))
+            .outerjoin(User, (User.department_id == Department.id) & (User.is_deleted == 0))
+            .group_by(Department.id)
+            .order_by(Department.path)
+        )
+        if session is not None:
+            result = await session.execute(statement)
+            return [{**department.to_dict(), "user_count": user_count} for department, user_count in result.all()]
+
+        async with pg_manager.get_async_session_context() as managed_session:
+            result = await managed_session.execute(statement)
             return [{**department.to_dict(), "user_count": user_count} for department, user_count in result.all()]
 
     async def create_child(

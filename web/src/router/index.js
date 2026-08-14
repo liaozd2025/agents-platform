@@ -80,7 +80,7 @@ const router = createRouter({
           path: '',
           name: 'DashboardComp',
           component: () => import('../views/DashboardView.vue'),
-          meta: { keepAlive: false, requiresAuth: true, requiresSuperAdmin: true }
+          meta: { keepAlive: false, requiresAuth: true, requiredPermission: 'dashboard:view' }
         }
       ]
     },

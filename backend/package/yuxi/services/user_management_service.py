@@ -59,6 +59,7 @@ async def list_authorized_users(
     *,
     department_id: int | None = None,
     direct: bool = False,
+    db: AsyncSession | None = None,
 ) -> list[tuple[User, str | None]] | None:
     """按同一管理域规则过滤用户，并区分子树和直属查询。"""
 
@@ -66,10 +67,11 @@ async def list_authorized_users(
         authorization,
         permission_key,
         department_id,
+        db=db,
     ):
         return None
 
-    rows = await UserRepository().list_with_department(limit=None)
+    rows = await UserRepository().list_with_department(limit=None, session=db)
     visible_rows = []
     for user, department_name in rows:
         target = _user_target(user)
@@ -85,20 +87,25 @@ async def list_authorized_users(
     return visible_rows
 
 
-async def list_authorized_departments(authorization: AuthorizationContext) -> list[dict[str, Any]]:
+async def list_authorized_departments(
+    authorization: AuthorizationContext,
+    permission_key: str = "department:read",
+    *,
+    db: AsyncSession | None = None,
+) -> list[dict[str, Any]]:
     """返回完整集团目录或当前授权子树及必要祖先。"""
 
     repository = DepartmentRepository()
-    departments = await repository.list_with_user_count()
+    departments = await repository.list_with_user_count(session=db)
     if authorization.has_permission("department:read_all"):
         return departments
 
-    paths = await repository.get_paths_by_ids([item["id"] for item in departments])
+    paths = await repository.get_paths_by_ids([item["id"] for item in departments], session=db)
     visible_ids = {
         item["id"]
         for item in departments
         if authorization.allows(
-            "department:read",
+            permission_key,
             AuthorizationTarget(department_ancestor_ids=parse_department_ancestor_ids(paths.get(item["id"]))),
         )
     }

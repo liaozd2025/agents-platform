@@ -10,14 +10,17 @@ import traceback
 from datetime import datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import Integer, String, cast, distinct, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_db, get_superadmin_user
+from server.utils.auth_middleware import get_db, get_superadmin_user, require_permission
+from yuxi.permissions.authorization import AuthorizationContext, AuthorizationTarget, parse_department_ancestor_ids
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
+from yuxi.repositories.department_repository import DepartmentRepository
+from yuxi.services.user_management_service import list_authorized_departments, list_authorized_users
 from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.datetime_utils import UTC, ensure_shanghai, shanghai_now, utc_now
@@ -120,6 +123,70 @@ class ConversationDetailResponse(BaseModel):
     updated_at: str
     total_tokens: int
     messages: list[dict]
+
+
+class DashboardDepartmentOption(BaseModel):
+    """Dashboard 组织筛选项。"""
+
+    id: int
+    name: str
+    parent_id: int | None
+    node_type: str
+    selectable: bool
+
+
+class CurrentOrganizationStats(BaseModel):
+    """当前组织关系下的人员和组织统计。"""
+
+    selected_department_id: int | None
+    selected_department_name: str
+    includes_descendants: bool
+    total_users: int
+    total_departments: int
+    departments: list[DashboardDepartmentOption]
+
+
+@dashboard.get("/stats/current-organization", response_model=CurrentOrganizationStats)
+async def get_current_organization_stats(
+    department_id: int | None = None,
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """按 Dashboard 查看者的数据范围统计当前组织子树。"""
+
+    user_rows = await list_authorized_users(
+        authorization,
+        "dashboard:view",
+        department_id=department_id,
+        db=db,
+    )
+    if user_rows is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
+
+    departments = await list_authorized_departments(authorization, "dashboard:view", db=db)
+    paths = await DepartmentRepository().get_paths_by_ids([item["id"] for item in departments], session=db)
+    options = []
+    for item in departments:
+        selectable = authorization.allows(
+            "dashboard:view",
+            AuthorizationTarget(department_ancestor_ids=parse_department_ancestor_ids(paths.get(item["id"]))),
+        )
+        options.append({**item, "selectable": selectable})
+
+    selected = next((item for item in options if item["id"] == department_id and item["selectable"]), None)
+    selected_path = paths.get(department_id) if selected else None
+    total_departments = sum(
+        item["selectable"] and (selected_path is None or paths[item["id"]].startswith(selected_path))
+        for item in options
+    )
+    return CurrentOrganizationStats(
+        selected_department_id=department_id,
+        selected_department_name=selected["name"] if selected else "全部授权组织",
+        includes_descendants=True,
+        total_users=len(user_rows),
+        total_departments=total_departments,
+        departments=[DashboardDepartmentOption(**item) for item in options],
+    )
 
 
 # =============================================================================

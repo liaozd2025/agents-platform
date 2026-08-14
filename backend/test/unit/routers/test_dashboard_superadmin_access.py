@@ -5,15 +5,18 @@ import pytest_asyncio
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from types import SimpleNamespace
 
 from server.routers.dashboard_router import (
     dashboard,
     get_all_conversations,
     get_conversation_detail,
+    get_current_organization_stats,
     get_tool_call_stats,
     get_user_activity_stats,
 )
 from server.utils.auth_middleware import get_superadmin_user
+from yuxi.permissions.authorization import build_authorization_context
 from yuxi.storage.postgres.models_business import Base, Conversation, Department, Message, ToolCall, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
@@ -27,8 +30,19 @@ async def dashboard_session():
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
-        dept_a = Department(name="Dept A")
-        dept_b = Department(name="Dept B")
+        root = Department(name="Group", node_type="group", path="/1/")
+        db.add(root)
+        await db.flush()
+        dept_a = Department(name="Dept A", parent_id=root.id)
+        dept_b = Department(name="Dept B", parent_id=root.id)
+        db.add_all([dept_a, dept_b])
+        await db.flush()
+        dept_a.path = f"{root.path}{dept_a.id}/"
+        dept_b.path = f"{root.path}{dept_b.id}/"
+        child_a = Department(name="Child A", parent_id=dept_a.id)
+        db.add(child_a)
+        await db.flush()
+        child_a.path = f"{dept_a.path}{child_a.id}/"
         superadmin = User(
             username="Super Admin",
             uid="superadmin",
@@ -64,6 +78,13 @@ async def dashboard_session():
             role="user",
             department=dept_b,
         )
+        child_user = User(
+            username="Child User",
+            uid="child_user",
+            password_hash="$argon2id$placeholder",
+            role="user",
+            department=child_a,
+        )
         now = utc_now_naive()
         conversation_a = Conversation(
             thread_id="thread-a",
@@ -96,6 +117,7 @@ async def dashboard_session():
                 user_a,
                 admin_b,
                 user_b,
+                child_user,
                 conversation_a,
                 conversation_b,
                 message_a,
@@ -108,26 +130,39 @@ async def dashboard_session():
         for item in [
             dept_a,
             dept_b,
+            child_a,
             superadmin,
             admin_a,
             user_a,
             admin_b,
             user_b,
+            child_user,
             conversation_a,
             conversation_b,
         ]:
             await db.refresh(item)
-        yield {"db": db, "superadmin": superadmin, "admin_a": admin_a}
+        yield {
+            "db": db,
+            "superadmin": superadmin,
+            "admin_a": admin_a,
+            "dept_a": dept_a,
+            "dept_b": dept_b,
+            "child_a": child_a,
+        }
     await engine.dispose()
 
 
-async def test_dashboard_routes_require_superadmin_dependency():
+async def test_dashboard_current_organization_uses_permission_dependency():
     dashboard_routes = [route for route in dashboard.routes if isinstance(route, APIRoute)]
 
     assert dashboard_routes
     for route in dashboard_routes:
         dependency_calls = {dependency.call for dependency in route.dependant.dependencies}
-        assert get_superadmin_user in dependency_calls
+        if route.path == "/dashboard/stats/current-organization":
+            assert get_superadmin_user not in dependency_calls
+            assert any(call.__name__ == "check_permission" for call in dependency_calls)
+        else:
+            assert get_superadmin_user in dependency_calls
 
 
 async def test_dashboard_dependency_rejects_department_admin(dashboard_session):
@@ -156,7 +191,7 @@ async def test_conversation_detail_superadmin_can_view_other_department(dashboar
 async def test_user_activity_stats_superadmin_include_all_departments(dashboard_session):
     stats = await get_user_activity_stats(db=dashboard_session["db"], current_user=dashboard_session["superadmin"])
 
-    assert stats.total_users == 5
+    assert stats.total_users == 6
     assert stats.active_users_24h == 2
     assert stats.active_users_30d == 2
 
@@ -167,3 +202,70 @@ async def test_tool_stats_superadmin_include_all_departments(dashboard_session):
     assert stats.total_calls == 2
     assert stats.successful_calls == 2
     assert {tool["tool_name"] for tool in stats.most_used_tools} == {"dept_a_tool", "dept_b_tool"}
+
+
+def _authorization(user, permission_keys, scope_type):
+    """构造 Dashboard 数据范围测试所需的最小授权上下文。"""
+
+    role = SimpleNamespace(
+        is_active=True,
+        permissions=[SimpleNamespace(permission_key=key) for key in permission_keys],
+        default_scope_type=scope_type,
+        default_departments=[],
+    )
+    assignment = SimpleNamespace(role=role, scope_mode="inherit", scope_departments=[])
+    authorization_user = SimpleNamespace(
+        id=user.id,
+        department_id=user.department_id,
+        role_assignments=[assignment],
+    )
+    return build_authorization_context(authorization_user)
+
+
+async def test_current_organization_stats_include_authorized_descendants(dashboard_session):
+    authorization = _authorization(
+        dashboard_session["admin_a"],
+        ["dashboard:view"],
+        "organization_and_descendants",
+    )
+
+    all_stats = await get_current_organization_stats(
+        authorization=authorization,
+        db=dashboard_session["db"],
+    )
+    child_stats = await get_current_organization_stats(
+        department_id=dashboard_session["child_a"].id,
+        authorization=authorization,
+        db=dashboard_session["db"],
+    )
+
+    assert all_stats.total_users == 4
+    assert all_stats.total_departments == 2
+    assert {item.id for item in all_stats.departments} == {
+        dashboard_session["dept_a"].parent_id,
+        dashboard_session["dept_a"].id,
+        dashboard_session["child_a"].id,
+    }
+    root_option = next(item for item in all_stats.departments if item.id == dashboard_session["dept_a"].parent_id)
+    assert root_option.selectable is False
+    assert child_stats.total_users == 1
+    assert child_stats.total_departments == 1
+    assert child_stats.selected_department_name == "Child A"
+    assert child_stats.includes_descendants is True
+
+
+async def test_current_organization_stats_hide_out_of_scope_target(dashboard_session):
+    authorization = _authorization(
+        dashboard_session["admin_a"],
+        ["dashboard:view"],
+        "organization_and_descendants",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await get_current_organization_stats(
+            department_id=dashboard_session["dept_b"].id,
+            authorization=authorization,
+            db=dashboard_session["db"],
+        )
+
+    assert exc.value.status_code == 404

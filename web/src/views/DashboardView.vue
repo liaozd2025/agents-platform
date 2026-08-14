@@ -1,6 +1,29 @@
 <template>
   <div class="dashboard-container">
-    <!-- 顶部状态条 -->
+    <div class="organization-filter">
+      <div>
+        <div class="filter-title">当前筛选组织：{{ currentStats.selected_department_name }}</div>
+        <div class="filter-hint">包含下级组织</div>
+      </div>
+      <a-tree-select
+        v-model:value="selectedDepartmentId"
+        class="department-select"
+        :tree-data="departmentTree"
+        :field-names="{ label: 'name', value: 'id' }"
+        tree-default-expand-all
+        allow-clear
+        placeholder="全部授权组织"
+        @change="loadCurrentStats"
+      />
+      <div class="current-stat">
+        <span>人员</span>
+        <strong>{{ currentStats.total_users }}</strong>
+      </div>
+      <div class="current-stat">
+        <span>组织</span>
+        <strong>{{ currentStats.total_departments }}</strong>
+      </div>
+    </div>
 
     <!-- 现代化顶部统计栏 -->
     <div class="modern-stats-header">
@@ -56,9 +79,10 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { dashboardApi } from '@/apis/dashboard_api'
+import { buildDepartmentTree } from '@/utils/departmentTree'
 
 // 导入子组件
 import StatusBar from '@/components/StatusBar.vue'
@@ -72,6 +96,21 @@ import FeedbackModalComponent from '@/components/dashboard/FeedbackModalComponen
 
 // 组件引用
 const feedbackModal = ref(null)
+const selectedDepartmentId = ref()
+const currentStats = ref({
+  selected_department_name: '全部授权组织',
+  total_users: 0,
+  total_departments: 0,
+  departments: []
+})
+const departmentTree = computed(() =>
+  buildDepartmentTree(
+    currentStats.value.departments.map((department) => ({
+      ...department,
+      disabled: !department.selectable
+    }))
+  )
+)
 
 // 统计数据 - 使用新的响应式结构
 const basicStats = ref({})
@@ -93,6 +132,15 @@ const userStatsRef = ref(null)
 const toolStatsRef = ref(null)
 const knowledgeStatsRef = ref(null)
 const agentStatsRef = ref(null)
+
+const loadCurrentStats = async () => {
+  try {
+    currentStats.value = await dashboardApi.getCurrentOrganizationStats(selectedDepartmentId.value)
+  } catch (error) {
+    console.error('加载当前组织统计失败:', error)
+    message.error('加载当前组织统计失败')
+  }
+}
 
 // 加载统计数据 - 使用并行API调用
 const loadAllStats = async () => {
@@ -148,6 +196,7 @@ const cleanupCharts = () => {
 
 // 初始化
 onMounted(() => {
+  loadCurrentStats()
   loadAllStats()
 })
 
@@ -162,6 +211,45 @@ onUnmounted(() => {
   background-color: var(--gray-25);
   min-height: calc(100vh - 64px);
   overflow-x: hidden;
+}
+
+.organization-filter {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: var(--page-padding) var(--page-padding) 0;
+  padding: 16px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  background: var(--gray-0);
+}
+
+.filter-title {
+  color: var(--gray-900);
+  font-weight: 600;
+}
+
+.filter-hint {
+  margin-top: 4px;
+  color: var(--gray-500);
+  font-size: 12px;
+}
+
+.department-select {
+  width: 280px;
+  margin-left: auto;
+}
+
+.current-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--gray-600);
+
+  strong {
+    color: var(--gray-900);
+    font-size: 24px;
+  }
 }
 
 // Dashboard 特有的网格布局
