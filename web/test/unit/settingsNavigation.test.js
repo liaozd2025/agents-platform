@@ -12,7 +12,7 @@ test('设置导航按权限分组并支持搜索', () => {
     superadminGroups.map((group) => [group.label, group.items.map((item) => item.id)]),
     [
       ['个人', ['account', 'agentEnv']],
-      ['系统', ['base', 'user', 'department']],
+      ['系统', ['base', 'user', 'department', 'role']],
       ['平台能力', ['apiKeys', 'ocr']]
     ]
   )
@@ -49,6 +49,14 @@ test('设置导航按权限分组并支持搜索', () => {
   assert.deepEqual(searchResult, [
     { label: '系统', items: [{ id: 'department', label: '组织机构' }] }
   ])
+
+  assert.deepEqual(
+    getSettingsNavigationGroups(
+      { isLoggedIn: true, isAdmin: true, isSuperAdmin: true },
+      '角色'
+    ),
+    [{ label: '系统', items: [{ id: 'role', label: '角色与权限' }] }]
+  )
 
   assert.deepEqual(
     getSettingsNavigationGroups({ isLoggedIn: true, isAdmin: false, isSuperAdmin: false }, 'env'),

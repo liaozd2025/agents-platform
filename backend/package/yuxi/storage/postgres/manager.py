@@ -8,6 +8,7 @@ from psycopg_pool import AsyncConnectionPool
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
+from yuxi.permissions.role_catalog import BUILTIN_ROLES
 from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES
 from yuxi.storage.postgres.models_business import Base as BusinessBase
 from yuxi.storage.postgres.models_knowledge import Base as KnowledgeBase
@@ -17,6 +18,13 @@ from yuxi.utils.singleton import SingletonMeta
 # 合并两个 Base
 CombinedBase = declarative_base()
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
+
+
+def _sql_literal(value: str) -> str:
+    """把受代码控制的目录文本转为 PostgreSQL 字符串字面量。"""
+
+    return "'" + value.replace("'", "''") + "'"
+
 
 # 继承所有表
 for module in [KnowledgeBase, BusinessBase]:
@@ -495,7 +503,123 @@ class PostgresManager(metaclass=SingletonMeta):
     async def ensure_business_schema(self):
         """确保业务 schema 包含后续新增字段（运行时 schema 演进）。"""
         self._check_initialized()
+        builtin_role_values = ", ".join(
+            "("
+            + ", ".join(
+                (
+                    _sql_literal(role.code),
+                    _sql_literal(role.name),
+                    _sql_literal(role.description),
+                    "TRUE",
+                    "TRUE",
+                    _sql_literal(role.default_scope_type),
+                )
+            )
+            + ")"
+            for role in BUILTIN_ROLES
+        )
+        builtin_permission_values = ", ".join(
+            f"({_sql_literal(role.code)}, {_sql_literal(permission_key)})"
+            for role in BUILTIN_ROLES
+            for permission_key in role.permission_keys
+        )
         stmts = [
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+                id SERIAL PRIMARY KEY,
+                code VARCHAR(64) NOT NULL UNIQUE,
+                name VARCHAR(100) NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                default_scope_type VARCHAR(48) NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                CONSTRAINT ck_roles_default_scope_type CHECK (
+                    default_scope_type IN (
+                        'none', 'self', 'organization_and_descendants',
+                        'selected_organizations_and_descendants', 'all'
+                    )
+                )
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                permission_key VARCHAR(96) NOT NULL,
+                PRIMARY KEY (role_id, permission_key)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS role_default_departments (
+                role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                PRIMARY KEY (role_id, department_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_role_assignments (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                scope_mode VARCHAR(16) NOT NULL DEFAULT 'inherit',
+                override_scope_type VARCHAR(48),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                CONSTRAINT uq_user_role_assignments_user_role UNIQUE (user_id, role_id),
+                CONSTRAINT ck_user_role_assignments_scope_mode CHECK (scope_mode IN ('inherit', 'override')),
+                CONSTRAINT ck_user_role_assignments_override_scope_type CHECK (
+                    override_scope_type IS NULL OR override_scope_type IN (
+                        'none', 'self', 'organization_and_descendants',
+                        'selected_organizations_and_descendants', 'all'
+                    )
+                )
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_role_assignment_departments (
+                assignment_id INTEGER NOT NULL REFERENCES user_role_assignments(id) ON DELETE CASCADE,
+                department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                PRIMARY KEY (assignment_id, department_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_roles_is_active ON roles(is_active)",
+            "CREATE INDEX IF NOT EXISTS ix_user_role_assignments_user_id ON user_role_assignments(user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_user_role_assignments_role_id ON user_role_assignments(role_id)",
+            f"""
+            INSERT INTO roles (code, name, description, is_builtin, is_active, default_scope_type)
+            VALUES {builtin_role_values}
+            ON CONFLICT (code) DO UPDATE SET
+                name = EXCLUDED.name,
+                description = EXCLUDED.description,
+                is_builtin = TRUE,
+                is_active = TRUE,
+                default_scope_type = EXCLUDED.default_scope_type,
+                updated_at = NOW()
+            """,
+            "DELETE FROM role_permissions WHERE role_id IN (SELECT id FROM roles WHERE is_builtin IS TRUE)",
+            f"""
+            INSERT INTO role_permissions (role_id, permission_key)
+            SELECT roles.id, seed.permission_key
+            FROM (VALUES {builtin_permission_values}) AS seed(role_code, permission_key)
+            JOIN roles ON roles.code = seed.role_code
+            ON CONFLICT (role_id, permission_key) DO NOTHING
+            """,
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM users WHERE role NOT IN ('superadmin', 'admin', 'user')) THEN
+                    RAISE EXCEPTION 'users.role 存在未知角色，无法安全回填用户角色分配';
+                END IF;
+            END $$;
+            """,
+            """
+            INSERT INTO user_role_assignments (user_id, role_id, scope_mode)
+            SELECT users.id, roles.id, 'inherit'
+            FROM users
+            JOIN roles ON roles.code = users.role
+            ON CONFLICT (user_id, role_id) DO NOTHING
+            """,
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS mcp_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS skill_dependencies JSONB DEFAULT '[]'::jsonb",

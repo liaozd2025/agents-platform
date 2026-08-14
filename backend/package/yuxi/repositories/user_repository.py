@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import APIKey, Department, User
+from yuxi.storage.postgres.models_business import APIKey, Department, Role, User, UserRoleAssignment
 
 
 def _utc_now() -> dt:
@@ -116,6 +116,13 @@ class UserRepository:
         async with pg_manager.get_async_session_context() as session:
             user = User(**data)
             session.add(user)
+            await session.flush()
+
+            role = await session.scalar(select(Role).where(Role.code == user.role))
+            if role is None:
+                raise ValueError(f"用户角色 {user.role} 不存在")
+            session.add(UserRoleAssignment(user=user, role=role, scope_mode="inherit"))
+
             await session.commit()
             await session.refresh(user)
         return user

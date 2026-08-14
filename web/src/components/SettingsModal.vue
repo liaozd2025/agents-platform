@@ -167,6 +167,16 @@
           <div v-show="activeTab === 'department'" v-if="userStore.isSuperAdmin">
             <DepartmentManagementComponent />
           </div>
+
+          <div v-if="activeTab === 'role' && userStore.isSuperAdmin">
+            <div class="settings-page-header">
+              <div class="settings-page-title">角色与权限</div>
+              <p class="settings-page-description">
+                查看内置角色的功能权限、默认数据范围和当前成员。
+              </p>
+            </div>
+            <RoleManagementComponent />
+          </div>
         </div>
       </main>
     </div>
@@ -184,6 +194,7 @@ import {
   ScanText,
   Search,
   Settings,
+  ShieldCheck,
   SquareTerminal,
   Star,
   User,
@@ -197,6 +208,7 @@ import OCRSettingsSection from '@/components/OCRSettingsSection.vue'
 import ApiKeyManagementComponent from '@/components/ApiKeyManagementComponent.vue'
 import UserManagementComponent from '@/components/UserManagementComponent.vue'
 import DepartmentManagementComponent from '@/components/DepartmentManagementComponent.vue'
+import RoleManagementComponent from '@/components/RoleManagementComponent.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { getSettingsNavigationGroups } from '@/utils/settingsNavigation'
 
@@ -219,6 +231,7 @@ const settingsTabIcons = {
   base: Settings,
   user: User,
   department: Users,
+  role: ShieldCheck,
   apiKeys: Key,
   ocr: ScanText
 }

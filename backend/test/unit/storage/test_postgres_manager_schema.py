@@ -138,6 +138,46 @@ async def test_ensure_business_schema_creates_generic_config_options_table():
 
 
 @pytest.mark.asyncio
+async def test_ensure_business_schema_backfills_builtin_role_assignments_idempotently():
+    """角色扩展迁移应保留旧字段，并可重复回填同一用户角色。"""
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager.ensure_business_schema()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+
+    for table_name in (
+        "roles",
+        "role_permissions",
+        "role_default_departments",
+        "user_role_assignments",
+        "user_role_assignment_departments",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in statements
+
+    assert "INSERT INTO roles" in statements
+    assert "'superadmin'" in statements
+    assert "'admin'" in statements
+    assert "'user'" in statements
+    assert (
+        "('superadmin', '超级管理员', '拥有全部功能权限和全部数据范围', "
+        "TRUE, TRUE, 'all')"
+    ) in statements
+    assert "INSERT INTO user_role_assignments" in statements
+    assert "ON CONFLICT (user_id, role_id) DO NOTHING" in statements
+    assert "DROP COLUMN IF EXISTS role" not in statements
+
+
+@pytest.mark.asyncio
 async def test_ensure_business_schema_fails_when_nonempty_organization_has_no_group_root():
     """存量组织表缺少固定集团根时应中止迁移，避免继续运行无效树。"""
     manager = PostgresManager()
