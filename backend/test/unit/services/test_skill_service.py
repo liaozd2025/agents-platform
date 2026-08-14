@@ -1199,7 +1199,11 @@ async def test_init_builtin_skills_create_missing(tmp_path: Path, monkeypatch: p
     assert len(items) == 1
     assert items[0].slug == "reporter"
     assert FakeRepo.created_payload["source_type"] == "builtin"
-    assert FakeRepo.created_payload["share_config"] == svc.BUILTIN_SKILL_SHARE_CONFIG
+    assert FakeRepo.created_payload["share_config"] == {
+        "version": 2,
+        "read_scope": svc.BUILTIN_SKILL_SHARE_CONFIG,
+        "manage_scope": None,
+    }
     assert FakeRepo.created_payload["enabled"] is True
     assert FakeRepo.created_payload["created_by"] == "system"
     assert FakeRepo.created_payload["tool_dependencies"] == ["mysql_query"]
