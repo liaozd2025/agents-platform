@@ -1,6 +1,6 @@
 # OA iframe 接入说明
 
-Yuxi 提供 `/embed` 和 `/embed/{thread_id}` 两个无外壳路由。九典 OA 使用现有自定义 token 登录，不需要新建 OIDC 平台或修改 OA 后端。
+Yuxi 提供 `/embed` 和 `/embed/{thread_id}` 两个嵌入路由：固定/浮窗模式仅显示对话界面，全屏模式复用完整 PC 左侧菜单。九典 OA 使用现有自定义 token 登录，不需要新建 OIDC 平台或修改 OA 后端。
 
 ## 认证流程
 
@@ -105,7 +105,7 @@ Yuxi 只提出显示请求，OA 父页负责 iframe 容器布局并回传实际�
 | OA → Yuxi | `oa:mode-changed` | `{ mode: 'fixed' \| 'floating' \| 'fullscreen' }` |
 | Yuxi → OA | `yuxi:close-request` | `{ threadId? }` |
 
-切换模式不得修改 iframe 的 `/embed` 路由、清空会话或重新认证。独立站 `/agent` 不显示这些控件，也不参与该协议。
+切换模式不得修改 iframe 当前路由、清空会话或重新认证。固定/浮窗模式隐藏 PC 侧边栏，全屏模式显示完整侧边栏；点击智能体、工作区、知识库或技能时，使用 `/embed/*` 路由在 iframe 右侧区域切换，不打开新窗口。独立站 `/agent` 不显示这些控件，也不参与该协议。
 
 ## OA 用户映射
 
@@ -149,9 +149,10 @@ Accept: application/json
 3. 返回账号或公司不匹配时拒绝登录。
 4. 发起一轮对话并看到流式输出。
 5. 依次切换固定、浮窗、全屏、固定，父页收到 `yuxi:mode-request` 并回传 `oa:mode-changed`，iframe 路由和会话不变。
-6. Yuxi token 失效时 OA 收到 `yuxi:auth-required`，刷新 OA token 后可继续对话。
-7. 关闭后 iframe 仅隐藏；再次打开默认固定模式，最近会话和上下文仍在。
-8. 非白名单 origin 无法嵌入 Yuxi，伪造 `oa:token` 和 `oa:mode-changed` 不被接受。
+6. 固定/浮窗模式不显示 PC 侧边栏；全屏模式显示默认展开的完整 PC 侧边栏，智能体、工作区、知识库和技能在右侧区域显示。
+7. Yuxi token 失效时 OA 收到 `yuxi:auth-required`，刷新 OA token 后可继续对话。
+8. 关闭后 iframe 仅隐藏；再次打开默认固定模式，最近会话和上下文仍在。
+9. 非白名单 origin 无法嵌入 Yuxi，伪造 `oa:token` 和 `oa:mode-changed` 不被接受。
 
 ## 本地模拟验收
 

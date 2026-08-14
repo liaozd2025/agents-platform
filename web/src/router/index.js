@@ -3,6 +3,7 @@ import AppLayout from '@/layouts/AppLayout.vue'
 import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
 import { useAgentStore } from '@/stores/agent'
+import { resolveAppNavigationPath, resolveAppSurface } from '@/composables/useEmbedMode'
 import { sanitizeRedirect } from '@/utils/oidcAutoStart'
 
 const router = createRouter({
@@ -61,7 +62,7 @@ const router = createRouter({
     {
       path: '/embed',
       name: 'EmbedMain',
-      component: BlankLayout,
+      component: AppLayout,
       meta: { embed: true },
       children: [
         {
@@ -75,6 +76,61 @@ const router = createRouter({
           name: 'EmbedAgentWithThreadId',
           component: () => import('../views/AgentView.vue'),
           meta: { keepAlive: true, requiresAuth: true }
+        },
+        {
+          path: 'agent-manage',
+          name: 'EmbedAgentManageComp',
+          component: () => import('../views/AgentManageView.vue'),
+          meta: { keepAlive: false, requiresAuth: true }
+        },
+        {
+          path: 'workspace',
+          name: 'EmbedWorkspaceComp',
+          component: () => import('../views/WorkspaceView.vue'),
+          meta: { keepAlive: true, requiresAuth: true }
+        },
+        {
+          path: 'dashboard',
+          name: 'EmbedDashboardComp',
+          component: () => import('../views/DashboardView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiresSuperAdmin: true }
+        },
+        {
+          path: 'extensions',
+          name: 'EmbedExtensionsComp',
+          component: () => import('../views/ExtensionsView.vue'),
+          meta: { keepAlive: false, requiresAuth: true },
+          children: [
+            {
+              path: 'knowledgebase/:kbId',
+              name: 'EmbedExtensionKnowledgeBaseDetail',
+              component: () => import('../views/DataBaseInfoView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true,
+                requiresAdmin: true
+              }
+            },
+            {
+              path: 'mcp/:slug',
+              name: 'EmbedExtensionMcpDetail',
+              component: () => import('../components/extensions/McpDetailView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true,
+                requiresAdmin: true
+              }
+            },
+            {
+              path: 'skill/:slug',
+              name: 'EmbedExtensionSkillDetail',
+              component: () => import('../components/extensions/SkillDetailView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true
+              }
+            }
+          ]
         }
       ]
     },
@@ -174,7 +230,15 @@ const router = createRouter({
 })
 
 // 全局前置守卫
-router.beforeEach(async (to) => {
+router.beforeEach(async (to, from) => {
+  const embeddedTargetPath = resolveAppNavigationPath(
+    resolveAppSurface(from) === 'oa-embed',
+    to.path
+  )
+  if (embeddedTargetPath !== to.path) {
+    return { path: embeddedTargetPath, query: to.query, hash: to.hash }
+  }
+
   // 检查路由是否需要认证
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true)
   const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin)
@@ -199,7 +263,7 @@ router.beforeEach(async (to) => {
   const isSuperAdmin = userStore.isSuperAdmin
 
   // 嵌入页由 postMessage 握手后再渲染业务组件，不能在 yuxi:ready 前请求受保护接口。
-  if (isEmbedRoute) return true
+  if (isEmbedRoute && !userStore.userId) return true
 
   // 如果路由需要认证但用户未登录
   if (requiresAuth && !isLoggedIn) {
@@ -217,10 +281,10 @@ router.beforeEach(async (to) => {
       if (!agentStore.isInitialized) {
         await agentStore.initialize()
       }
-      return '/agent'
+      return isEmbedRoute ? '/embed' : '/agent'
     } catch (error) {
       console.error('获取智能体信息失败:', error)
-      return '/agent'
+      return isEmbedRoute ? '/embed' : '/agent'
     }
   }
 
@@ -231,10 +295,10 @@ router.beforeEach(async (to) => {
       if (!agentStore.isInitialized) {
         await agentStore.initialize()
       }
-      return '/agent'
+      return isEmbedRoute ? '/embed' : '/agent'
     } catch (error) {
       console.error('获取智能体信息失败:', error)
-      return '/agent'
+      return isEmbedRoute ? '/embed' : '/agent'
     }
   }
 

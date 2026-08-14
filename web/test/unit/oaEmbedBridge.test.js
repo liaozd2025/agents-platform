@@ -6,7 +6,11 @@ import {
   createOAEmbedBridge,
   parseOAEmbedAllowedOrigins
 } from '../../src/utils/oaEmbedBridge.js'
-import { resolveAppSurface } from '../../src/composables/useEmbedMode.js'
+import {
+  resolveAppNavigationPath,
+  resolveAppSurface,
+  shouldShowAppSidebar
+} from '../../src/composables/useEmbedMode.js'
 
 function createBrowserHarness() {
   const messages = []
@@ -61,6 +65,24 @@ test('OA origin config only keeps exact HTTP origins', () => {
 test('route metadata is the only standalone and OA embed surface boundary', () => {
   assert.equal(resolveAppSurface({ matched: [{ meta: { embed: true } }] }), 'oa-embed')
   assert.equal(resolveAppSurface({ matched: [{ meta: { requiresAuth: true } }] }), 'standalone')
+})
+
+test('OA embed only shows the complete app sidebar in fullscreen mode', () => {
+  assert.equal(shouldShowAppSidebar(true, 'fixed'), false)
+  assert.equal(shouldShowAppSidebar(true, 'floating'), false)
+  assert.equal(shouldShowAppSidebar(true, 'fullscreen'), true)
+  assert.equal(shouldShowAppSidebar(false, 'fixed'), true)
+})
+
+test('OA fullscreen keeps PC feature navigation inside the iframe', () => {
+  assert.equal(resolveAppNavigationPath(true, '/agent'), '/embed')
+  assert.equal(resolveAppNavigationPath(true, '/agent-manage'), '/embed/agent-manage')
+  assert.equal(resolveAppNavigationPath(true, '/workspace'), '/embed/workspace')
+  assert.equal(
+    resolveAppNavigationPath(true, '/extensions/skill/knowledge-base'),
+    '/embed/extensions/skill/knowledge-base'
+  )
+  assert.equal(resolveAppNavigationPath(false, '/workspace'), '/workspace')
 })
 
 test('OA bridge only accepts a token from an allowed parent origin', async () => {

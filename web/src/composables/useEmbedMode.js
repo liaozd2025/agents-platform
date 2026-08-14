@@ -6,10 +6,25 @@ const displayMode = ref(DEFAULT_OA_EMBED_MODE)
 const modeConfirmed = ref(false)
 const readonlyDisplayMode = readonly(displayMode)
 const readonlyModeConfirmed = readonly(modeConfirmed)
+const embedAppSections = ['/agent-manage', '/workspace', '/extensions', '/dashboard']
 
 /** 根据路由元数据解析应用运行形态。 */
 export function resolveAppSurface(route) {
   return route.matched.some((record) => record.meta.embed === true) ? 'oa-embed' : 'standalone'
+}
+
+/** 独立站始终显示侧栏，OA 嵌入仅在全屏模式显示。 */
+export function shouldShowAppSidebar(isEmbedded, mode) {
+  return !isEmbedded || mode === 'fullscreen'
+}
+
+/** 将 OA 全屏中的 PC 功能导航保留在嵌入路由内。 */
+export function resolveAppNavigationPath(isEmbedded, path) {
+  if (!isEmbedded) return path
+  if (path === '/agent') return '/embed'
+  return embedAppSections.some((section) => path === section || path.startsWith(`${section}/`))
+    ? `/embed${path}`
+    : path
 }
 
 /** 开始新的嵌入显示会话，等待父页面确认默认固定模式。 */

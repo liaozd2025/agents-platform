@@ -1,9 +1,6 @@
 <template>
   <div class="agent-view">
-    <div v-if="embedMode && !embedAuthorized" class="embed-auth-waiting" role="status">
-      {{ embedStatusMessage }}
-    </div>
-    <div v-else class="agent-view-body">
+    <div class="agent-view-body">
       <!-- 中间内容区域 -->
       <div class="content">
         <AgentChatComponent
@@ -153,7 +150,7 @@
       </div>
     </div>
     <a-drawer
-      v-if="embedMode && embedAuthorized"
+      v-if="embedMode"
       v-model:open="historyDrawerOpen"
       title="对话历史"
       placement="left"
@@ -172,7 +169,6 @@
       />
     </a-drawer>
     <AgentEditModal
-      v-if="!embedMode || embedAuthorized"
       ref="agentEditModalRef"
       :backend-options="agentBackendOptions"
       @saved="handleAgentSaved"
@@ -181,7 +177,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, inject, nextTick, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   Settings2,
@@ -197,7 +193,6 @@ import {
 import { useRoute, useRouter } from 'vue-router'
 import { agentApi } from '@/apis/agent_api'
 import { useEmbedContext } from '@/composables/useEmbedMode'
-import { useOAEmbedBridge } from '@/composables/useOAEmbedBridge'
 import { useOutsidePointerdown } from '@/composables/useOutsidePointerdown'
 import AgentChatComponent from '@/components/AgentChatComponent.vue'
 import AgentEditModal from '@/components/model-management/AgentEditModal.vue'
@@ -224,12 +219,7 @@ const {
   displayMode: embedDisplayMode,
   modeConfirmed: embedModeConfirmed
 } = useEmbedContext()
-const {
-  isAuthorized: embedAuthorized,
-  statusMessage: embedStatusMessage,
-  requestDisplayMode,
-  requestClose
-} = useOAEmbedBridge(embedMode)
+const { requestDisplayMode, requestClose } = inject('oaEmbedBridge')
 
 // 从 agentStore 中获取响应式状态
 const { agents, selectedAgentId, isLoadingConfig } = storeToRefs(agentStore)
@@ -283,8 +273,6 @@ const syncSelectedThreadFromRoute = async () => {
 const consumeRouteAgentSelection = async () => {
   const targetAgentId = getRouteAgentId()
   if (!targetAgentId || getRouteThreadId()) return
-  if (embedMode.value && !embedAuthorized.value) return
-
   try {
     if (!agentStore.isInitialized) {
       await agentStore.initialize()
@@ -317,14 +305,6 @@ watch(
   },
   { immediate: true }
 )
-
-watch(embedAuthorized, (authorized) => {
-  if (authorized) {
-    consumeRouteAgentSelection()
-    return
-  }
-  historyDrawerOpen.value = false
-})
 
 watch(chatComponentRef, (instance) => {
   if (!instance) return
@@ -482,17 +462,6 @@ useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdown
   width: 100%;
   height: 100vh;
   overflow: hidden;
-}
-
-.embed-auth-waiting {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  color: var(--gray-600);
-  background: var(--gray-25);
-  font-size: 14px;
 }
 
 .agent-view-body {
