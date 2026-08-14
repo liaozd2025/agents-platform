@@ -1,5 +1,5 @@
 <template>
-  <div class="agent-view" :data-app-surface="appSurface">
+  <div class="agent-view">
     <div v-if="embedMode && !embedAuthorized" class="embed-auth-waiting" role="status">
       {{ embedStatusMessage }}
     </div>
@@ -220,7 +220,6 @@ const chatThreadsStore = useChatThreadsStore()
 const route = useRoute()
 const router = useRouter()
 const {
-  surface: appSurface,
   isEmbedded: embedMode,
   displayMode: embedDisplayMode,
   modeConfirmed: embedModeConfirmed
