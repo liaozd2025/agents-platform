@@ -51,6 +51,34 @@ async def _create_user(session, uid: str = "alice") -> User:
     return user
 
 
+async def test_create_oidc_user_always_uses_builtin_user_role(monkeypatch):
+    """OIDC 首次登录不能通过外部配置自动获得管理角色。"""
+
+    captured = {}
+
+    class _UserRepository:
+        """记录 OIDC 新用户创建参数的最小仓库替身。"""
+
+        async def create(self, data):
+            """保存创建参数并返回测试用户。"""
+
+            captured.update(data)
+            return User(id=9, **data)
+
+    monkeypatch.setattr(oidc_service, "UserRepository", _UserRepository)
+    monkeypatch.setattr(oidc_service.oidc_config, "use_raw_username", False)
+    monkeypatch.setattr(oidc_service, "build_unique_oidc_username", AsyncMock(return_value="新用户"))
+
+    user = await oidc_service.create_oidc_user(
+        AsyncMock(),
+        {"sub": "new-sub", "name": "新用户", "username": "new-user"},
+        ROOT_DEPARTMENT_ID,
+    )
+
+    assert user.role == "user"
+    assert captured["role"] == "user"
+
+
 async def test_resolve_oidc_department_returns_unique_exact_match(oidc_session):
     """唯一同名 claim 应精确挂载已有组织节点。"""
     department = Department(name="研发部", parent_id=ROOT_DEPARTMENT_ID, path=f"/{ROOT_DEPARTMENT_ID}/2/")

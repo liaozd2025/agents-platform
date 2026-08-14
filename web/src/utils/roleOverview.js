@@ -1,3 +1,5 @@
+import { isDepartmentSelectionCovered } from './departmentTree.js'
+
 /**
  * 按服务端权限目录顺序返回角色已拥有的功能权限分组。
  */
@@ -36,4 +38,64 @@ export function getRoleAuditActionLabel(action) {
       'role.deactivate': '停用角色'
     }[action] || action
   )
+}
+
+/**
+ * 返回角色默认范围允许保存的个性化范围。
+ */
+export function getAssignableScopeTypes(
+  defaultScopeType,
+  scopeTypes,
+  departments = [],
+  targetDepartmentId = null,
+  defaultDepartmentIds = []
+) {
+  let allowedScopes = {
+    none: ['none'],
+    self: ['none', 'self'],
+    organization_and_descendants: [
+      'none',
+      'self',
+      'organization_and_descendants',
+      'selected_organizations_and_descendants'
+    ],
+    selected_organizations_and_descendants: [
+      'none',
+      'self',
+      'organization_and_descendants',
+      'selected_organizations_and_descendants'
+    ],
+    all: scopeTypes.map((scope) => scope.key)
+  }[defaultScopeType]
+
+  if (defaultScopeType === 'organization_and_descendants' && targetDepartmentId == null) {
+    allowedScopes = allowedScopes.filter(
+      (scope) => scope !== 'selected_organizations_and_descendants'
+    )
+  }
+  if (
+    defaultScopeType === 'selected_organizations_and_descendants' &&
+    !isDepartmentSelectionCovered(departments, defaultDepartmentIds, [targetDepartmentId])
+  ) {
+    allowedScopes = allowedScopes.filter(
+      (scope) => scope !== 'self' && scope !== 'organization_and_descendants'
+    )
+  }
+
+  return scopeTypes.filter((scope) => allowedScopes?.includes(scope.key))
+}
+
+/**
+ * 切换角色时清空旧范围；选择超级管理员时移除其他角色。
+ */
+export function resetRoleAssignmentScope(assignments, index, isSuperadmin) {
+  const changed = {
+    ...assignments[index],
+    scope_mode: 'inherit',
+    override_scope_type: null,
+    override_department_ids: []
+  }
+  return isSuperadmin
+    ? [changed]
+    : assignments.map((item, itemIndex) => (itemIndex === index ? changed : item))
 }

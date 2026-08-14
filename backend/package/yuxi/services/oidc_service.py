@@ -45,7 +45,6 @@ class OIDCConfig(BaseModel):
     provider_name: str = Field(default="OIDC登录", description="认证源名称，显示在登录按钮上的文字")
     scopes: str = Field(default="openid profile email", description="请求的 scope")
     auto_create_user: bool = Field(default=True, description="是否自动创建用户")
-    default_role: str = Field(default="user", description="OIDC 用户的默认角色")
     username_claim: str = Field(default="preferred_username", description="用户名映射字段")
     email_claim: str = Field(default="email", description="邮箱映射字段")
     name_claim: str = Field(default="name", description="姓名映射字段")
@@ -79,7 +78,6 @@ class OIDCConfig(BaseModel):
             end_session_endpoint=_env("OIDC_END_SESSION_ENDPOINT"),
             scopes=_env("OIDC_SCOPES", "openid profile email"),
             auto_create_user=os.environ.get("OIDC_AUTO_CREATE_USER", "true").lower() == "true",
-            default_role=_env("OIDC_DEFAULT_ROLE", "user"),
             username_claim=_env("OIDC_USERNAME_CLAIM", "preferred_username"),
             email_claim=_env("OIDC_EMAIL_CLAIM", "email"),
             name_claim=_env("OIDC_NAME_CLAIM", "name"),
@@ -617,7 +615,7 @@ async def create_oidc_user(db, user_info: dict, department_id: int | None = None
                     "phone_number": None,
                     "avatar": None,
                     "password_hash": password_hash,
-                    "role": oidc_config.default_role,
+                    "role": "user",
                     "department_id": department_id,
                     "last_login": utc_now_naive(),
                 }

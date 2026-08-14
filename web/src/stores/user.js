@@ -11,6 +11,7 @@ export const useUserStore = defineStore('user', () => {
   const phoneNumber = ref('')
   const avatar = ref('')
   const userRole = ref('')
+  const userRoles = ref([])
   const departmentId = ref(null)
   const departmentName = ref('')
 
@@ -56,6 +57,7 @@ export const useUserStore = defineStore('user', () => {
       phoneNumber.value = data.phone_number || ''
       avatar.value = data.avatar || ''
       userRole.value = data.role
+      userRoles.value = data.roles || []
       departmentId.value = data.department_id || null
       departmentName.value = data.department_name || ''
 
@@ -78,6 +80,7 @@ export const useUserStore = defineStore('user', () => {
     phoneNumber.value = ''
     avatar.value = ''
     userRole.value = ''
+    userRoles.value = []
     departmentId.value = null
     departmentName.value = ''
 
@@ -114,6 +117,7 @@ export const useUserStore = defineStore('user', () => {
       phoneNumber.value = data.phone_number || ''
       avatar.value = data.avatar || ''
       userRole.value = data.role
+      userRoles.value = data.roles || []
       departmentId.value = data.department_id || null
       departmentName.value = data.department_name || ''
 
@@ -327,6 +331,7 @@ export const useUserStore = defineStore('user', () => {
       phoneNumber.value = userData.phone_number || ''
       avatar.value = userData.avatar || ''
       userRole.value = userData.role
+      userRoles.value = userData.roles || []
       departmentId.value = userData.department_id || null
       departmentName.value = userData.department_name || ''
 
@@ -380,6 +385,7 @@ export const useUserStore = defineStore('user', () => {
     phoneNumber,
     avatar,
     userRole,
+    userRoles,
     departmentId,
     departmentName,
 

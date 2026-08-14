@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   buildDepartmentShareTree,
+  buildDepartmentScopeTree,
   buildDepartmentTree,
   getDepartmentExpandableKeys,
   getDepartmentSelectionSummary,
@@ -10,6 +11,22 @@ import {
   normalizeDepartmentSelection,
   updateDepartmentExpandedKeys
 } from '../../src/utils/departmentTree.js'
+
+test('角色范围树禁用默认组织子树之外的节点', () => {
+  const departments = [
+    { id: 1, parent_id: null, name: '集团' },
+    { id: 2, parent_id: 1, name: '甲公司' },
+    { id: 3, parent_id: 2, name: '研发部' },
+    { id: 4, parent_id: 1, name: '乙公司' }
+  ]
+
+  const [root] = buildDepartmentScopeTree(departments, [2])
+
+  assert.equal(root.disabled, true)
+  assert.equal(root.children[0].disabled, false)
+  assert.equal(root.children[0].children[0].disabled, false)
+  assert.equal(root.children[1].disabled, true)
+})
 
 test('组织节点列表可组装为树且移动时禁用自身与后代', () => {
   const departments = [

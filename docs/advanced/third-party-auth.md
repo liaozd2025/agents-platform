@@ -53,8 +53,7 @@ Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有�
 # 是否自动创建用户 (true/false，默认: true)
 # OIDC_AUTO_CREATE_USER=true
 
-# OIDC 用户的默认角色 (user/admin，默认: user)
-# OIDC_DEFAULT_ROLE=user
+# OIDC 首次登录创建的新用户固定获得内置 user 角色，管理员可在用户管理中调整
 
 # 用户名映射字段 (默认: preferred_username)
 # OIDC_USERNAME_CLAIM=preferred_username

@@ -21,6 +21,11 @@ from server.utils.auth_middleware import (
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.services.user_identity_service import generate_unique_uid, validate_username, is_valid_phone_number
 from yuxi.services.operation_log_service import log_operation
+from yuxi.services.user_role_service import (
+    UserRoleConflictError,
+    replace_user_role_assignments,
+    serialize_user,
+)
 from yuxi.services.auth_service import (
     CLI_AUTH_POLL_INTERVAL_SECONDS,
     CLI_AUTH_SESSION_TTL_SECONDS,
@@ -60,12 +65,23 @@ class Token(BaseModel):
     department_name: str | None = None
 
 
+class UserRoleAssignmentRequest(BaseModel):
+    """一条用户角色分配及其可选收窄范围。"""
+
+    role_id: int
+    scope_mode: str = Field(default="inherit", pattern=r"^(inherit|override)$")
+    override_scope_type: str | None = Field(default=None, max_length=64)
+    override_department_ids: list[int] = Field(default_factory=list)
+
+
 class UserCreate(BaseModel):
     username: str
     password: str = Field(min_length=8)
     role: str = "user"
     phone_number: str | None = None
     department_id: int | None = None
+    role_assignments: list[UserRoleAssignmentRequest] | None = None
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class UserUpdate(BaseModel):
@@ -76,11 +92,31 @@ class UserUpdate(BaseModel):
     phone_number: str | None = None
     avatar: str | None = None
     department_id: int | None = None
+    role_assignments: list[UserRoleAssignmentRequest] | None = None
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class UserProfileUpdate(BaseModel):
     username: str | None = None
     phone_number: str | None = None
+
+
+class UserRoleResponse(BaseModel):
+    """用户响应中的完整角色分配。"""
+
+    assignment_id: int | None = None
+    id: int
+    code: str
+    name: str
+    is_builtin: bool
+    is_active: bool
+    scope_mode: str
+    default_scope_type: str
+    default_department_ids: list[int]
+    override_scope_type: str | None = None
+    override_department_ids: list[int]
+    effective_scope_type: str
+    effective_department_ids: list[int]
 
 
 class UserResponse(BaseModel):
@@ -94,6 +130,7 @@ class UserResponse(BaseModel):
     department_name: str | None = None  # 部门名称
     created_at: str
     last_login: str | None = None
+    roles: list[UserRoleResponse] = Field(default_factory=list)
 
 
 class UserAccessOption(BaseModel):
@@ -190,6 +227,14 @@ def _raise_cli_auth_error(exc: CLIAuthError) -> None:
         status_code=exc.status_code,
         detail={"error": exc.code, "message": exc.message},
     ) from exc
+
+
+def _raise_user_role_error(error: ValueError) -> None:
+    """将角色分配校验错误映射为稳定的用户管理状态码。"""
+
+    if isinstance(error, UserRoleConflictError):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
 
 # 路由：登录获取令牌
@@ -434,13 +479,13 @@ async def initialize_admin(admin_data: InitializeAdmin, db: AsyncSession = Depen
 @auth.get("/me", response_model=UserResponse)
 async def read_users_me(current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
     """获取当前登录用户的个人信息"""
-    user_dict = current_user.to_dict()
+    department_name = None
 
     if current_user.department_id:
         result = await db.execute(select(Department.name).filter(Department.id == current_user.department_id))
-        user_dict["department_name"] = result.scalar_one_or_none()
+        department_name = result.scalar_one_or_none()
 
-    return user_dict
+    return serialize_user(current_user, department_name)
 
 
 # 路由：更新个人资料
@@ -502,7 +547,7 @@ async def update_profile(
     if update_details:
         await log_operation(db, current_user.id, "更新个人资料", f"更新个人资料: {', '.join(update_details)}", request)
 
-    return current_user.to_dict()
+    return serialize_user(current_user)
 
 
 # 路由：创建新用户（管理员权限）
@@ -552,16 +597,22 @@ async def create_user(
     # 创建新用户
     hashed_password = AuthUtils.hash_password(user_data.password)
 
-    # 检查角色权限
-    # 禁止创建超级管理员账户（系统只能有一个超级管理员）
-    if user_data.role == "superadmin":
+    requested_assignments = user_data.role_assignments
+    if requested_assignments is not None and current_user.role != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有超级管理员可以配置用户角色",
+        )
+
+    # 旧单角色字段仅用于尚未迁移的调用方。
+    if requested_assignments is None and user_data.role == "superadmin":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="不能创建超级管理员账户",
+            detail="创建超级管理员请使用角色分配数组并填写原因",
         )
 
     # 管理员只能创建普通用户
-    if current_user.role == "admin" and user_data.role != "user":
+    if requested_assignments is None and current_user.role == "admin" and user_data.role != "user":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="管理员只能创建普通用户账户",
@@ -587,23 +638,39 @@ async def create_user(
                 detail="普通管理员不能指定部门",
             )
 
-    new_user = await user_repo.create(
+    initial_role = user_data.role if requested_assignments is None else "user"
+    new_user = await user_repo.create_with_db(
+        db,
         {
             "username": user_data.username,
             "uid": uid,
             "phone_number": user_data.phone_number,
             "password_hash": hashed_password,
-            "role": user_data.role,
+            "role": initial_role,
             "department_id": department_id,
-        }
+        },
     )
+    if requested_assignments is not None:
+        try:
+            await replace_user_role_assignments(
+                db,
+                actor=current_user,
+                target=new_user,
+                assignments=[item.model_dump() for item in requested_assignments],
+                reason=user_data.reason,
+            )
+        except ValueError as error:
+            _raise_user_role_error(error)
 
     # 记录操作
     await log_operation(
-        db, current_user.id, "创建用户", f"创建用户: {user_data.username}, 角色: {user_data.role}", request
+        db, current_user.id, "创建用户", f"创建用户: {user_data.username}, 角色: {new_user.role}", request
     )
 
-    return new_user.to_dict()
+    new_user = await user_repo.get_by_id_with_db(db, new_user.id)
+    if new_user is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="用户创建后读取失败")
+    return serialize_user(new_user)
 
 
 # 路由：获取所有用户（管理员权限）
@@ -625,9 +692,7 @@ async def read_users(
 
     users = []
     for user, dept_name in users_with_dept:
-        user_dict = user.to_dict()
-        user_dict["department_name"] = dept_name
-        users.append(user_dict)
+        users.append(serialize_user(user, dept_name))
     return users
 
 
@@ -669,15 +734,16 @@ async def read_user_access_options(
 # 路由：获取特定用户信息（管理员权限）
 @auth.get("/users/{user_id}", response_model=UserResponse)
 async def read_user(user_id: int, current_user: User = Depends(get_admin_user), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).filter(User.id == user_id, User.is_deleted == 0))
-    user = result.scalar_one_or_none()
+    user = await UserRepository().get_by_id_with_db(db, user_id)
+    if user is not None and user.is_deleted:
+        user = None
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="用户不存在",
         )
     _ensure_user_in_current_department(current_user, user)
-    return user.to_dict()
+    return serialize_user(user)
 
 
 # 路由：更新用户信息（管理员权限）
@@ -689,8 +755,9 @@ async def update_user(
     current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(User).filter(User.id == user_id, User.is_deleted == 0))
-    user = result.scalar_one_or_none()
+    user = await UserRepository().get_by_id_with_db(db, user_id)
+    if user is not None and user.is_deleted:
+        user = None
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -712,6 +779,12 @@ async def update_user(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="管理员只能修改普通用户账户",
             )
+
+    if user_data.role_assignments is not None and current_user.role != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有超级管理员可以配置用户角色",
+        )
 
     # 更新信息
     update_details = []
@@ -762,12 +835,25 @@ async def update_user(
         user.department_id = user_data.department_id
         update_details.append(f"部门ID: {user_data.department_id}")
 
+    if user_data.role_assignments is not None:
+        try:
+            await replace_user_role_assignments(
+                db,
+                actor=current_user,
+                target=user,
+                assignments=[item.model_dump() for item in user_data.role_assignments],
+                reason=user_data.reason,
+            )
+        except ValueError as error:
+            _raise_user_role_error(error)
+        update_details.append("角色分配")
+
     await db.commit()
 
     # 记录操作
     await log_operation(db, current_user.id, "更新用户", f"更新用户ID {user_id}: {', '.join(update_details)}", request)
 
-    return user.to_dict()
+    return serialize_user(user)
 
 
 # 路由：删除用户（管理员权限）

@@ -591,6 +591,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 target_type VARCHAR(32) NOT NULL,
                 target_id INTEGER NOT NULL,
                 target_code VARCHAR(64) NOT NULL,
+                reason TEXT,
                 before_value JSONB,
                 after_value JSONB,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -601,6 +602,7 @@ class PostgresManager(metaclass=SingletonMeta):
             "CREATE INDEX IF NOT EXISTS ix_user_role_assignments_role_id ON user_role_assignments(role_id)",
             "CREATE INDEX IF NOT EXISTS ix_security_audits_actor_user_id ON security_audits(actor_user_id)",
             "CREATE INDEX IF NOT EXISTS ix_security_audits_target ON security_audits(target_type, target_id)",
+            "ALTER TABLE security_audits ADD COLUMN IF NOT EXISTS reason TEXT",
             f"""
             INSERT INTO roles (code, name, description, is_builtin, is_active, default_scope_type)
             VALUES {builtin_role_values}
@@ -633,6 +635,10 @@ class PostgresManager(metaclass=SingletonMeta):
             SELECT users.id, roles.id, 'inherit'
             FROM users
             JOIN roles ON roles.code = users.role
+            WHERE NOT EXISTS (
+                SELECT 1 FROM user_role_assignments existing
+                WHERE existing.user_id = users.id
+            )
             ON CONFLICT (user_id, role_id) DO NOTHING
             """,
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",

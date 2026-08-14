@@ -59,6 +59,7 @@ def _serialize_audit(audit: SecurityAudit) -> dict[str, Any]:
             "id": audit.target_id,
             "code": audit.target_code,
         },
+        "reason": audit.reason,
         "before": audit.before_value,
         "after": audit.after_value,
         "created_at": format_utc_datetime(audit.created_at),

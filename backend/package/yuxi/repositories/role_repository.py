@@ -46,6 +46,35 @@ class RoleRepository:
 
         return await self.db.scalar(select(Role).where(Role.code == code))
 
+    async def lock_assignment_roles(self, role_ids: list[int]) -> list[Role]:
+        """锁定并读取本次用户分配涉及的角色及默认组织范围。"""
+
+        return list(
+            (
+                await self.db.scalars(
+                    select(Role)
+                    .options(selectinload(Role.default_departments))
+                    .where(Role.id.in_(role_ids))
+                    .order_by(Role.id)
+                    .with_for_update()
+                )
+            ).all()
+        )
+
+    async def lock_superadmin_and_count_active_users(self) -> int:
+        """锁定超级管理员角色并统计其有效用户，串行保护最后一人。"""
+
+        await self.db.scalar(select(Role.id).where(Role.code == "superadmin").with_for_update())
+        return int(
+            await self.db.scalar(
+                select(func.count(func.distinct(UserRoleAssignment.user_id)))
+                .join(User, User.id == UserRoleAssignment.user_id)
+                .join(Role, Role.id == UserRoleAssignment.role_id)
+                .where(Role.code == "superadmin", User.is_deleted == 0)
+            )
+            or 0
+        )
+
     async def count_active_members(self, role_id: int) -> int:
         """统计仍在使用指定角色的有效用户。"""
 

@@ -264,6 +264,7 @@ class SecurityAudit(Base):
     target_type = Column(String(32), nullable=False)
     target_id = Column(Integer, nullable=False)
     target_code = Column(String(64), nullable=False)
+    reason = Column(Text, nullable=True)
     before_value = Column(JSON_VALUE, nullable=True)
     after_value = Column(JSON_VALUE, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)

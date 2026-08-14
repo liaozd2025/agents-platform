@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import OperationLog, Role, SecurityAudit, User, UserRoleAssignment
@@ -130,6 +130,7 @@ async def role_test_users(test_client):
     try:
         yield {
             "admin_headers": headers[0],
+            "admin": {"user": {"id": user_ids[0]}, "headers": headers[0]},
             "standard": {"user": {"id": user_ids[1]}, "headers": headers[1]},
         }
     finally:
@@ -319,3 +320,210 @@ async def test_custom_role_with_active_member_cannot_be_deactivated(test_client,
             async with pg_manager.get_async_session_context() as session:
                 await session.execute(delete(UserRoleAssignment).where(UserRoleAssignment.role_id == role_id))
         await _cleanup_custom_roles([role_code])
+
+
+async def test_superadmin_can_assign_multiple_roles_with_narrower_scope(test_client, role_test_users):
+    """用户响应应返回多角色，并保存不超过角色默认值的个性化范围。"""
+
+    admin_headers = role_test_users["admin_headers"]
+    overview_response = await test_client.get("/api/roles/overview", headers=admin_headers)
+    assert overview_response.status_code == 200, overview_response.text
+    roles = {role["code"]: role for role in overview_response.json()["roles"]}
+    suffix = uuid.uuid4().hex[:8]
+    password = f"Pw!{uuid.uuid4().hex}"
+    target_id = None
+    try:
+        create_response = await test_client.post(
+            "/api/auth/users",
+            json={"username": f"urm_{suffix}", "password": password},
+            headers=admin_headers,
+        )
+        assert create_response.status_code == 200, create_response.text
+        created = create_response.json()
+        target_id = created["id"]
+        assert [role["code"] for role in created["roles"]] == ["user"]
+
+        login_response = await test_client.post(
+            "/api/auth/token",
+            data={"username": created["uid"], "password": password},
+        )
+        assert login_response.status_code == 200, login_response.text
+        target_headers = {"Authorization": f"Bearer {login_response.json()['access_token']}"}
+
+        response = await test_client.put(
+            f"/api/auth/users/{target_id}",
+            json={
+                "role_assignments": [
+                    {"role_id": roles["user"]["id"], "scope_mode": "inherit"},
+                    {
+                        "role_id": roles["admin"]["id"],
+                        "scope_mode": "override",
+                        "override_scope_type": "self",
+                    },
+                ]
+            },
+            headers=admin_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["role"] == "admin"
+        assert {role["code"] for role in payload["roles"]} == {"admin", "user"}
+        admin_assignment = next(role for role in payload["roles"] if role["code"] == "admin")
+        assert admin_assignment["scope_mode"] == "override"
+        assert admin_assignment["effective_scope_type"] == "self"
+        assert admin_assignment["override_department_ids"] == []
+
+        profile_response = await test_client.get("/api/auth/me", headers=target_headers)
+        assert profile_response.status_code == 200, profile_response.text
+        assert {role["code"] for role in profile_response.json()["roles"]} == {"admin", "user"}
+
+        async with pg_manager.get_async_session_context() as session:
+            audit = await session.scalar(
+                select(SecurityAudit)
+                .where(SecurityAudit.target_type == "user", SecurityAudit.target_id == target_id)
+                .order_by(SecurityAudit.id.desc())
+            )
+            assert audit is not None
+            assert audit.action == "user.roles.update"
+            assert {item["code"] for item in audit.after_value["roles"]} == {"admin", "user"}
+    finally:
+        if target_id is not None:
+            delete_response = await test_client.delete(f"/api/auth/users/{target_id}", headers=admin_headers)
+            assert delete_response.status_code in {200, 404}, delete_response.text
+
+
+async def test_role_assignments_reject_expansion_and_protect_superadmin_changes(test_client, role_test_users):
+    """覆盖范围不能扩宽，超级角色必须独占且授予撤销均要求原因。"""
+
+    admin_headers = role_test_users["admin_headers"]
+    standard = role_test_users["standard"]
+    overview_response = await test_client.get("/api/roles/overview", headers=admin_headers)
+    assert overview_response.status_code == 200, overview_response.text
+    roles = {role["code"]: role for role in overview_response.json()["roles"]}
+    endpoint = f"/api/auth/users/{standard['user']['id']}"
+
+    expansion_response = await test_client.put(
+        endpoint,
+        json={
+            "role_assignments": [
+                {
+                    "role_id": roles["user"]["id"],
+                    "scope_mode": "override",
+                    "override_scope_type": "all",
+                }
+            ]
+        },
+        headers=admin_headers,
+    )
+    assert expansion_response.status_code == 400, expansion_response.text
+    assert "不能超过角色默认范围" in expansion_response.json()["detail"]
+
+    mixed_response = await test_client.put(
+        endpoint,
+        json={
+            "reason": "测试超级角色互斥",
+            "role_assignments": [
+                {"role_id": roles["superadmin"]["id"], "scope_mode": "inherit"},
+                {"role_id": roles["user"]["id"], "scope_mode": "inherit"},
+            ],
+        },
+        headers=admin_headers,
+    )
+    assert mixed_response.status_code == 400, mixed_response.text
+    assert "不能与其他角色同时分配" in mixed_response.json()["detail"]
+
+    missing_reason_response = await test_client.put(
+        endpoint,
+        json={"role_assignments": [{"role_id": roles["superadmin"]["id"], "scope_mode": "inherit"}]},
+        headers=admin_headers,
+    )
+    assert missing_reason_response.status_code == 400, missing_reason_response.text
+    assert "必须填写原因" in missing_reason_response.json()["detail"]
+
+    grant_response = await test_client.put(
+        endpoint,
+        json={
+            "reason": "轮值超级管理员",
+            "role_assignments": [{"role_id": roles["superadmin"]["id"], "scope_mode": "inherit"}],
+        },
+        headers=admin_headers,
+    )
+    assert grant_response.status_code == 200, grant_response.text
+    assert grant_response.json()["role"] == "superadmin"
+    assert [role["code"] for role in grant_response.json()["roles"]] == ["superadmin"]
+
+    revoke_without_reason = await test_client.put(
+        endpoint,
+        json={"role_assignments": [{"role_id": roles["user"]["id"], "scope_mode": "inherit"}]},
+        headers=admin_headers,
+    )
+    assert revoke_without_reason.status_code == 400, revoke_without_reason.text
+    assert "必须填写原因" in revoke_without_reason.json()["detail"]
+
+    revoke_response = await test_client.put(
+        endpoint,
+        json={
+            "reason": "轮值结束",
+            "role_assignments": [{"role_id": roles["user"]["id"], "scope_mode": "inherit"}],
+        },
+        headers=admin_headers,
+    )
+    assert revoke_response.status_code == 200, revoke_response.text
+    assert revoke_response.json()["role"] == "user"
+
+    async with pg_manager.get_async_session_context() as session:
+        audits = list(
+            (
+                await session.scalars(
+                    select(SecurityAudit)
+                    .where(SecurityAudit.target_type == "user", SecurityAudit.target_id == standard["user"]["id"])
+                    .order_by(SecurityAudit.id.asc())
+                )
+            ).all()
+        )
+        assert [audit.reason for audit in audits[-2:]] == ["轮值超级管理员", "轮值结束"]
+
+
+async def test_last_active_superadmin_assignment_cannot_be_removed(test_client, role_test_users):
+    """通过真实接口验证系统始终保留一个有效超级管理员。"""
+
+    admin = role_test_users["admin"]
+    overview_response = await test_client.get("/api/roles/overview", headers=admin["headers"])
+    assert overview_response.status_code == 200, overview_response.text
+    user_role = next(role for role in overview_response.json()["roles"] if role["code"] == "user")
+
+    async with pg_manager.get_async_session_context() as session:
+        other_superadmin_ids = list(
+            (
+                await session.scalars(
+                    select(User.id)
+                    .join(UserRoleAssignment)
+                    .join(Role)
+                    .where(
+                        Role.code == "superadmin",
+                        User.is_deleted == 0,
+                        User.id != admin["user"]["id"],
+                    )
+                )
+            ).all()
+        )
+        if other_superadmin_ids:
+            await session.execute(update(User).where(User.id.in_(other_superadmin_ids)).values(is_deleted=1))
+
+    try:
+        response = await test_client.put(
+            f"/api/auth/users/{admin['user']['id']}",
+            json={
+                "reason": "测试最后一个超级管理员保护",
+                "role_assignments": [{"role_id": user_role["id"], "scope_mode": "inherit"}],
+            },
+            headers=admin["headers"],
+        )
+
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == "系统必须至少保留一个有效超级管理员"
+    finally:
+        if other_superadmin_ids:
+            async with pg_manager.get_async_session_context() as session:
+                await session.execute(update(User).where(User.id.in_(other_superadmin_ids)).values(is_deleted=0))

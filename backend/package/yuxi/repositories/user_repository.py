@@ -6,6 +6,7 @@ from typing import Annotated, Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import APIKey, Department, Role, User, UserRoleAssignment
@@ -26,7 +27,15 @@ def _parse_department_ancestor_ids(path: str | None) -> tuple[int, ...]:
 async def _get_user_with_department_ancestors(db: AsyncSession, criterion: Any) -> User | None:
     """查询用户并一次带出其组织节点祖先链。"""
     result = await db.execute(
-        select(User, Department.path).outerjoin(Department, User.department_id == Department.id).where(criterion)
+        select(User, Department.path)
+        .options(
+            selectinload(User.role_assignments).selectinload(UserRoleAssignment.scope_departments),
+            selectinload(User.role_assignments)
+            .selectinload(UserRoleAssignment.role)
+            .selectinload(Role.default_departments),
+        )
+        .outerjoin(Department, User.department_id == Department.id)
+        .where(criterion)
     )
     row = result.one_or_none()
     if row is None:
@@ -100,6 +109,12 @@ class UserRepository:
         async with pg_manager.get_async_session_context() as session:
             query = (
                 select(User, Department.name.label("department_name"))
+                .options(
+                    selectinload(User.role_assignments).selectinload(UserRoleAssignment.scope_departments),
+                    selectinload(User.role_assignments)
+                    .selectinload(UserRoleAssignment.role)
+                    .selectinload(Role.default_departments),
+                )
                 .outerjoin(Department, User.department_id == Department.id)
                 .where(User.is_deleted == 0)
             )
@@ -114,17 +129,25 @@ class UserRepository:
     async def create(self, data: dict[str, Any]) -> User:
         """创建用户"""
         async with pg_manager.get_async_session_context() as session:
-            user = User(**data)
-            session.add(user)
-            await session.flush()
-
-            role = await session.scalar(select(Role).where(Role.code == user.role))
-            if role is None:
-                raise ValueError(f"用户角色 {user.role} 不存在")
-            session.add(UserRoleAssignment(user=user, role=role, scope_mode="inherit"))
-
+            user = await self.create_with_db(session, data)
             await session.commit()
             await session.refresh(user)
+        return user
+
+    async def create_with_db(self, db: AsyncSession, data: dict[str, Any]) -> User:
+        """在调用方事务中创建用户并立即绑定迁移期默认角色。"""
+
+        user = User(**data)
+        db.add(user)
+        await db.flush()
+
+        role = await db.scalar(
+            select(Role).options(selectinload(Role.default_departments)).where(Role.code == user.role)
+        )
+        if role is None:
+            raise ValueError(f"用户角色 {user.role} 不存在")
+        db.add(UserRoleAssignment(user=user, role=role, scope_mode="inherit"))
+        await db.flush()
         return user
 
     async def update(self, id: int, data: dict[str, Any]) -> User | None:

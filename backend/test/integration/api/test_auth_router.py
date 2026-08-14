@@ -129,6 +129,7 @@ async def test_admin_can_create_and_delete_user(test_client, admin_headers):
     created_user = create_response.json()
     assert created_user["username"] == payload["username"]
     assert created_user["role"] == payload["role"]
+    assert [role["code"] for role in created_user["roles"]] == ["user"]
 
     delete_response = await test_client.delete(f"/api/auth/users/{created_user['id']}", headers=admin_headers)
     assert delete_response.status_code == 200, delete_response.text

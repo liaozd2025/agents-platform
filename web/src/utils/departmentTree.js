@@ -29,6 +29,34 @@ export function buildDepartmentTree(departments, disabledRootId = null) {
 }
 
 /**
+ * 构建角色范围选择树，并禁用允许子树之外的组织节点。
+ */
+export function buildDepartmentScopeTree(departments, allowedRootIds = null) {
+  const tree = buildDepartmentTree(departments)
+  if (allowedRootIds === null) return tree
+
+  const departmentById = new Map(departments.map((item) => [Number(item.id), item]))
+  const allowedRoots = new Set(allowedRootIds.map(Number))
+  const isCovered = (departmentId) => {
+    let currentId = Number(departmentId)
+    while (Number.isFinite(currentId)) {
+      if (allowedRoots.has(currentId)) return true
+      const parentId = departmentById.get(currentId)?.parent_id
+      if (parentId == null) return false
+      currentId = Number(parentId)
+    }
+    return false
+  }
+
+  const decorate = (node) => ({
+    ...node,
+    disabled: !isCovered(node.id),
+    ...(node.children ? { children: node.children.map(decorate) } : {})
+  })
+  return tree.map(decorate)
+}
+
+/**
  * 返回拥有子节点的组织节点 ID，用于树表格全部展开。
  */
 export function getDepartmentExpandableKeys(departments) {

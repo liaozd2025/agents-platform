@@ -49,10 +49,10 @@
           :dropdown-style="{ maxHeight: '360px', overflow: 'auto' }"
         />
         <a-select v-model:value="userManagement.roleFilter" class="filter-select">
-          <a-select-option value="">全部权限</a-select-option>
-          <a-select-option value="superadmin">超级管理员</a-select-option>
-          <a-select-option value="admin">管理员</a-select-option>
-          <a-select-option value="user">普通用户</a-select-option>
+          <a-select-option value="">全部角色</a-select-option>
+          <a-select-option v-for="role in roleFilterOptions" :key="role.code" :value="role.code">
+            {{ role.name }}
+          </a-select-option>
         </a-select>
       </div>
     </div>
@@ -133,6 +133,10 @@
               <template #info>
                 <div class="card-content">
                   <div class="info-item">
+                    <span class="info-label">角色:</span>
+                    <span class="info-value">{{ getUserRoleNames(user) }}</span>
+                  </div>
+                  <div class="info-item">
                     <span class="info-label">手机号:</span>
                     <span class="info-value phone-text">{{ user.phone_number || '-' }}</span>
                   </div>
@@ -170,7 +174,7 @@
       :confirmLoading="userManagement.loading"
       @cancel="userManagement.modalVisible = false"
       :maskClosable="false"
-      width="480px"
+      width="720px"
       class="user-modal"
     >
       <a-form layout="vertical" class="user-form">
@@ -229,11 +233,96 @@
           </a-form-item>
         </template>
 
-        <a-form-item v-if="!userManagement.editMode" label="角色" class="form-item">
+        <a-form-item
+          v-if="!userStore.isSuperAdmin && !userManagement.editMode"
+          label="角色"
+          class="form-item"
+        >
           <a-select v-model:value="userManagement.form.role">
             <a-select-option value="user">普通用户</a-select-option>
-            <a-select-option value="admin" v-if="userStore.isSuperAdmin">管理员</a-select-option>
           </a-select>
+        </a-form-item>
+
+        <a-form-item v-if="userStore.isSuperAdmin" label="角色分配" required class="form-item">
+          <div class="role-assignment-list">
+            <section
+              v-for="(assignment, index) in userManagement.form.roleAssignments"
+              :key="index"
+              class="role-assignment"
+            >
+              <div class="role-assignment-header">
+                <a-select
+                  v-model:value="assignment.role_id"
+                  placeholder="请选择角色"
+                  style="flex: 1"
+                  @change="handleRoleChange(index)"
+                >
+                  <a-select-option
+                    v-for="role in activeRoles"
+                    :key="role.id"
+                    :value="role.id"
+                    :disabled="isRoleSelectedByOther(role.id, index)"
+                  >
+                    {{ role.name }}{{ role.is_builtin ? '（内置）' : '' }}
+                  </a-select-option>
+                </a-select>
+                <a-button
+                  danger
+                  :disabled="userManagement.form.roleAssignments.length === 1"
+                  @click="removeRoleAssignment(index)"
+                >
+                  移除
+                </a-button>
+              </div>
+
+              <template v-if="getRoleById(assignment.role_id)">
+                <p class="role-default-scope">
+                  默认范围：{{ getScopeLabel(getRoleById(assignment.role_id).default_scope_type) }}
+                </p>
+                <a-radio-group
+                  v-model:value="assignment.scope_mode"
+                  @change="handleScopeModeChange(assignment)"
+                >
+                  <a-radio value="inherit">继承角色默认范围</a-radio>
+                  <a-radio value="override">个性化收窄</a-radio>
+                </a-radio-group>
+
+                <div v-if="assignment.scope_mode === 'override'" class="role-override-fields">
+                  <a-select
+                    v-model:value="assignment.override_scope_type"
+                    :options="getOverrideScopeOptions(assignment.role_id)"
+                    placeholder="请选择更窄的数据范围"
+                    @change="handleOverrideScopeChange(assignment)"
+                  />
+                  <a-tree-select
+                    v-if="
+                      assignment.override_scope_type === 'selected_organizations_and_descendants'
+                    "
+                    v-model:value="assignment.override_department_ids"
+                    :tree-data="getOverrideDepartmentTree(assignment.role_id)"
+                    :field-names="treeFieldNames"
+                    tree-checkable
+                    tree-default-expand-all
+                    allow-clear
+                    placeholder="请选择组织子树"
+                  />
+                </div>
+              </template>
+            </section>
+
+            <a-button v-if="canAddRoleAssignment" block @click="addRoleAssignment">
+              添加角色
+            </a-button>
+          </div>
+        </a-form-item>
+
+        <a-form-item v-if="requiresSuperadminReason" label="变更原因" required class="form-item">
+          <a-textarea
+            v-model:value="userManagement.form.reason"
+            :maxlength="500"
+            :rows="2"
+            placeholder="请说明授予或撤销超级管理员的原因"
+          />
         </a-form-item>
 
         <!-- 组织机构选择器（仅超级管理员可见） -->
@@ -247,6 +336,7 @@
             tree-default-expand-all
             show-search
             :dropdown-style="{ maxHeight: '360px', overflow: 'auto' }"
+            @change="handleUserDepartmentChange"
           />
         </a-form-item>
       </a-form>
@@ -259,6 +349,7 @@ import { reactive, onMounted, watch, computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis'
+import { getRoleOverview } from '@/apis/role_api'
 import {
   Plus,
   SquarePen,
@@ -272,7 +363,12 @@ import {
 import { formatDateTime } from '@/utils/time'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
-import { buildDepartmentTree } from '@/utils/departmentTree'
+import {
+  buildDepartmentScopeTree,
+  buildDepartmentTree,
+  normalizeDepartmentSelection
+} from '@/utils/departmentTree'
+import { getAssignableScopeTypes, resetRoleAssignmentScope } from '@/utils/roleOverview'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 
@@ -293,6 +389,7 @@ const userManagement = reactive({
   modalTitle: '添加用户',
   editMode: false,
   editUserId: null,
+  originalHadSuperadmin: false,
   form: {
     username: '',
     generatedUid: '', // 自动生成的uid
@@ -300,6 +397,8 @@ const userManagement = reactive({
     password: '',
     confirmPassword: '',
     role: 'user', // 默认角色
+    roleAssignments: [],
+    reason: '',
     departmentId: null, // 部门ID
     usernameError: '', // 用户名错误信息
     phoneError: '' // 手机号错误信息
@@ -311,9 +410,33 @@ const userManagement = reactive({
 const departmentManagement = reactive({
   departments: []
 })
+const roleOverview = reactive({ roles: [], dataScopeTypes: [] })
 
 const treeFieldNames = { children: 'children', label: 'name', value: 'id' }
 const departmentTree = computed(() => buildDepartmentTree(departmentManagement.departments))
+const activeRoles = computed(() => roleOverview.roles.filter((role) => role.is_active))
+const roleFilterOptions = computed(() =>
+  activeRoles.value.length
+    ? activeRoles.value
+    : [
+        { code: 'superadmin', name: '超级管理员' },
+        { code: 'admin', name: '管理员' },
+        { code: 'user', name: '普通用户' }
+      ]
+)
+const hasSuperadminAssignment = computed(() =>
+  userManagement.form.roleAssignments.some(
+    (assignment) => getRoleById(assignment.role_id)?.code === 'superadmin'
+  )
+)
+const requiresSuperadminReason = computed(
+  () => hasSuperadminAssignment.value !== userManagement.originalHadSuperadmin
+)
+const canAddRoleAssignment = computed(
+  () =>
+    !hasSuperadminAssignment.value &&
+    userManagement.form.roleAssignments.length < activeRoles.value.length
+)
 
 const filteredUsers = computed(() => {
   const keyword = userManagement.searchKeyword.trim().toLowerCase()
@@ -329,7 +452,9 @@ const filteredUsers = computed(() => {
     const matchesDepartment =
       userManagement.departmentFilter == null ||
       Number(user.department_id) === Number(userManagement.departmentFilter)
-    const matchesRole = !userManagement.roleFilter || user.role === userManagement.roleFilter
+    const matchesRole =
+      !userManagement.roleFilter ||
+      (user.roles || []).some((role) => role.code === userManagement.roleFilter)
 
     return matchesKeyword && matchesDepartment && matchesRole
   })
@@ -348,6 +473,118 @@ const fetchDepartments = async () => {
     departmentManagement.departments = departments
   } catch (error) {
     console.error('获取组织机构列表失败:', error)
+  }
+}
+
+const fetchRoleOptions = async (force = false) => {
+  if (!userStore.isSuperAdmin || (!force && roleOverview.roles.length)) return
+
+  try {
+    const overview = await getRoleOverview()
+    roleOverview.roles = overview.roles
+    roleOverview.dataScopeTypes = overview.data_scope_types
+  } catch (error) {
+    console.error('获取角色列表失败:', error)
+    message.error(error.message || '获取角色列表失败')
+  }
+}
+
+const getRoleById = (roleId) => roleOverview.roles.find((role) => role.id === roleId)
+const getScopeLabel = (scopeType) =>
+  roleOverview.dataScopeTypes.find((scope) => scope.key === scopeType)?.label || scopeType
+const getUserRoleNames = (user) =>
+  (user.roles || []).map((role) => role.name).join('、') || user.role || '-'
+
+const makeRoleAssignment = (role, existing = null) => ({
+  role_id: role?.id ?? existing?.id ?? null,
+  scope_mode: existing?.scope_mode || 'inherit',
+  override_scope_type: existing?.override_scope_type || null,
+  override_department_ids: [...(existing?.override_department_ids || [])]
+})
+
+const getDefaultRoleAssignments = () => {
+  const userRole = roleOverview.roles.find((role) => role.code === 'user')
+  return userRole ? [makeRoleAssignment(userRole)] : []
+}
+
+const getOverrideScopeOptions = (roleId) => {
+  const role = getRoleById(roleId)
+  return getAssignableScopeTypes(
+    role?.default_scope_type,
+    roleOverview.dataScopeTypes,
+    departmentManagement.departments,
+    userManagement.form.departmentId,
+    role?.default_department_ids
+  ).map((scope) => ({ value: scope.key, label: scope.label }))
+}
+
+const getOverrideDepartmentTree = (roleId) => {
+  const role = getRoleById(roleId)
+  let allowedRootIds = null
+  if (role?.default_scope_type === 'organization_and_descendants') {
+    allowedRootIds = userManagement.form.departmentId ? [userManagement.form.departmentId] : []
+  } else if (role?.default_scope_type === 'selected_organizations_and_descendants') {
+    allowedRootIds = role.default_department_ids
+  }
+  return buildDepartmentScopeTree(departmentManagement.departments, allowedRootIds)
+}
+
+const isRoleSelectedByOther = (roleId, currentIndex) =>
+  userManagement.form.roleAssignments.some(
+    (assignment, index) => index !== currentIndex && assignment.role_id === roleId
+  )
+
+const addRoleAssignment = () => {
+  const selected = new Set(userManagement.form.roleAssignments.map((item) => item.role_id))
+  const role = activeRoles.value.find(
+    (item) => !selected.has(item.id) && item.code !== 'superadmin'
+  )
+  if (role) userManagement.form.roleAssignments.push(makeRoleAssignment(role))
+}
+
+const removeRoleAssignment = (index) => {
+  userManagement.form.roleAssignments.splice(index, 1)
+}
+
+const handleRoleChange = (index) => {
+  const assignment = userManagement.form.roleAssignments[index]
+  const isSuperadmin = getRoleById(assignment.role_id)?.code === 'superadmin'
+  userManagement.form.roleAssignments = resetRoleAssignmentScope(
+    userManagement.form.roleAssignments,
+    index,
+    isSuperadmin
+  )
+}
+
+const handleScopeModeChange = (assignment) => {
+  if (assignment.scope_mode === 'inherit') {
+    assignment.override_scope_type = null
+    assignment.override_department_ids = []
+    return
+  }
+
+  assignment.override_scope_type = getOverrideScopeOptions(assignment.role_id)[0]?.value || null
+}
+
+const handleOverrideScopeChange = (assignment) => {
+  if (assignment.override_scope_type !== 'selected_organizations_and_descendants') {
+    assignment.override_department_ids = []
+  }
+}
+
+const handleUserDepartmentChange = () => {
+  for (const assignment of userManagement.form.roleAssignments) {
+    const defaultScopeType = getRoleById(assignment.role_id)?.default_scope_type
+    if (
+      assignment.scope_mode === 'override' &&
+      ['organization_and_descendants', 'selected_organizations_and_descendants'].includes(
+        defaultScopeType
+      )
+    ) {
+      assignment.scope_mode = 'inherit'
+      assignment.override_scope_type = null
+      assignment.override_department_ids = []
+    }
   }
 }
 
@@ -457,7 +694,7 @@ const handleRefresh = async () => {
   if (userManagement.refreshing) return
   userManagement.refreshing = true
   try {
-    await Promise.all([fetchUsers(), fetchDepartments()])
+    await Promise.all([fetchUsers(), fetchDepartments(), fetchRoleOptions(true)])
     message.success('刷新成功')
   } catch (error) {
     console.error('刷新失败:', error)
@@ -468,10 +705,12 @@ const handleRefresh = async () => {
 }
 
 // 打开添加用户模态框
-const showAddUserModal = () => {
+const showAddUserModal = async () => {
+  await fetchRoleOptions()
   userManagement.modalTitle = '添加用户'
   userManagement.editMode = false
   userManagement.editUserId = null
+  userManagement.originalHadSuperadmin = false
   userManagement.form = {
     username: '',
     generatedUid: '',
@@ -479,6 +718,8 @@ const showAddUserModal = () => {
     password: '',
     confirmPassword: '',
     role: 'user', // 默认角色为普通用户
+    roleAssignments: getDefaultRoleAssignments(),
+    reason: '',
     departmentId: null,
     usernameError: '',
     phoneError: ''
@@ -488,16 +729,23 @@ const showAddUserModal = () => {
 }
 
 // 打开编辑用户模态框
-const showEditUserModal = (user) => {
+const showEditUserModal = async (user) => {
+  await fetchRoleOptions()
   userManagement.modalTitle = '编辑用户'
   userManagement.editMode = true
   userManagement.editUserId = user.id
+  userManagement.originalHadSuperadmin = (user.roles || []).some(
+    (role) => role.code === 'superadmin'
+  )
   userManagement.form = {
     username: user.username,
     generatedUid: user.uid || '', // 编辑模式显示现有的uid
     phoneNumber: user.phone_number || '',
     password: '',
     confirmPassword: '',
+    role: user.role,
+    roleAssignments: (user.roles || []).map((role) => makeRoleAssignment(null, role)),
+    reason: '',
     departmentId: user.department_id || null,
     usernameError: '',
     phoneError: ''
@@ -547,7 +795,49 @@ const handleUserFormSubmit = async () => {
       }
     }
 
+    if (userStore.isSuperAdmin) {
+      if (!userManagement.form.roleAssignments.length) {
+        message.error('请至少分配一个角色')
+        return
+      }
+      for (const assignment of userManagement.form.roleAssignments) {
+        if (!assignment.role_id) {
+          message.error('请选择角色')
+          return
+        }
+        if (assignment.scope_mode === 'override' && !assignment.override_scope_type) {
+          message.error('请选择个性化数据范围')
+          return
+        }
+        if (
+          assignment.override_scope_type === 'selected_organizations_and_descendants' &&
+          !assignment.override_department_ids.length
+        ) {
+          message.error('指定组织及下级范围至少需要选择一个组织节点')
+          return
+        }
+      }
+      if (requiresSuperadminReason.value && !userManagement.form.reason.trim()) {
+        message.error('授予或撤销超级管理员必须填写原因')
+        return
+      }
+    }
+
     userManagement.loading = true
+
+    const roleAssignments = userManagement.form.roleAssignments.map((assignment) => ({
+      role_id: assignment.role_id,
+      scope_mode: assignment.scope_mode,
+      override_scope_type:
+        assignment.scope_mode === 'override' ? assignment.override_scope_type : null,
+      override_department_ids:
+        assignment.scope_mode === 'override'
+          ? normalizeDepartmentSelection(
+              departmentManagement.departments,
+              assignment.override_department_ids
+            )
+          : []
+    }))
 
     // 根据模式决定创建还是更新用户
     if (userManagement.editMode) {
@@ -566,6 +856,11 @@ const handleUserFormSubmit = async () => {
         updateData.department_id = userManagement.form.departmentId
       }
 
+      if (userStore.isSuperAdmin) {
+        updateData.role_assignments = roleAssignments
+        if (requiresSuperadminReason.value) updateData.reason = userManagement.form.reason.trim()
+      }
+
       // 如果显示了密码字段并且填写了密码，才更新密码
       if (userManagement.displayPasswordFields && userManagement.form.password) {
         updateData.password = userManagement.form.password
@@ -577,8 +872,14 @@ const handleUserFormSubmit = async () => {
       // 创建新用户
       const createData = {
         username: userManagement.form.username.trim(),
-        password: userManagement.form.password,
-        role: userManagement.form.role
+        password: userManagement.form.password
+      }
+
+      if (userStore.isSuperAdmin) {
+        createData.role_assignments = roleAssignments
+        if (requiresSuperadminReason.value) createData.reason = userManagement.form.reason.trim()
+      } else {
+        createData.role = userManagement.form.role
       }
 
       // 超级管理员可以指定部门
@@ -653,8 +954,7 @@ const getRoleClass = (role) => {
 
 // 在组件挂载时获取用户列表
 onMounted(async () => {
-  await fetchUsers()
-  await fetchDepartments()
+  await Promise.all([fetchUsers(), fetchDepartments(), fetchRoleOptions()])
 })
 </script>
 
@@ -963,6 +1263,47 @@ onMounted(async () => {
         color: var(--gray-700);
         font-size: 13px;
       }
+    }
+
+    .role-assignment-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .role-assignment {
+      padding: 12px;
+      border: 1px solid var(--gray-150);
+      border-radius: 8px;
+      background: var(--gray-25);
+    }
+
+    .role-assignment-header,
+    .role-override-fields {
+      display: flex;
+      gap: 8px;
+    }
+
+    .role-default-scope {
+      margin: 8px 0;
+      color: var(--gray-600);
+      font-size: 12px;
+    }
+
+    .role-override-fields {
+      margin-top: 10px;
+
+      > * {
+        flex: 1;
+      }
+    }
+  }
+}
+
+@media (max-width: 640px) {
+  .user-modal .user-form {
+    .role-assignment-header,
+    .role-override-fields {
+      flex-direction: column;
     }
   }
 }
