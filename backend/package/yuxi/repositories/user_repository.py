@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from yuxi.permissions.authorization import parse_department_ancestor_ids
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import APIKey, Department, Role, User, UserRoleAssignment
 
@@ -15,13 +16,6 @@ from yuxi.storage.postgres.models_business import APIKey, Department, Role, User
 def _utc_now() -> dt:
     # 使用 naive datetime 以匹配 PostgreSQL TIMESTAMP WITHOUT TIME ZONE 列
     return dt.now(UTC).replace(tzinfo=None)
-
-
-def _parse_department_ancestor_ids(path: str | None) -> tuple[int, ...]:
-    """从组织节点物化路径解析包含自身的祖先节点 ID。"""
-    if not path:
-        return ()
-    return tuple(int(node_id) for node_id in path.strip("/").split("/") if node_id)
 
 
 async def _get_user_with_department_ancestors(db: AsyncSession, criterion: Any) -> User | None:
@@ -33,6 +27,7 @@ async def _get_user_with_department_ancestors(db: AsyncSession, criterion: Any) 
             selectinload(User.role_assignments)
             .selectinload(UserRoleAssignment.role)
             .selectinload(Role.default_departments),
+            selectinload(User.role_assignments).selectinload(UserRoleAssignment.role).selectinload(Role.permissions),
         )
         .outerjoin(Department, User.department_id == Department.id)
         .where(criterion)
@@ -44,7 +39,7 @@ async def _get_user_with_department_ancestors(db: AsyncSession, criterion: Any) 
     user, department_path = row
     if user.department_id is not None and not department_path:
         raise ValueError(f"用户 {user.uid} 所属组织节点缺少有效物化路径")
-    ancestor_ids = _parse_department_ancestor_ids(department_path)
+    ancestor_ids = parse_department_ancestor_ids(department_path)
     if user.department_id is not None and (not ancestor_ids or ancestor_ids[-1] != user.department_id):
         raise ValueError(f"用户 {user.uid} 所属组织节点的物化路径无效")
     user.department_ancestor_ids = ancestor_ids

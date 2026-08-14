@@ -5,7 +5,7 @@
         <h2>角色与权限</h2>
         <p>内置角色受系统保护；自定义角色采用停用而非删除。</p>
       </div>
-      <a-button type="primary" @click="openCreate">创建角色</a-button>
+      <a-button v-if="canManageRoles" type="primary" @click="openCreate">创建角色</a-button>
     </header>
 
     <a-spin :spinning="loading">
@@ -48,7 +48,7 @@
               <p>{{ selectedRole.description || '暂无说明' }}</p>
               <code>{{ selectedRole.code }}</code>
             </div>
-            <a-space wrap>
+            <a-space v-if="canManageRoles" wrap>
               <a-button @click="openCopy">复制</a-button>
               <a-button v-if="!selectedRole.is_builtin" @click="openEdit">编辑</a-button>
               <a-button
@@ -230,6 +230,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
+import { useUserStore } from '@/stores/user'
 import { getDepartments } from '@/apis/department_api'
 import { copyRole, createRole, deactivateRole, getRoleOverview, updateRole } from '@/apis/role_api'
 import {
@@ -243,7 +244,8 @@ import {
   groupRolePermissions
 } from '@/utils/roleOverview'
 
-const overview = ref({ permissions: [], data_scope_types: [], roles: [] })
+const overview = ref({ permissions: [], data_scope_types: [], scope_departments: [], roles: [] })
+const userStore = useUserStore()
 const departments = ref([])
 const selectedRoleId = ref(null)
 const loading = ref(false)
@@ -276,10 +278,13 @@ const scopeOptions = computed(() =>
   overview.value.data_scope_types.map((scope) => ({ value: scope.key, label: scope.label }))
 )
 const departmentTree = computed(() => buildDepartmentTree(departments.value))
+const scopeDepartments = computed(() =>
+  departments.value.length ? departments.value : overview.value.scope_departments
+)
 const selectedScopeSummary = computed(() => {
   if (selectedRole.value?.default_scope_type === 'selected_organizations_and_descendants') {
     return getDepartmentSelectionSummary(
-      departments.value,
+      scopeDepartments.value,
       selectedRole.value.default_department_ids
     )
   }
@@ -287,6 +292,9 @@ const selectedScopeSummary = computed(() => {
 })
 const editorTitle = computed(
   () => ({ create: '创建角色', copy: '复制角色', edit: '编辑角色' })[editorMode.value]
+)
+const canManageRoles = computed(
+  () => userStore.isSuperAdmin && userStore.hasPermission('role:manage')
 )
 
 const loadOverview = async (preferredRoleId = selectedRoleId.value) => {
@@ -437,7 +445,7 @@ const formatAuditValue = (value) => (value == null ? '无' : JSON.stringify(valu
 
 onMounted(() => {
   loadOverview()
-  loadDepartments()
+  if (canManageRoles.value) loadDepartments()
 })
 </script>
 

@@ -108,6 +108,8 @@ async def test_admin_can_login_and_fetch_profile(test_client, admin_headers):
     assert data["role"] in {"admin", "superadmin"}
     assert data["username"]
     assert data["id"]
+    assert data["roles"]
+    assert "role:read" in data["effective_permissions"]
 
 
 async def test_profile_requires_authentication(test_client):

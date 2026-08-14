@@ -168,7 +168,7 @@
             <DepartmentManagementComponent />
           </div>
 
-          <div v-if="activeTab === 'role' && userStore.isSuperAdmin">
+          <div v-if="activeTab === 'role' && userStore.hasPermission('role:read')">
             <div class="settings-page-header">
               <div class="settings-page-title">角色与权限</div>
               <p class="settings-page-description">
@@ -256,7 +256,8 @@ const visible = computed({
 const permissions = computed(() => ({
   isLoggedIn: userStore.isLoggedIn,
   isAdmin: userStore.isAdmin,
-  isSuperAdmin: userStore.isSuperAdmin
+  isSuperAdmin: userStore.isSuperAdmin,
+  effectivePermissions: userStore.effectivePermissions
 }))
 const allNavigationGroups = computed(() => getSettingsNavigationGroups(permissions.value))
 const navigationGroups = computed(() =>

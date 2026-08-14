@@ -7,7 +7,6 @@ import uuid
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select, update
-
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import OperationLog, Role, SecurityAudit, User, UserRoleAssignment
 from yuxi.utils.auth_utils import AuthUtils
@@ -60,6 +59,94 @@ async def test_new_standard_user_is_listed_but_cannot_view_role_overview(
     assert overview_response.status_code == 200, overview_response.text
     user_role = next(role for role in overview_response.json()["roles"] if role["code"] == "user")
     assert any(member["id"] == standard_user["user"]["id"] for member in user_role["members"])
+
+
+async def test_role_read_permission_changes_take_effect_on_next_request(test_client, role_test_users):
+    """同一令牌的下一次请求应读取最新角色权限。"""
+
+    admin_headers = role_test_users["admin_headers"]
+    standard = role_test_users["standard"]
+    role_code = f"pytest_live_auth_{uuid.uuid4().hex[:10]}"
+    role_id = None
+    user_role_id = None
+    try:
+        overview = await test_client.get("/api/roles/overview", headers=admin_headers)
+        assert overview.status_code == 200, overview.text
+        user_role_id = next(role["id"] for role in overview.json()["roles"] if role["code"] == "user")
+
+        created = await test_client.post(
+            "/api/roles",
+            json={
+                "code": role_code,
+                "name": "实时授权测试角色",
+                "description": "",
+                "permission_keys": ["role:read", "role:manage"],
+                "default_scope_type": "self",
+                "default_department_ids": [],
+            },
+            headers=admin_headers,
+        )
+        assert created.status_code == 201, created.text
+        role_id = created.json()["id"]
+
+        assigned = await test_client.put(
+            f"/api/auth/users/{standard['user']['id']}",
+            json={"role_assignments": [{"role_id": role_id, "scope_mode": "inherit"}]},
+            headers=admin_headers,
+        )
+        assert assigned.status_code == 200, assigned.text
+        assert "effective_permissions" not in assigned.json()
+
+        allowed = await test_client.get("/api/roles/overview", headers=standard["headers"])
+        assert allowed.status_code == 200, allowed.text
+        visible_member_ids = {member["id"] for role in allowed.json()["roles"] for member in role["members"]}
+        assert visible_member_ids == {standard["user"]["id"]}
+        allowed_role = next(role for role in allowed.json()["roles"] if role["id"] == role_id)
+        assert allowed_role["audits"] == []
+        profile = await test_client.get("/api/auth/me", headers=standard["headers"])
+        assert profile.status_code == 200, profile.text
+        assert profile.json()["effective_permissions"] == ["role:read", "role:manage"]
+
+        forbidden_manage = await test_client.post(
+            "/api/roles",
+            json={
+                "code": f"pytest_forbidden_manage_{uuid.uuid4().hex[:8]}",
+                "name": "不应创建的角色",
+                "description": "",
+                "permission_keys": [],
+                "default_scope_type": "none",
+                "default_department_ids": [],
+            },
+            headers=standard["headers"],
+        )
+        assert forbidden_manage.status_code == 403, forbidden_manage.text
+
+        updated = await test_client.put(
+            f"/api/roles/{role_id}",
+            json={
+                "name": "实时授权测试角色",
+                "description": "",
+                "permission_keys": [],
+                "default_scope_type": "self",
+                "default_department_ids": [],
+            },
+            headers=admin_headers,
+        )
+        assert updated.status_code == 200, updated.text
+
+        denied = await test_client.get("/api/roles/overview", headers=standard["headers"])
+        assert denied.status_code == 403, denied.text
+        refreshed_profile = await test_client.get("/api/auth/me", headers=standard["headers"])
+        assert refreshed_profile.status_code == 200, refreshed_profile.text
+        assert refreshed_profile.json()["effective_permissions"] == []
+    finally:
+        if role_id is not None and user_role_id is not None:
+            await test_client.put(
+                f"/api/auth/users/{standard['user']['id']}",
+                json={"role_assignments": [{"role_id": user_role_id, "scope_mode": "inherit"}]},
+                headers=admin_headers,
+            )
+        await _cleanup_custom_roles([role_code])
 
 
 async def _cleanup_custom_roles(role_codes: list[str]) -> None:
@@ -225,7 +312,11 @@ async def test_superadmin_can_manage_custom_role_lifecycle_with_structured_audit
 
         overview_response = await test_client.get("/api/roles/overview", headers=admin_headers)
         assert overview_response.status_code == 200, overview_response.text
-        overview_role = next(item for item in overview_response.json()["roles"] if item["id"] == created["id"])
+        overview = overview_response.json()
+        overview_role = next(item for item in overview["roles"] if item["id"] == created["id"])
+        assert {item["id"]: item["name"] for item in overview["scope_departments"]}[department_id] == (
+            departments_response.json()[0]["name"]
+        )
         assert [item["action"] for item in overview_role["audits"]] == ["role.create", "role.update"]
     finally:
         await _cleanup_custom_roles([role_code, copy_code])

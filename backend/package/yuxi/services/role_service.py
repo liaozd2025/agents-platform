@@ -5,6 +5,11 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.permissions.authorization import (
+    AuthorizationContext,
+    AuthorizationTarget,
+    parse_department_ancestor_ids,
+)
 from yuxi.permissions.role_catalog import DATA_SCOPE_CATALOG, PERMISSION_CATALOG
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.role_repository import RoleRepository
@@ -66,7 +71,11 @@ def _serialize_audit(audit: SecurityAudit) -> dict[str, Any]:
     }
 
 
-def _serialize_role(role: Role, audits: list[SecurityAudit]) -> dict[str, Any]:
+def _serialize_role(
+    role: Role,
+    audits: list[SecurityAudit],
+    visible_user_ids: set[int] | None = None,
+) -> dict[str, Any]:
     """把角色、成员和相关审计转换为 API 数据。"""
 
     snapshot = _role_snapshot(role)
@@ -82,7 +91,9 @@ def _serialize_role(role: Role, audits: list[SecurityAudit]) -> dict[str, Any]:
             "username": assignment.user.username,
         }
         for assignment in role.assignments
-        if assignment.user is not None and assignment.user.is_deleted == 0
+        if assignment.user is not None
+        and assignment.user.is_deleted == 0
+        and (visible_user_ids is None or assignment.user.id in visible_user_ids)
     ]
     members.sort(key=lambda member: member["id"])
 
@@ -92,7 +103,11 @@ def _serialize_role(role: Role, audits: list[SecurityAudit]) -> dict[str, Any]:
         "is_builtin": bool(role.is_builtin),
         "member_count": len(members),
         "members": members,
-        "audits": [_serialize_audit(audit) for audit in audits],
+        "audits": [
+            _serialize_audit(audit)
+            for audit in audits
+            if visible_user_ids is None or audit.actor_user_id in visible_user_ids
+        ],
     }
 
 
@@ -196,16 +211,48 @@ async def _get_serialized_role(db: AsyncSession, role_id: int) -> dict[str, Any]
     return _serialize_role(role, audits[role_id])
 
 
-async def get_role_overview(db: AsyncSession) -> dict[str, Any]:
-    """返回权限目录、数据范围目录和全部角色详情。"""
+async def get_role_overview(db: AsyncSession, authorization: AuthorizationContext) -> dict[str, Any]:
+    """返回角色定义以及当前数据范围内的成员和审计。"""
 
     repository = RoleRepository(db)
+    department_repository = DepartmentRepository()
     roles = await repository.list_with_details()
     audits = await repository.list_role_audits([role.id for role in roles])
+
+    users = {
+        assignment.user.id: assignment.user
+        for role in roles
+        for assignment in role.assignments
+        if assignment.user is not None and assignment.user.is_deleted == 0
+    }
+    for role_audits in audits.values():
+        for audit in role_audits:
+            users[audit.actor.id] = audit.actor
+
+    department_ids = {user.department_id for user in users.values() if user.department_id is not None}
+    department_paths = await department_repository.get_paths_by_ids(department_ids, session=db)
+    visible_user_ids = {
+        user.id
+        for user in users.values()
+        if authorization.allows(
+            "role:read",
+            AuthorizationTarget(
+                owner_user_id=user.id,
+                department_ancestor_ids=parse_department_ancestor_ids(department_paths.get(user.department_id)),
+            ),
+        )
+    }
+
+    scope_department_ids = {item.department_id for role in roles for item in role.default_departments}
+    scope_department_names = await department_repository.get_names_by_ids(scope_department_ids, session=db)
+
     return {
         "permissions": [asdict(item) for item in PERMISSION_CATALOG],
         "data_scope_types": [asdict(item) for item in DATA_SCOPE_CATALOG],
-        "roles": [_serialize_role(role, audits[role.id]) for role in roles],
+        "scope_departments": [
+            {"id": department_id, "name": name} for department_id, name in scope_department_names.items()
+        ],
+        "roles": [_serialize_role(role, audits[role.id], visible_user_ids) for role in roles],
     }
 
 

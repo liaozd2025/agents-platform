@@ -12,6 +12,7 @@ export const useUserStore = defineStore('user', () => {
   const avatar = ref('')
   const userRole = ref('')
   const userRoles = ref([])
+  const effectivePermissions = ref([])
   const departmentId = ref(null)
   const departmentName = ref('')
 
@@ -19,6 +20,7 @@ export const useUserStore = defineStore('user', () => {
   const isLoggedIn = computed(() => !!token.value)
   const isAdmin = computed(() => userRole.value === 'admin' || userRole.value === 'superadmin')
   const isSuperAdmin = computed(() => userRole.value === 'superadmin')
+  const hasPermission = (permissionKey) => effectivePermissions.value.includes(permissionKey)
 
   // 动作
   async function login(credentials) {
@@ -63,9 +65,11 @@ export const useUserStore = defineStore('user', () => {
 
       // 只保存 token 到本地存储
       localStorage.setItem('user_token', data.access_token)
+      await getCurrentUser()
 
       return true
     } catch (error) {
+      if (token.value) logout()
       console.error('登录错误:', error)
       throw error
     }
@@ -81,6 +85,7 @@ export const useUserStore = defineStore('user', () => {
     avatar.value = ''
     userRole.value = ''
     userRoles.value = []
+    effectivePermissions.value = []
     departmentId.value = null
     departmentName.value = ''
 
@@ -123,9 +128,11 @@ export const useUserStore = defineStore('user', () => {
 
       // 只保存 token 到本地存储
       localStorage.setItem('user_token', data.access_token)
+      await getCurrentUser()
 
       return true
     } catch (error) {
+      if (token.value) logout()
       console.error('初始化管理员错误:', error)
       throw error
     }
@@ -332,6 +339,7 @@ export const useUserStore = defineStore('user', () => {
       avatar.value = userData.avatar || ''
       userRole.value = userData.role
       userRoles.value = userData.roles || []
+      effectivePermissions.value = userData.effective_permissions || []
       departmentId.value = userData.department_id || null
       departmentName.value = userData.department_name || ''
 
@@ -386,6 +394,7 @@ export const useUserStore = defineStore('user', () => {
     avatar,
     userRole,
     userRoles,
+    effectivePermissions,
     departmentId,
     departmentName,
 
@@ -393,6 +402,7 @@ export const useUserStore = defineStore('user', () => {
     isLoggedIn,
     isAdmin,
     isSuperAdmin,
+    hasPermission,
 
     // 方法
     login,

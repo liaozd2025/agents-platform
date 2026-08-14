@@ -13,11 +13,13 @@ from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Us
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.repositories.department_repository import DepartmentRepository
 from server.utils.auth_middleware import (
+    get_authorization_context,
     get_admin_user,
     get_superadmin_user,
     get_db,
     get_required_user,
 )
+from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.services.user_identity_service import generate_unique_uid, validate_username, is_valid_phone_number
 from yuxi.services.operation_log_service import log_operation
@@ -131,6 +133,12 @@ class UserResponse(BaseModel):
     created_at: str
     last_login: str | None = None
     roles: list[UserRoleResponse] = Field(default_factory=list)
+
+
+class CurrentUserResponse(UserResponse):
+    """当前登录用户及其请求级有效功能权限。"""
+
+    effective_permissions: list[str] = Field(default_factory=list)
 
 
 class UserAccessOption(BaseModel):
@@ -476,16 +484,23 @@ async def initialize_admin(admin_data: InitializeAdmin, db: AsyncSession = Depen
 # =============================================================================
 
 
-@auth.get("/me", response_model=UserResponse)
-async def read_users_me(current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)):
+@auth.get("/me", response_model=CurrentUserResponse)
+async def read_users_me(
+    authorization: AuthorizationContext = Depends(get_authorization_context),
+    db: AsyncSession = Depends(get_db),
+):
     """获取当前登录用户的个人信息"""
+    current_user = authorization.user
     department_name = None
 
     if current_user.department_id:
         result = await db.execute(select(Department.name).filter(Department.id == current_user.department_id))
         department_name = result.scalar_one_or_none()
 
-    return serialize_user(current_user, department_name)
+    return {
+        **serialize_user(current_user, department_name),
+        "effective_permissions": list(authorization.effective_permissions),
+    }
 
 
 # 路由：更新个人资料

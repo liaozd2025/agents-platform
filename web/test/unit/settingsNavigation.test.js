@@ -5,7 +5,12 @@ import { getSettingsNavigationGroups } from '../../src/utils/settingsNavigation.
 
 test('设置导航按权限分组并支持搜索', () => {
   const superadminGroups = getSettingsNavigationGroups(
-    { isLoggedIn: true, isAdmin: true, isSuperAdmin: true },
+    {
+      isLoggedIn: true,
+      isAdmin: true,
+      isSuperAdmin: true,
+      effectivePermissions: ['role:read', 'role:manage']
+    },
     ''
   )
   assert.deepEqual(
@@ -18,7 +23,7 @@ test('设置导航按权限分组并支持搜索', () => {
   )
 
   const userGroups = getSettingsNavigationGroups(
-    { isLoggedIn: true, isAdmin: false, isSuperAdmin: false },
+    { isLoggedIn: true, isAdmin: false, isSuperAdmin: false, effectivePermissions: [] },
     ''
   )
   assert.deepEqual(
@@ -30,20 +35,30 @@ test('设置导航按权限分组并支持搜索', () => {
   )
 
   const adminGroups = getSettingsNavigationGroups(
-    { isLoggedIn: true, isAdmin: true, isSuperAdmin: false },
+    {
+      isLoggedIn: true,
+      isAdmin: true,
+      isSuperAdmin: false,
+      effectivePermissions: ['role:read']
+    },
     ''
   )
   assert.deepEqual(
     adminGroups.map((group) => [group.label, group.items.map((item) => item.id)]),
     [
       ['个人', ['account', 'agentEnv']],
-      ['系统', ['base', 'user']],
+      ['系统', ['base', 'user', 'role']],
       ['平台能力', ['apiKeys', 'ocr']]
     ]
   )
 
   const searchResult = getSettingsNavigationGroups(
-    { isLoggedIn: true, isAdmin: true, isSuperAdmin: true },
+    {
+      isLoggedIn: true,
+      isAdmin: true,
+      isSuperAdmin: true,
+      effectivePermissions: ['role:read', 'role:manage']
+    },
     '组织'
   )
   assert.deepEqual(searchResult, [
@@ -52,14 +67,40 @@ test('设置导航按权限分组并支持搜索', () => {
 
   assert.deepEqual(
     getSettingsNavigationGroups(
-      { isLoggedIn: true, isAdmin: true, isSuperAdmin: true },
+      {
+        isLoggedIn: true,
+        isAdmin: true,
+        isSuperAdmin: true,
+        effectivePermissions: ['role:read', 'role:manage']
+      },
       '角色'
     ),
     [{ label: '系统', items: [{ id: 'role', label: '角色与权限' }] }]
   )
 
   assert.deepEqual(
-    getSettingsNavigationGroups({ isLoggedIn: true, isAdmin: false, isSuperAdmin: false }, 'env'),
+    getSettingsNavigationGroups(
+      { isLoggedIn: true, isAdmin: false, isSuperAdmin: false, effectivePermissions: [] },
+      'env'
+    ),
     [{ label: '个人', items: [{ id: 'agentEnv', label: '环境变量' }] }]
+  )
+})
+
+test('角色入口只依赖服务端有效权限', () => {
+  const groups = getSettingsNavigationGroups({
+    isLoggedIn: true,
+    isAdmin: false,
+    isSuperAdmin: false,
+    effectivePermissions: ['role:read']
+  })
+
+  assert.deepEqual(
+    groups.map((group) => [group.label, group.items.map((item) => item.id)]),
+    [
+      ['个人', ['account', 'agentEnv']],
+      ['系统', ['role']],
+      ['平台能力', ['apiKeys']]
+    ]
   )
 })

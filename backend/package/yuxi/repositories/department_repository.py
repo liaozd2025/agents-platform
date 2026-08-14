@@ -61,6 +61,26 @@ class DepartmentRepository:
             result = await managed_session.execute(statement)
             return dict(result.all())
 
+    async def get_names_by_ids(
+        self,
+        ids: Collection[int],
+        *,
+        session: AsyncSession | None = None,
+    ) -> dict[int, str]:
+        """一次读取指定组织节点名称，并保持物化路径顺序。"""
+
+        if not ids:
+            return {}
+
+        statement = select(Department.id, Department.name).where(Department.id.in_(ids)).order_by(Department.path)
+        if session is not None:
+            result = await session.execute(statement)
+            return dict(result.all())
+
+        async with pg_manager.get_async_session_context() as managed_session:
+            result = await managed_session.execute(statement)
+            return dict(result.all())
+
     async def list_with_user_count(self) -> list[dict[str, Any]]:
         """获取所有组织节点，按物化路径排序并附带用户数量"""
         async with pg_manager.get_async_session_context() as session:
