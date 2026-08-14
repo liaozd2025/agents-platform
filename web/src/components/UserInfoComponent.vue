@@ -47,7 +47,11 @@
             }}</span>
           </a-menu-item>
           <a-menu-divider />
-          <a-menu-item v-if="userStore.isSuperAdmin" key="debug" @click="showDebug = true">
+          <a-menu-item
+            v-if="userStore.hasPermission('system_log:read')"
+            key="debug"
+            @click="showDebug = true"
+          >
             <template #icon><Terminal :size="16" /></template>
             <span class="menu-text">调试面板（非生产环境）</span>
           </a-menu-item>

@@ -14,13 +14,13 @@
       <div v-if="userStore.isAdmin && activeTab === 'knowledge'" class="tab-panel">
         <DataBaseView ref="knowledgeRef" embedded />
       </div>
-      <div v-if="userStore.isAdmin && activeTab === 'tools'" class="tab-panel">
+      <div v-if="userStore.hasPermission('tool:manage') && activeTab === 'tools'" class="tab-panel">
         <ToolsCardList ref="toolsRef" />
       </div>
       <div v-if="activeTab === 'skills'" class="tab-panel">
         <SkillCardList ref="skillsRef" />
       </div>
-      <div v-if="userStore.isAdmin && activeTab === 'mcp'" class="tab-panel">
+      <div v-if="userStore.hasPermission('mcp:manage') && activeTab === 'mcp'" class="tab-panel">
         <McpCardList ref="mcpRef" />
       </div>
     </div>
@@ -48,14 +48,14 @@ const skillsRef = ref(null)
 const mcpRef = ref(null)
 const toolsRef = ref(null)
 
-const adminExtensionTabs = [
-  { key: 'knowledge', label: '知识库' },
-  { key: 'skills', label: '技能' },
-  { key: 'tools', label: '工具' },
-  { key: 'mcp', label: 'MCP' }
-]
-const userExtensionTabs = [{ key: 'skills', label: '技能' }]
-const extensionTabs = computed(() => (userStore.isAdmin ? adminExtensionTabs : userExtensionTabs))
+const extensionTabs = computed(() => {
+  const tabs = []
+  if (userStore.isAdmin) tabs.push({ key: 'knowledge', label: '知识库' })
+  tabs.push({ key: 'skills', label: '技能' })
+  if (userStore.hasPermission('tool:manage')) tabs.push({ key: 'tools', label: '工具' })
+  if (userStore.hasPermission('mcp:manage')) tabs.push({ key: 'mcp', label: 'MCP' })
+  return tabs
+})
 const allowedTabKeys = computed(() => extensionTabs.value.map((tab) => tab.key))
 const defaultTabKey = computed(() => extensionTabs.value[0]?.key || 'skills')
 
@@ -94,7 +94,7 @@ const activeChildLoading = computed(() => {
 })
 
 watch(
-  () => [route.query.tab, userStore.isAdmin],
+  () => [route.query.tab, userStore.isAdmin, userStore.effectivePermissions],
   ([tab]) => {
     const nextTab = normalizeTab(tab)
     if (activeTab.value !== nextTab) activeTab.value = nextTab

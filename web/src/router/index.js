@@ -117,8 +117,7 @@ const router = createRouter({
               component: () => import('../views/DataBaseInfoView.vue'),
               meta: {
                 keepAlive: false,
-                requiresAuth: true,
-                requiresAdmin: true
+                requiresAuth: true
               }
             },
             {
@@ -128,7 +127,7 @@ const router = createRouter({
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
-                requiresAdmin: true
+                requiredPermission: 'mcp:manage'
               }
             },
             {
@@ -159,6 +158,9 @@ router.beforeEach(async (to) => {
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true)
   const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin)
   const requiresSuperAdmin = to.matched.some((record) => record.meta.requiresSuperAdmin)
+  const requiredPermissions = to.matched
+    .map((record) => record.meta.requiredPermission)
+    .filter(Boolean)
 
   const userStore = useUserStore()
 
@@ -212,6 +214,10 @@ router.beforeEach(async (to) => {
       console.error('获取智能体信息失败:', error)
       return '/agent'
     }
+  }
+
+  if (requiredPermissions.some((permission) => !userStore.hasPermission(permission))) {
+    return '/agent'
   }
 
   // 如果用户已登录但访问登录页，按 redirect 参数跳转

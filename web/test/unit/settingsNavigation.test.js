@@ -9,7 +9,13 @@ test('设置导航按权限分组并支持搜索', () => {
       isLoggedIn: true,
       isAdmin: true,
       isSuperAdmin: true,
-      effectivePermissions: ['role:read', 'role:manage', 'user:read']
+      effectivePermissions: [
+        'role:read',
+        'role:manage',
+        'user:read',
+        'system_config:manage',
+        'ocr:manage'
+      ]
     },
     ''
   )
@@ -39,7 +45,12 @@ test('设置导航按权限分组并支持搜索', () => {
       isLoggedIn: true,
       isAdmin: true,
       isSuperAdmin: false,
-      effectivePermissions: ['role:read', 'user:read']
+      effectivePermissions: [
+        'role:read',
+        'user:read',
+        'system_config:manage',
+        'ocr:manage'
+      ]
     },
     ''
   )
@@ -57,7 +68,13 @@ test('设置导航按权限分组并支持搜索', () => {
       isLoggedIn: true,
       isAdmin: true,
       isSuperAdmin: true,
-      effectivePermissions: ['role:read', 'role:manage', 'user:read']
+      effectivePermissions: [
+        'role:read',
+        'role:manage',
+        'user:read',
+        'system_config:manage',
+        'ocr:manage'
+      ]
     },
     '组织'
   )
@@ -71,7 +88,13 @@ test('设置导航按权限分组并支持搜索', () => {
         isLoggedIn: true,
         isAdmin: true,
         isSuperAdmin: true,
-        effectivePermissions: ['role:read', 'role:manage', 'user:read']
+        effectivePermissions: [
+          'role:read',
+          'role:manage',
+          'user:read',
+          'system_config:manage',
+          'ocr:manage'
+        ]
       },
       '角色'
     ),
@@ -119,6 +142,24 @@ test('用户管理入口只依赖服务端有效权限', () => {
       ['个人', ['account', 'agentEnv']],
       ['系统', ['user']],
       ['平台能力', ['apiKeys']]
+    ]
+  )
+})
+
+test('平台设置入口只依赖对应功能权限', () => {
+  const groups = getSettingsNavigationGroups({
+    isLoggedIn: true,
+    isAdmin: false,
+    isSuperAdmin: false,
+    effectivePermissions: ['system_config:manage', 'ocr:manage']
+  })
+
+  assert.deepEqual(
+    groups.map((group) => [group.label, group.items.map((item) => item.id)]),
+    [
+      ['个人', ['account', 'agentEnv']],
+      ['系统', ['base']],
+      ['平台能力', ['apiKeys', 'ocr']]
     ]
   )
 })

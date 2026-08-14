@@ -144,7 +144,7 @@
             <AgentEnvSettingsCard />
           </div>
 
-          <div v-show="activeTab === 'base'" v-if="userStore.isAdmin">
+          <div v-show="activeTab === 'base'" v-if="userStore.hasPermission('system_config:manage')">
             <div class="settings-page-header">
               <div class="settings-page-title">基本设置</div>
               <p class="settings-page-description">配置系统默认模型、内容审查与服务链接。</p>
@@ -152,7 +152,7 @@
             <BasicSettingsSection />
           </div>
 
-          <div v-show="activeTab === 'ocr'" v-if="userStore.isAdmin">
+          <div v-show="activeTab === 'ocr'" v-if="userStore.hasPermission('ocr:manage')">
             <div class="settings-page-header">
               <div class="settings-page-title">OCR 配置</div>
               <p class="settings-page-description">配置系统默认 OCR 方法及相关服务参数。</p>

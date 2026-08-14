@@ -108,18 +108,21 @@
           </template>
         </a-menu>
         <div
-          v-if="!modelMetadataNoticeDismissed && (userStore.isAdmin || hasModelMetadata)"
+          v-if="
+            !modelMetadataNoticeDismissed &&
+            (userStore.hasPermission('model_provider:manage') || hasModelMetadata)
+          "
           class="model-metadata-source"
         >
           <div class="model-metadata-source-content">
-            <template v-if="userStore.isAdmin">
+            <template v-if="userStore.hasPermission('model_provider:manage')">
               没有合适的模型？
               <RouterLink :to="{ path: '/agent-manage', query: { tab: 'providers' } }" @click.stop>
                 配置模型
               </RouterLink>
             </template>
             <template v-if="hasModelMetadata">
-              <span v-if="userStore.isAdmin">。 </span>
+              <span v-if="userStore.hasPermission('model_provider:manage')">。 </span>
               部分信息（价格、能力等）来自
               <a href="https://models.dev" target="_blank" rel="noreferrer" @click.stop
                 >models.dev</a

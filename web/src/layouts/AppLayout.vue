@@ -58,7 +58,8 @@ const conversationSearchOpen = ref(false)
 
 // Provide settings modal methods to child components
 const openSettingsModal = (tab) => {
-  settingsInitialTab.value = tab || (userStore.isAdmin ? 'base' : 'account')
+  settingsInitialTab.value =
+    tab || (userStore.hasPermission('system_config:manage') ? 'base' : 'account')
   showSettingsModal.value = true
 }
 
@@ -104,7 +105,7 @@ onMounted(async () => {
   await initAgentNavigation()
   await getRemoteConfig()
   // 仅管理员加载任务中心数据
-  if (userStore.isAdmin) {
+  if (userStore.hasPermission('system_task:manage')) {
     taskerStore.loadTasks()
     fetchGithubStars() // Fetch GitHub stars on mount
   }
@@ -388,7 +389,7 @@ provide('settingsModal', {
         <!-- 用户信息组件 -->
         <div class="nav-item user-info" @click.stop>
           <UserInfoComponent :show-role="!sidebarCollapsed">
-            <template v-if="userStore.isAdmin" #actions>
+            <template v-if="userStore.hasPermission('system_task:manage')" #actions>
               <a-tooltip placement="top" title="任务中心">
                 <button
                   class="user-task-center"
@@ -440,7 +441,7 @@ provide('settingsModal', {
     >
       <DebugComponent />
     </a-modal>
-    <TaskCenterDrawer v-if="userStore.isAdmin" />
+    <TaskCenterDrawer v-if="userStore.hasPermission('system_task:manage')" />
     <SettingsModal
       v-model:visible="showSettingsModal"
       :initial-tab="settingsInitialTab"
