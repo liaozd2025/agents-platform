@@ -7,6 +7,8 @@
     :footer="null"
     :closable="false"
     :keyboard="true"
+    transition-name=""
+    mask-transition-name=""
     @cancel="handleClose"
     class="settings-modal"
     wrap-class-name="settings-modal-wrap"
