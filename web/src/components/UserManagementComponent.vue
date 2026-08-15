@@ -59,119 +59,131 @@
             {{ role.name }}
           </a-select-option>
         </a-select>
+        <a-button v-if="hasActiveFilters" @click="resetFilters">重置</a-button>
       </div>
+      <span class="filter-summary">
+        共 {{ filteredUsers.length }} 名用户 · 全部 {{ userManagement.users.length }} 名
+      </span>
     </div>
 
     <!-- 主内容区域 -->
     <div class="content-section">
-      <a-spin :spinning="userManagement.loading">
-        <div v-if="userManagement.error" class="error-message">
-          <a-alert type="error" :message="userManagement.error" show-icon />
-        </div>
+      <div v-if="userManagement.error" class="error-message">
+        <a-alert type="error" :message="userManagement.error" show-icon />
+      </div>
 
-        <div class="cards-container">
-          <div v-if="filteredUsers.length === 0" class="empty-state">
-            <a-empty
-              :description="userManagement.users.length === 0 ? '暂无用户数据' : '没有匹配的用户'"
-            />
-          </div>
-          <div v-else class="user-cards-grid">
-            <InfoCard
-              v-for="user in paginatedUsers"
-              :key="user.id"
-              :title="user.username"
-              :subtitle="`ID: ${user.uid || '-'}`"
-              class="user-card"
-            >
-              <template #icon>
-                <FallbackAvatar
-                  :src="user.avatar"
-                  :default-src="getUserDefaultAvatarSrc(user)"
-                  :name="user.username"
-                  :seed="user.uid || user.username"
-                  kind="user"
-                  :size="40"
-                  shape="circle"
-                  :alt="user.username"
-                  class="avatar-img"
-                />
-              </template>
+      <a-table
+        :columns="userTableColumns"
+        :data-source="filteredUsers"
+        :loading="userManagement.loading"
+        :pagination="tablePagination"
+        :scroll="{ x: 920 }"
+        row-key="id"
+        size="middle"
+        class="user-table"
+        @change="handleTableChange"
+      >
+        <template #bodyCell="{ column, record: user }">
+          <template v-if="column.key === 'user'">
+            <div class="user-identity">
+              <FallbackAvatar
+                :src="user.avatar"
+                :default-src="getUserDefaultAvatarSrc(user)"
+                :name="user.username"
+                :seed="user.uid || user.username"
+                kind="user"
+                :size="32"
+                shape="circle"
+                :alt="user.username"
+              />
+              <div class="user-identity-copy">
+                <strong :title="user.username">{{ user.username }}</strong>
+                <code :title="`登录 ID：${user.uid || '-'}`">登录 ID：{{ user.uid || '-' }}</code>
+              </div>
+            </div>
+          </template>
 
-              <template #status>
-                <div v-if="user.department_name" class="role-dept-badge">
-                  <span class="role-icon-wrapper">
-                    <User :size="14" />
-                  </span>
-                  <span v-if="user.department_name" class="dept-text">
-                    {{ user.department_name }}
-                  </span>
-                </div>
-              </template>
+          <template v-else-if="column.key === 'department'">
+            <span class="department-text" :title="user.department_name || '未分配组织机构'">
+              {{ user.department_name || '未分配' }}
+            </span>
+          </template>
 
-              <template
-                v-if="canUpdateUsers || canAssignRoles || canDeleteUsers"
-                #card-more-action-corner
+          <template v-else-if="column.key === 'roles'">
+            <div v-if="user.roles?.length" class="role-tags">
+              <span
+                v-for="role in user.roles"
+                :key="role.assignment_id || role.id"
+                class="role-tag"
+                :class="{ inactive: !role.is_active }"
               >
-                <a-menu>
-                  <a-menu-item
-                    v-if="canUpdateUsers || canAssignRoles"
-                    key="edit"
-                    @click.stop="showEditUserModal(user)"
-                  >
-                    <span class="lucide-menu-item">
-                      <SquarePen :size="14" />
-                      <span>编辑用户</span>
-                    </span>
-                  </a-menu-item>
-                  <a-menu-item
-                    v-if="canDeleteUsers"
-                    key="delete"
-                    :disabled="isUserDeleteDisabled(user)"
-                    :danger="!isUserDeleteDisabled(user)"
-                    @click.stop="confirmDeleteUser(user)"
-                  >
-                    <span class="lucide-menu-item">
-                      <Trash2 :size="14" />
-                      <span>删除用户</span>
-                    </span>
-                  </a-menu-item>
-                </a-menu>
-              </template>
+                {{ role.name }}
+              </span>
+            </div>
+            <span v-else class="empty-value">-</span>
+          </template>
 
-              <template #info>
-                <div class="card-content">
-                  <div class="info-item">
-                    <span class="info-label">角色:</span>
-                    <span class="info-value">{{ getUserRoleNames(user) }}</span>
-                  </div>
-                  <div class="info-item">
-                    <span class="info-label">手机号:</span>
-                    <span class="info-value phone-text">{{ user.phone_number || '-' }}</span>
-                  </div>
-                  <div class="info-item">
-                    <span class="info-label">创建时间:</span>
-                    <span class="info-value time-text">{{ formatTime(user.created_at) }}</span>
-                  </div>
-                  <div class="info-item">
-                    <span class="info-label">最后登录:</span>
-                    <span class="info-value time-text">{{ formatTime(user.last_login) }}</span>
-                  </div>
-                </div>
-              </template>
-            </InfoCard>
-          </div>
-          <div v-if="filteredUsers.length > userManagement.pageSize" class="pagination-section">
-            <a-pagination
-              v-model:current="userManagement.currentPage"
-              v-model:page-size="userManagement.pageSize"
-              :total="filteredUsers.length"
-              :page-size-options="['20', '50', '100']"
-              show-size-changer
-              size="small"
-            />
-          </div>
-        </div>
-      </a-spin>
+          <template v-else-if="column.key === 'phone'">
+            <code class="phone-text">{{ user.phone_number || '-' }}</code>
+          </template>
+
+          <template v-else-if="column.key === 'created'">
+            <div class="time-cell">
+              <span>{{ formatTime(user.created_at) }}</span>
+              <small>最后登录 {{ formatTime(user.last_login) }}</small>
+            </div>
+          </template>
+
+          <template v-else-if="column.key === 'actions'">
+            <div class="row-actions">
+              <a-button
+                v-if="canUpdateUsers || canAssignRoles"
+                type="text"
+                size="small"
+                @click="showEditUserModal(user)"
+              >
+                编辑
+              </a-button>
+              <a-dropdown v-if="canDeleteUsers" :trigger="['click']">
+                <a-button
+                  size="small"
+                  class="more-action lucide-icon-btn"
+                  :aria-label="`更多操作：${user.username}`"
+                >
+                  <MoreHorizontal :size="16" />
+                </a-button>
+                <template #overlay>
+                  <a-menu>
+                    <a-menu-item
+                      key="delete"
+                      :disabled="isUserDeleteDisabled(user)"
+                      :danger="!isUserDeleteDisabled(user)"
+                      @click="confirmDeleteUser(user)"
+                    >
+                      <span class="lucide-menu-item">
+                        <Trash2 :size="14" />
+                        <span>删除用户</span>
+                      </span>
+                    </a-menu-item>
+                  </a-menu>
+                </template>
+              </a-dropdown>
+            </div>
+          </template>
+        </template>
+
+        <template #emptyText>
+          <a-empty
+            :description="
+              userManagement.users.length === 0
+                ? canCreateUsers
+                  ? '暂无用户数据，可使用右上角“添加用户”创建'
+                  : '暂无用户数据'
+                : '没有匹配的用户，请调整筛选条件'
+            "
+          />
+        </template>
+      </a-table>
     </div>
 
     <!-- 用户表单模态框 -->
@@ -360,7 +372,7 @@ import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis'
 import { getRoleOverview } from '@/apis/role_api'
-import { Plus, SquarePen, Trash2, User, RefreshCw, Search } from 'lucide-vue-next'
+import { MoreHorizontal, Plus, Trash2, RefreshCw, Search } from 'lucide-vue-next'
 import { formatDateTime } from '@/utils/time'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
@@ -372,7 +384,6 @@ import {
 } from '@/utils/departmentTree'
 import { getAssignableScopeTypes, resetRoleAssignmentScope } from '@/utils/roleOverview'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
-import InfoCard from '@/components/shared/InfoCard.vue'
 
 const userStore = useUserStore()
 
@@ -385,7 +396,7 @@ const userManagement = reactive({
   departmentFilter: null,
   roleFilter: '',
   currentPage: 1,
-  pageSize: 50,
+  pageSize: 10,
   error: null,
   modalVisible: false,
   modalTitle: '添加用户',
@@ -414,11 +425,24 @@ const departmentManagement = reactive({
 const roleOverview = reactive({ roles: [], dataScopeTypes: [], targetUserId: null })
 
 const treeFieldNames = { children: 'children', label: 'name', value: 'id' }
+const userTableColumnsWithActions = [
+  { title: '用户', key: 'user', width: 210 },
+  { title: '组织机构', key: 'department', width: 140 },
+  { title: '角色', key: 'roles', width: 150 },
+  { title: '手机号', key: 'phone', width: 130 },
+  { title: '创建时间', key: 'created', width: 180 },
+  { title: '', key: 'actions', width: 100, align: 'right' }
+]
 const departmentTree = computed(() => buildDepartmentTree(departmentManagement.departments))
 const canCreateUsers = computed(() => userStore.hasPermission('user:create'))
 const canUpdateUsers = computed(() => userStore.hasPermission('user:update'))
 const canAssignRoles = computed(() => userStore.hasPermission('user:role_assign'))
 const canDeleteUsers = computed(() => userStore.hasPermission('user:delete'))
+const userTableColumns = computed(() =>
+  canUpdateUsers.value || canAssignRoles.value || canDeleteUsers.value
+    ? userTableColumnsWithActions
+    : userTableColumnsWithActions.slice(0, -1)
+)
 const canEditRoleAssignments = computed(
   () => canAssignRoles.value && (userManagement.editMode || userStore.hasPermission('role:read'))
 )
@@ -448,6 +472,12 @@ const canAddRoleAssignment = computed(
     !hasSuperadminAssignment.value &&
     userManagement.form.roleAssignments.length < activeRoles.value.length
 )
+const hasActiveFilters = computed(
+  () =>
+    Boolean(userManagement.searchKeyword.trim()) ||
+    userManagement.departmentFilter != null ||
+    Boolean(userManagement.roleFilter)
+)
 
 const filteredUsers = computed(() => {
   const keyword = userManagement.searchKeyword.trim().toLowerCase()
@@ -475,11 +505,27 @@ const filteredUsers = computed(() => {
   })
 })
 
-const paginatedUsers = computed(() => {
-  const pageSize = Number(userManagement.pageSize)
-  const start = (userManagement.currentPage - 1) * pageSize
-  return filteredUsers.value.slice(start, start + pageSize)
-})
+const tablePagination = computed(() => ({
+  current: userManagement.currentPage,
+  pageSize: Number(userManagement.pageSize),
+  total: filteredUsers.value.length,
+  pageSizeOptions: ['10', '20', '50'],
+  showSizeChanger: true,
+  showTotal: (total, range) => `第 ${range[0]}–${range[1]} 条，共 ${total} 条`
+}))
+
+/** 清空筛选后由现有 watch 统一将表格退回第一页。 */
+const resetFilters = () => {
+  userManagement.searchKeyword = ''
+  userManagement.departmentFilter = null
+  userManagement.roleFilter = ''
+}
+
+/** 保持表格分页受控，以便筛选和数据刷新时能校正当前页。 */
+const handleTableChange = (pagination) => {
+  userManagement.currentPage = pagination.current
+  userManagement.pageSize = pagination.pageSize
+}
 
 // 获取组织机构列表
 const fetchDepartments = async () => {
@@ -512,8 +558,6 @@ const fetchRoleOptions = async (force = false, targetUserId = null) => {
 const getRoleById = (roleId) => roleOverview.roles.find((role) => role.id === roleId)
 const getScopeLabel = (scopeType) =>
   roleOverview.dataScopeTypes.find((scope) => scope.key === scopeType)?.label || scopeType
-const getUserRoleNames = (user) => (user.roles || []).map((role) => role.name).join('、') || '-'
-
 const makeRoleAssignment = (role, existing = null) => ({
   role_id: role?.id ?? existing?.id ?? null,
   scope_mode: existing?.scope_mode || 'inherit',
@@ -1081,6 +1125,13 @@ onMounted(async () => {
     .filter-select {
       width: 150px;
     }
+
+    .filter-summary {
+      margin-left: auto;
+      color: var(--gray-500);
+      font-size: 12.5px;
+      white-space: nowrap;
+    }
   }
 
   @media (max-width: 640px) {
@@ -1096,6 +1147,10 @@ onMounted(async () => {
         margin-left: 0;
       }
 
+      .filter-summary {
+        margin-left: 0;
+      }
+
       .filter-select {
         flex: 1;
         min-width: 0;
@@ -1104,123 +1159,148 @@ onMounted(async () => {
   }
 
   .content-section {
-    overflow: hidden;
+    overflow-x: auto;
+    border: 1px solid var(--gray-150);
+    border-radius: 8px;
+    background: var(--gray-0);
 
     .error-message {
-      padding: 16px 24px;
+      padding: 16px;
     }
 
-    .cards-container {
-      .empty-state {
-        padding: 60px 20px;
-        text-align: center;
+    .user-table {
+      min-width: 920px;
+
+      :deep(.ant-table) {
+        background: var(--gray-0);
       }
 
-      .user-cards-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-        gap: 16px;
-        // padding: 16px;
-
-        .user-card {
-          cursor: default;
-
-          :deep(.info-card-icon) {
-            border-radius: 50%;
-          }
-
-          :deep(.info-card-body) {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-          }
-
-          .avatar-img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-          }
-
-          .role-dept-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            padding: 2px 8px 2px 4px;
-            background: var(--gray-50);
-            border-radius: 4px;
-
-            .role-icon-wrapper {
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              width: 16px;
-              height: 16px;
-              color: var(--gray-600);
-            }
-
-            .dept-text {
-              font-size: 12px;
-              color: var(--gray-700);
-              font-weight: 500;
-            }
-          }
-
-          .card-content {
-            .info-item {
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              padding: 2px 0;
-              border-bottom: 1px solid var(--gray-25);
-
-              &:last-child {
-                border-bottom: none;
-              }
-
-              .info-label {
-                font-size: 12px;
-                color: var(--gray-600);
-                font-weight: 500;
-                min-width: 70px;
-              }
-
-              .info-value {
-                font-size: 12px;
-                color: var(--gray-900);
-                text-align: right;
-                flex: 1;
-
-                &.time-text {
-                  color: var(--gray-700);
-                }
-
-                &.phone-text {
-                  font-family: 'Monaco', 'Consolas', monospace;
-                }
-              }
-            }
-          }
-        }
+      :deep(.ant-table-thead > tr > th) {
+        padding: 11px 16px;
+        background: var(--gray-25);
+        color: var(--gray-500);
+        font-size: 12px;
+        font-weight: 500;
       }
 
-      .pagination-section {
-        display: flex;
-        justify-content: flex-end;
-        margin-top: 16px;
+      :deep(.ant-table-tbody > tr > td) {
+        padding: 12px 16px;
+        color: var(--gray-700);
+        border-bottom-color: var(--gray-100);
+      }
+
+      :deep(.ant-table-tbody > tr:hover > td) {
+        background: var(--gray-25);
+      }
+
+      :deep(.ant-table-pagination.ant-pagination) {
+        margin: 12px 16px;
+      }
+    }
+
+    .user-identity {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      gap: 10px;
+    }
+
+    .user-identity-copy {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      line-height: 1.35;
+
+      strong,
+      code {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      strong {
+        color: var(--gray-900);
+        font-size: 13.5px;
+      }
+
+      code {
+        color: var(--gray-500);
+        font-size: 11.5px;
+      }
+    }
+
+    .department-text {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .role-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .role-tag {
+      padding: 2px 7px;
+      border-radius: 5px;
+      background: var(--gray-100);
+      color: var(--gray-700);
+      font-size: 11.5px;
+      line-height: 18px;
+
+      &.inactive {
+        background: var(--gray-100);
+        color: var(--gray-500);
+        text-decoration: line-through;
+      }
+    }
+
+    .empty-value {
+      color: var(--gray-400);
+    }
+
+    .phone-text {
+      color: var(--gray-700);
+      font-size: 12.5px;
+    }
+
+    .time-cell {
+      display: flex;
+      flex-direction: column;
+      color: var(--gray-600);
+      font-size: 12.5px;
+      line-height: 1.5;
+
+      small {
+        color: var(--gray-400);
+        font-size: 11.5px;
+      }
+    }
+
+    .row-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+
+      .more-action {
+        width: 28px;
+        padding: 0;
       }
     }
   }
+}
 
-  .time-text {
-    font-size: 13px;
-    color: var(--gray-700);
-  }
+@media (max-width: 640px) {
+  .user-management .content-section .row-actions {
+    :deep(.ant-btn) {
+      min-height: 40px;
+    }
 
-  .phone-text,
-  .user-id-text {
-    font-size: 13px;
-    color: var(--gray-900);
-    font-family: 'Monaco', 'Consolas', monospace;
+    .more-action {
+      width: 40px;
+    }
   }
 }
 

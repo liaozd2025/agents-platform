@@ -114,7 +114,10 @@
       </nav>
 
       <main class="settings-content-wrapper">
-        <div class="settings-content" :class="{ 'role-settings-content': activeTab === 'role' }">
+        <div
+          class="settings-content"
+          :class="{ 'wide-settings-content': ['user', 'role'].includes(activeTab) }"
+        >
           <div v-show="activeTab === 'account'" v-if="userStore.isLoggedIn">
             <AccountSettingsComponent />
           </div>
@@ -593,7 +596,7 @@ onMounted(async () => {
   }
 }
 
-.settings-modal .settings-content.role-settings-content {
+.settings-modal .settings-content.wide-settings-content {
   max-width: 1120px;
   padding-top: 36px;
 }
@@ -698,7 +701,7 @@ onMounted(async () => {
     }
   }
 
-  .settings-modal .settings-content.role-settings-content {
+  .settings-modal .settings-content.wide-settings-content {
     padding-top: 28px;
   }
 }
