@@ -111,14 +111,15 @@
 
           <template v-else-if="column.key === 'roles'">
             <div v-if="user.roles?.length" class="role-tags">
-              <span
+              <a-tag
                 v-for="role in user.roles"
                 :key="role.assignment_id || role.id"
+                :bordered="false"
                 class="role-tag"
                 :class="{ inactive: !role.is_active }"
               >
                 {{ role.name }}
-              </span>
+              </a-tag>
             </div>
             <span v-else class="empty-value">-</span>
           </template>
@@ -1159,7 +1160,6 @@ onMounted(async () => {
   }
 
   .content-section {
-    overflow-x: auto;
     border: 1px solid var(--gray-150);
     border-radius: 8px;
     background: var(--gray-0);
@@ -1169,8 +1169,6 @@ onMounted(async () => {
     }
 
     .user-table {
-      min-width: 920px;
-
       :deep(.ant-table) {
         background: var(--gray-0);
       }
@@ -1243,15 +1241,9 @@ onMounted(async () => {
     }
 
     .role-tag {
-      padding: 2px 7px;
-      border-radius: 5px;
-      background: var(--gray-100);
-      color: var(--gray-700);
-      font-size: 11.5px;
-      line-height: 18px;
+      margin: 0;
 
       &.inactive {
-        background: var(--gray-100);
         color: var(--gray-500);
         text-decoration: line-through;
       }
