@@ -114,7 +114,7 @@
       </nav>
 
       <main class="settings-content-wrapper">
-        <div class="settings-content">
+        <div class="settings-content" :class="{ 'role-settings-content': activeTab === 'role' }">
           <div v-show="activeTab === 'account'" v-if="userStore.isLoggedIn">
             <AccountSettingsComponent />
           </div>
@@ -158,12 +158,6 @@
           </div>
 
           <div v-if="activeTab === 'role' && userStore.hasPermission('role:read')">
-            <div class="settings-page-header">
-              <div class="settings-page-title">角色与权限</div>
-              <p class="settings-page-description">
-                查看内置角色的功能权限、默认数据范围和当前成员。
-              </p>
-            </div>
             <RoleManagementComponent />
           </div>
         </div>
@@ -599,6 +593,11 @@ onMounted(async () => {
   }
 }
 
+.settings-modal .settings-content.role-settings-content {
+  max-width: 1120px;
+  padding-top: 36px;
+}
+
 .settings-modal .settings-mobile-header,
 .settings-modal .settings-mobile-nav {
   display: none;
@@ -697,6 +696,10 @@ onMounted(async () => {
         }
       }
     }
+  }
+
+  .settings-modal .settings-content.role-settings-content {
+    padding-top: 28px;
   }
 }
 </style>

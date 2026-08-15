@@ -1,22 +1,100 @@
 import { isDepartmentSelectionCovered } from './departmentTree.js'
 
 /**
- * 按服务端权限目录顺序返回角色已拥有的功能权限分组。
+ * 将角色成员转换为可直接下载的 CSV 内容。
  */
-export function groupRolePermissions(catalog, permissionKeys) {
+export function serializeRoleMembersCsv(members) {
+  /** 转义单个 CSV 字段。 */
+  const escapeCell = (value) => {
+    const text = String(value)
+    return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
+  }
+
+  return [
+    ['成员', '账号'],
+    ...members.map((member) => [member.username, member.uid])
+  ]
+    .map((row) => row.map(escapeCell).join(','))
+    .join('\n')
+}
+
+/**
+ * 按服务端权限目录组成菜单与操作权限层级。
+ */
+export function groupRolePermissions(catalog, permissionKeys, onlyGranted = false) {
   const selectedKeys = new Set(permissionKeys)
+  const menus = new Map()
   const groups = new Map()
 
-  for (const permission of catalog) {
-    if (!selectedKeys.has(permission.key)) continue
+  const menuPermissions = catalog
+    .filter((permission) => !permission.parent_key)
+    .sort((left, right) => (left.display_order || 0) - (right.display_order || 0))
+
+  for (const permission of menuPermissions) {
 
     if (!groups.has(permission.group)) {
       groups.set(permission.group, [])
     }
-    groups.get(permission.group).push(permission)
+
+    const menu = {
+      ...permission,
+      granted: selectedKeys.has(permission.key),
+      operations: []
+    }
+    menus.set(permission.key, menu)
+    groups.get(permission.group).push(menu)
   }
 
-  return Array.from(groups, ([label, permissions]) => ({ label, permissions }))
+  for (const permission of catalog) {
+    if (!permission.parent_key) continue
+
+    const menu = menus.get(permission.parent_key)
+    if (!menu) throw new Error(`操作权限 ${permission.key} 缺少菜单权限 ${permission.parent_key}`)
+    menu.operations.push({ ...permission, granted: selectedKeys.has(permission.key) })
+  }
+
+  return Array.from(groups, ([label, groupMenus]) => {
+    const visibleMenus = groupMenus
+      .filter(
+        (menu) =>
+          !onlyGranted || menu.granted || menu.operations.some((operation) => operation.granted)
+      )
+      .map((menu) => ({
+        ...menu,
+        granted_operation_count: menu.operations.filter((operation) => operation.granted).length,
+        operation_count: menu.operations.length,
+        operations: onlyGranted
+          ? menu.operations.filter((operation) => operation.granted)
+          : menu.operations
+      }))
+
+    return { label, menus: visibleMenus }
+  }).filter((group) => group.menus.length)
+}
+
+/**
+ * 更新一个权限并保持菜单与操作权限的父子联动。
+ */
+export function updateRolePermissionSelection(permissionKeys, catalog, permissionKey, checked) {
+  const target = catalog.find((permission) => permission.key === permissionKey)
+  if (!target) throw new Error(`权限目录中不存在 ${permissionKey}`)
+
+  const selectedKeys = new Set(permissionKeys)
+  if (checked) {
+    selectedKeys.add(permissionKey)
+    if (target.parent_key) selectedKeys.add(target.parent_key)
+  } else {
+    selectedKeys.delete(permissionKey)
+    if (!target.parent_key) {
+      for (const permission of catalog) {
+        if (permission.parent_key === permissionKey) selectedKeys.delete(permission.key)
+      }
+    }
+  }
+
+  return catalog
+    .map((permission) => permission.key)
+    .filter((key) => selectedKeys.has(key))
 }
 
 /**
@@ -24,20 +102,6 @@ export function groupRolePermissions(catalog, permissionKeys) {
  */
 export function getDataScopeLabel(scopeTypes, scopeType) {
   return scopeTypes.find((item) => item.key === scopeType)?.label || '未知范围'
-}
-
-/**
- * 返回安全审计动作的中文名称。
- */
-export function getRoleAuditActionLabel(action) {
-  return (
-    {
-      'role.create': '创建角色',
-      'role.copy': '复制角色',
-      'role.update': '修改角色',
-      'role.deactivate': '停用角色'
-    }[action] || action
-  )
 }
 
 /**

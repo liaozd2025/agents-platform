@@ -27,3 +27,19 @@ def test_role_catalog_has_stable_keys_and_complete_builtin_mappings():
     assert roles["superadmin"].default_scope_type == "all"
     assert roles["admin"].default_scope_type == "organization_and_descendants"
     assert roles["user"].default_scope_type == "self"
+
+
+def test_role_catalog_operations_reference_menu_permissions():
+    """操作权限必须挂在同分组的菜单权限下。"""
+    permissions = {item.key: item for item in PERMISSION_CATALOG}
+    menus = {key: item for key, item in permissions.items() if item.parent_key is None}
+
+    assert set(menus) >= {"dashboard:view", "user:read", "department:read", "role:read"}
+    assert all(menu.display_order > 0 for menu in menus.values())
+    assert len({menu.display_order for menu in menus.values()}) == len(menus)
+    for permission in PERMISSION_CATALOG:
+        if permission.parent_key is None:
+            continue
+
+        assert permission.parent_key in menus
+        assert menus[permission.parent_key].group == permission.group
