@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed, provide, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, provide, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { GithubOutlined } from '@ant-design/icons-vue'
 import {
@@ -10,8 +10,12 @@ import {
   FolderKanban,
   PanelLeft,
   PanelLeftOpen,
+  PanelRight,
   MessageCirclePlus,
-  Search
+  Maximize2,
+  PictureInPicture2,
+  Search,
+  X
 } from 'lucide-vue-next'
 
 import { useConfigStore } from '@/stores/config'
@@ -22,6 +26,12 @@ import { useDatabaseStore } from '@/stores/database'
 import { useInfoStore } from '@/stores/info'
 import { useTaskerStore } from '@/stores/tasker'
 import { useUserStore } from '@/stores/user'
+import {
+  resolveAppNavigationPath,
+  shouldShowAppSidebar,
+  useEmbedContext
+} from '@/composables/useEmbedMode'
+import { useOAEmbedBridge } from '@/composables/useOAEmbedBridge'
 import { storeToRefs } from 'pinia'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
 import DebugComponent from '@/components/DebugComponent.vue'
@@ -40,18 +50,43 @@ const taskerStore = useTaskerStore()
 const userStore = useUserStore()
 const route = useRoute()
 const router = useRouter()
+const {
+  isEmbedded,
+  displayMode: embedDisplayMode,
+  modeConfirmed: embedModeConfirmed
+} = useEmbedContext()
+const oaEmbedBridge = useOAEmbedBridge(isEmbedded)
+const {
+  isAuthorized: embedAuthorized,
+  statusMessage: embedStatusMessage,
+  requestDisplayMode,
+  requestClose
+} = oaEmbedBridge
+provide('oaEmbedBridge', oaEmbedBridge)
 const { activeCount: activeCountRef, isDrawerOpen } = storeToRefs(taskerStore)
 const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
   storeToRefs(chatThreadsStore)
-
-// Add state for GitHub stars
-const githubStars = ref(0)
-const isLoadingStars = ref(false)
+const conversationRouteNames = new Set([
+  'AgentComp',
+  'AgentCompWithThreadId',
+  'EmbedAgent',
+  'EmbedAgentWithThreadId'
+])
+const embedModeOptions = [
+  { value: 'fixed', label: '固定模式', icon: PanelRight },
+  { value: 'floating', label: '浮窗模式', icon: PictureInPicture2 },
+  { value: 'fullscreen', label: '全屏模式', icon: Maximize2 }
+]
 
 // Add state for debug modal
 const showDebugModal = ref(false)
 
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
+const embedSidebarCollapsed = ref(false)
+const showSidebar = computed(() => shouldShowAppSidebar(isEmbedded.value, embedDisplayMode.value))
+const layoutSidebarCollapsed = computed(() =>
+  isEmbedded.value ? embedSidebarCollapsed.value : sidebarCollapsed.value
+)
 const conversationSearchOpen = ref(false)
 const canUseAgents = computed(() => userStore.hasPermission('agent:use'))
 const canAccessExtensions = computed(() =>
@@ -95,40 +130,69 @@ const getRemoteDatabase = async () => {
   }
 }
 
-// Fetch GitHub stars count
-const fetchGithubStars = async () => {
-  try {
-    isLoadingStars.value = true
-    // 公共API，可以直接使用fetch
-    const response = await fetch('https://api.github.com/repos/xerrors/Yuxi')
-    const data = await response.json()
-    githubStars.value = data.stargazers_count
-  } catch (error) {
-    console.error('获取GitHub stars失败:', error)
-  } finally {
-    isLoadingStars.value = false
+let layoutInitialization = null
+
+const initializeLayout = () => {
+  if (layoutInitialization) return layoutInitialization
+
+  layoutInitialization = (async () => {
+    // 加载信息配置与知识库数据无依赖，可并行
+    const databaseRequest = userStore.hasPermission('knowledge_base:read')
+      ? getRemoteDatabase()
+      : null
+    await Promise.all([infoStore.loadInfoConfig(), databaseRequest])
+    if (canUseAgents.value) await initAgentNavigation()
+    if (userStore.hasPermission('system_config:manage')) await getRemoteConfig()
+    // 仅管理员加载任务中心数据
+    if (userStore.hasPermission('system_task:manage')) {
+      taskerStore.loadTasks()
+    }
+  })()
+
+  return layoutInitialization
+}
+
+const initializeLayoutWhenReady = () => {
+  if (!isEmbedded.value || (showSidebar.value && userStore.userId)) {
+    void initializeLayout()
   }
 }
 
-onMounted(async () => {
-  // 加载信息配置与知识库数据无依赖，可并行
-  const databaseRequest = userStore.hasPermission('knowledge_base:read')
-    ? getRemoteDatabase()
-    : null
-  await Promise.all([infoStore.loadInfoConfig(), databaseRequest])
-  if (canUseAgents.value) await initAgentNavigation()
-  if (userStore.hasPermission('system_config:manage')) await getRemoteConfig()
-  // 仅管理员加载任务中心数据
-  if (userStore.hasPermission('system_task:manage')) {
-    taskerStore.loadTasks()
-    fetchGithubStars() // Fetch GitHub stars on mount
-  }
+onMounted(() => {
+  initializeLayoutWhenReady()
+  startThreadStatusSync()
 })
 
-const activeTaskCount = computed(() => activeCountRef.value || 0)
-const activeConversationThreadId = computed(() => {
-  return route.path.startsWith('/agent') ? currentThreadId.value : null
+// 低频刷新侧边栏线程状态，让后台线程完成时也能从 loading 转为 ready/done。
+const THREAD_STATUS_SYNC_INTERVAL_MS = 12 * 1000
+let threadStatusSyncTimer = null
+
+const startThreadStatusSync = () => {
+  if (threadStatusSyncTimer) return
+  threadStatusSyncTimer = setInterval(() => {
+    if (
+      layoutSidebarCollapsed.value ||
+      (typeof document !== 'undefined' && document.visibilityState !== 'visible')
+    ) {
+      return
+    }
+    void chatThreadsStore.syncThreadStatuses()
+  }, THREAD_STATUS_SYNC_INTERVAL_MS)
+}
+
+onUnmounted(() => {
+  if (threadStatusSyncTimer) {
+    clearInterval(threadStatusSyncTimer)
+    threadStatusSyncTimer = null
+  }
 })
+watch([showSidebar, () => userStore.userId], initializeLayoutWhenReady)
+
+const activeTaskCount = computed(() => activeCountRef.value || 0)
+const isConversationRoute = computed(() => conversationRouteNames.has(route.name))
+const activeConversationThreadId = computed(() =>
+  isConversationRoute.value ? currentThreadId.value : null
+)
 const organizationName = computed(() => {
   return infoStore.organization.name || infoStore.branding.name || 'Yuxi'
 })
@@ -140,7 +204,7 @@ const mainList = computed(() => {
   if (canUseAgents.value) {
     items.push({
       name: '新建对话',
-      path: '/agent',
+      path: resolveAppNavigationPath(isEmbedded.value, '/agent'),
       icon: MessageCirclePlus,
       activeIcon: MessageCirclePlus,
       action: true,
@@ -155,7 +219,7 @@ const mainList = computed(() => {
   ) {
     items.push({
       name: '智能体',
-      path: '/agent-manage',
+      path: resolveAppNavigationPath(isEmbedded.value, '/agent-manage'),
       icon: Box,
       activeIcon: Box
     })
@@ -163,7 +227,7 @@ const mainList = computed(() => {
 
   items.push({
     name: '工作区',
-    path: '/workspace',
+    path: resolveAppNavigationPath(isEmbedded.value, '/workspace'),
     icon: FolderKanban,
     activeIcon: FolderKanban
   })
@@ -171,8 +235,8 @@ const mainList = computed(() => {
   if (canAccessExtensions.value) {
     items.push({
       name: '知识库 · 技能',
-      path: '/extensions',
-      activePaths: ['/extensions'],
+      path: resolveAppNavigationPath(isEmbedded.value, '/extensions'),
+      activePaths: [resolveAppNavigationPath(isEmbedded.value, '/extensions')],
       icon: LibraryBig,
       activeIcon: LibraryBig
     })
@@ -181,7 +245,7 @@ const mainList = computed(() => {
   if (userStore.hasPermission('dashboard:view')) {
     items.push({
       name: '数据总览',
-      path: '/dashboard',
+      path: resolveAppNavigationPath(isEmbedded.value, '/dashboard'),
       icon: BarChart3,
       activeIcon: BarChart3
     })
@@ -202,11 +266,15 @@ const isNavItemActive = (item) => {
 }
 
 const setSidebarCollapsed = (collapsed) => {
+  if (isEmbedded.value) {
+    embedSidebarCollapsed.value = collapsed
+    return
+  }
   sidebarCollapsed.value = collapsed
 }
 
 const toggleSidebar = () => {
-  setSidebarCollapsed(!sidebarCollapsed.value)
+  setSidebarCollapsed(!layoutSidebarCollapsed.value)
 }
 
 const openConversationSearch = () => {
@@ -224,10 +292,32 @@ const initAgentNavigation = async () => {
   }
 }
 
+/** 根据当前运行形态返回对话路由名。 */
+const getAgentRouteName = (withThread = false) => {
+  if (isEmbedded.value) return withThread ? 'EmbedAgentWithThreadId' : 'EmbedAgent'
+  return withThread ? 'AgentCompWithThreadId' : 'AgentComp'
+}
+
+/** 在非对话页切回窄档前先恢复当前对话。 */
+const requestEmbedMode = async (mode) => {
+  if (mode !== 'fullscreen' && !isConversationRoute.value) {
+    await router.push({
+      name: getAgentRouteName(Boolean(currentThreadId.value)),
+      params: currentThreadId.value ? { thread_id: currentThreadId.value } : undefined
+    })
+  }
+  requestDisplayMode(mode, currentThreadId.value)
+}
+
+const requestEmbedClose = () => requestClose(currentThreadId.value)
+
 const handleSelectChat = (threadId) => {
   if (!threadId) return
   chatThreadsStore.setCurrentThreadId(threadId)
-  router.push({ name: 'AgentCompWithThreadId', params: { thread_id: threadId } })
+  router.push({
+    name: getAgentRouteName(true),
+    params: { thread_id: threadId }
+  })
 }
 
 const handleSearchThreadFound = (thread) => {
@@ -242,7 +332,7 @@ const handleSearchSelectThread = (thread) => {
 
 const handleCreateConversationFromSearch = () => {
   chatThreadsStore.setCurrentThreadId(null)
-  router.push({ name: 'AgentComp' })
+  router.push({ name: getAgentRouteName() })
 }
 
 const handleDeleteChat = async (threadId) => {
@@ -250,7 +340,7 @@ const handleDeleteChat = async (threadId) => {
   try {
     await chatThreadsStore.deleteThread(threadId)
     if (route.params.thread_id === threadId) {
-      await router.replace({ name: 'AgentComp' })
+      await router.replace({ name: getAgentRouteName() })
     }
   } catch (error) {
     console.warn('删除对话失败:', error)
@@ -282,7 +372,7 @@ const handleTogglePinChat = async (threadId) => {
 watch(
   () => [route.path, route.params.thread_id],
   () => {
-    if (!route.path.startsWith('/agent')) return
+    if (!isConversationRoute.value) return
     const threadId = typeof route.params.thread_id === 'string' ? route.params.thread_id : null
     chatThreadsStore.setCurrentThreadId(threadId)
   },
@@ -296,10 +386,20 @@ provide('settingsModal', {
 </script>
 
 <template>
-  <div class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
-    <div class="header">
+  <div
+    class="app-layout"
+    :class="{
+      'sidebar-collapsed': layoutSidebarCollapsed,
+      'embed-layout': isEmbedded
+    }"
+  >
+    <div v-if="showSidebar" class="header">
       <div class="sidebar-brand" @click.stop>
-        <router-link v-if="!sidebarCollapsed" to="/" class="brand-link">
+        <router-link
+          v-if="!layoutSidebarCollapsed"
+          :to="isEmbedded ? '/embed' : '/'"
+          class="brand-link"
+        >
           <img :src="infoStore.organization.avatar" class="brand-avatar" />
           <span class="brand-name">{{ organizationName }}</span>
         </router-link>
@@ -314,7 +414,7 @@ provide('settingsModal', {
           <PanelLeftOpen class="brand-expand-icon" size="20" />
         </button>
         <button
-          v-if="!sidebarCollapsed"
+          v-if="!layoutSidebarCollapsed"
           type="button"
           class="sidebar-toggle"
           aria-label="折叠侧边栏"
@@ -332,7 +432,7 @@ provide('settingsModal', {
           :active-class="primaryNavItem.action ? '' : 'active'"
           @click.stop
         >
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="layoutSidebarCollapsed ? undefined : false">
             <template #title>{{ primaryNavItem.name }}</template>
             <component
               class="icon"
@@ -352,7 +452,7 @@ provide('settingsModal', {
           :class="{ active: conversationSearchOpen }"
           @click.stop="openConversationSearch"
         >
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="layoutSidebarCollapsed ? undefined : false">
             <template #title>搜索</template>
             <Search class="icon" size="18" />
           </a-tooltip>
@@ -369,7 +469,7 @@ provide('settingsModal', {
           :active-class="item.action ? '' : 'active'"
           @click.stop
         >
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="layoutSidebarCollapsed ? undefined : false">
             <template #title>{{ item.name }}</template>
             <component
               class="icon"
@@ -382,7 +482,7 @@ provide('settingsModal', {
       </div>
       <div class="fill">
         <ConversationNavSection
-          v-if="canUseAgents && !sidebarCollapsed"
+          v-if="canUseAgents && !layoutSidebarCollapsed"
           class="sidebar-conversations"
           :current-chat-id="activeConversationThreadId"
           :chats-list="threads"
@@ -397,20 +497,17 @@ provide('settingsModal', {
       </div>
       <div class="foo">
         <div class="github nav-item" @click.stop>
-          <a-tooltip placement="right" :open="sidebarCollapsed ? undefined : false">
+          <a-tooltip placement="right" :open="layoutSidebarCollapsed ? undefined : false">
             <template #title>欢迎 Star</template>
             <a href="https://github.com/xerrors/Yuxi" target="_blank" class="github-link">
               <GithubOutlined class="icon" />
               <span class="nav-text">GitHub</span>
-              <span v-if="githubStars > 0" class="github-stars">
-                <span class="star-count">{{ (githubStars / 1000).toFixed(1) }}k</span>
-              </span>
             </a>
           </a-tooltip>
         </div>
         <!-- 用户信息组件 -->
         <div class="nav-item user-info" @click.stop>
-          <UserInfoComponent :show-role="!sidebarCollapsed">
+          <UserInfoComponent :show-role="!layoutSidebarCollapsed">
             <template v-if="userStore.hasPermission('system_task:manage')" #actions>
               <a-tooltip placement="top" title="任务中心">
                 <button
@@ -435,12 +532,50 @@ provide('settingsModal', {
         </div>
       </div>
     </div>
-    <router-view v-slot="{ Component, route }" id="app-router-view">
+    <div
+      v-if="isEmbedded && !embedAuthorized"
+      id="app-router-view"
+      class="embed-auth-waiting"
+      role="status"
+    >
+      {{ embedStatusMessage }}
+    </div>
+    <router-view v-else v-slot="{ Component, route }" id="app-router-view">
       <keep-alive v-if="route.meta.keepAlive !== false">
         <component :is="Component" />
       </keep-alive>
       <component :is="Component" v-else />
     </router-view>
+    <div
+      v-if="isEmbedded && embedAuthorized && !isConversationRoute"
+      class="embed-page-controls"
+      role="group"
+      aria-label="AI 助手显示模式"
+      :aria-busy="!embedModeConfirmed"
+    >
+      <button
+        v-for="option in embedModeOptions"
+        :key="option.value"
+        type="button"
+        class="embed-page-control"
+        :class="{ active: embedDisplayMode === option.value }"
+        :title="option.label"
+        :aria-label="`切换为${option.label}`"
+        :aria-pressed="embedDisplayMode === option.value"
+        @click="requestEmbedMode(option.value)"
+      >
+        <component :is="option.icon" :size="16" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        class="embed-page-control embed-page-close"
+        title="关闭 AI 助手"
+        aria-label="关闭 AI 助手"
+        @click="requestEmbedClose"
+      >
+        <X :size="16" aria-hidden="true" />
+      </button>
+    </div>
 
     <ConversationSearchModal
       v-if="canUseAgents"
@@ -501,6 +636,10 @@ provide('settingsModal', {
   min-width: var(--min-width);
 }
 
+.app-layout.embed-layout {
+  min-width: 0;
+}
+
 div.header,
 #app-router-view {
   height: 100%;
@@ -510,6 +649,57 @@ div.header,
 #app-router-view {
   flex: 1 1 auto;
   overflow-y: auto;
+}
+
+.embed-auth-waiting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--gray-600);
+  background: var(--gray-25);
+  font-size: 14px;
+}
+
+.embed-page-controls {
+  position: fixed;
+  top: 10px;
+  right: 14px;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--gray-150);
+  border-radius: 8px;
+  background: var(--gray-0);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 6%);
+}
+
+.embed-page-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--gray-600);
+  background: transparent;
+  cursor: pointer;
+}
+
+.embed-page-control:hover,
+.embed-page-control:focus-visible,
+.embed-page-control.active {
+  color: var(--main-600);
+  background: var(--main-50);
+  outline: none;
+}
+
+.embed-page-close {
+  margin-left: 2px;
 }
 
 .header {

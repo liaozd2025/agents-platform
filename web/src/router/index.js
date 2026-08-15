@@ -2,9 +2,25 @@ import { createRouter, createWebHistory } from 'vue-router'
 import AppLayout from '@/layouts/AppLayout.vue'
 import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
-import { getAuthenticatedHomePath } from '@/utils/authNavigation'
+import { canAccessRoute, getAuthenticatedHomePath } from '@/utils/authNavigation'
+import { resolveAppNavigationPath, resolveAppSurface } from '@/composables/useEmbedMode'
 import { sanitizeRedirect } from '@/utils/oidcAutoStart'
 import { SETTINGS_ROUTES } from '@/utils/settingsNavigation'
+
+/** 生成独立站与 OA 嵌入共用的设置路由。 */
+const createSettingsRoutes = (embedded = false) =>
+  SETTINGS_ROUTES.map(({ id, path, routeName, requiredPermission, requiredAnyPermissions }) => ({
+    path: embedded ? path.slice(1) : path,
+    name: embedded ? `Embed${routeName}` : routeName,
+    component: () => import('@/components/SettingsModal.vue'),
+    meta: {
+      keepAlive: false,
+      requiresAuth: true,
+      settingsTab: id,
+      requiredPermission,
+      requiredAnyPermissions
+    }
+  }))
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -57,6 +73,87 @@ const router = createRouter({
           component: () => import('../views/AgentView.vue'),
           meta: { keepAlive: true, requiresAuth: true, requiredPermission: 'agent:use' }
         }
+      ]
+    },
+    {
+      path: '/embed',
+      name: 'EmbedMain',
+      component: AppLayout,
+      meta: { embed: true },
+      children: [
+        {
+          path: '',
+          name: 'EmbedAgent',
+          component: () => import('../views/AgentView.vue'),
+          meta: { keepAlive: true, requiresAuth: true, requiredPermission: 'agent:use' }
+        },
+        {
+          path: ':thread_id',
+          name: 'EmbedAgentWithThreadId',
+          component: () => import('../views/AgentView.vue'),
+          meta: { keepAlive: true, requiresAuth: true, requiredPermission: 'agent:use' }
+        },
+        {
+          path: 'agent-manage',
+          name: 'EmbedAgentManageComp',
+          component: () => import('../views/AgentManageView.vue'),
+          meta: {
+            keepAlive: false,
+            requiresAuth: true,
+            requiredAnyPermissions: ['agent:use', 'agent:manage', 'model_provider:manage']
+          }
+        },
+        {
+          path: 'workspace',
+          name: 'EmbedWorkspaceComp',
+          component: () => import('../views/WorkspaceView.vue'),
+          meta: { keepAlive: true, requiresAuth: true }
+        },
+        {
+          path: 'dashboard',
+          name: 'EmbedDashboardComp',
+          component: () => import('../views/DashboardView.vue'),
+          meta: { keepAlive: false, requiresAuth: true, requiredPermission: 'dashboard:view' }
+        },
+        {
+          path: 'extensions',
+          name: 'EmbedExtensionsComp',
+          component: () => import('../views/ExtensionsView.vue'),
+          meta: { keepAlive: false, requiresAuth: true },
+          children: [
+            {
+              path: 'knowledgebase/:kbId',
+              name: 'EmbedExtensionKnowledgeBaseDetail',
+              component: () => import('../views/DataBaseInfoView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true,
+                requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage']
+              }
+            },
+            {
+              path: 'mcp/:slug',
+              name: 'EmbedExtensionMcpDetail',
+              component: () => import('../components/extensions/McpDetailView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true,
+                requiredPermission: 'mcp:manage'
+              }
+            },
+            {
+              path: 'skill/:slug',
+              name: 'EmbedExtensionSkillDetail',
+              component: () => import('../components/extensions/SkillDetailView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true,
+                requiredAnyPermissions: ['skill:use', 'skill:manage']
+              }
+            }
+          ]
+        },
+        ...createSettingsRoutes(true)
       ]
     },
     {
@@ -150,20 +247,7 @@ const router = createRouter({
         }
       ]
     },
-    ...SETTINGS_ROUTES.map(
-      ({ id, path, routeName, requiredPermission, requiredAnyPermissions }) => ({
-        path,
-        name: routeName,
-        component: () => import('@/components/SettingsModal.vue'),
-        meta: {
-          keepAlive: false,
-          requiresAuth: true,
-          settingsTab: id,
-          requiredPermission,
-          requiredAnyPermissions
-        }
-      })
-    ),
+    ...createSettingsRoutes(),
     {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',
@@ -174,20 +258,23 @@ const router = createRouter({
 })
 
 // 全局前置守卫
-router.beforeEach(async (to) => {
+router.beforeEach(async (to, from) => {
+  const embeddedTargetPath = resolveAppNavigationPath(
+    resolveAppSurface(from) === 'oa-embed',
+    to.path
+  )
+  if (embeddedTargetPath !== to.path) {
+    return { path: embeddedTargetPath, query: to.query, hash: to.hash }
+  }
+
   // 检查路由是否需要认证
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true)
-  const requiredPermissions = to.matched
-    .map((record) => record.meta.requiredPermission)
-    .filter(Boolean)
-  const requiredAnyPermissions = to.matched.flatMap(
-    (record) => record.meta.requiredAnyPermissions || []
-  )
+  const isEmbedRoute = to.matched.some((record) => record.meta.embed === true)
 
   const userStore = useUserStore()
 
   // 如果有 token 但用户信息未加载，先获取用户信息
-  if (userStore.token && !userStore.userId) {
+  if (!isEmbedRoute && userStore.token && !userStore.userId) {
     try {
       await userStore.getCurrentUser()
     } catch (error) {
@@ -199,6 +286,9 @@ router.beforeEach(async (to) => {
 
   const isLoggedIn = userStore.isLoggedIn
 
+  // 嵌入页由 postMessage 握手后再渲染业务组件，不能在 yuxi:ready 前请求受保护接口。
+  if (isEmbedRoute && !userStore.userId) return true
+
   // 如果路由需要认证但用户未登录
   if (requiresAuth && !isLoggedIn) {
     // 保存尝试访问的路径，登录后跳转
@@ -206,14 +296,13 @@ router.beforeEach(async (to) => {
     return '/login'
   }
 
-  if (requiredPermissions.some((permission) => !userStore.hasPermission(permission))) {
-    return getAuthenticatedHomePath(userStore.hasPermission)
-  }
-  if (
-    requiredAnyPermissions.length &&
-    !requiredAnyPermissions.some((permission) => userStore.hasPermission(permission))
-  ) {
-    return getAuthenticatedHomePath(userStore.hasPermission)
+  const authenticatedHomePath = resolveAppNavigationPath(
+    isEmbedRoute,
+    getAuthenticatedHomePath(userStore.hasPermission)
+  )
+
+  if (!canAccessRoute(to.matched, userStore.hasPermission)) {
+    return authenticatedHomePath
   }
 
   // 如果用户已登录但访问登录页，按 redirect 参数跳转

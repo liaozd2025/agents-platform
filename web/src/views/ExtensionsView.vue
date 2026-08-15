@@ -85,10 +85,11 @@ const replaceTabQuery = (tab) => {
 }
 
 const isDetailPage = computed(() => {
+  const extensionPath = route.path.replace(/^\/embed/, '')
   return (
-    route.path.startsWith('/extensions/knowledgebase/') ||
-    route.path.startsWith('/extensions/mcp/') ||
-    route.path.startsWith('/extensions/skill/')
+    extensionPath.startsWith('/extensions/knowledgebase/') ||
+    extensionPath.startsWith('/extensions/mcp/') ||
+    extensionPath.startsWith('/extensions/skill/')
   )
 })
 

@@ -6,8 +6,54 @@
         <AgentChatComponent
           ref="chatComponentRef"
           :single-mode="false"
+          :embed-mode="embedMode"
           @thread-change="handleThreadChange"
+          @request-fullscreen="requestEmbedFullscreen"
         >
+          <template #header-left>
+            <button
+              v-if="embedMode"
+              type="button"
+              class="embed-history-btn agent-nav-btn"
+              title="对话历史"
+              aria-label="打开对话历史"
+              @click="historyDrawerOpen = true"
+            >
+              <History :size="16" />
+            </button>
+          </template>
+          <template #header-right>
+            <div
+              v-if="embedMode"
+              class="embed-mode-controls"
+              role="group"
+              aria-label="AI 助手显示模式"
+              :aria-busy="!embedModeConfirmed"
+            >
+              <button
+                v-for="option in embedModeOptions"
+                :key="option.value"
+                type="button"
+                class="agent-nav-btn embed-mode-btn"
+                :class="{ active: embedDisplayMode === option.value }"
+                :title="option.label"
+                :aria-label="`切换为${option.label}`"
+                :aria-pressed="embedDisplayMode === option.value"
+                @click="requestEmbedMode(option.value)"
+              >
+                <component :is="option.icon" :size="16" aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                class="agent-nav-btn embed-mode-btn embed-close-btn"
+                title="关闭 AI 助手"
+                aria-label="关闭 AI 助手"
+                @click="requestEmbedClose"
+              >
+                <X :size="16" aria-hidden="true" />
+              </button>
+            </div>
+          </template>
           <template #input-actions-left="{ hasActiveThread }">
             <a-dropdown
               v-if="selectedAgentId"
@@ -106,6 +152,25 @@
         </AgentChatComponent>
       </div>
     </div>
+    <a-drawer
+      v-if="embedMode"
+      v-model:open="historyDrawerOpen"
+      title="对话历史"
+      placement="left"
+      :width="320"
+    >
+      <ConversationNavSection
+        :current-chat-id="currentThreadId"
+        :chats-list="threads"
+        :has-more-chats="hasMoreThreads"
+        :is-loading-more="isLoadingMoreThreads"
+        @select-chat="handleHistorySelect"
+        @delete-chat="handleHistoryDelete"
+        @rename-chat="handleHistoryRename"
+        @toggle-pin="handleHistoryTogglePin"
+        @load-more-chats="() => chatThreadsStore.loadMoreThreads()"
+      />
+    </a-drawer>
     <AgentEditModal
       ref="agentEditModalRef"
       :backend-options="agentBackendOptions"
@@ -115,15 +180,28 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, inject, nextTick, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { Settings2, ChevronDown, Check, Plus } from 'lucide-vue-next'
+import {
+  Settings2,
+  ChevronDown,
+  Check,
+  History,
+  Maximize2,
+  PanelRight,
+  PictureInPicture2,
+  Plus,
+  X
+} from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { agentApi } from '@/apis/agent_api'
+import { useEmbedContext } from '@/composables/useEmbedMode'
 import { useOutsidePointerdown } from '@/composables/useOutsidePointerdown'
 import AgentChatComponent from '@/components/AgentChatComponent.vue'
 import AgentEditModal from '@/components/model-management/AgentEditModal.vue'
+import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import { isBuiltinAgent, useAgentStore } from '@/stores/agent'
+import { useChatThreadsStore } from '@/stores/chatThreads'
 import { handleChatError } from '@/utils/errorHandler'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
@@ -136,13 +214,32 @@ const agentEditModalRef = ref(null)
 
 // Stores
 const agentStore = useAgentStore()
+const chatThreadsStore = useChatThreadsStore()
 const route = useRoute()
 const router = useRouter()
+const {
+  isEmbedded: embedMode,
+  displayMode: embedDisplayMode,
+  modeConfirmed: embedModeConfirmed
+} = useEmbedContext()
+const { requestDisplayMode, requestClose } = inject('oaEmbedBridge')
 
 // 从 agentStore 中获取响应式状态
 const { agents, selectedAgentId, isLoadingConfig } = storeToRefs(agentStore)
+const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
+  storeToRefs(chatThreadsStore)
 
 const syncingRouteThread = ref(false)
+const historyDrawerOpen = ref(false)
+const embedModeOptions = [
+  { value: 'fixed', label: '固定模式', icon: PanelRight },
+  { value: 'floating', label: '浮窗模式', icon: PictureInPicture2 },
+  { value: 'fullscreen', label: '全屏模式', icon: Maximize2 }
+]
+
+const requestEmbedMode = (mode) => requestDisplayMode(mode, currentThreadId.value)
+const requestEmbedFullscreen = (threadId) => requestDisplayMode('fullscreen', threadId)
+const requestEmbedClose = () => requestClose(currentThreadId.value)
 
 const getRouteThreadId = () => {
   const value = route.params.thread_id
@@ -167,7 +264,7 @@ const syncSelectedThreadFromRoute = async () => {
 
     const ok = await chatComponent.selectThreadFromRoute(threadId)
     if (threadId && !ok) {
-      await router.replace({ name: 'AgentComp' })
+      await router.replace({ name: embedMode.value ? 'EmbedAgent' : 'AgentComp' })
     }
   } catch (error) {
     handleChatError(error, 'load')
@@ -179,7 +276,6 @@ const syncSelectedThreadFromRoute = async () => {
 const consumeRouteAgentSelection = async () => {
   const targetAgentId = getRouteAgentId()
   if (!targetAgentId || getRouteThreadId()) return
-
   try {
     if (!agentStore.isInitialized) {
       await agentStore.initialize()
@@ -193,7 +289,7 @@ const consumeRouteAgentSelection = async () => {
   } finally {
     const nextQuery = { ...route.query }
     delete nextQuery.agent_id
-    await router.replace({ name: 'AgentComp', query: nextQuery })
+    await router.replace({ name: embedMode.value ? 'EmbedAgent' : 'AgentComp', query: nextQuery })
   }
 }
 
@@ -225,9 +321,50 @@ const handleThreadChange = (threadId) => {
   if (currentRouteThreadId === nextThreadId) return
 
   if (nextThreadId) {
-    router.replace({ name: 'AgentCompWithThreadId', params: { thread_id: nextThreadId } })
+    router.replace({
+      name: embedMode.value ? 'EmbedAgentWithThreadId' : 'AgentCompWithThreadId',
+      params: { thread_id: nextThreadId }
+    })
   } else {
-    router.replace({ name: 'AgentComp' })
+    router.replace({ name: embedMode.value ? 'EmbedAgent' : 'AgentComp' })
+  }
+}
+
+const handleHistorySelect = async (threadId) => {
+  if (!threadId) return
+  historyDrawerOpen.value = false
+  await router.replace({ name: 'EmbedAgentWithThreadId', params: { thread_id: threadId } })
+}
+
+const handleHistoryDelete = async (threadId) => {
+  if (!threadId) return
+  try {
+    await chatThreadsStore.deleteThread(threadId)
+    if (getRouteThreadId() === threadId) {
+      await router.replace({ name: 'EmbedAgent' })
+    }
+  } catch (error) {
+    console.warn('删除对话失败:', error)
+  }
+}
+
+const handleHistoryRename = async ({ chatId, title }) => {
+  try {
+    await chatThreadsStore.updateThread(chatId, title)
+  } catch (error) {
+    console.warn('重命名对话失败:', error)
+  }
+}
+
+const handleHistoryTogglePin = async (threadId) => {
+  const thread = threads.value.find((item) => item.id === threadId)
+  if (!thread) return
+  try {
+    await chatThreadsStore.updateThread(threadId, null, !thread.is_pinned)
+    await chatThreadsStore.loadThreads()
+    chatThreadsStore.setCurrentThreadId(currentThreadId.value)
+  } catch (error) {
+    console.warn('更新置顶状态失败:', error)
   }
 }
 
@@ -344,12 +481,38 @@ useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdown
     flex: 1;
     display: flex;
     flex-direction: column;
+    container-type: inline-size;
   }
 }
 
 .content {
   flex: 1;
   overflow: hidden;
+}
+
+.embed-history-btn {
+  display: none;
+}
+
+.embed-mode-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.embed-mode-btn {
+  width: 28px;
+  padding: 4px;
+}
+
+.embed-mode-btn.active {
+  color: var(--main-600);
+  background: var(--main-50);
+}
+
+.embed-close-btn {
+  margin-left: 2px;
+  color: var(--gray-600);
 }
 
 .config-dropdown-trigger {
@@ -384,6 +547,10 @@ useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdown
 }
 
 @container (max-width: 640px) {
+  .embed-history-btn {
+    display: inline-flex;
+  }
+
   .config-dropdown-trigger {
     width: 30px;
     padding-inline: 0;

@@ -3,14 +3,10 @@ import uuid
 from typing import Any
 
 import aiofiles
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from yuxi.storage.postgres.models_business import User
-from server.utils.agent_permissions import require_agent_use_permission
-from server.utils.auth_middleware import get_db
 from yuxi import config as conf
 from yuxi.agents.tool_approval import ToolApprovalMode
 from yuxi.models import select_model
@@ -23,12 +19,14 @@ from yuxi.services.conversation_service import (
     get_thread_history_view,
     list_thread_attachments_view,
     list_threads_view,
+    mark_thread_viewed_view,
     parse_tmp_attachment_view,
     search_threads_view,
     update_thread_view,
     upload_thread_attachment_view,
     upload_tmp_attachment_view,
 )
+from yuxi.services.feedback_service import get_message_feedback_view, submit_message_feedback_view
 from yuxi.services.file_preview import detect_media_type
 from yuxi.services.thread_files_service import (
     list_thread_files_view,
@@ -36,11 +34,13 @@ from yuxi.services.thread_files_service import (
     resolve_thread_artifact_view,
     save_thread_artifact_to_workspace_view,
 )
-from yuxi.services.feedback_service import get_message_feedback_view, submit_message_feedback_view
-from yuxi.utils.logging_config import logger
+from yuxi.storage.postgres.models_business import User
 from yuxi.utils.image_processor import process_uploaded_image
+from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import VIRTUAL_PATH_PREFIX
 
+from server.utils.agent_permissions import require_agent_use_permission
+from server.utils.auth_middleware import get_db, get_required_user
 
 # TODO：当前文件的功能过于庞杂，路由标签混乱
 
@@ -139,6 +139,7 @@ class ThreadResponse(BaseModel):
     created_at: str
     updated_at: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+    thread_status: str = "done"
 
 
 class ThreadSearchSnippet(BaseModel):
@@ -354,6 +355,20 @@ async def update_thread(
         title=thread_update.title,
         is_pinned=thread_update.is_pinned,
         tool_approval_mode=thread_update.tool_approval_mode,
+        db=db,
+        current_uid=str(current_user.uid),
+    )
+
+
+@chat.post("/thread/{thread_id}/viewed", response_model=ThreadResponse)
+async def mark_thread_viewed(
+    thread_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_required_user),
+):
+    """记录用户已查看该线程的最新顶层 run，清除侧边栏未读状态。"""
+    return await mark_thread_viewed_view(
+        thread_id=thread_id,
         db=db,
         current_uid=str(current_user.uid),
     )

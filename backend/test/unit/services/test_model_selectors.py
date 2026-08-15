@@ -4,12 +4,11 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import requests
-
 from yuxi.agents.models import load_chat_model, resolve_chat_model_spec
 from yuxi.models.chat import LangChainChatAdapter, select_model
 from yuxi.models.embed import OtherEmbedding, select_embedding_model
-from yuxi.models.rerank import OpenAIReranker, get_reranker
 from yuxi.models.providers.cache import ModelInfo
+from yuxi.models.rerank import OpenAIReranker, get_reranker
 
 
 def _model_info(model_type: str) -> ModelInfo:
@@ -184,6 +183,10 @@ def test_load_chat_model_uses_toolcall_chunk_fix_for_openai_compatible(monkeypat
     # 不再按 provider 禁用流式，改用归一化子类规避 v3 流式累积丢 tool_call 字段的缺陷
     assert isinstance(model, _ToolCallChunkFixChatOpenAI)
     assert model.disable_streaming is False
+    assert model.metadata["yuxi_provider_id"] == "siliconflow-cn"
+    assert model.metadata["yuxi_provider_type"] == "openai"
+    assert model.metadata["yuxi_model_id"] == "deepseek-ai/DeepSeek-V4-Flash"
+    assert model.metadata["yuxi_model_spec"] == "siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash"
 
 
 def test_load_chat_model_keeps_non_siliconflow_openai_streaming(monkeypatch):

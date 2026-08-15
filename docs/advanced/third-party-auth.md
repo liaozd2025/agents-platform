@@ -8,6 +8,7 @@ Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有�
 - 客户端ID（Client ID）
 - 客户端密钥（Client Secret）
 - ISSUER URL
+- Provider discovery 地址或 JWKS URL
 
 填入回调地址（Redirect URI）：https://<your_yuxi_host>/api/auth/oidc/callback
 
@@ -43,6 +44,9 @@ Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有�
 
 # UserInfo 端点 (可选，自动从 discovery 获取)
 # OIDC_USERINFO_ENDPOINT=
+
+# JWKS 地址（使用显式端点时必填，discovery 模式自动获取）
+# OIDC_JWKS_URI=
 
 # 登出端点 (可选，自动从 discovery 获取)
 # OIDC_END_SESSION_ENDPOINT=
@@ -91,8 +95,11 @@ docker restart api-dev web-dev
 **绑定原理**（无需修改数据库）：  
 系统会创建一个标记为删除的占位用户 `oidc:{sub}:{target_user_id}` 来记录 OIDC sub 与 Yuxi 用户的绑定关系，确保只有绑定过的 OIDC 身份才能登录对应的账号，**防止账号冒用**。其中 `target_user_id` 是数据库中的数值 `users.id`；用户登录标识仍使用字符串 `uid`。
 
-### 自动获取部门信息（OIDC_FETCH_DEPARTMENT_INFO=true）
-开启后，系统会从 OIDC userinfo 的 `OIDC_DEPARTMENT_CLAIM` 配置字段读取组织节点名称，仅在全部已有组织节点中精确命中一个时关联用户；已有用户再次登录也会按本次 claim 更新归属节点。
+### 身份令牌与部门信息
+
+系统会验证 `id_token` 的签名、`iss`、`aud`、`exp`、`iat`、`sub` 和 `nonce`。使用显式端点配置时，必须同时设置 `OIDC_ISSUER_URL` 和 `OIDC_JWKS_URI`；discovery 返回的 `issuer` 必须与 `OIDC_ISSUER_URL` 完全一致。OIDC 端点必须使用 HTTPS，仅 `YUXI_ENV=development` 时允许本机 HTTP Provider。
+
+开启 `OIDC_FETCH_DEPARTMENT_INFO` 后，系统会从 OIDC claims 的 `OIDC_DEPARTMENT_CLAIM` 字段读取组织节点名称，仅在全部已有组织节点中精确命中一个时关联用户；已有用户再次登录也会按本次 claim 更新归属节点。
 
 - claim 命中 0 个或多个同名节点时，用户回落到集团根，并写入 warning 日志
 - 登录流程不会创建组织节点，不做模糊匹配或路径字符串解析

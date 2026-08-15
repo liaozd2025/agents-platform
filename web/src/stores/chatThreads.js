@@ -20,6 +20,12 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     currentThreadId.value = threadId || null
   }
 
+  const reset = () => {
+    threads.value = []
+    hasMoreThreads.value = true
+    isLoadingMoreThreads.value = false
+  }
+
   const upsertThread = (thread) => {
     if (!thread?.id) return
     const index = threads.value.findIndex((item) => item.id === thread.id)
@@ -28,6 +34,44 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
       return
     }
     threads.value = [thread, ...threads.value]
+  }
+
+  const setThreadStatus = (threadId, status) => {
+    if (!threadId) return
+    const index = threads.value.findIndex((item) => item.id === threadId)
+    if (index >= 0) {
+      threads.value[index] = { ...threads.value[index], thread_status: status }
+    }
+  }
+
+  const markThreadViewed = async (threadId) => {
+    if (!threadId) return
+    try {
+      const updatedThread = await threadApi.markThreadViewed(threadId)
+      upsertThread(updatedThread)
+      return updatedThread
+    } catch (error) {
+      console.warn(`Failed to mark thread viewed: ${threadId}`, error)
+      return null
+    }
+  }
+
+  const syncThreadStatuses = async (agentId = null) => {
+    try {
+      const pinnedCount = threads.value.filter((thread) => thread.is_pinned).length
+      // ponytail: 补偿接口重复返回的置顶项；超过 500 条时改为专用批量状态接口。
+      const statusLimit = Math.min(Math.max(threads.value.length + pinnedCount, PAGE_SIZE), 500)
+      const fetchedThreads = await threadApi.getThreads(agentId, statusLimit, 0)
+      if (!fetchedThreads) return
+      const statusById = new Map(fetchedThreads.map((thread) => [thread.id, thread.thread_status]))
+      threads.value = threads.value.map((thread) => {
+        const latestStatus = statusById.get(thread.id)
+        if (!latestStatus) return thread
+        return { ...thread, thread_status: latestStatus }
+      })
+    } catch (error) {
+      console.warn('Failed to sync thread statuses:', error)
+    }
   }
 
   const loadThreads = async (agentId = null) => {
@@ -133,8 +177,12 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     currentThread,
     hasMoreThreads,
     isLoadingMoreThreads,
+    reset,
     setCurrentThreadId,
     upsertThread,
+    setThreadStatus,
+    markThreadViewed,
+    syncThreadStatuses,
     loadThreads,
     loadMoreThreads,
     createThread,

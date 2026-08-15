@@ -3,15 +3,17 @@
 统一封装 OIDC 配置、工具能力和认证业务处理逻辑
 """
 
+import asyncio
 import hashlib
+import json
 import os
 import secrets
-import time
 import urllib.parse
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+import jwt
 from fastapi import HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
@@ -20,8 +22,10 @@ from sqlalchemy.exc import IntegrityError
 from yuxi.permissions.authorization import build_authorization_context
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.operation_log_service import log_operation
+from yuxi.services.user_identity_service import build_unique_external_username, resolve_external_department
 from yuxi.services.user_role_service import serialize_user
-from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, Department, User
+from yuxi.storage.postgres.models_business import Department, User
+from yuxi.storage.redis import get_async_redis_client
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.logging_config import logger
@@ -30,6 +34,69 @@ from yuxi.utils.logging_config import logger
 FRONTEND_CALLBACK_PATH = "/auth/oidc/callback"
 # 登录页路径
 FRONTEND_LOGIN_PATH = "/login"
+LOCAL_OIDC_HOSTS = {"localhost", "127.0.0.1", "::1", "host.docker.internal"}
+
+
+def is_allowed_oidc_endpoint(url: str, issuer_url: str) -> bool:
+    """仅允许 HTTPS OIDC 端点，开发环境可使用本机 HTTP Provider。"""
+    try:
+        endpoint = urllib.parse.urlsplit(url)
+        issuer = urllib.parse.urlsplit(issuer_url)
+    except ValueError:
+        return False
+
+    if not endpoint.hostname or endpoint.username or endpoint.password:
+        return False
+    if endpoint.scheme == "https":
+        return True
+
+    environment = os.environ.get("YUXI_ENV", "development").strip().lower()
+    return (
+        environment == "development"
+        and endpoint.scheme == "http"
+        and endpoint.hostname in LOCAL_OIDC_HOSTS
+        and issuer.scheme == "http"
+        and issuer.hostname in LOCAL_OIDC_HOSTS
+    )
+
+
+def get_embed_allowed_origins() -> list[str]:
+    """读取并规范化允许承载 Yuxi iframe 的 OA origin。"""
+    values = os.environ.get("YUXI_EMBED_ALLOWED_ORIGINS", "").replace(",", " ").split()
+    origins = []
+    for value in values:
+        try:
+            parsed = urllib.parse.urlsplit(value)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            logger.warning(f"Ignoring invalid YUXI_EMBED_ALLOWED_ORIGINS entry: {value}")
+            continue
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        uses_default_port = (parsed.scheme == "http" and port == 80) or (parsed.scheme == "https" and port == 443)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not hostname
+            or parsed.username
+            or parsed.password
+            or uses_default_port
+            or value != origin
+        ):
+            logger.warning(f"Ignoring invalid YUXI_EMBED_ALLOWED_ORIGINS entry: {value}")
+            continue
+        origins.append(origin)
+    return list(dict.fromkeys(origins))
+
+
+def build_oidc_callback_redirect(exchange_code: str, redirect_path: str) -> str:
+    """把登录 code 交给白名单 OA 回调，否则回到 Yuxi 自身回调页。"""
+    parsed = urllib.parse.urlsplit(redirect_path)
+    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+    if origin in get_embed_allowed_origins():
+        query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        query.append(("code", exchange_code))
+        return urllib.parse.urlunsplit(parsed._replace(query=urllib.parse.urlencode(query), fragment=""))
+    return f"{FRONTEND_CALLBACK_PATH}?{urlencode({'code': exchange_code})}"
 
 
 class OIDCConfig(BaseModel):
@@ -44,6 +111,7 @@ class OIDCConfig(BaseModel):
     token_endpoint: str = Field(default="", description="Token 端点 URL")
     userinfo_endpoint: str = Field(default="", description="UserInfo 端点 URL")
     end_session_endpoint: str = Field(default="", description="登出端点 URL")
+    jwks_uri: str = Field(default="", description="OIDC Provider 的签名密钥地址")
     provider_name: str = Field(default="OIDC登录", description="认证源名称，显示在登录按钮上的文字")
     scopes: str = Field(default="openid profile email", description="请求的 scope")
     auto_create_user: bool = Field(default=True, description="是否自动创建用户")
@@ -78,6 +146,7 @@ class OIDCConfig(BaseModel):
             token_endpoint=_env("OIDC_TOKEN_ENDPOINT"),
             userinfo_endpoint=_env("OIDC_USERINFO_ENDPOINT"),
             end_session_endpoint=_env("OIDC_END_SESSION_ENDPOINT"),
+            jwks_uri=_env("OIDC_JWKS_URI"),
             scopes=_env("OIDC_SCOPES", "openid profile email"),
             auto_create_user=os.environ.get("OIDC_AUTO_CREATE_USER", "true").lower() == "true",
             username_claim=_env("OIDC_USERNAME_CLAIM", "preferred_username"),
@@ -93,15 +162,28 @@ class OIDCConfig(BaseModel):
         """检查登录链接生成所需配置是否完整"""
         if not self.enabled:
             return False
-        # 生成登录链接只要求 client_id + (issuer_url 或 authorization_endpoint)
-        return bool(self.client_id and (self.issuer_url or self.authorization_endpoint))
+        if self.authorization_endpoint:
+            required_endpoints = {
+                "authorization_endpoint": self.authorization_endpoint,
+                "token_endpoint": self.token_endpoint,
+                "userinfo_endpoint": self.userinfo_endpoint,
+                "jwks_uri": self.jwks_uri,
+            }
+            return bool(
+                self.client_id
+                and self.issuer_url
+                and all(required_endpoints.values())
+                and all(is_allowed_oidc_endpoint(url, self.issuer_url) for url in required_endpoints.values())
+                and (
+                    not self.end_session_endpoint
+                    or is_allowed_oidc_endpoint(self.end_session_endpoint, self.issuer_url)
+                )
+            )
+        return bool(self.client_id and self.issuer_url and is_allowed_oidc_endpoint(self.issuer_url, self.issuer_url))
 
     def is_token_exchange_configured(self) -> bool:
         """检查授权码换 token 所需配置是否完整"""
-        if not self.enabled:
-            return False
-        # 回调换 token 需要 client_id + client_secret + (issuer_url 或 token_endpoint)
-        return bool(self.client_id and self.client_secret and (self.issuer_url or self.token_endpoint))
+        return self.is_configured() and bool(self.client_secret)
 
 
 oidc_config = OIDCConfig.from_env()
@@ -111,17 +193,20 @@ class OIDCProviderMetadata:
     """OIDC Provider 元数据"""
 
     def __init__(self):
+        self.issuer: str | None = None
         self.authorization_endpoint: str | None = None
         self.token_endpoint: str | None = None
         self.userinfo_endpoint: str | None = None
         self.end_session_endpoint: str | None = None
+        self.jwks_uri: str | None = None
+        self.id_token_signing_alg_values_supported: list[str] = []
         self.last_error: str | None = None
-        self._loaded = False
 
     async def load(self, issuer_url: str) -> bool:
         """从 discovery 端点加载元数据"""
-        if self._loaded:
-            return True
+        if not is_allowed_oidc_endpoint(issuer_url, issuer_url):
+            self.last_error = "OIDC issuer 必须使用 HTTPS，仅开发环境本机允许 HTTP"
+            return False
 
         discovery_url = f"{issuer_url.rstrip('/')}/.well-known/openid-configuration"
         try:
@@ -130,18 +215,43 @@ class OIDCProviderMetadata:
                 response.raise_for_status()
                 metadata = response.json()
 
+            expected_issuer = issuer_url.rstrip("/")
+            self.issuer = metadata.get("issuer")
+            if self.issuer != expected_issuer:
+                self.last_error = "discovery 响应的 issuer 与配置不一致"
+                logger.error(f"Failed to load OIDC discovery: {self.last_error}, url={discovery_url}")
+                return False
             self.authorization_endpoint = metadata.get("authorization_endpoint")
             self.token_endpoint = metadata.get("token_endpoint")
             self.userinfo_endpoint = metadata.get("userinfo_endpoint")
             self.end_session_endpoint = metadata.get("end_session_endpoint")
+            self.jwks_uri = metadata.get("jwks_uri")
+            self.id_token_signing_alg_values_supported = metadata.get("id_token_signing_alg_values_supported", [])
 
-            # 登录 URL 生成至少需要 authorization_endpoint。
-            if not self.authorization_endpoint:
-                self.last_error = "discovery 响应缺少 authorization_endpoint"
+            required_fields = {
+                "authorization_endpoint": self.authorization_endpoint,
+                "token_endpoint": self.token_endpoint,
+                "userinfo_endpoint": self.userinfo_endpoint,
+                "jwks_uri": self.jwks_uri,
+            }
+            missing_fields = [name for name, value in required_fields.items() if not value]
+            if missing_fields:
+                self.last_error = f"discovery 响应缺少 {', '.join(missing_fields)}"
                 logger.error(f"Failed to load OIDC discovery: {self.last_error}, url={discovery_url}")
                 return False
 
-            self._loaded = True
+            insecure_fields = [
+                name
+                for name, value in required_fields.items()
+                if value and not is_allowed_oidc_endpoint(value, expected_issuer)
+            ]
+            if self.end_session_endpoint and not is_allowed_oidc_endpoint(self.end_session_endpoint, expected_issuer):
+                insecure_fields.append("end_session_endpoint")
+            if insecure_fields:
+                self.last_error = f"discovery 响应包含不安全端点 {', '.join(insecure_fields)}"
+                logger.error(f"Failed to load OIDC discovery: {self.last_error}, url={discovery_url}")
+                return False
+
             self.last_error = None
             logger.info(f"OIDC discovery loaded from {discovery_url}")
             return True
@@ -156,25 +266,11 @@ class OIDCUtils:
     """OIDC 工具类"""
 
     _metadata: OIDCProviderMetadata | None = None
-    _state_store: dict[str, dict[str, Any]] = {}
-    _login_code_store: dict[str, dict[str, Any]] = {}
+    _jwks_client: jwt.PyJWKClient | None = None
+    _jwks_client_uri: str | None = None
     _state_ttl_seconds = 300
     _login_code_ttl_seconds = 60
     _last_metadata_error: str | None = None
-
-    @classmethod
-    def _cleanup_expired_state(cls) -> None:
-        now = time.time()
-        expired = [k for k, v in cls._state_store.items() if v["expires_at"] <= now]
-        for key in expired:
-            cls._state_store.pop(key, None)
-
-    @classmethod
-    def _cleanup_expired_login_code(cls) -> None:
-        now = time.time()
-        expired = [k for k, v in cls._login_code_store.items() if v["expires_at"] <= now]
-        for key in expired:
-            cls._login_code_store.pop(key, None)
 
     @classmethod
     async def get_metadata(cls) -> OIDCProviderMetadata | None:
@@ -184,20 +280,23 @@ class OIDCUtils:
             return None
 
         if cls._metadata is None:
-            cls._metadata = OIDCProviderMetadata()
+            metadata = OIDCProviderMetadata()
 
             if oidc_config.authorization_endpoint:
-                cls._metadata.authorization_endpoint = oidc_config.authorization_endpoint
-                cls._metadata.token_endpoint = oidc_config.token_endpoint
-                cls._metadata.userinfo_endpoint = oidc_config.userinfo_endpoint
-                cls._metadata.end_session_endpoint = oidc_config.end_session_endpoint
-                cls._metadata._loaded = True
+                metadata.issuer = oidc_config.issuer_url.rstrip("/") or None
+                metadata.authorization_endpoint = oidc_config.authorization_endpoint
+                metadata.token_endpoint = oidc_config.token_endpoint
+                metadata.userinfo_endpoint = oidc_config.userinfo_endpoint
+                metadata.end_session_endpoint = oidc_config.end_session_endpoint
+                metadata.jwks_uri = oidc_config.jwks_uri or None
+                metadata.id_token_signing_alg_values_supported = ["RS256"]
                 cls._last_metadata_error = None
             else:
-                success = await cls._metadata.load(oidc_config.issuer_url)
+                success = await metadata.load(oidc_config.issuer_url)
                 if not success:
-                    cls._last_metadata_error = cls._metadata.last_error or "OIDC discovery 加载失败"
+                    cls._last_metadata_error = metadata.last_error or "OIDC discovery 加载失败"
                     return None
+            cls._metadata = metadata
 
         if not cls._metadata.authorization_endpoint:
             cls._last_metadata_error = "OIDC 授权端点不可用"
@@ -213,51 +312,78 @@ class OIDCUtils:
         return cls._last_metadata_error
 
     @classmethod
-    def generate_state(cls, redirect_path: str = "/") -> str:
-        """生成 state 参数并存储"""
-        cls._cleanup_expired_state()
+    async def generate_state(cls, redirect_path: str, nonce: str) -> str:
+        """生成包含重定向路径和 nonce 的一次性 state。"""
         state = secrets.token_urlsafe(32)
-        cls._state_store[state] = {
-            "redirect_path": redirect_path,
-            "expires_at": time.time() + cls._state_ttl_seconds,
-        }
+        redis = await get_async_redis_client()
+        await redis.set(
+            f"oidc:state:{state}",
+            json.dumps({"redirect_path": redirect_path, "nonce": nonce}),
+            ex=cls._state_ttl_seconds,
+        )
         return state
 
     @classmethod
-    def verify_state(cls, state: str) -> dict[str, Any] | None:
-        """验证 state 参数"""
-        state_data = cls._state_store.pop(state, None)
-        if not state_data:
-            return None
-        if state_data["expires_at"] <= time.time():
-            return None
-        return {"redirect_path": state_data["redirect_path"]}
+    async def verify_state(cls, state: str) -> dict[str, Any] | None:
+        """原子消费 state 并返回本次授权请求上下文。"""
+        redis = await get_async_redis_client()
+        state_data = await redis.getdel(f"oidc:state:{state}")
+        return json.loads(state_data) if state_data else None
 
     @classmethod
-    def generate_login_code(cls, payload: dict[str, Any]) -> str:
-        """生成一次性短期登录 code"""
-        cls._cleanup_expired_login_code()
+    async def generate_login_code(cls, payload: dict[str, Any]) -> str:
+        """生成存入 Redis 的一次性短期登录 code。"""
         code = secrets.token_urlsafe(32)
-        cls._login_code_store[code] = {
-            "payload": payload,
-            "expires_at": time.time() + cls._login_code_ttl_seconds,
-        }
+        redis = await get_async_redis_client()
+        await redis.set(f"oidc:logincode:{code}", json.dumps(payload), ex=cls._login_code_ttl_seconds)
         return code
 
     @classmethod
-    def consume_login_code(cls, code: str) -> dict[str, Any] | None:
-        """消费一次性短期登录 code"""
-        data = cls._login_code_store.pop(code, None)
-        if not data:
-            return None
-        if data["expires_at"] <= time.time():
-            return None
-        return data["payload"]
+    async def consume_login_code(cls, code: str) -> dict[str, Any] | None:
+        """原子消费一次性短期登录 code。"""
+        redis = await get_async_redis_client()
+        payload = await redis.getdel(f"oidc:logincode:{code}")
+        return json.loads(payload) if payload else None
 
     @classmethod
     def generate_nonce(cls) -> str:
         """生成 nonce 参数"""
         return secrets.token_urlsafe(32)
+
+    @classmethod
+    async def verify_id_token(cls, id_token: str, expected_nonce: str) -> dict[str, Any]:
+        """校验 Provider 签发的 id_token 并返回可信 claims。"""
+        metadata = await cls.get_metadata()
+        if not metadata or not metadata.issuer or not metadata.jwks_uri:
+            raise jwt.InvalidTokenError("OIDC metadata missing issuer or jwks_uri")
+        if not is_allowed_oidc_endpoint(metadata.jwks_uri, metadata.issuer):
+            raise jwt.InvalidTokenError("OIDC jwks_uri must use HTTPS")
+
+        if cls._jwks_client is None or cls._jwks_client_uri != metadata.jwks_uri:
+            cls._jwks_client = jwt.PyJWKClient(metadata.jwks_uri, cache_jwk_set=True, lifespan=300)
+            cls._jwks_client_uri = metadata.jwks_uri
+
+        signing_key = await asyncio.to_thread(cls._jwks_client.get_signing_key_from_jwt, id_token)
+        claims = jwt.decode(
+            id_token,
+            signing_key.key,
+            algorithms=metadata.id_token_signing_alg_values_supported or ["RS256"],
+            audience=oidc_config.client_id,
+            issuer=metadata.issuer,
+            options={"require": ["exp", "iat", "iss", "aud", "sub", "nonce"]},
+        )
+
+        audience = claims["aud"]
+        authorized_party = claims.get("azp")
+        if authorized_party is not None and authorized_party != oidc_config.client_id:
+            raise jwt.InvalidTokenError("OIDC authorized party mismatch")
+        if isinstance(audience, list) and len(audience) > 1 and authorized_party != oidc_config.client_id:
+            raise jwt.InvalidTokenError("OIDC authorized party missing for multiple audiences")
+
+        token_nonce = str(claims.get("nonce", ""))
+        if not token_nonce or not secrets.compare_digest(token_nonce, expected_nonce):
+            raise jwt.InvalidTokenError("OIDC nonce mismatch")
+        return claims
 
     @classmethod
     async def build_authorization_url(cls, redirect_path: str = "/") -> str | None:
@@ -266,8 +392,8 @@ class OIDCUtils:
         if not metadata or not metadata.authorization_endpoint:
             return None
 
-        state = cls.generate_state(redirect_path)
         nonce = cls.generate_nonce()
+        state = await cls.generate_state(redirect_path, nonce)
 
         redirect_uri = oidc_config.redirect_uri
         if not redirect_uri:
@@ -397,26 +523,6 @@ class OIDCUtils:
         }
 
 
-async def resolve_oidc_department(db, department_claim: Any) -> Department:
-    """按 OIDC 部门 claim 精确匹配已有组织节点，无法唯一定位时回落集团根。"""
-    matched = []
-    if isinstance(department_claim, str):
-        result = await db.execute(select(Department).where(Department.name == department_claim))
-        matched = list(result.scalars().all())
-
-    if len(matched) == 1:
-        logger.info(f"Using existing department: {department_claim}")
-        return matched[0]
-
-    logger.warning(
-        f"Department claim {department_claim!r} matched {len(matched)} org nodes, falling back to group root"
-    )
-    group_root = await db.get(Department, ROOT_DEPARTMENT_ID)
-    if group_root is None:
-        raise RuntimeError("集团根组织节点不存在")
-    return group_root
-
-
 async def find_user_by_oidc_sub(db, sub: str) -> User | None:
     """通过 OIDC sub 查找用户"""
     # 方法1: 检查是否有用户的 uid 直接等于 "oidc:{sub}"（标准 OIDC 用户）
@@ -536,34 +642,6 @@ async def _create_oidc_binding_placeholder(db, sub: str, target_user: User) -> N
         logger.info(f"OIDC binding placeholder already exists for sub {sub}")
 
 
-async def build_unique_oidc_username(db, preferred_username: str, sub: str) -> str:
-    """为 OIDC 用户生成不冲突的用户名"""
-    base_username = preferred_username.strip() if preferred_username else ""
-    if not base_username:
-        base_username = f"oidc_{sub[:8]}"
-
-    result = await db.execute(select(User.id).filter(User.username == base_username))
-    if result.scalar_one_or_none() is None:
-        return base_username
-
-    hash_suffix = hashlib.sha256(sub.encode()).hexdigest()[:6]
-    candidate = f"{base_username}-{hash_suffix}"
-    result = await db.execute(select(User.id).filter(User.username == candidate))
-    if result.scalar_one_or_none() is None:
-        return candidate
-
-    for i in range(2, 100):
-        indexed_candidate = f"{candidate}-{i}"
-        result = await db.execute(select(User.id).filter(User.username == indexed_candidate))
-        if result.scalar_one_or_none() is None:
-            return indexed_candidate
-
-    raise HTTPException(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail="无法生成可用用户名，请联系管理员",
-    )
-
-
 async def create_oidc_user(db, user_info: dict, department_id: int | None = None) -> User:
     """创建 OIDC 用户"""
     user_repo = UserRepository()
@@ -605,7 +683,7 @@ async def create_oidc_user(db, user_info: dict, department_id: int | None = None
     random_password = secrets.token_urlsafe(32)
     password_hash = AuthUtils.hash_password(random_password)
 
-    username = await build_unique_oidc_username(db, preferred_username, sub)
+    username = await build_unique_external_username(db, preferred_username, sub)
 
     for retry_index in range(3):
         try:
@@ -631,7 +709,7 @@ async def create_oidc_user(db, user_info: dict, department_id: int | None = None
             existing_user = await find_user_by_oidc_sub(db, sub)
             if existing_user:
                 return existing_user
-            username = await build_unique_oidc_username(db, f"{preferred_username}-{retry_index + 2}", sub)
+            username = await build_unique_external_username(db, f"{preferred_username}-{retry_index + 2}", sub)
 
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -656,7 +734,7 @@ async def restore_deleted_oidc_user(
     deleted_user.avatar = None
 
     if deleted_user.username.startswith("已注销用户-"):
-        deleted_user.username = await build_unique_oidc_username(db, preferred_username, user_info["sub"])
+        deleted_user.username = await build_unique_external_username(db, preferred_username, user_info["sub"])
 
     if deleted_user.password_hash == "DELETED":
         random_password = secrets.token_urlsafe(32)
@@ -676,10 +754,9 @@ async def update_oidc_user_login(db, user: User, department_id: int | None = Non
     await db.commit()
 
 
-def _redirect_to_callback(exchange_code: str) -> RedirectResponse:
-    """成功后重定向到前端 OIDC 回调页面，仅携带一次性 code"""
-    url = f"{FRONTEND_CALLBACK_PATH}?{urlencode({'code': exchange_code})}"
-    return RedirectResponse(url=url, status_code=302)
+def _redirect_to_callback(exchange_code: str, redirect_path: str) -> RedirectResponse:
+    """成功后把一次性 code 重定向到 Yuxi 或白名单 OA 回调页。"""
+    return RedirectResponse(url=build_oidc_callback_redirect(exchange_code, redirect_path), status_code=302)
 
 
 def _redirect_to_login_with_error(error_message: str) -> RedirectResponse:
@@ -703,7 +780,8 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
     if not oidc_config.is_token_exchange_configured():
         return _redirect_to_login_with_error("OIDC 配置不完整，请联系管理员")
 
-    if not OIDCUtils.verify_state(state):
+    state_data = await OIDCUtils.verify_state(state)
+    if not state_data:
         return _redirect_to_login_with_error("登录会话已过期，请返回登录页重试")
 
     token_response = await OIDCUtils.exchange_code_for_token(code)
@@ -714,11 +792,26 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
     if not access_token:
         return _redirect_to_login_with_error("无法获取访问令牌，请返回登录页重试")
 
+    id_token = token_response.get("id_token")
+    if not id_token:
+        return _redirect_to_login_with_error("OIDC身份令牌缺失，请返回登录页重试")
+
+    try:
+        id_token_claims = await OIDCUtils.verify_id_token(id_token, state_data["nonce"])
+    except (jwt.PyJWTError, KeyError, ValueError) as exc:
+        logger.warning(f"OIDC id_token validation failed: {type(exc).__name__}")
+        return _redirect_to_login_with_error("OIDC身份令牌校验失败，请返回登录页重试")
+
     userinfo = await OIDCUtils.get_userinfo(access_token)
     if not userinfo:
         return _redirect_to_login_with_error("无法获取用户信息，请返回登录页重试")
 
-    extracted_info = OIDCUtils.extract_user_info(userinfo)
+    if userinfo.get("sub") != id_token_claims["sub"]:
+        logger.warning("OIDC userinfo subject does not match validated id_token subject")
+        return _redirect_to_login_with_error("OIDC用户标识不一致，请返回登录页重试")
+
+    identity_claims = {**id_token_claims, **userinfo, "sub": id_token_claims["sub"]}
+    extracted_info = OIDCUtils.extract_user_info(identity_claims)
     sub = extracted_info["sub"]
 
     if not sub:
@@ -775,12 +868,12 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
     if user:
         department_id = None
         if oidc_config.fetch_department_info:
-            department = await resolve_oidc_department(db, extracted_info.get("department_name"))
+            department = await resolve_external_department(db, extracted_info.get("department_name"))
             department_id = department.id
         await update_oidc_user_login(db, user, department_id)
         logger.info(f"OIDC user logged in: {user.username}")
     elif oidc_config.auto_create_user:
-        department = await resolve_oidc_department(db, extracted_info.get("department_name"))
+        department = await resolve_external_department(db, extracted_info.get("department_name"))
         deleted_user = await find_deleted_oidc_user_by_sub(db, sub)
         if deleted_user:
             user = await restore_deleted_oidc_user(db, deleted_user, extracted_info, department.id)
@@ -815,13 +908,13 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
         "effective_permissions": list(build_authorization_context(user).effective_permissions),
     }
 
-    exchange_code = OIDCUtils.generate_login_code(response_data)
-    return _redirect_to_callback(exchange_code)
+    exchange_code = await OIDCUtils.generate_login_code(response_data)
+    return _redirect_to_callback(exchange_code, state_data["redirect_path"])
 
 
 async def oidc_exchange_code_handler(code: str) -> dict:
     """用一次性 code 交换登录响应数据"""
-    token_data = OIDCUtils.consume_login_code(code)
+    token_data = await OIDCUtils.consume_login_code(code)
     if not token_data:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

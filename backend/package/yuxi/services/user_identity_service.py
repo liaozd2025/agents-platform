@@ -1,7 +1,12 @@
+import hashlib
 import re
 import time
 
+from fastapi import HTTPException, status
 from pypinyin import Style, lazy_pinyin
+from sqlalchemy import select
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, Department, User
+from yuxi.utils.logging_config import logger
 
 
 def to_pinyin(text: str) -> str:
@@ -57,3 +62,51 @@ def normalize_phone_number(phone: str) -> str:
     if len(phone) == 11 and phone.startswith("1"):
         return phone
     return phone
+
+
+async def resolve_external_department(db, department_name: str | None) -> Department:
+    """按外部身份部门名精确匹配已有组织节点，无法唯一定位时回落集团根。"""
+
+    normalized_name = department_name.strip() if isinstance(department_name, str) else None
+    matched = []
+    if normalized_name:
+        result = await db.execute(select(Department).where(Department.name == normalized_name))
+        matched = list(result.scalars().all())
+
+    if len(matched) == 1:
+        logger.info(f"Using existing department: {normalized_name}")
+        return matched[0]
+
+    logger.warning(f"Department claim {department_name!r} matched {len(matched)} org nodes, falling back to group root")
+    group_root = await db.get(Department, ROOT_DEPARTMENT_ID)
+    if group_root is None:
+        raise RuntimeError("集团根组织节点不存在")
+    return group_root
+
+
+async def build_unique_external_username(db, preferred_username: str, external_id: str) -> str:
+    """为外部身份生成不冲突的显示用户名。"""
+    base_username = preferred_username.strip() if preferred_username else ""
+    if not base_username:
+        base_username = f"external_{external_id[:8]}"
+
+    result = await db.execute(select(User.id).filter(User.username == base_username))
+    if result.scalar_one_or_none() is None:
+        return base_username
+
+    hash_suffix = hashlib.sha256(external_id.encode()).hexdigest()[:6]
+    candidate = f"{base_username}-{hash_suffix}"
+    result = await db.execute(select(User.id).filter(User.username == candidate))
+    if result.scalar_one_or_none() is None:
+        return candidate
+
+    for index in range(2, 100):
+        indexed_candidate = f"{candidate}-{index}"
+        result = await db.execute(select(User.id).filter(User.username == indexed_candidate))
+        if result.scalar_one_or_none() is None:
+            return indexed_candidate
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail="无法生成可用用户名，请联系管理员",
+    )

@@ -10,6 +10,9 @@
 1. 升级到 v0.7.2 后，管理员此前创建的 stdio MCP 会被禁用，也无法重新启用。请在详情页迁移为 SSE 或 Streamable HTTP，或直接删除；代码内置的系统 stdio MCP 不受影响。
 :::
 
+- 完善 Agent Token 用量统计：state 同时保留近似上下文与主 Agent 模型返回的 Provider `usage_metadata`，实际用量拆分为最近调用、当前 Run 和线程累计；前端只读取 state，终态 chunk 不传递用量，worker 在 Run 终态时将父线程中 Run ID 匹配的 state 快照写入 AgentRun。支持 OpenAI priority/flex 缓存明细；L2 摘要内部调用暂未计入完整账单口径。
+- 修复公开图片上传的存储型 XSS 风险：头像与用户图片不再信任客户端 MIME 或文件名后缀，服务端校验真实图片内容且仅接受 PNG、JPEG、WebP、GIF，对象名使用识别出的固定安全后缀，拒绝伪装成图片的 SVG。
+- 新增 OA iframe S0 接入：提供精确 origin 的 token 握手与固定、浮窗、全屏、关闭模式；固定/浮窗仅显示对话，全屏复用 PC 侧边栏，智能体、工作区、知识库与技能在 iframe 右侧切换。九典 OA 通过现有 token 交换 Yuxi 登录态，不保存 OA token；OIDC 仅为可选身份源。
 
 - 系统设置由居中弹窗升级为无过渡动画的全屏路由设置中心：各菜单拥有独立 `/settings/*` 地址，支持直接访问、前进后退和返回原页面；桌面端采用分组侧栏与设置搜索，移动端使用顶部返回栏与横向导航，并保留原有权限。
 - 新增“角色与权限”管理：角色页采用可搜索筛选的总览和独立详情，功能权限按服务端菜单与操作层级展示并联动编辑，成员支持检索、分页与导出；内置角色受保护，自定义角色可创建、复制、修改、停用，变更保留审计。用户支持多角色与范围收窄，`superadmin` 独占；非超管仅可在有效授权边界内转授。新用户默认绑定 `user`，旧 `users.role` 自动迁移。
@@ -25,7 +28,7 @@
 - 修复 Agent worker 知识库运行配置不一致：`get_kb_config` 从 Redis 读取最小 Config 快照，未命中时在 KB 级分布式锁内回源 PostgreSQL，Redis 连接故障时只读请求直接回源且不回填；更新与删除先可靠失效缓存再提交数据库，避免旧请求回填过期配置。查询参数在数据库行锁内合并，并发保存不再互相覆盖。
 - 精简知识库文档内容接口响应：`GET /api/knowledge/databases/{kb_id}/documents/{doc_id}/content` 不再返回分块内部的实体 ID 与抽取结果，避免向文档预览请求传输仅供知识图谱构建使用的数据。
 - 清理未使用的共享访问级别常量模块，移除 Agent、Skill 与知识库中的冗余导入和别名；共享范围校验继续由统一权限模块负责。
-- 统一 Agent、Skill 与知识库共享权限：配置拆分读取/管理范围并统一解析 `none/read/manage`；启动时将旧 `share_config` 幂等迁移为 v2 且只回填只读范围、不追溯授予管理权，运行时代码仅接受 v2；资源创建者保留管理权，其他用户含超管均须命中共享范围。Agent 共享范围由 `agent:manage` 控制，不再按旧角色收窄；具体资源管理仍需满足共享范围。Skill 查看、个人安装及运行时加载使用 `skill:use`，共享安装与管理使用 `skill:manage`，具体 Skill 仍需满足共享范围；依赖范围按组织祖先路径判断，父级可覆盖后代但不命中兄弟子树。知识库路由统一按 READ/MANAGE ACL 校验，配置弹窗按基础信息、权限、检索分栏，非检索保存不再覆盖检索参数，编辑表单不再残留已移除的“自动生成问题”开关；用户编辑不允许修改角色身份。同步修复 Agent/Skill `share_config` 列实际类型为 `json` 而非预期 `jsonb` 导致迁移语句报错、后端无法启动的问题。
+- 统一 Agent、Skill 与知识库共享权限：配置拆分读取/管理范围并统一解析 `none/read/manage`；启动时将旧 `share_config` 幂等迁移为 v2 且只回填只读范围、不追溯授予管理权，运行时代码仅接受 v2；资源创建者保留管理权，其他用户含超管均须命中共享范围。Agent 共享范围由 `agent:manage` 控制，不再按旧角色收窄；具体资源管理仍需满足共享范围。Skill 查看、个人安装及运行时加载使用 `skill:use`，共享安装与管理使用 `skill:manage`，具体 Skill 仍需满足共享范围；依赖范围按组织祖先路径判断，父级可覆盖后代但不命中兄弟子树。知识库路由统一按 READ/MANAGE ACL 校验，配置弹窗按基础信息、权限、检索分栏，非检索保存不再覆盖检索参数，编辑表单不再残留已移除的“自动生成问题”开关；用户编辑不允许修改角色身份。同步修复 Agent/Skill `share_config` 列实际类型为 `json` 而非预期 `jsonb` 导致迁移语句报错、后端无法启动，以及内置 Skill 初次同步仍写入旧格式的问题。
 - 收敛消息型 AgentRun 提交：Web Chat 与 Agent Call/Eval 共用 `run_submission_service.submit_run_command`，Call/Eval 拆为独立 Router；Request/Run 固化 `source/channel/external_id/origin_metadata` 来源快照，Eval 评估上下文继续透传到 worker 与 Langfuse，保留现有接口与响应兼容性，Resume、Subagent 生命周期不变。
 - 新增个人工作区 Skill：安装确认可选择个人或共享位置；个人 Skill 保存到 `workspace/agents/skills` 且不入库，元数据按用户缓存 5 分钟并在安装、删除、手动刷新后立即更新；Card List 与 Agent 运行时统一按个人版本覆盖同名共享版本，卡片与聊天技能选择列表共用 slug 到 Lucide 图标映射；Agent 直接读取工作区真实路径，不再复制到线程 `/home/gem/skills` 投影；共享 Skill 投影统一以来源映射为单一数据源。
 - 统一后端真实路径根目录校验：Skill、工作区和沙盒复用 `ensure_within_root`，保持原有越界拒绝语义并减少重复安全判断。
@@ -58,6 +61,9 @@
 - 收敛 Ruff CI 行为：Pull Request 与 push 到 main 均只检查、不修改仓库内容，发现问题直接标红并提示本地运行 `make format`；工作流仅保留 `contents: read` 权限，不再自动提交或创建修复 PR。
 - 优化知识库详情页自动轮询：轮询从固定 1s `setInterval` 改为链式调度，等上一轮知识库信息与文件列表请求全部返回后再排下一轮，慢接口下不再出现请求堆积重叠；全库 `processing_count` 持续不变时按退避因子拉长间隔（上限 30s），连续多轮无进展即自动停止轮询；离开详情页时 `onUnmounted` 主动清理定时器。
 - 统一工具调用展示名称映射：知识库工具显示名改为后端 `display_name` 定义，前端拉取完整工具元数据；工具卡片与折叠摘要按「工具列表 display name → middleware 兜底映射 → 工具 id」统一展示。
+- 侧边栏对话列表新增 Thread 运行状态：以 `AgentRun` 为事实来源，后端把每个线程最新顶层 chat/resume Run 聚合成 `thread_status`（进行中显示 loading、已终态未查看显示 ready 点、已查看或无 Run 为 done），列表接口一次窗口查询完成聚合、不逐项请求；`Conversation` 新增 `last_viewed_run_id` 持久化查看边界，`POST /api/chat/thread/{id}/viewed` 幂等标记已读。前端打开线程、当前线程收到终态/中断事件时自动标记已读，发送或恢复 Run 时置为 loading，侧边栏可见时低频轮询刷新后台线程状态；历史线程上线时按各自最新顶层 Run 一次性回填为已读，新建线程写入未读哨兵避免回填误清新产生的未读点。
+- 修复 Thread 运行状态两个正确性问题：终态/中断事件仅在事件线程等于当前打开线程时才自动标记已读，后台线程完成保留 ready 点直至用户打开；无 chat/resume Run 的历史会话（agent_call / agent_evaluation 调用、从未对话过的线程）在回填时写入未读哨兵，使回填探测条件收敛为 false，避免每次启动都重复对 `agent_runs` 做全表聚合。
+- 优化侧边栏对话列表操作渐隐：`.actions-mask` 三态（默认/悬浮/激活）渐隐统一为线性延伸至操作按钮左边缘（距右缘 28px）再转为实色，修复悬浮时渐隐铺满整条遮罩导致按钮下方文字残留鬼影、以及三处渐隐宽度不一致的问题。
 
 
 ## v0.7.1 (2026-07-17)

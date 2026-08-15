@@ -62,7 +62,8 @@ export default defineConfig({
           { text: '品牌自定义', link: '/advanced/branding' },
           { text: '其他配置', link: '/advanced/misc' },
           { text: '生产部署', link: '/advanced/deployment' },
-          { text: 'API Key 外部集成', link: '/advanced/api-key-integration' }
+          { text: 'API Key 外部集成', link: '/advanced/api-key-integration' },
+          { text: 'OA iframe 集成', link: '/enterprise/oa-embed-integration' }
         ]
       },
       {

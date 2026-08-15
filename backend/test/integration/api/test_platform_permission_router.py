@@ -7,7 +7,6 @@ import uuid
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select
-
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
     ROOT_DEPARTMENT_ID,

@@ -1,39 +1,14 @@
 import re
-from yuxi.utils import logger
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status, UploadFile, File
-from fastapi.security import OAuth2PasswordRequestForm
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, User, Department
-from yuxi.repositories.user_repository import UserRepository
-from yuxi.repositories.department_repository import DepartmentRepository
-from server.utils.auth_middleware import (
-    get_authorization_context,
-    get_db,
-    get_required_user,
-    require_permission,
-)
 from yuxi.permissions.authorization import AuthorizationContext, build_authorization_context
-from yuxi.services.user_management_service import (
-    department_is_accessible,
-    get_authorized_user,
-    list_authorized_users,
-)
-from yuxi.utils.auth_utils import AuthUtils
-from yuxi.services.user_identity_service import generate_unique_uid, validate_username, is_valid_phone_number
-from yuxi.services.operation_log_service import log_operation
-from yuxi.services.user_role_service import (
-    UserRoleAuthorizationError,
-    UserRoleConflictError,
-    has_active_role,
-    replace_user_role_assignments,
-    serialize_user,
-)
+from yuxi.repositories.department_repository import DepartmentRepository
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.auth_service import (
     CLI_AUTH_POLL_INTERVAL_SECONDS,
     CLI_AUTH_SESSION_TTL_SECONDS,
@@ -43,8 +18,7 @@ from yuxi.services.auth_service import (
     exchange_cli_auth_token,
     get_cli_auth_session_for_user,
 )
-from yuxi.storage.minio import upload_image_to_minio
-from yuxi.utils.datetime_utils import utc_now_naive
+from yuxi.services.oa_sso_service import MAX_OA_TOKEN_LENGTH, exchange_oa_token_handler
 
 # OIDC 认证相关导入
 from yuxi.services.oidc_service import (
@@ -52,6 +26,33 @@ from yuxi.services.oidc_service import (
     oidc_callback_handler,
     oidc_exchange_code_handler,
     oidc_login_url_handler,
+)
+from yuxi.services.operation_log_service import log_operation
+from yuxi.services.user_identity_service import generate_unique_uid, is_valid_phone_number, validate_username
+from yuxi.services.user_management_service import (
+    department_is_accessible,
+    get_authorized_user,
+    list_authorized_users,
+)
+from yuxi.services.user_role_service import (
+    UserRoleAuthorizationError,
+    UserRoleConflictError,
+    has_active_role,
+    replace_user_role_assignments,
+    serialize_user,
+)
+from yuxi.storage.minio import upload_image_to_minio
+from yuxi.storage.postgres.manager import pg_manager
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Department, User
+from yuxi.utils import logger
+from yuxi.utils.auth_utils import AuthUtils
+from yuxi.utils.datetime_utils import utc_now_naive
+
+from server.utils.auth_middleware import (
+    get_authorization_context,
+    get_db,
+    get_required_user,
+    require_permission,
 )
 
 # 创建路由器
@@ -192,6 +193,12 @@ class OIDCLoginResponse(BaseModel):
     department_name: str | None = None
     roles: list[UserRoleResponse] = Field(default_factory=list)
     effective_permissions: list[str] = Field(default_factory=list)
+
+
+class OASSOTokenRequest(BaseModel):
+    """OA 页面下发的现有登录凭证。"""
+
+    token: str = Field(min_length=1, max_length=MAX_OA_TOKEN_LENGTH)
 
 
 class CLIAuthSessionCreate(BaseModel):
@@ -1041,6 +1048,17 @@ async def impersonate_user(
     logger.warning(f"⚠️ [危险操作] 超级管理员 {current_user.username} 模拟登录用户: {target_user.username}")
 
     return _serialize_login_response(target_user, access_token, department_name)
+
+
+# =============================================================================
+# === OA 自定义 SSO 分组 ===
+# =============================================================================
+
+
+@auth.post("/oa/exchange-token", response_model=Token)
+async def exchange_oa_token(data: OASSOTokenRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """验证 OA 现有 token 并签发 Yuxi 登录凭证。"""
+    return await exchange_oa_token_handler(data.token, db, request)
 
 
 # =============================================================================
