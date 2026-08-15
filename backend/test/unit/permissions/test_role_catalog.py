@@ -10,6 +10,7 @@ def test_role_catalog_has_stable_keys_and_complete_builtin_mappings():
 
     assert len(permission_keys) == len(set(permission_keys))
     assert all(key.count(":") == 1 for key in permission_keys)
+    assert "agent:use" not in permission_keys
     assert scope_keys == {
         "none",
         "self",
@@ -35,6 +36,7 @@ def test_role_catalog_operations_reference_menu_permissions():
     menus = {key: item for key, item in permissions.items() if item.parent_key is None}
 
     assert set(menus) >= {"dashboard:view", "user:read", "department:read", "role:read"}
+    assert permissions["agent:manage"].parent_key is None
     assert all(menu.display_order > 0 for menu in menus.values())
     assert len({menu.display_order for menu in menus.values()}) == len(menus)
     for permission in PERMISSION_CATALOG:

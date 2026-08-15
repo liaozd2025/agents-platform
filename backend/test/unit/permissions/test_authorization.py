@@ -50,11 +50,12 @@ def test_complete_assignments_are_combined_as_allow_union():
     assert context.allows("user:read", AuthorizationTarget(department_ancestor_ids=(1, 6))) is False
 
 
-def test_unassigned_permission_is_denied_by_default():
-    """未分配的功能权限默认拒绝。"""
+def test_chat_is_a_baseline_capability_and_other_permissions_default_to_deny():
+    """聊天是登录基础能力，其他未分配权限仍默认拒绝。"""
 
-    context = _context(_assignment(["agent:use"], "self"))
+    context = _context(_assignment([], "self"))
 
+    assert context.has_permission("agent:use") is True
     assert context.has_permission("role:read") is False
     assert context.allows("role:read") is False
 
@@ -67,9 +68,7 @@ def test_permission_scopes_keep_each_assignment_intact():
         _assignment(["user:read"], "all"),
     )
 
-    assert context.permission_scopes("dashboard:view") == (
-        ("selected_organizations_and_descendants", frozenset({2})),
-    )
+    assert context.permission_scopes("dashboard:view") == (("selected_organizations_and_descendants", frozenset({2})),)
 
 
 @pytest.mark.asyncio

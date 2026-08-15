@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Any
 
-from yuxi.permissions.role_catalog import ALL_PERMISSION_KEYS
+from yuxi.permissions.role_catalog import ALL_PERMISSION_KEYS, ASSIGNABLE_PERMISSION_KEYS, BASE_PERMISSION_KEYS
 
 
 def parse_department_ancestor_ids(path: str | None) -> tuple[int, ...]:
@@ -77,9 +77,9 @@ class AuthorizationContext:
 
 
 def build_authorization_context(user: Any) -> AuthorizationContext:
-    """从已加载的用户角色关系生成默认拒绝的授权上下文。"""
+    """从登录基础能力和已加载的用户角色关系生成授权上下文。"""
 
-    catalog_keys = set(ALL_PERMISSION_KEYS)
+    catalog_keys = set(ASSIGNABLE_PERMISSION_KEYS)
     assignments = []
     for assignment in user.role_assignments:
         role = assignment.role
@@ -99,7 +99,8 @@ def build_authorization_context(user: Any) -> AuthorizationContext:
             )
         )
 
-    effective_keys = {key for assignment in assignments for key in assignment.permission_keys}
+    effective_keys = set(BASE_PERMISSION_KEYS)
+    effective_keys.update(key for assignment in assignments for key in assignment.permission_keys)
     return AuthorizationContext(
         user=user,
         assignments=tuple(assignments),

@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import AppLayout from '@/layouts/AppLayout.vue'
 import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
+import { getAuthenticatedHomePath } from '@/utils/authNavigation'
 import { sanitizeRedirect } from '@/utils/oidcAutoStart'
 import { SETTINGS_ROUTES } from '@/utils/settingsNavigation'
 
@@ -206,13 +207,13 @@ router.beforeEach(async (to) => {
   }
 
   if (requiredPermissions.some((permission) => !userStore.hasPermission(permission))) {
-    return userStore.hasPermission('agent:use') ? '/agent' : '/'
+    return getAuthenticatedHomePath(userStore.hasPermission)
   }
   if (
     requiredAnyPermissions.length &&
     !requiredAnyPermissions.some((permission) => userStore.hasPermission(permission))
   ) {
-    return userStore.hasPermission('agent:use') ? '/agent' : '/'
+    return getAuthenticatedHomePath(userStore.hasPermission)
   }
 
   // 如果用户已登录但访问登录页，按 redirect 参数跳转

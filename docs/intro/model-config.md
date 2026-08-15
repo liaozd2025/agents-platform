@@ -10,7 +10,7 @@
 智能体管理 → 模型供应商
 ```
 
-模型供应商页签仅向持有 `model_provider:manage` 的账号开放；智能体页签及操作按 `agent:use`、`agent:manage` 权限开放。
+模型供应商页签仅向持有 `model_provider:manage` 的账号开放；所有登录用户均可新建会话和使用可见智能体，创建、编辑、删除及配置智能体需要 `agent:manage`。
 
 ## API 凭证配置
 

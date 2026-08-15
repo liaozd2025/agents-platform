@@ -128,8 +128,13 @@ PERMISSION_CATALOG = (
         "执行和管理知识库评估",
         "knowledge_base:read",
     ),
-    PermissionDefinition("agent:use", "智能体", "业务资源", "使用共享范围允许访问的智能体", display_order=60),
-    PermissionDefinition("agent:manage", "管理智能体", "业务资源", "管理共享范围允许维护的智能体", "agent:use"),
+    PermissionDefinition(
+        "agent:manage",
+        "智能体管理",
+        "业务资源",
+        "管理共享范围允许维护的智能体",
+        display_order=60,
+    ),
     PermissionDefinition("skill:use", "Skill", "业务资源", "使用共享范围允许访问的 Skill", display_order=70),
     PermissionDefinition("skill:manage", "管理 Skill", "业务资源", "管理共享范围允许维护的 Skill", "skill:use"),
 )
@@ -150,11 +155,13 @@ DATA_SCOPE_CATALOG = (
     DataScopeDefinition("all", "全部数据", "访问整棵组织机构树的数据"),
 )
 
-ALL_PERMISSION_KEYS = tuple(item.key for item in PERMISSION_CATALOG)
+# 新建会话是登录基础能力；保留内部标识供既有路由复用，但不允许角色配置。
+BASE_PERMISSION_KEYS = ("agent:use",)
+ASSIGNABLE_PERMISSION_KEYS = tuple(item.key for item in PERMISSION_CATALOG)
+ALL_PERMISSION_KEYS = (*BASE_PERMISSION_KEYS, *ASSIGNABLE_PERMISSION_KEYS)
 
 USER_PERMISSION_KEYS = (
     "knowledge_base:read",
-    "agent:use",
     "skill:use",
 )
 
@@ -177,7 +184,6 @@ ADMIN_PERMISSION_KEYS = (
     "knowledge_base:read",
     "knowledge_base:manage",
     "knowledge_evaluation:manage",
-    "agent:use",
     "agent:manage",
     "skill:use",
     "skill:manage",
@@ -189,7 +195,7 @@ BUILTIN_ROLES = (
         name="超级管理员",
         description="拥有全部功能权限和全部数据范围",
         default_scope_type="all",
-        permission_keys=ALL_PERMISSION_KEYS,
+        permission_keys=ASSIGNABLE_PERMISSION_KEYS,
     ),
     BuiltinRoleDefinition(
         code="admin",

@@ -10,6 +10,6 @@ from yuxi.storage.postgres.models_business import User
 async def require_agent_use_permission(
     authorization: AuthorizationContext = Depends(require_permission("agent:use")),
 ) -> User:
-    """校验智能体使用功能权限。"""
+    """校验登录用户的基础聊天能力。"""
 
     return authorization.user

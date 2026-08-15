@@ -112,7 +112,10 @@ const fetchGithubStars = async () => {
 
 onMounted(async () => {
   // 加载信息配置与知识库数据无依赖，可并行
-  await Promise.all([infoStore.loadInfoConfig(), getRemoteDatabase()])
+  const databaseRequest = userStore.hasPermission('knowledge_base:read')
+    ? getRemoteDatabase()
+    : null
+  await Promise.all([infoStore.loadInfoConfig(), databaseRequest])
   if (canUseAgents.value) await initAgentNavigation()
   if (userStore.hasPermission('system_config:manage')) await getRemoteConfig()
   // 仅管理员加载任务中心数据

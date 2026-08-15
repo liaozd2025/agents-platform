@@ -216,7 +216,7 @@ async def test_oidc_callback_allows_existing_binding_when_sub_contains_colon(oid
     login_payload = await oidc_service.oidc_exchange_code_handler(exchange_code)
     assert "role" not in login_payload
     assert [role["code"] for role in login_payload["roles"]] == ["user"]
-    assert login_payload["effective_permissions"] == []
+    assert login_payload["effective_permissions"] == ["agent:use"]
     await oidc_session.refresh(user)
     assert user.department_id == department.id
 

@@ -105,7 +105,7 @@ async def test_role_read_permission_changes_take_effect_on_next_request(test_cli
         assert allowed_role["audits"] == []
         profile = await test_client.get("/api/auth/me", headers=standard["headers"])
         assert profile.status_code == 200, profile.text
-        assert profile.json()["effective_permissions"] == ["role:read", "role:manage"]
+        assert profile.json()["effective_permissions"] == ["agent:use", "role:read", "role:manage"]
 
         delegated_manage = await test_client.post(
             "/api/roles",
@@ -138,7 +138,7 @@ async def test_role_read_permission_changes_take_effect_on_next_request(test_cli
         assert denied.status_code == 403, denied.text
         refreshed_profile = await test_client.get("/api/auth/me", headers=standard["headers"])
         assert refreshed_profile.status_code == 200, refreshed_profile.text
-        assert refreshed_profile.json()["effective_permissions"] == []
+        assert refreshed_profile.json()["effective_permissions"] == ["agent:use"]
     finally:
         if role_id is not None and user_role_id is not None:
             await test_client.put(

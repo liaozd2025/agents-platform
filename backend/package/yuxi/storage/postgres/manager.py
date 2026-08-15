@@ -615,6 +615,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 updated_at = NOW()
             """,
             "DELETE FROM role_permissions WHERE role_id IN (SELECT id FROM roles WHERE is_builtin IS TRUE)",
+            "DELETE FROM role_permissions WHERE permission_key = 'agent:use'",
             f"""
             INSERT INTO role_permissions (role_id, permission_key)
             SELECT roles.id, seed.permission_key

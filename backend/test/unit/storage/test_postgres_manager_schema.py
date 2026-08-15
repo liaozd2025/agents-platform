@@ -174,6 +174,7 @@ async def test_ensure_business_schema_backfills_builtin_role_assignments_idempot
     assert "WHERE NOT EXISTS" in statements
     assert "ON CONFLICT (user_id, role_id) DO NOTHING" in statements
     assert "ALTER TABLE security_audits ADD COLUMN IF NOT EXISTS reason TEXT" in statements
+    assert "DELETE FROM role_permissions WHERE permission_key = 'agent:use'" in statements
     assert "DROP COLUMN IF EXISTS role" not in statements
 
 

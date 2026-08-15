@@ -78,24 +78,3 @@ def test_agent_manage_combines_function_permission_and_resource_scope(monkeypatc
     response = client.put("/agent/shared-agent", json={"name": "Updated"})
     assert response.status_code == 200
     assert response.json()["agent"]["can_manage"] is True
-
-
-def test_agent_run_requires_use_permission():
-    user = SimpleNamespace(uid="manager")
-
-    async def fake_authorization():
-        return SimpleNamespace(
-            user=user,
-            has_permission=lambda permission: permission == "agent:manage",
-        )
-
-    app = FastAPI()
-    app.include_router(agent_router.agent_router)
-    app.dependency_overrides[get_authorization_context] = fake_authorization
-
-    response = TestClient(app).post(
-        "/agent/runs",
-        json={"query": "hello", "agent_slug": "shared-agent", "thread_id": "thread-1"},
-    )
-
-    assert response.status_code == 403

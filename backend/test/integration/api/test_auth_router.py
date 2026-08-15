@@ -180,7 +180,7 @@ async def _create_custom_user(
     login_payload = response.json()
     assert "role" not in login_payload
     assert [item["code"] for item in login_payload["roles"]] == [role.code]
-    assert set(login_payload["effective_permissions"]) == set(permission_keys)
+    assert set(login_payload["effective_permissions"]) == {"agent:use", *permission_keys}
     return {
         "user_id": user_id,
         "role_id": role_id,
