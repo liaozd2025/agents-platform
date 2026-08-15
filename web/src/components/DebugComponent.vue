@@ -19,7 +19,10 @@
           >
           </a-button>
           <a-button @click="clearLogs" :icon="h(ClearOutlined)" class="icon-only"> </a-button>
-          <a-button @click="printSystemConfig">
+          <a-button
+            v-if="userStore.hasPermission('system_config:manage')"
+            @click="printSystemConfig"
+          >
             <template #icon><SettingOutlined /></template>
             系统配置
           </a-button>
@@ -59,7 +62,7 @@
               <span v-if="state.autoRefresh" class="refresh-interval">(5s)</span>
             </a-button>
           </a-tooltip>
-          <a-button @click="openUserSwitcher">
+          <a-button v-if="userStore.hasPermission('user:impersonate')" @click="openUserSwitcher">
             <template #icon><SwapOutlined /></template>
             切换用户
           </a-button>
@@ -122,7 +125,10 @@
         <a-list item-layout="horizontal" :data-source="state.users">
           <template #renderItem="{ item }">
             <a-list-item @click="switchToUser(item)" style="cursor: pointer">
-              <a-list-item-meta :title="item.username" :description="item.role" />
+              <a-list-item-meta
+                :title="item.username"
+                :description="(item.roles || []).map((role) => role.name).join('、')"
+              />
             </a-list-item>
           </template>
           <template #empty>
@@ -189,7 +195,6 @@ import {
 } from '@ant-design/icons-vue'
 import dayjs from '@/utils/time'
 import { configApi } from '@/apis/system_api'
-import { checkSuperAdminPermission } from '@/stores/user'
 
 const configStore = useConfigStore()
 const userStore = useUserStore()
@@ -275,7 +280,7 @@ const processedLogs = computed(() => {
 
 // 获取日志数据
 const fetchLogs = async () => {
-  if (!checkSuperAdminPermission()) return
+  if (!userStore.hasPermission('system_log:read')) return
 
   state.fetching = true
   try {
@@ -301,7 +306,6 @@ const fetchLogs = async () => {
 
 // 清空日志
 const clearLogs = () => {
-  if (!checkSuperAdminPermission()) return
   state.rawLogs = []
 }
 
@@ -336,7 +340,7 @@ const toggleLogLevel = (level) => {
 
 // 自动刷新
 const toggleAutoRefresh = (value) => {
-  if (!checkSuperAdminPermission()) return
+  if (!userStore.hasPermission('system_log:read')) return
 
   if (value) {
     autoRefreshInterval = setInterval(fetchLogs, 5000)
@@ -352,8 +356,6 @@ const toggleAutoRefresh = (value) => {
 
 // 全屏切换
 const toggleFullscreen = async () => {
-  if (!checkSuperAdminPermission()) return
-
   try {
     if (!state.isFullscreen) {
       if (logViewer.value.requestFullscreen) {
@@ -410,14 +412,13 @@ onUnmounted(() => {
 
 // 打印系统配置
 const printSystemConfig = () => {
-  if (!checkSuperAdminPermission()) return
+  if (!userStore.hasPermission('system_config:manage')) return
   console.log('=== 系统配置 ===')
   console.log(config)
 }
 
 // 打印用户信息
 const printUserInfo = () => {
-  if (!checkSuperAdminPermission()) return
   console.log('=== 用户信息 ===')
   const userInfo = {
     token: userStore.token ? '*** (已隐藏)' : null,
@@ -426,18 +427,15 @@ const printUserInfo = () => {
     uid: userStore.uid,
     phoneNumber: userStore.phoneNumber,
     avatar: userStore.avatar,
-    userRole: userStore.userRole,
-    isLoggedIn: userStore.isLoggedIn,
-    isAdmin: userStore.isAdmin,
-    isSuperAdmin: userStore.isSuperAdmin
+    userRoles: userStore.userRoles,
+    effectivePermissions: userStore.effectivePermissions,
+    isLoggedIn: userStore.isLoggedIn
   }
   console.log(JSON.stringify(userInfo, null, 2))
 }
 
 // 打印知识库信息
 const printDatabaseInfo = async () => {
-  if (!checkSuperAdminPermission()) return
-
   try {
     console.log('=== 知识库信息 ===')
     console.log('基本信息:', {
@@ -468,14 +466,11 @@ const printDatabaseInfo = async () => {
 
 // 切换Debug模式
 const toggleDebugMode = () => {
-  if (!checkSuperAdminPermission()) return
   infoStore.toggleDebugMode()
 }
 
 // 打印智能体配置
 const printAgentConfig = async () => {
-  if (!checkSuperAdminPermission()) return
-
   try {
     console.log('=== 智能体配置信息 ===')
 
@@ -508,7 +503,7 @@ const printAgentConfig = async () => {
       })
 
       // 当前智能体配置（仅管理员可见）
-      if (userStore.isAdmin) {
+      if (userStore.hasPermission('agent:manage')) {
         console.log('当前智能体配置:', {
           current: toRaw(agentStore.agentConfig),
           original: toRaw(agentStore.originalAgentConfig),
@@ -527,7 +522,7 @@ const printAgentConfig = async () => {
     })
 
     // 配置项信息（管理员可见）
-    if (userStore.isAdmin && agentStore.selectedAgent) {
+    if (userStore.hasPermission('agent:manage') && agentStore.selectedAgent) {
       console.log('可配置项:', toRaw(agentStore.configurableItems))
     }
   } catch (error) {
@@ -553,14 +548,14 @@ const fetchUsers = async () => {
 
 // 打开用户选择器
 const openUserSwitcher = () => {
-  if (!checkSuperAdminPermission()) return
+  if (!userStore.hasPermission('user:impersonate')) return
   state.showUserSwitcher = true
   fetchUsers()
 }
 
 // 切换用户
 const switchToUser = async (user) => {
-  if (!checkSuperAdminPermission()) return
+  if (!userStore.hasPermission('user:impersonate')) return
 
   // 危险操作确认
   Modal.confirm({

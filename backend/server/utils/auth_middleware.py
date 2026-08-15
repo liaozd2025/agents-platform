@@ -1,14 +1,15 @@
 import hashlib
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from yuxi.permissions.authorization import AuthorizationContext, build_authorization_context
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import APIKey, User
-from yuxi.utils.datetime_utils import utc_now_naive
-
 from yuxi.utils.auth_utils import AuthUtils
+from yuxi.utils.datetime_utils import utc_now_naive
 
 # 定义OAuth2密码承载器，指定token URL
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token", auto_error=False)
@@ -39,8 +40,7 @@ async def _verify_api_key(key: str, db: AsyncSession) -> tuple[User | None, APIK
     if not api_key.user_id:
         return None, None
 
-    result = await db.execute(select(User).filter(User.id == api_key.user_id))
-    user = result.scalar_one_or_none()
+    user = await UserRepository().get_by_id_with_db(db, api_key.user_id)
     if user and not user.is_deleted:
         return user, api_key
 
@@ -90,9 +90,8 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    result = await db.execute(select(User).filter(User.id == int(user_id), User.is_deleted == 0))
-    user = result.scalar_one_or_none()
-    if user is None:
+    user = await UserRepository().get_by_id_with_db(db, int(user_id))
+    if user is None or user.is_deleted:
         raise credentials_exception
     if user.is_login_locked():
         raise HTTPException(
@@ -112,29 +111,35 @@ async def get_required_user(user: User | None = Depends(get_current_user)):
             detail="请登录后再访问",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not user.department_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="当前用户未绑定部门",
-        )
     return user
 
 
-# 获取管理员用户
-async def get_admin_user(current_user: User = Depends(get_required_user)):
-    if current_user.role not in ["admin", "superadmin"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="需要管理员权限",
-        )
-    return current_user
+async def get_authorization_context(
+    request: Request,
+    current_user: User = Depends(get_required_user),
+) -> AuthorizationContext:
+    """在单次请求内创建并复用当前用户授权上下文。"""
+
+    context = getattr(request.state, "authorization_context", None)
+    if context is None:
+        context = build_authorization_context(current_user)
+        request.state.authorization_context = context
+    return context
 
 
-# 获取超级管理员用户
-async def get_superadmin_user(current_user: User = Depends(get_required_user)):
-    if current_user.role != "superadmin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="需要超级管理员权限",
-        )
-    return current_user
+def require_permission(permission_key: str):
+    """生成统一的功能权限依赖，缺少权限时返回 403。"""
+
+    async def check_permission(
+        context: AuthorizationContext = Depends(get_authorization_context),
+    ) -> AuthorizationContext:
+        """检查当前请求授权上下文中的一项功能权限。"""
+
+        if not context.has_permission(permission_key):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"缺少功能权限: {permission_key}",
+            )
+        return context
+
+    return check_permission

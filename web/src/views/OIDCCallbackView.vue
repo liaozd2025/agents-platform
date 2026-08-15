@@ -70,17 +70,10 @@ const handleCallback = async () => {
 
     // 更新用户状态
     userStore.token = tokenData.access_token
-    userStore.userId = tokenData.uid
-    userStore.username = tokenData.username
-    userStore.uid = tokenData.uid || ''
-    userStore.phoneNumber = tokenData.phone_number || ''
-    userStore.avatar = tokenData.avatar || ''
-    userStore.userRole = tokenData.role || 'user'
-    userStore.departmentId = tokenData.department_id || null
-    userStore.departmentName = tokenData.department_name || ''
 
     // 保存 token 到 localStorage
     localStorage.setItem('user_token', tokenData.access_token)
+    await userStore.getCurrentUser()
 
     // 显示成功消息
     message.success('登录成功')
@@ -108,6 +101,7 @@ const handleCallback = async () => {
       }
     }, 500)
   } catch (err) {
+    if (userStore.token) userStore.logout()
     console.error('OIDC 回调处理失败:', err)
     loading.value = false
     error.value = true

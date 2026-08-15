@@ -58,7 +58,10 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
 
   const syncThreadStatuses = async (agentId = null) => {
     try {
-      const fetchedThreads = await threadApi.getThreads(agentId, PAGE_SIZE, 0)
+      const pinnedCount = threads.value.filter((thread) => thread.is_pinned).length
+      // ponytail: 补偿接口重复返回的置顶项；超过 500 条时改为专用批量状态接口。
+      const statusLimit = Math.min(Math.max(threads.value.length + pinnedCount, PAGE_SIZE), 500)
+      const fetchedThreads = await threadApi.getThreads(agentId, statusLimit, 0)
       if (!fetchedThreads) return
       const statusById = new Map(fetchedThreads.map((thread) => [thread.id, thread.thread_status]))
       threads.value = threads.value.map((thread) => {

@@ -192,8 +192,7 @@ const isEditingBuiltinAgent = computed(() => isBuiltinAgent({ id: editingAgentId
 const canEditAgentShareConfig = computed(() => !isEditingBuiltinAgent.value)
 const getAgentShareAllowedLevels = () => {
   if (isEditingBuiltinAgent.value) return ['global']
-  if (userStore.isAdmin) return ['global', 'department', 'user']
-  return ['user']
+  return ['global', 'department', 'user']
 }
 
 const agentModalTitle = computed(() => (editingAgentId.value ? '编辑智能体' : '新增智能体'))
@@ -548,7 +547,6 @@ defineExpose({
             <ShareConfigForm
               ref="agentShareConfigFormRef"
               v-model="agentShareConfig"
-              :auto-select-user-dept="true"
               :allowed-access-levels="getAgentShareAllowedLevels()"
             />
           </div>

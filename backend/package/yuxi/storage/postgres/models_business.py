@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -14,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
@@ -32,19 +34,32 @@ AGENT_RUN_TERMINAL_STATUSES = ("completed", "failed", "cancelled", "interrupted"
 # 避免 startup 回填把后续新产生的未读状态误清为已读。不会与真实 Run id 冲突。
 UNVIEWED_RUN_MARKER = "__unviewed__"
 
+# 集团根固定为 id=1：它不可删除，也是组织节点被删除时用户的回落目标
+ROOT_DEPARTMENT_ID = 1
+GROUP_NODE_TYPE = "group"
+DEPARTMENT_NODE_TYPE = "department"
+
 
 class Department(Base):
-    """部门模型"""
+    """组织节点模型：集团、分子公司与部门是同一概念的不同层级，通过 parent_id 组成一棵树"""
 
     __tablename__ = "departments"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(50), nullable=False, unique=True, index=True)
+    name = Column(String(50), nullable=False, index=True)
     description = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=utc_now_naive)
 
+    parent_id = Column(Integer, ForeignKey("departments.id"), nullable=True, index=True)
+    # 仅用于界面展示，不参与权限判定，也不参与父子关系校验
+    node_type = Column(String(16), nullable=False, default=DEPARTMENT_NODE_TYPE)
+    # 物化路径，形如 /1/3/7/，记录从集团根到自身的祖先链，供权限判定零查询地取得祖先集合
+    path = Column(String(512), nullable=False, default="")
+
     # 关联关系
     users = relationship("User", back_populates="department", cascade="all, delete-orphan")
+
+    __table_args__ = (UniqueConstraint("parent_id", "name", name="uq_departments_parent_name"),)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +67,8 @@ class Department(Base):
             "name": self.name,
             "description": self.description,
             "created_at": format_utc_datetime(self.created_at),
+            "parent_id": self.parent_id,
+            "node_type": self.node_type,
         }
 
 
@@ -66,7 +83,6 @@ class User(Base):
     phone_number = Column(String, nullable=True, unique=True, index=True)  # 手机号
     avatar = Column(String, nullable=True)  # 头像URL
     password_hash = Column(String, nullable=False)
-    role = Column(String, nullable=False, default="user")  # 角色: superadmin, admin, user
     department_id = Column(Integer, ForeignKey("departments.id"), nullable=True)  # 部门ID
     created_at = Column(DateTime, default=utc_now_naive)
     last_login = Column(DateTime, nullable=True)
@@ -91,6 +107,7 @@ class User(Base):
 
     agent_env = relationship("AgentEnv", back_populates="user", cascade="all, delete-orphan", uselist=False)
     user_config = relationship("UserConfig", back_populates="user", cascade="all, delete-orphan", uselist=False)
+    role_assignments = relationship("UserRoleAssignment", back_populates="user", cascade="all, delete-orphan")
 
     def to_dict(self, include_password: bool = False) -> dict[str, Any]:
         result = {
@@ -99,7 +116,6 @@ class User(Base):
             "uid": self.uid,
             "phone_number": self.phone_number,
             "avatar": normalize_public_minio_url(self.avatar),
-            "role": self.role,
             "department_id": self.department_id,
             "created_at": format_utc_datetime(self.created_at),
             "last_login": format_utc_datetime(self.last_login),
@@ -138,6 +154,128 @@ class User(Base):
         self.login_failed_count = 0
         self.last_failed_login = None
         self.login_locked_until = None
+
+
+class Role(Base):
+    """角色模型：功能权限与默认数据范围的命名集合。"""
+
+    __tablename__ = "roles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(64), nullable=False, unique=True, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    is_builtin = Column(Boolean, nullable=False, default=False)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    default_scope_type = Column(String(48), nullable=False)
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+    permissions = relationship("RolePermission", back_populates="role", cascade="all, delete-orphan")
+    default_departments = relationship("RoleDefaultDepartment", back_populates="role", cascade="all, delete-orphan")
+    assignments = relationship("UserRoleAssignment", back_populates="role", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint(
+            "default_scope_type IN ('none', 'self', 'organization_and_descendants', "
+            "'selected_organizations_and_descendants', 'all')",
+            name="ck_roles_default_scope_type",
+        ),
+    )
+
+
+class RolePermission(Base):
+    """角色与服务端功能权限目录标识的关联。"""
+
+    __tablename__ = "role_permissions"
+
+    role_id = Column(Integer, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True)
+    permission_key = Column(String(96), primary_key=True)
+
+    role = relationship("Role", back_populates="permissions")
+
+
+class RoleDefaultDepartment(Base):
+    """角色默认“指定组织及下级”范围中的组织节点。"""
+
+    __tablename__ = "role_default_departments"
+
+    role_id = Column(Integer, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True)
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="CASCADE"), primary_key=True)
+
+    role = relationship("Role", back_populates="default_departments")
+
+
+class UserRoleAssignment(Base):
+    """用户的一条角色分配及其数据范围覆盖方式。"""
+
+    __tablename__ = "user_role_assignments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role_id = Column(Integer, ForeignKey("roles.id", ondelete="CASCADE"), nullable=False, index=True)
+    scope_mode = Column(String(16), nullable=False, default="inherit")
+    override_scope_type = Column(String(48), nullable=True)
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+    user = relationship("User", back_populates="role_assignments")
+    role = relationship("Role", back_populates="assignments")
+    scope_departments = relationship(
+        "UserRoleAssignmentDepartment",
+        back_populates="assignment",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "role_id", name="uq_user_role_assignments_user_role"),
+        CheckConstraint("scope_mode IN ('inherit', 'override')", name="ck_user_role_assignments_scope_mode"),
+        CheckConstraint(
+            "override_scope_type IS NULL OR override_scope_type IN "
+            "('none', 'self', 'organization_and_descendants', "
+            "'selected_organizations_and_descendants', 'all')",
+            name="ck_user_role_assignments_override_scope_type",
+        ),
+    )
+
+
+class UserRoleAssignmentDepartment(Base):
+    """用户角色分配覆盖范围中的指定组织节点。"""
+
+    __tablename__ = "user_role_assignment_departments"
+
+    assignment_id = Column(
+        Integer,
+        ForeignKey("user_role_assignments.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="CASCADE"), primary_key=True)
+
+    assignment = relationship("UserRoleAssignment", back_populates="scope_departments")
+
+
+class SecurityAudit(Base):
+    """保存权限模型变更前后值的结构化安全审计。"""
+
+    __tablename__ = "security_audits"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    action = Column(String(64), nullable=False)
+    target_type = Column(String(32), nullable=False)
+    target_id = Column(Integer, nullable=False)
+    target_code = Column(String(64), nullable=False)
+    reason = Column(Text, nullable=True)
+    before_value = Column(JSON_VALUE, nullable=True)
+    after_value = Column(JSON_VALUE, nullable=True)
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+
+    actor = relationship("User")
+
+    __table_args__ = (Index("ix_security_audits_target", "target_type", "target_id"),)
 
 
 class AgentEnv(Base):
@@ -205,6 +343,9 @@ class Agent(Base):
     is_subagent = Column(Boolean, nullable=False, default=False, index=True)
 
     created_by = Column(String(64), nullable=True, index=True)
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     updated_by = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=utc_now_naive)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
@@ -253,6 +394,9 @@ class Skill(Base):
     share_config = Column(JSON_VALUE, nullable=False, comment="共享权限配置")
     enabled = Column(Boolean, nullable=False, default=True, comment="是否启用")
     created_by = Column(String(64), nullable=True)
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     updated_by = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=utc_now_naive)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
@@ -296,6 +440,9 @@ class Conversation(Base):
     created_at = Column(DateTime, default=utc_now_naive, comment="Creation time")
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, comment="Update time")
     extra_metadata = Column(JSON, nullable=True, comment="Additional metadata")
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
 
     # Relationships
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
@@ -419,6 +566,9 @@ class ToolCall(Base):
     tool_output = Column(Text, nullable=True, comment="Tool execution result")
     status = Column(String(20), default="pending", comment="Status: pending/success/error")
     error_message = Column(Text, nullable=True, comment="Error message if failed")
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=utc_now_naive, comment="Creation time")
 
     # Relationships
@@ -480,6 +630,9 @@ class OperationLog(Base):
     operation = Column(String, nullable=False)
     details = Column(Text, nullable=True)
     ip_address = Column(String, nullable=True)
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     timestamp = Column(DateTime, default=utc_now_naive)
 
     # 关联用户
@@ -508,6 +661,9 @@ class MessageFeedback(Base):
     uid = Column(String(64), nullable=False, index=True, comment="UID who provided feedback")
     rating = Column(String(10), nullable=False, comment="Feedback rating: like or dislike")
     reason = Column(Text, nullable=True, comment="Optional reason for dislike feedback")
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=utc_now_naive, comment="Feedback creation time")
 
     # Relationships

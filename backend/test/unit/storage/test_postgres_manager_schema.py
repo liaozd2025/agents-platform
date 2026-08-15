@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from yuxi.storage.postgres.manager import PostgresManager
 
 
@@ -164,6 +163,68 @@ async def test_ensure_business_schema_creates_generic_config_options_table():
 
 
 @pytest.mark.asyncio
+async def test_ensure_business_schema_backfills_builtin_role_assignments_idempotently():
+    """角色扩展迁移应保留旧字段，并可重复回填同一用户角色。"""
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager.ensure_business_schema()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+
+    for table_name in (
+        "roles",
+        "role_permissions",
+        "role_default_departments",
+        "user_role_assignments",
+        "user_role_assignment_departments",
+        "security_audits",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in statements
+
+    assert "INSERT INTO roles" in statements
+    assert "'superadmin'" in statements
+    assert "'admin'" in statements
+    assert "'user'" in statements
+    assert ("('superadmin', '超级管理员', '拥有全部功能权限和全部数据范围', TRUE, TRUE, 'all')") in statements
+    assert "INSERT INTO user_role_assignments" in statements
+    assert "WHERE NOT EXISTS" in statements
+    assert "ON CONFLICT (user_id, role_id) DO NOTHING" in statements
+    assert "ALTER TABLE security_audits ADD COLUMN IF NOT EXISTS reason TEXT" in statements
+    assert "DELETE FROM role_permissions WHERE permission_key = 'agent:use'" in statements
+    assert "DROP COLUMN IF EXISTS role" not in statements
+
+
+@pytest.mark.asyncio
+async def test_ensure_business_schema_fails_when_nonempty_organization_has_no_group_root():
+    """存量组织表缺少固定集团根时应中止迁移，避免继续运行无效树。"""
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager.ensure_business_schema()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+    assert "RAISE EXCEPTION" in statements
+    assert "departments 非空但缺少 id=1 的集团根" in statements
+
+
+@pytest.mark.asyncio
 async def test_ensure_business_schema_adds_run_origin_snapshot_columns():
     manager = PostgresManager()
     original_initialized = manager._initialized
@@ -186,6 +247,67 @@ async def test_ensure_business_schema_adds_run_origin_snapshot_columns():
     assert "agent_run_requests ADD COLUMN IF NOT EXISTS channel VARCHAR(32)" in statements
     assert "agent_run_requests ADD COLUMN IF NOT EXISTS external_id VARCHAR(128)" in statements
     assert "agent_run_requests ADD COLUMN IF NOT EXISTS origin_metadata JSONB" in statements
+
+
+@pytest.mark.asyncio
+async def test_ensure_business_schema_backfills_historical_organization_snapshots_idempotently():
+    """旧历史事件应只按当前组织关系推算一次，并保留明确标记。"""
+
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager.ensure_business_schema()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+    for table_name in (
+        "conversations",
+        "tool_calls",
+        "message_feedbacks",
+        "operation_logs",
+        "security_audits",
+    ):
+        assert table_name in statements
+    assert "organization_id_snapshot INTEGER" in statements
+    assert "organization_path_snapshot VARCHAR(512)" in statements
+    assert "organization_snapshot_inferred = TRUE" in statements
+    assert "organization_snapshot_inferred IS NULL" in statements
+    assert "ALTER COLUMN organization_snapshot_inferred SET DEFAULT FALSE" in statements
+    assert statements.index("ADD COLUMN IF NOT EXISTS organization_id_snapshot") < statements.index(
+        "organization_snapshot_inferred = TRUE"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_business_schema_backfills_resource_creation_snapshots_idempotently():
+    """旧资源只按创建者当前组织回填一次，并标记为推算。"""
+
+    manager = PostgresManager()
+    original_initialized = manager._initialized
+    original_engine = manager.async_engine
+    connection = _RecordingConnection()
+
+    manager._initialized = True
+    manager.async_engine = _RecordingEngine(connection)
+    try:
+        await manager.ensure_business_schema()
+    finally:
+        manager._initialized = original_initialized
+        manager.async_engine = original_engine
+
+    statements = "\n".join(connection.statements)
+    for table_name in ("knowledge_bases", "agents", "skills"):
+        assert f"UPDATE {table_name} AS resource" in statements
+    assert "resource.created_by = users.uid" in statements
+    assert "resource.organization_snapshot_inferred IS NULL" in statements
+    assert "ARRAY['knowledge_bases', 'agents', 'skills']" in statements
 
 
 @pytest.mark.asyncio

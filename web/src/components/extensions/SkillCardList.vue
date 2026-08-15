@@ -4,6 +4,7 @@
       <template #actions>
         <template v-if="!isBatchDeleteMode">
           <a-button
+            v-if="canManageSkills"
             @click="isBatchDeleteMode = true"
             :disabled="loading || importing || filteredDeletableSkills.length === 0"
             class="lucide-icon-btn"
@@ -11,6 +12,7 @@
             <span>批量管理</span>
           </a-button>
           <a-button
+            v-if="canInstallSkills"
             @click="handleOpenRemoteInstall"
             :disabled="loading || importing"
             class="lucide-icon-btn"
@@ -19,6 +21,7 @@
             <span>远程安装</span>
           </a-button>
           <a-upload
+            v-if="canInstallSkills"
             accept=".zip,.md"
             :show-upload-list="false"
             :custom-request="handleImportUpload"
@@ -121,11 +124,11 @@
               >
                 <template #actions>
                   <button
-                    v-if="skill.sourceScope !== 'personal'"
+                    v-if="skill.sourceScope !== 'personal' && canManageSkill(skill)"
                     type="button"
                     class="skill-enabled-action"
                     :class="{ enabled: skill.enabled !== false }"
-                    :disabled="!canManageSkill(skill) || isSkillToggling(skill.slug)"
+                    :disabled="isSkillToggling(skill.slug)"
                     :aria-label="skill.enabled === false ? '启用 Skill' : '禁用 Skill'"
                     @click.stop="handleToggleSkillEnabled(skill)"
                   >
@@ -177,9 +180,9 @@
           </div>
           <div class="skill-preview-actions">
             <a-switch
-              v-if="previewSkill.sourceScope !== 'personal'"
+              v-if="previewSkill.sourceScope !== 'personal' && canManageSkill(previewSkill)"
               :checked="previewSkill.enabled !== false"
-              :disabled="!canManageSkill(previewSkill) || isSkillToggling(previewSkill.slug)"
+              :disabled="isSkillToggling(previewSkill.slug)"
               :loading="isSkillToggling(previewSkill.slug)"
               size="small"
               @change="handlePreviewToggle"
@@ -218,7 +221,7 @@
               class="lucide-icon-btn"
               @click="goToPreviewSkillManagement"
             >
-              <span>去管理</span>
+              <span>{{ canManageSkill(previewSkill) ? '去管理' : '查看详情' }}</span>
             </a-button>
           </div>
         </div>
@@ -523,6 +526,7 @@ import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { formatExtensionCardTitle } from '@/utils/extensionDisplayName'
 import { getShareConfigLabel } from '@/utils/shareConfig'
 import { getSkillIcon } from '@/utils/skill_icon_utils'
+import { useUserStore } from '@/stores/user'
 
 const RECOMMENDED_SUITES = [
   {
@@ -558,6 +562,10 @@ const RECOMMENDED_SUITES = [
 ]
 
 const router = useRouter()
+const userStore = useUserStore()
+const canUseSkills = computed(() => userStore.hasPermission('skill:use'))
+const canManageSkills = computed(() => userStore.hasPermission('skill:manage'))
+const canInstallSkills = computed(() => canUseSkills.value || canManageSkills.value)
 
 const loading = ref(false)
 const importing = ref(false)
@@ -798,7 +806,10 @@ const skillCardTags = (skill) => {
   ]
 }
 
-const canManageSkill = (skill) => skill?.can_manage !== false
+const canManageSkill = (skill) => {
+  if (skill?.sourceScope === 'personal') return canUseSkills.value && skill?.can_manage !== false
+  return canManageSkills.value && skill?.can_manage !== false
+}
 const isSkillToggling = (slug) => togglingSkillSlugs.value.includes(slug)
 const navigateToDetail = (skill) => {
   if (skill?.sourceScope === 'personal') return
@@ -993,7 +1004,9 @@ const handleBatchDelete = () => {
 const fetchSkills = async ({ refreshPersonal = false } = {}) => {
   loading.value = true
   try {
-    const skillResult = await skillApi.listSkillCards({ refreshPersonal })
+    const skillResult = canUseSkills.value
+      ? await skillApi.listSkillCards({ refreshPersonal })
+      : await skillApi.listSkills()
     skills.value = skillResult?.data || []
   } catch {
     message.error('加载失败')

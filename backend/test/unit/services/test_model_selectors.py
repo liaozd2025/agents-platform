@@ -4,12 +4,11 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import requests
-
 from yuxi.agents.models import load_chat_model, resolve_chat_model_spec
 from yuxi.models.chat import LangChainChatAdapter, select_model
 from yuxi.models.embed import OtherEmbedding, select_embedding_model
-from yuxi.models.rerank import OpenAIReranker, get_reranker
 from yuxi.models.providers.cache import ModelInfo
+from yuxi.models.rerank import OpenAIReranker, get_reranker
 
 
 def _model_info(model_type: str) -> ModelInfo:

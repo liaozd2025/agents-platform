@@ -3,13 +3,10 @@ import uuid
 from typing import Any
 
 import aiofiles
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from yuxi.storage.postgres.models_business import User
-from server.utils.auth_middleware import get_db, get_required_user
 from yuxi import config as conf
 from yuxi.agents.tool_approval import ToolApprovalMode
 from yuxi.models import select_model
@@ -29,6 +26,7 @@ from yuxi.services.conversation_service import (
     upload_thread_attachment_view,
     upload_tmp_attachment_view,
 )
+from yuxi.services.feedback_service import get_message_feedback_view, submit_message_feedback_view
 from yuxi.services.file_preview import detect_media_type
 from yuxi.services.thread_files_service import (
     list_thread_files_view,
@@ -36,11 +34,13 @@ from yuxi.services.thread_files_service import (
     resolve_thread_artifact_view,
     save_thread_artifact_to_workspace_view,
 )
-from yuxi.services.feedback_service import get_message_feedback_view, submit_message_feedback_view
-from yuxi.utils.logging_config import logger
+from yuxi.storage.postgres.models_business import User
 from yuxi.utils.image_processor import process_uploaded_image
+from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import VIRTUAL_PATH_PREFIX
 
+from server.utils.agent_permissions import require_agent_use_permission
+from server.utils.auth_middleware import get_db, get_required_user
 
 # TODO：当前文件的功能过于庞杂，路由标签混乱
 
@@ -62,7 +62,11 @@ chat = APIRouter(prefix="/chat", tags=["chat"])
 
 
 @chat.post("/call")
-async def call(query: str = Body(...), meta: dict = Body(None), current_user: User = Depends(get_required_user)):
+async def call(
+    query: str = Body(...),
+    meta: dict = Body(None),
+    current_user: User = Depends(require_agent_use_permission),
+):
     """调用模型进行简单问答（需要登录）"""
     meta = meta or {}
 
@@ -80,7 +84,7 @@ async def call(query: str = Body(...), meta: dict = Body(None), current_user: Us
 
 @chat.get("/thread/{thread_id}/history")
 async def get_thread_history(
-    thread_id: str, current_user: User = Depends(get_required_user), db: AsyncSession = Depends(get_db)
+    thread_id: str, current_user: User = Depends(require_agent_use_permission), db: AsyncSession = Depends(get_db)
 ):
     """获取对话历史消息（需要登录）- 包含用户反馈状态"""
     try:
@@ -99,7 +103,7 @@ async def get_thread_history(
 async def get_thread_state(
     thread_id: str,
     include_messages: bool = Query(False),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
     db: AsyncSession = Depends(get_db),
 ):
     """获取对话当前状态（需要登录）"""
@@ -274,7 +278,9 @@ class SaveThreadArtifactResponse(BaseModel):
 
 @chat.post("/thread", response_model=ThreadResponse)
 async def create_thread(
-    thread: ThreadCreate, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_required_user)
+    thread: ThreadCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """创建新对话线程 (使用新存储系统)"""
     return await create_thread_view(
@@ -292,7 +298,7 @@ async def list_threads(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """获取用户的所有对话线程 (使用新存储系统)"""
     return await list_threads_view(
@@ -307,7 +313,7 @@ async def search_threads(
     limit: int = Query(20, ge=1, le=50),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """搜索当前用户的历史对话。"""
     return await search_threads_view(
@@ -322,7 +328,9 @@ async def search_threads(
 
 @chat.delete("/thread/{thread_id}")
 async def delete_thread(
-    thread_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_required_user)
+    thread_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """删除对话线程 (使用新存储系统)"""
     return await delete_thread_view(thread_id=thread_id, db=db, current_uid=str(current_user.uid))
@@ -339,7 +347,7 @@ async def update_thread(
     thread_id: str,
     thread_update: ThreadUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """更新对话线程信息 (使用新存储系统)"""
     return await update_thread_view(
@@ -372,7 +380,10 @@ async def mark_thread_viewed(
 
 
 @chat.post("/attachments/tmp", response_model=TmpAttachmentResponse)
-async def upload_tmp_attachment(file: UploadFile = File(...), current_user: User = Depends(get_required_user)):
+async def upload_tmp_attachment(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_agent_use_permission),
+):
     """上传附件到 MinIO tmp，暂不关联线程。"""
     return await upload_tmp_attachment_view(file=file, current_uid=str(current_user.uid))
 
@@ -380,7 +391,7 @@ async def upload_tmp_attachment(file: UploadFile = File(...), current_user: User
 @chat.post("/attachments/tmp/parse", response_model=TmpAttachmentParseResponse)
 async def parse_tmp_attachment(
     request: TmpAttachmentParseRequest,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """解析 tmp 附件并返回解析后的 tmp URL。"""
     return await parse_tmp_attachment_view(
@@ -397,7 +408,7 @@ async def confirm_tmp_thread_attachments(
     thread_id: str,
     request: TmpAttachmentConfirmRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """将 tmp 附件正式加入线程附件列表。"""
     return await confirm_tmp_thread_attachments_view(
@@ -413,7 +424,7 @@ async def upload_thread_attachment(
     thread_id: str,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """上传原始附件并关联到指定对话线程。"""
     return await upload_thread_attachment_view(
@@ -428,7 +439,7 @@ async def upload_thread_attachment(
 async def list_thread_attachments(
     thread_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """列出当前对话线程的所有附件元信息。"""
     return await list_thread_attachments_view(
@@ -443,7 +454,7 @@ async def delete_thread_attachment(
     thread_id: str,
     file_id: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """移除指定附件。"""
     return await delete_thread_attachment_view(
@@ -460,7 +471,7 @@ async def list_thread_files(
     path: str = Query(f"{VIRTUAL_PATH_PREFIX}"),
     recursive: bool = Query(False),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """列出线程文件目录。"""
     return await list_thread_files_view(
@@ -479,7 +490,7 @@ async def read_thread_file_content(
     offset: int = Query(0, ge=0),
     limit: int = Query(2000, ge=1, le=5000),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """读取线程文本文件（按行分页）。"""
     return await read_thread_file_content_view(
@@ -498,7 +509,7 @@ async def get_thread_artifact(
     path: str,
     download: bool = Query(False),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """下载或预览线程文件。"""
     file_path = await resolve_thread_artifact_view(
@@ -520,7 +531,7 @@ async def save_thread_artifact_to_workspace(
     thread_id: str,
     request: SaveThreadArtifactRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """保存交付物到共享 workspace/saved_artifacts 目录。"""
     return await save_thread_artifact_to_workspace_view(
@@ -554,7 +565,7 @@ async def submit_message_feedback(
     message_id: int,
     feedback_data: MessageFeedbackRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """提交消息反馈（需要登录）"""
     result = await submit_message_feedback_view(
@@ -571,7 +582,7 @@ async def submit_message_feedback(
 async def get_message_feedback(
     message_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
 ):
     """获取指定消息的用户反馈（需要登录）"""
     return await get_message_feedback_view(
@@ -587,7 +598,10 @@ async def get_message_feedback(
 
 
 @chat.post("/image/upload", response_model=ImageUploadResponse)
-async def upload_image(file: UploadFile = File(...), current_user: User = Depends(get_required_user)):
+async def upload_image(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_agent_use_permission),
+):
     """
     上传并处理图片，返回base64编码的图片数据
     """

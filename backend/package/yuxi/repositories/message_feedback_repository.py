@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import MessageFeedback
 
@@ -26,7 +27,8 @@ class MessageFeedbackRepository:
     async def create(self, data: dict[str, Any]) -> MessageFeedback:
         """创建消息反馈"""
         async with pg_manager.get_async_session_context() as session:
-            feedback = MessageFeedback(**data)
+            snapshot = await get_user_organization_snapshot(session, uid=str(data["uid"]))
+            feedback = MessageFeedback(**data, **snapshot)
             session.add(feedback)
         return feedback
 

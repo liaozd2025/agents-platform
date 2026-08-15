@@ -78,6 +78,7 @@ test('OA fullscreen keeps PC feature navigation inside the iframe', () => {
   assert.equal(resolveAppNavigationPath(true, '/agent'), '/embed')
   assert.equal(resolveAppNavigationPath(true, '/agent-manage'), '/embed/agent-manage')
   assert.equal(resolveAppNavigationPath(true, '/workspace'), '/embed/workspace')
+  assert.equal(resolveAppNavigationPath(true, '/settings/account'), '/embed/settings/account')
   assert.equal(
     resolveAppNavigationPath(true, '/extensions/skill/knowledge-base'),
     '/embed/extensions/skill/knowledge-base'

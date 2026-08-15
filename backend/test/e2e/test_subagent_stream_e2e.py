@@ -14,6 +14,7 @@ from test.live_api_cleanup import remove_e2e_thread_storage
 pytestmark = [pytest.mark.asyncio, pytest.mark.e2e, pytest.mark.slow]
 
 RUN_TIMEOUT_SECONDS = int(os.getenv("E2E_RUN_TIMEOUT_SECONDS", "300"))
+MODEL_SPEC = os.getenv("E2E_MODEL_SPEC")
 
 
 def _assert_ok(response: httpx.Response) -> None:
@@ -75,6 +76,7 @@ async def _create_run(
             "query": query,
             "agent_slug": agent_slug,
             "thread_id": thread_id,
+            "tool_approval_mode": "always_trust",
             "meta": {"request_id": f"subagent-stream-e2e-{uuid.uuid4()}"},
         },
         headers=headers,
@@ -192,8 +194,8 @@ async def test_subagent_stream_records_run_and_shares_output_files(
     me_response = await e2e_client.get("/api/auth/me", headers=e2e_headers)
     _assert_ok(me_response)
     me = me_response.json()
-    if me.get("role") not in {"admin", "superadmin"}:
-        pytest.skip("Subagent E2E needs an admin user to create temporary agents.")
+    if "agent:manage" not in set(me.get("effective_permissions") or []):
+        pytest.fail("Subagent E2E credentials must include agent:manage.")
     uid = str(me.get("uid") or "")
     assert uid, me
 
@@ -213,8 +215,8 @@ async def test_subagent_stream_records_run_and_shares_output_files(
     _assert_ok(default_response)
     default_context = ((default_response.json().get("agent") or {}).get("config_json") or {}).get("context") or {}
     base_context: dict[str, Any] = {"tools": [], "knowledges": [], "mcps": [], "skills": []}
-    if default_context.get("model"):
-        base_context["model"] = default_context["model"]
+    if MODEL_SPEC or default_context.get("model"):
+        base_context["model"] = MODEL_SPEC or default_context["model"]
 
     share_config = {
         "version": 2,
@@ -235,9 +237,10 @@ async def test_subagent_stream_records_run_and_shares_output_files(
                     "context": {
                         **base_context,
                         "system_prompt": (
-                            "你是专门负责文件写入和文件校验的子智能体。收到任务后必须使用文件系统工具完成任务，"
-                            "不要向用户提问。必须严格写入用户指定路径，文件内容必须完全符合用户要求，"
-                            "不要自动追加句号、引号、说明或其他字符。完成后只回复写入的路径和文件内容。"
+                            "你是专门负责文件写入的子智能体。收到任务后直接且只调用一次 write_file 工具，"
+                            "禁止调用 write_todos、task 或其他工具，也不要创建计划或向用户提问。"
+                            "必须严格写入用户指定路径，文件内容必须完全符合用户要求，不要追加任何字符。"
+                            "write_file 成功后立即回复写入的路径和文件内容。"
                         ),
                     }
                 },
@@ -261,8 +264,8 @@ async def test_subagent_stream_records_run_and_shares_output_files(
                         "subagents": [sub_slug],
                         "system_prompt": (
                             "你是主智能体。遇到用户要求创建、修改或验证文件的任务时，"
-                            "必须调用 task 工具交给可用子智能体完成，不要自己写文件，"
-                            "也不要通过 shell、curl 或 HTTP API 调用子智能体。子智能体完成后，简短汇总结果。"
+                            "只调用一次 task 工具交给可用子智能体完成，不要自己写文件，也不要创建计划。"
+                            "task 参数必须完整包含路径和内容；子智能体返回后不得再次调用 task，直接简短汇总结果。"
                         ),
                     }
                 },

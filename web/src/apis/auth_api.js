@@ -2,7 +2,7 @@
  * 认证相关 API
  */
 
-import { apiAdminGet, apiGet, apiPost } from './base'
+import { apiGet, apiPost } from './base'
 
 async function parseErrorDetail(response, fallbackMessage) {
   const contentType = response.headers.get('content-type') || ''
@@ -68,13 +68,18 @@ async function getOIDCLoginUrl(redirectPath = '/') {
  *   uid: string,
  *   phone_number: string | null,
  *   avatar: string | null,
- *   role: string,
+ *   roles: Array,
+ *   effective_permissions: string[],
  *   department_id: number | null,
  *   department_name: string | null
  * }>}
  */
 async function getUserAccessOptions() {
-  return apiAdminGet('/api/auth/users/access-options')
+  return apiGet('/api/auth/users/access-options')
+}
+
+async function checkUidAvailability(uid) {
+  return apiGet(`/api/auth/check-uid/${encodeURIComponent(uid)}`)
 }
 
 async function exchangeOIDCCode(code) {
@@ -100,6 +105,7 @@ export const authApi = {
   getOIDCConfig,
   getOIDCLoginUrl,
   getUserAccessOptions,
+  checkUidAvailability,
   exchangeOIDCCode,
   exchangeOAToken,
   getCLIAuthSession,

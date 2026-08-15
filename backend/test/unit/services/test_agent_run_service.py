@@ -230,7 +230,7 @@ class _FakeBackend:
 
 class _UserResult:
     def scalar_one_or_none(self):
-        return SimpleNamespace(uid="user-1", role="user")
+        return SimpleNamespace(uid="user-1")
 
 
 class _CreateRunDb:
@@ -1415,7 +1415,7 @@ def _patch_agent_run_creation(
             del db_session
 
         async def get_visible_by_slug(self, *, slug: str, user, kind="main"):
-            del user
+            assert user.department_ancestor_ids == (1, 2)
             is_subagent = kind == "subagent"
             return SimpleNamespace(
                 slug=slug,
@@ -1424,6 +1424,12 @@ def _patch_agent_run_creation(
                 config_json=agent_config_json or {"context": {}},
                 is_subagent=is_subagent,
             )
+
+    class UserRepo:
+        async def get_by_uid_with_db(self, db_session, uid):
+            assert db_session is db
+            assert uid == "user-1"
+            return SimpleNamespace(uid=uid, department_ancestor_ids=(1, 2))
 
     class Queue:
         async def enqueue_job(self, job_name: str, run_id: str, _job_id: str):
@@ -1438,6 +1444,7 @@ def _patch_agent_run_creation(
     monkeypatch.setattr(agent_run_service, "AgentRepository", AgentRepo)
     monkeypatch.setattr(agent_run_service, "ConversationRepository", ConvRepo)
     monkeypatch.setattr(agent_run_service, "AgentRunRepository", _CreateRunRepo)
+    monkeypatch.setattr(agent_run_service, "UserRepository", UserRepo)
     monkeypatch.setattr(agent_run_service, "get_arq_pool", fake_get_arq_pool)
     return db
 

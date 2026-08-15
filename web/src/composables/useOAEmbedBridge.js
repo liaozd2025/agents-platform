@@ -1,12 +1,15 @@
 import { onActivated, onDeactivated, onMounted, onUnmounted, ref, unref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useChatThreadsStore } from '@/stores/chatThreads'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/apis/auth_api'
 import {
   confirmEmbedDisplayMode,
   markEmbedDisplayModePending,
+  resolveAppNavigationPath,
   resetEmbedDisplayMode
 } from '@/composables/useEmbedMode'
+import { canAccessRoute, getAuthenticatedHomePath } from '@/utils/authNavigation'
 import { createOAEmbedBridge, parseOAEmbedAllowedOrigins } from '@/utils/oaEmbedBridge'
 import { setOAEmbedAuthRequiredHandler } from '@/utils/oaEmbedSession'
 
@@ -14,6 +17,8 @@ import { setOAEmbedAuthRequiredHandler } from '@/utils/oaEmbedSession'
 export function useOAEmbedBridge(enabled) {
   const userStore = useUserStore()
   const chatThreadsStore = useChatThreadsStore()
+  const route = useRoute()
+  const router = useRouter()
   const isAuthorized = ref(false)
   const statusMessage = ref('等待 OA 授权')
   let bridge = null
@@ -54,6 +59,11 @@ export function useOAEmbedBridge(enabled) {
         try {
           const loginData = await authApi.exchangeOAToken(token)
           await userStore.acceptEmbedToken(loginData.access_token)
+          if (!canAccessRoute(route.matched, userStore.hasPermission)) {
+            await router.replace(
+              resolveAppNavigationPath(true, getAuthenticatedHomePath(userStore.hasPermission))
+            )
+          }
           isAuthorized.value = true
           statusMessage.value = ''
         } catch (error) {

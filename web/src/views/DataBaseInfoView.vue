@@ -335,7 +335,6 @@
                   <ShareConfigForm
                     ref="shareConfigFormRef"
                     v-model="editShareConfig"
-                    :auto-select-user-dept="true"
                     :require-read-scope="true"
                   >
                     <template #manage-description>
@@ -370,6 +369,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useDatabaseStore } from '@/stores/database'
 import { useTaskerStore } from '@/stores/tasker'
+import { useUserStore } from '@/stores/user'
 import {
   ArrowLeft,
   BarChart3,
@@ -405,6 +405,7 @@ import { departmentApi } from '@/apis/department_api'
 import { authApi } from '@/apis/auth_api'
 import { useChunkPresetOptions } from '@/composables/useChunkPresetOptions'
 import { DEFAULT_CHUNK_PRESET_ID } from '@/utils/chunkUtils'
+import { getDepartmentSelectionSummary } from '@/utils/departmentTree'
 import { formatFileSize } from '@/utils/file_utils'
 import { getKbTypeIcon, getKbTypeLabel, kbUtils } from '@/utils/kb_utils'
 
@@ -412,6 +413,7 @@ const route = useRoute()
 const router = useRouter()
 const store = useDatabaseStore()
 const taskerStore = useTaskerStore()
+const userStore = useUserStore()
 const {
   chunkPresetSelectOptions: chunkPresetOptions,
   chunkPresetLoading,
@@ -421,7 +423,13 @@ const {
 
 const kbId = computed(() => store.kbId)
 const database = computed(() => store.database)
-const canManageDatabase = computed(() => database.value?.can_manage === true)
+const canManageResource = computed(() => database.value?.can_manage === true)
+const canManageDatabase = computed(
+  () => canManageResource.value && userStore.hasPermission('knowledge_base:manage')
+)
+const canManageEvaluation = computed(
+  () => canManageResource.value && userStore.hasPermission('knowledge_evaluation:manage')
+)
 const isCurrentDatabaseLoaded = computed(() => database.value?.kb_id === kbId.value)
 const kbType = computed(() =>
   isCurrentDatabaseLoaded.value ? database.value.kb_type?.toLowerCase() || 'milvus' : ''
@@ -462,9 +470,9 @@ const tabs = computed(() => {
 })
 
 const visibleTabs = computed(() =>
-  canManageDatabase.value
-    ? tabs.value
-    : tabs.value.filter((tab) => ['filetable', 'query', 'graph', 'mindmap'].includes(tab.key))
+  tabs.value.filter(
+    (tab) => !['evaluation', 'benchmarks'].includes(tab.key) || canManageEvaluation.value
+  )
 )
 const activeTab = ref('filetable')
 
@@ -763,9 +771,7 @@ const shareConfigDisplay = computed(() => {
     if (!scope) return '无'
     if (scope.access_level === 'global') return '全局'
     if (scope.access_level === 'department') {
-      const names =
-        (scope.department_ids || []).map((id) => getDepartmentName(id)).join('、') || '无'
-      return `${scope.department_ids?.length || 0} 个部门：${names}`
+      return getDepartmentSelectionSummary(departments.value, scope.department_ids || [])
     }
     const names = (scope.user_uids || []).map((uid) => getUserName(uid)).join('、') || '无'
     return `${scope.user_uids?.length || 0} 个用户：${names}`
@@ -783,11 +789,6 @@ const shareConfigDisplay = computed(() => {
     detail: `读取：${describeScope(readScope)}`
   }
 })
-
-const getDepartmentName = (id) => {
-  const dept = departments.value.find((item) => Number(item.id) === Number(id))
-  return dept?.name || `部门${id}`
-}
 
 const getUserName = (uid) => {
   const user = users.value.find((item) => item.uid === uid)

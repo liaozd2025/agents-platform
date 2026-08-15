@@ -20,14 +20,8 @@ def _build_zip(files: dict[str, str]) -> bytes:
     return buf.getvalue()
 
 
-def _user(uid: str = "root", role: str = "admin") -> User:
-    return User(username=uid, uid=uid, password_hash="x", role=role, department_id=1)
-
-
-def test_allowed_skill_access_levels_by_role():
-    assert svc.get_allowed_skill_access_levels(_user(role="user")) == ["user"]
-    assert svc.get_allowed_skill_access_levels(_user(role="admin")) == ["global", "department", "user"]
-    assert svc.get_allowed_skill_access_levels(_user(role="superadmin")) == ["global", "department", "user"]
+def _user(uid: str = "root") -> User:
+    return User(username=uid, uid=uid, password_hash="x", department_id=1)
 
 
 @pytest.mark.asyncio
@@ -141,7 +135,7 @@ async def test_list_visible_skills_for_management_includes_owned_disabled_and_en
 
     monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
 
-    visible = await svc.list_visible_skills_for_management(None, _user("root", role="user"))
+    visible = await svc.list_visible_skills_for_management(None, _user("root"))
 
     assert [item.slug for item in visible] == ["owned-disabled", "shared-enabled", "shared-disabled"]
 
@@ -159,7 +153,7 @@ async def test_list_visible_skills_for_management_includes_owned_disabled_and_en
                 enabled=False,
                 share_config={"version": 2, "read_scope": None, "manage_scope": None},
             ),
-            _user("root", role="user"),
+            _user("root"),
         ),
         (
             Skill(
@@ -174,7 +168,7 @@ async def test_list_visible_skills_for_management_includes_owned_disabled_and_en
                     "manage_scope": {"access_level": "global"},
                 },
             ),
-            _user("root", role="admin"),
+            _user("root"),
         ),
         (
             Skill(
@@ -189,7 +183,7 @@ async def test_list_visible_skills_for_management_includes_owned_disabled_and_en
                     "manage_scope": {"access_level": "user", "user_uids": ["root"]},
                 },
             ),
-            _user("root", role="user"),
+            _user("root"),
         ),
     ],
 )
@@ -238,7 +232,7 @@ async def test_management_readable_skill_allows_disabled_user_shared_manager(mon
 
     monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
 
-    result = await svc.get_management_readable_skill_or_raise(None, _user("root", role="user"), skill.slug)
+    result = await svc.get_management_readable_skill_or_raise(None, _user("root"), skill.slug)
 
     assert result is skill
 
@@ -267,14 +261,20 @@ async def test_runtime_access_still_excludes_disabled_shared_skill(monkeypatch: 
 
     monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
 
-    assert svc.user_can_access_skill(_user("root", role="user"), skill) is False
-    assert await svc.list_accessible_skills(None, _user("root", role="user")) == []
+    async def empty_personal_skills(_uid: str, *, refresh: bool = False):
+        """避免共享 Skill 规则单测访问 Redis 个人快照。"""
+
+        del refresh
+        return svc.PersonalSkillSnapshot(items=[], scanned_at="", from_cache=False)
+
+    monkeypatch.setattr(svc, "list_personal_skills", empty_personal_skills)
+
+    assert svc.user_can_access_skill(_user("root"), skill) is False
+    assert await svc.list_accessible_skills(None, _user("root")) == []
 
 
 @pytest.mark.asyncio
-async def test_normal_user_skill_upload_draft_defaults_to_personal_read_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+async def test_skill_upload_draft_defaults_to_creator_read_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(svc.sys_config, "save_dir", str(tmp_path))
 
     class FakeRepo:
@@ -290,7 +290,7 @@ async def test_normal_user_skill_upload_draft_defaults_to_personal_read_scope(
         None,
         filename="SKILL.md",
         file_bytes=b"---\nname: demo\ndescription: demo skill\n---\n# Demo\n",
-        operator=_user("normal-user", role="user"),
+        operator=_user("normal-user"),
     )
 
     assert draft["default_share_config"] == {
@@ -298,7 +298,7 @@ async def test_normal_user_skill_upload_draft_defaults_to_personal_read_scope(
         "read_scope": {"access_level": "user", "department_ids": [], "user_uids": ["normal-user"]},
         "manage_scope": None,
     }
-    assert draft["allowed_access_levels"] == ["user"]
+    assert draft["allowed_access_levels"] == ["global", "department", "user"]
 
 
 @pytest.mark.parametrize(
@@ -316,40 +316,16 @@ async def test_normal_user_skill_upload_draft_defaults_to_personal_read_scope(
         },
     ],
 )
-@pytest.mark.asyncio
-async def test_normal_user_confirm_skill_draft_rejects_wider_share_scope(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    share_config: dict,
-):
-    monkeypatch.setattr(svc.sys_config, "save_dir", str(tmp_path))
+def test_skill_share_config_accepts_function_authorized_scope(share_config: dict):
+    department_paths = {1: "/1/"} if share_config["read_scope"]["access_level"] == "department" else {}
 
-    class FakeRepo:
-        def __init__(self, _db):
-            pass
-
-        async def exists_slug(self, _slug: str) -> bool:
-            return False
-
-        async def create(self, **_kwargs) -> Skill:
-            raise AssertionError("普通用户的越权共享范围应在创建前被拒绝")
-
-    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
-    operator = _user("normal-user", role="user")
-    draft = await svc.prepare_skill_upload(
-        None,
-        filename="SKILL.md",
-        file_bytes=b"---\nname: demo\ndescription: demo skill\n---\n# Demo\n",
-        operator=operator,
+    normalized = svc.normalize_skill_share_config(
+        share_config,
+        operator_uid="operator",
+        department_paths=department_paths,
     )
 
-    with pytest.raises(ValueError, match="无权使用该 Skill 共享范围"):
-        await svc.confirm_skill_install_draft(
-            None,
-            draft_id=draft["draft_id"],
-            share_config=share_config,
-            operator=operator,
-        )
+    assert normalized["read_scope"]["access_level"] == share_config["read_scope"]["access_level"]
 
 
 @pytest.mark.asyncio
@@ -1125,6 +1101,50 @@ def test_skill_dependency_scope_covers_read_and_manage_audiences():
     assert svc.can_skill_depend_on(parent, dependency) is True
 
 
+@pytest.mark.parametrize(
+    ("parent_department_id", "dependency_department_id", "expected"),
+    [
+        (2, 1, True),
+        (1, 2, False),
+        (2, 3, False),
+    ],
+)
+def test_skill_dependency_department_scope_uses_organization_ancestors(
+    parent_department_id: int,
+    dependency_department_id: int,
+    expected: bool,
+):
+    parent = Skill(
+        slug="parent",
+        name="parent",
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [parent_department_id]},
+            "manage_scope": None,
+        },
+        enabled=True,
+    )
+    dependency = Skill(
+        slug="dependency",
+        name="dependency",
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [dependency_department_id]},
+            "manage_scope": None,
+        },
+        enabled=True,
+    )
+
+    assert (
+        svc.can_skill_depend_on(
+            parent,
+            dependency,
+            department_paths={1: "/1/", 2: "/1/2/", 3: "/1/3/"},
+        )
+        is expected
+    )
+
+
 def test_owner_only_skill_can_depend_on_visible_skill():
     parent = Skill(
         slug="parent-owner-only",
@@ -1699,7 +1719,7 @@ async def test_personal_skill_overrides_shared_skill_and_drops_dependencies(
     monkeypatch.setattr(svc, "get_personal_skills_root_dir", lambda _uid: personal_root)
     monkeypatch.setattr(svc.sys_config, "save_dir", str(tmp_path))
 
-    items = await svc.list_accessible_skills(None, _user("user-1", role="user"))
+    items = await svc.list_accessible_skills(None, _user("user-1"))
 
     assert len(items) == 1
     assert items[0].source_scope == "personal"
@@ -1772,7 +1792,7 @@ async def test_skill_cards_keep_shadowed_shared_item_for_management(
     monkeypatch.setattr(svc, "get_personal_skills_root_dir", lambda _uid: personal_root)
     monkeypatch.setattr(svc.sys_config, "save_dir", str(tmp_path))
 
-    cards, snapshot = await svc.list_skill_cards_for_user(None, _user("user-1", role="user"))
+    cards, snapshot = await svc.list_skill_cards_for_user(None, _user("user-1"))
 
     assert [(item.slug, item.source_scope) for item in cards] == [
         ("demo", "personal"),
@@ -1827,7 +1847,7 @@ async def test_confirm_personal_skill_draft_uses_original_slug_without_database(
     results = await svc.confirm_personal_skill_install_draft(
         draft_id=draft_id,
         slugs=["demo-v2"],
-        operator=_user("user-1", role="user"),
+        operator=_user("user-1"),
     )
 
     assert results[0]["success"] is True

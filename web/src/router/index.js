@@ -2,9 +2,25 @@ import { createRouter, createWebHistory } from 'vue-router'
 import AppLayout from '@/layouts/AppLayout.vue'
 import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
-import { useAgentStore } from '@/stores/agent'
+import { canAccessRoute, getAuthenticatedHomePath } from '@/utils/authNavigation'
 import { resolveAppNavigationPath, resolveAppSurface } from '@/composables/useEmbedMode'
 import { sanitizeRedirect } from '@/utils/oidcAutoStart'
+import { SETTINGS_ROUTES } from '@/utils/settingsNavigation'
+
+/** 生成独立站与 OA 嵌入共用的设置路由。 */
+const createSettingsRoutes = (embedded = false) =>
+  SETTINGS_ROUTES.map(({ id, path, routeName, requiredPermission, requiredAnyPermissions }) => ({
+    path: embedded ? path.slice(1) : path,
+    name: embedded ? `Embed${routeName}` : routeName,
+    component: () => import('@/components/SettingsModal.vue'),
+    meta: {
+      keepAlive: false,
+      requiresAuth: true,
+      settingsTab: id,
+      requiredPermission,
+      requiredAnyPermissions
+    }
+  }))
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -49,13 +65,13 @@ const router = createRouter({
           path: '',
           name: 'AgentComp',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, requiredPermission: 'agent:use' }
         },
         {
           path: ':thread_id',
           name: 'AgentCompWithThreadId',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, requiredPermission: 'agent:use' }
         }
       ]
     },
@@ -69,19 +85,23 @@ const router = createRouter({
           path: '',
           name: 'EmbedAgent',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, requiredPermission: 'agent:use' }
         },
         {
           path: ':thread_id',
           name: 'EmbedAgentWithThreadId',
           component: () => import('../views/AgentView.vue'),
-          meta: { keepAlive: true, requiresAuth: true }
+          meta: { keepAlive: true, requiresAuth: true, requiredPermission: 'agent:use' }
         },
         {
           path: 'agent-manage',
           name: 'EmbedAgentManageComp',
           component: () => import('../views/AgentManageView.vue'),
-          meta: { keepAlive: false, requiresAuth: true }
+          meta: {
+            keepAlive: false,
+            requiresAuth: true,
+            requiredAnyPermissions: ['agent:use', 'agent:manage', 'model_provider:manage']
+          }
         },
         {
           path: 'workspace',
@@ -93,7 +113,7 @@ const router = createRouter({
           path: 'dashboard',
           name: 'EmbedDashboardComp',
           component: () => import('../views/DashboardView.vue'),
-          meta: { keepAlive: false, requiresAuth: true, requiresSuperAdmin: true }
+          meta: { keepAlive: false, requiresAuth: true, requiredPermission: 'dashboard:view' }
         },
         {
           path: 'extensions',
@@ -108,7 +128,7 @@ const router = createRouter({
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
-                requiresAdmin: true
+                requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage']
               }
             },
             {
@@ -118,7 +138,7 @@ const router = createRouter({
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
-                requiresAdmin: true
+                requiredPermission: 'mcp:manage'
               }
             },
             {
@@ -127,11 +147,13 @@ const router = createRouter({
               component: () => import('../components/extensions/SkillDetailView.vue'),
               meta: {
                 keepAlive: false,
-                requiresAuth: true
+                requiresAuth: true,
+                requiredAnyPermissions: ['skill:use', 'skill:manage']
               }
             }
           ]
-        }
+        },
+        ...createSettingsRoutes(true)
       ]
     },
     {
@@ -156,7 +178,7 @@ const router = createRouter({
           path: '',
           name: 'DashboardComp',
           component: () => import('../views/DashboardView.vue'),
-          meta: { keepAlive: false, requiresAuth: true, requiresSuperAdmin: true }
+          meta: { keepAlive: false, requiresAuth: true, requiredPermission: 'dashboard:view' }
         }
       ]
     },
@@ -169,7 +191,11 @@ const router = createRouter({
           path: '',
           name: 'AgentManageComp',
           component: () => import('../views/AgentManageView.vue'),
-          meta: { keepAlive: false, requiresAuth: true }
+          meta: {
+            keepAlive: false,
+            requiresAuth: true,
+            requiredAnyPermissions: ['agent:use', 'agent:manage', 'model_provider:manage']
+          }
         }
       ]
     },
@@ -194,7 +220,7 @@ const router = createRouter({
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
-                requiresAdmin: true
+                requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage']
               }
             },
             {
@@ -204,7 +230,7 @@ const router = createRouter({
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
-                requiresAdmin: true
+                requiredPermission: 'mcp:manage'
               }
             },
             {
@@ -213,13 +239,15 @@ const router = createRouter({
               component: () => import('../components/extensions/SkillDetailView.vue'),
               meta: {
                 keepAlive: false,
-                requiresAuth: true
+                requiresAuth: true,
+                requiredAnyPermissions: ['skill:use', 'skill:manage']
               }
             }
           ]
         }
       ]
     },
+    ...createSettingsRoutes(),
     {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',
@@ -241,8 +269,6 @@ router.beforeEach(async (to, from) => {
 
   // 检查路由是否需要认证
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true)
-  const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin)
-  const requiresSuperAdmin = to.matched.some((record) => record.meta.requiresSuperAdmin)
   const isEmbedRoute = to.matched.some((record) => record.meta.embed === true)
 
   const userStore = useUserStore()
@@ -259,8 +285,6 @@ router.beforeEach(async (to, from) => {
   }
 
   const isLoggedIn = userStore.isLoggedIn
-  const isAdmin = userStore.isAdmin
-  const isSuperAdmin = userStore.isSuperAdmin
 
   // 嵌入页由 postMessage 握手后再渲染业务组件，不能在 yuxi:ready 前请求受保护接口。
   if (isEmbedRoute && !userStore.userId) return true
@@ -272,34 +296,13 @@ router.beforeEach(async (to, from) => {
     return '/login'
   }
 
-  // 如果路由需要管理员权限但用户不是管理员
-  if (requiresAdmin && !isAdmin) {
-    // 如果是普通用户，跳转到聊天页空态
-    try {
-      const agentStore = useAgentStore()
-      // 等待 store 初始化完成
-      if (!agentStore.isInitialized) {
-        await agentStore.initialize()
-      }
-      return isEmbedRoute ? '/embed' : '/agent'
-    } catch (error) {
-      console.error('获取智能体信息失败:', error)
-      return isEmbedRoute ? '/embed' : '/agent'
-    }
-  }
+  const authenticatedHomePath = resolveAppNavigationPath(
+    isEmbedRoute,
+    getAuthenticatedHomePath(userStore.hasPermission)
+  )
 
-  // 如果路由需要超级管理员权限但用户不是超级管理员
-  if (requiresSuperAdmin && !isSuperAdmin) {
-    try {
-      const agentStore = useAgentStore()
-      if (!agentStore.isInitialized) {
-        await agentStore.initialize()
-      }
-      return isEmbedRoute ? '/embed' : '/agent'
-    } catch (error) {
-      console.error('获取智能体信息失败:', error)
-      return isEmbedRoute ? '/embed' : '/agent'
-    }
+  if (!canAccessRoute(to.matched, userStore.hasPermission)) {
+    return authenticatedHomePath
   }
 
   // 如果用户已登录但访问登录页，按 redirect 参数跳转

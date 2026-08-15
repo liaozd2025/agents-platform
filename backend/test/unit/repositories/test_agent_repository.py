@@ -29,6 +29,20 @@ class FakeDb:
         self.added = item
 
 
+@pytest.fixture(autouse=True)
+def stub_organization_snapshot(monkeypatch):
+    """仓储单测只关注 Agent 行为；组织快照由集成测试覆盖。"""
+
+    async def snapshot(_db, *, uid=None, **_kwargs):
+        return {
+            "organization_id_snapshot": 1 if uid else None,
+            "organization_path_snapshot": "/1/" if uid else None,
+            "organization_snapshot_inferred": False,
+        }
+
+    monkeypatch.setattr("yuxi.repositories.agent_repository.get_user_organization_snapshot", snapshot)
+
+
 @pytest.mark.asyncio
 async def test_ensure_default_agent_creates_description(monkeypatch):
     db = FakeDb()
@@ -169,7 +183,7 @@ async def test_create_agent_allows_same_explicit_share_scope_for_normal_user(mon
 
 
 def test_user_shared_agent_is_manageable_for_normal_user():
-    user = User(username="user", uid="user", password_hash="x", role="user", department_id=1)
+    user = User(username="user", uid="user", password_hash="x", department_id=1)
     agent = Agent(
         slug="shared-bot",
         name="Shared Bot",

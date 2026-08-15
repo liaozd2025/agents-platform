@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.storage.postgres.models_business import AgentRun, Base, Conversation, SubagentThread
 
@@ -134,9 +133,7 @@ async def test_get_latest_top_level_runs_for_threads_picks_latest_chat_resume(se
     await _seed_thread_run(session, thread_id="t2", run_id="t2-done", status="completed")
     await session.commit()
 
-    result = await AgentRunRepository(session).get_latest_top_level_runs_for_threads(
-        "user-1", ["t1", "t2"]
-    )
+    result = await AgentRunRepository(session).get_latest_top_level_runs_for_threads("user-1", ["t1", "t2"])
 
     assert result["t1"] == ("t1-running", "running")
     assert result["t2"] == ("t2-done", "completed")
@@ -166,6 +163,7 @@ async def test_get_latest_top_level_runs_for_threads_scopes_by_user(session):
 async def test_get_latest_top_level_runs_for_threads_empty_input(session):
     result = await AgentRunRepository(session).get_latest_top_level_runs_for_threads("user-1", [])
     assert result == {}
+
 
 async def test_set_terminal_status_persists_token_usage_only_for_winner(session):
     repo = AgentRunRepository(session)

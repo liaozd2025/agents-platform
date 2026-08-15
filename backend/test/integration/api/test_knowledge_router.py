@@ -13,6 +13,8 @@ from yuxi.knowledge.chunking.ragflow_like.presets import CHUNK_PRESET_IDS
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
+ROOT_DEPARTMENT_ID = 1
+
 
 def _assert_forbidden_response(response):
     """验证 403 禁止访问响应的格式"""
@@ -22,17 +24,27 @@ def _assert_forbidden_response(response):
     assert isinstance(payload["detail"], str)
 
 
-async def _create_test_department(test_client, admin_headers, prefix="pytest_dept"):
+def _assert_not_found_response(response):
+    """验证越出知识库共享范围时不暴露资源存在性。"""
+
+    assert response.status_code == 404
+    assert isinstance(response.json().get("detail"), str)
+
+
+async def _create_test_department(test_client, admin_headers, prefix="pytest_dept", parent_id=None):
     suffix = uuid.uuid4().hex[:8]
     admin_uid = f"deptadmin_{suffix}"
+    payload = {
+        "name": f"{prefix}_{suffix}",
+        "description": "pytest department",
+        "admin_uid": admin_uid,
+        "admin_password": f"Pw!{suffix}",
+    }
+    if parent_id is not None:
+        payload["parent_id"] = parent_id
     response = await test_client.post(
         "/api/departments",
-        json={
-            "name": f"{prefix}_{suffix}",
-            "description": "pytest department",
-            "admin_uid": admin_uid,
-            "admin_password": f"Pw!{suffix}",
-        },
+        json=payload,
         headers=admin_headers,
     )
     assert response.status_code == 201, response.text
@@ -49,7 +61,6 @@ async def _create_test_user(test_client, admin_headers, department_id):
         json={
             "username": f"pytest_user_{suffix}",
             "password": password,
-            "role": "user",
             "department_id": department_id,
         },
         headers=admin_headers,
@@ -102,6 +113,12 @@ async def _create_test_database(test_client, admin_headers, share_config=None):
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def _department_share_config(department_id):
+    """构造组织节点子树可读、管理员可管的共享配置。"""
+    scope = {"access_level": "department", "department_ids": [department_id], "user_uids": []}
+    return {"version": 2, "read_scope": scope, "manage_scope": scope}
 
 
 async def _accessible_kb_ids(test_client, headers):
@@ -220,7 +237,7 @@ async def test_update_database_additional_params_merge_keeps_chunk_preset(
     assert info_response.json()["additional_params"]["chunk_preset_id"] == "qa"
 
 
-async def test_knowledge_routes_enforce_permissions(test_client, standard_user, knowledge_database):
+async def test_knowledge_routes_follow_read_and_manage_permissions(test_client, standard_user, knowledge_database):
     kb_id = knowledge_database["kb_id"]
 
     forbidden_create = await test_client.post(
@@ -234,21 +251,29 @@ async def test_knowledge_routes_enforce_permissions(test_client, standard_user, 
     )
     _assert_forbidden_response(forbidden_create)
 
-    forbidden_list = await test_client.get("/api/knowledge/databases", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_list)
+    list_response = await test_client.get("/api/knowledge/databases", headers=standard_user["headers"])
+    assert list_response.status_code == 200, list_response.text
+    assert kb_id in {item["kb_id"] for item in list_response.json()["databases"]}
 
-    forbidden_chunk_presets = await test_client.get("/api/knowledge/chunk-presets", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_chunk_presets)
+    chunk_presets = await test_client.get("/api/knowledge/chunk-presets", headers=standard_user["headers"])
+    assert chunk_presets.status_code == 200, chunk_presets.text
 
-    forbidden_get = await test_client.get(f"/api/knowledge/databases/{kb_id}", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_get)
+    get_response = await test_client.get(f"/api/knowledge/databases/{kb_id}", headers=standard_user["headers"])
+    assert get_response.status_code == 200, get_response.text
 
-    forbidden_exists = await test_client.get(
+    exists_response = await test_client.get(
         f"/api/knowledge/databases/{kb_id}/documents/exists",
         params={"filename": "demo.txt"},
         headers=standard_user["headers"],
     )
-    _assert_forbidden_response(forbidden_exists)
+    assert exists_response.status_code == 200, exists_response.text
+
+    forbidden_update = await test_client.put(
+        f"/api/knowledge/databases/{kb_id}",
+        json={"name": knowledge_database["name"], "description": "Should not succeed"},
+        headers=standard_user["headers"],
+    )
+    _assert_forbidden_response(forbidden_update)
 
 
 async def test_admin_can_create_vector_db_with_reranker(test_client, admin_headers):
@@ -577,37 +602,113 @@ async def test_create_database_defaults_to_global_share_config(test_client, admi
         await test_client.delete(f"/api/knowledge/databases/{kb_id}", headers=admin_headers)
 
 
-async def test_department_share_config_filters_accessible_databases(test_client, admin_headers):
-    department_a = await _create_test_department(test_client, admin_headers, "pytest_dept_a")
-    department_b = await _create_test_department(test_client, admin_headers, "pytest_dept_b")
-    user_a = user_b = None
-    database = None
+async def test_group_read_and_company_manage_scope_can_be_saved(test_client, admin_headers):
+    """全集团可读时，管理范围可收窄到下级公司。"""
 
+    company = await _create_test_department(test_client, admin_headers, "pytest_manage_company")
+    database = None
     try:
-        user_a = await _create_test_user(test_client, admin_headers, department_a["id"])
-        user_b = await _create_test_user(test_client, admin_headers, department_b["id"])
-        scope = {"access_level": "department", "department_ids": [department_a["id"]], "user_uids": []}
         database = await _create_test_database(
             test_client,
             admin_headers,
-            {"version": 2, "read_scope": scope, "manage_scope": scope},
+            {
+                "version": 2,
+                "read_scope": {
+                    "access_level": "department",
+                    "department_ids": [ROOT_DEPARTMENT_ID],
+                    "user_uids": [],
+                },
+                "manage_scope": {
+                    "access_level": "department",
+                    "department_ids": [company["id"]],
+                    "user_uids": [],
+                },
+            },
         )
 
-        saved_config = database["share_config"]
-        assert saved_config["manage_scope"]["access_level"] == "department"
-        assert department_a["id"] in saved_config["manage_scope"]["department_ids"]
-
-        assert database["kb_id"] in await _accessible_kb_ids(test_client, user_a["headers"])
-        assert database["kb_id"] not in await _accessible_kb_ids(test_client, user_b["headers"])
+        assert database["share_config"]["manage_scope"]["department_ids"] == [company["id"]]
     finally:
         if database:
+            await test_client.delete(f"/api/knowledge/databases/{database['kb_id']}", headers=admin_headers)
+        await _delete_department_with_admin(test_client, admin_headers, company)
+
+
+async def test_department_share_config_inherits_to_subtree_and_isolates_siblings(test_client, admin_headers):
+    departments = []
+    user_a = user_b = None
+    databases = []
+
+    try:
+        company_a = await _create_test_department(test_client, admin_headers, "pytest_company_a")
+        departments.append(company_a)
+        company_b = await _create_test_department(test_client, admin_headers, "pytest_company_b")
+        departments.append(company_b)
+        department_a = await _create_test_department(
+            test_client,
+            admin_headers,
+            "pytest_dept_a",
+            parent_id=company_a["id"],
+        )
+        departments.append(department_a)
+        department_b = await _create_test_department(
+            test_client,
+            admin_headers,
+            "pytest_dept_b",
+            parent_id=company_b["id"],
+        )
+        departments.append(department_b)
+
+        user_a = await _create_test_user(test_client, admin_headers, department_a["id"])
+        user_b = await _create_test_user(test_client, admin_headers, department_b["id"])
+        database_a = await _create_test_database(
+            test_client,
+            admin_headers,
+            _department_share_config(company_a["id"]),
+        )
+        databases.append(database_a)
+        database_b = await _create_test_database(
+            test_client,
+            admin_headers,
+            _department_share_config(company_b["id"]),
+        )
+        databases.append(database_b)
+        group_database = await _create_test_database(
+            test_client,
+            admin_headers,
+            _department_share_config(ROOT_DEPARTMENT_ID),
+        )
+        databases.append(group_database)
+
+        user_a_kb_ids = await _accessible_kb_ids(test_client, user_a["headers"])
+        user_b_kb_ids = await _accessible_kb_ids(test_client, user_b["headers"])
+
+        assert database_a["kb_id"] in user_a_kb_ids
+        assert database_b["kb_id"] not in user_a_kb_ids
+        assert group_database["kb_id"] in user_a_kb_ids
+
+        assert database_b["kb_id"] in user_b_kb_ids
+        assert database_a["kb_id"] not in user_b_kb_ids
+        assert group_database["kb_id"] in user_b_kb_ids
+
+        response = await test_client.get(
+            f"/api/knowledge/databases/{database_b['kb_id']}",
+            headers=user_a["headers"],
+        )
+        _assert_not_found_response(response)
+        response = await test_client.get(
+            f"/api/knowledge/databases/{database_a['kb_id']}",
+            headers=user_b["headers"],
+        )
+        _assert_not_found_response(response)
+    finally:
+        for database in databases:
             await test_client.delete(f"/api/knowledge/databases/{database['kb_id']}", headers=admin_headers)
         if user_a:
             await _delete_user_by_id(test_client, admin_headers, user_a["user"]["id"])
         if user_b:
             await _delete_user_by_id(test_client, admin_headers, user_b["user"]["id"])
-        await _delete_department_with_admin(test_client, admin_headers, department_a)
-        await _delete_department_with_admin(test_client, admin_headers, department_b)
+        for department in reversed(departments):
+            await _delete_department_with_admin(test_client, admin_headers, department)
 
 
 async def test_user_share_config_filters_accessible_databases(test_client, admin_headers):
@@ -814,14 +915,13 @@ async def test_mindmap_permissions(test_client, standard_user, knowledge_databas
     """测试思维导图接口的权限控制"""
     kb_id = knowledge_database["kb_id"]
 
-    # 普通用户应该无法访问
-    forbidden_list = await test_client.get("/api/knowledge/mindmap/databases", headers=standard_user["headers"])
-    _assert_forbidden_response(forbidden_list)
+    list_response = await test_client.get("/api/knowledge/mindmap/databases", headers=standard_user["headers"])
+    assert list_response.status_code == 200, list_response.text
 
-    forbidden_files = await test_client.get(
+    files_response = await test_client.get(
         f"/api/knowledge/databases/{kb_id}/mindmap/files", headers=standard_user["headers"]
     )
-    _assert_forbidden_response(forbidden_files)
+    assert files_response.status_code == 200, files_response.text
 
     forbidden_generate = await test_client.post(
         f"/api/knowledge/databases/{kb_id}/mindmap/generate",
@@ -862,12 +962,18 @@ async def test_document_search_returns_structure_for_query(test_client, admin_he
     assert payload["has_more"] is False
 
 
-async def test_document_search_requires_admin(test_client, standard_user, knowledge_database):
-    """普通用户不能访问管理端搜索接口。"""
+async def test_document_search_allows_read_permission(test_client, standard_user, knowledge_database):
+    """具有读取功能权限且位于共享范围内的用户可以搜索文档。"""
     kb_id = knowledge_database["kb_id"]
     response = await test_client.get(
         f"/api/knowledge/databases/{kb_id}/documents/search",
         params={"query": "x"},
         headers=standard_user["headers"],
     )
-    _assert_forbidden_response(response)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert isinstance(payload.get("files"), list)
+    assert payload["offset"] == 0
+    assert payload["limit"] == 100
+    assert isinstance(payload["total"], int)
+    assert payload["has_more"] is (payload["total"] > payload["limit"])

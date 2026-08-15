@@ -208,7 +208,7 @@ async def standard_user(test_client: httpx.AsyncClient, admin_headers: dict[str,
 
     response = await test_client.post(
         "/api/auth/users",
-        json={"username": username, "password": password, "role": "user", "department_id": department_id},
+        json={"username": username, "password": password, "department_id": department_id},
         headers=admin_headers,
     )
     if response.status_code != 200:

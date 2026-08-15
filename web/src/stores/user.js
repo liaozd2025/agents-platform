@@ -10,15 +10,15 @@ export const useUserStore = defineStore('user', () => {
   const uid = ref('')
   const phoneNumber = ref('')
   const avatar = ref('')
-  const userRole = ref('')
+  const userRoles = ref([])
+  const effectivePermissions = ref([])
   const departmentId = ref(null)
   const departmentName = ref('')
   let authSessionController = new AbortController()
 
   // 计算属性
   const isLoggedIn = computed(() => !!token.value)
-  const isAdmin = computed(() => userRole.value === 'admin' || userRole.value === 'superadmin')
-  const isSuperAdmin = computed(() => userRole.value === 'superadmin')
+  const hasPermission = (permissionKey) => effectivePermissions.value.includes(permissionKey)
 
   // 动作
   async function login(credentials) {
@@ -56,15 +56,17 @@ export const useUserStore = defineStore('user', () => {
       uid.value = data.uid
       phoneNumber.value = data.phone_number || ''
       avatar.value = data.avatar || ''
-      userRole.value = data.role
+      userRoles.value = data.roles || []
       departmentId.value = data.department_id || null
       departmentName.value = data.department_name || ''
 
       // 只保存 token 到本地存储
       localStorage.setItem('user_token', data.access_token)
+      await getCurrentUser()
 
       return true
     } catch (error) {
+      if (token.value) logout()
       console.error('登录错误:', error)
       throw error
     }
@@ -81,7 +83,8 @@ export const useUserStore = defineStore('user', () => {
     uid.value = ''
     phoneNumber.value = ''
     avatar.value = ''
-    userRole.value = ''
+    userRoles.value = []
+    effectivePermissions.value = []
     departmentId.value = null
     departmentName.value = ''
 
@@ -117,15 +120,17 @@ export const useUserStore = defineStore('user', () => {
       uid.value = data.uid
       phoneNumber.value = data.phone_number || ''
       avatar.value = data.avatar || ''
-      userRole.value = data.role
+      userRoles.value = data.roles || []
       departmentId.value = data.department_id || null
       departmentName.value = data.department_name || ''
 
       // 只保存 token 到本地存储
       localStorage.setItem('user_token', data.access_token)
+      await getCurrentUser()
 
       return true
     } catch (error) {
+      if (token.value) logout()
       console.error('初始化管理员错误:', error)
       throw error
     }
@@ -337,7 +342,8 @@ export const useUserStore = defineStore('user', () => {
       uid.value = userData.uid
       phoneNumber.value = userData.phone_number || ''
       avatar.value = userData.avatar || ''
-      userRole.value = userData.role
+      userRoles.value = userData.roles || []
+      effectivePermissions.value = userData.effective_permissions || []
       departmentId.value = userData.department_id || null
       departmentName.value = userData.department_name || ''
 
@@ -406,14 +412,14 @@ export const useUserStore = defineStore('user', () => {
     uid,
     phoneNumber,
     avatar,
-    userRole,
+    userRoles,
+    effectivePermissions,
     departmentId,
     departmentName,
 
     // 计算属性
     isLoggedIn,
-    isAdmin,
-    isSuperAdmin,
+    hasPermission,
 
     // 方法
     login,
@@ -433,18 +439,3 @@ export const useUserStore = defineStore('user', () => {
     updateProfile
   }
 })
-
-// 检查当前用户是否有管理员权限
-export const checkAdminPermission = () => {
-  const userStore = useUserStore()
-  if (!userStore.isAdmin) {
-    throw new Error('需要管理员权限')
-  }
-  return true
-}
-
-// 检查当前用户是否有超级管理员权限
-export const checkSuperAdminPermission = () => {
-  const userStore = useUserStore()
-  return userStore.isSuperAdmin
-}

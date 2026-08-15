@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.services.langfuse_service import submit_user_feedback_score
+from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
 from yuxi.storage.postgres.models_business import Conversation, Message, MessageFeedback
 from yuxi.utils.logging_config import logger
 
@@ -42,6 +43,7 @@ async def submit_message_feedback_view(
             uid=str(current_uid),
             rating=rating,
             reason=reason,
+            **await get_user_organization_snapshot(db, uid=str(current_uid)),
         )
 
         db.add(new_feedback)

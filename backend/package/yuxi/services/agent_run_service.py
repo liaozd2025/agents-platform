@@ -32,6 +32,7 @@ from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.input_message_service import (
     AgentRunInputMessage,
     build_resume_input_message,
@@ -46,7 +47,7 @@ from yuxi.services.run_queue_service import (
     publish_cancel_signal,
 )
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Message, User
+from yuxi.storage.postgres.models_business import Message
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.hash_utils import hash_id
 from yuxi.utils.logging_config import logger
@@ -707,8 +708,7 @@ async def prepare_agent_run_creation_scope(
     if conversation.agent_id != agent_slug:
         raise HTTPException(status_code=409, detail="已有线程已绑定智能体，不能切换")
 
-    user_result = await db.execute(select(User).where(User.uid == str(current_uid)))
-    current_user = user_result.scalar_one_or_none()
+    current_user = await UserRepository().get_by_uid_with_db(db, str(current_uid))
     if not current_user:
         raise HTTPException(status_code=404, detail="用户不存在")
 

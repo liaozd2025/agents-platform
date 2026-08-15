@@ -35,6 +35,7 @@ from yuxi.permissions import (
     ResourcePermission,
     resolve_knowledge_base_permission,
 )
+from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.services.ocr_service import parse_document
 from yuxi.services.task_service import TaskContext, tasker
 from yuxi.services.workspace_service import MAX_WORKSPACE_UPLOAD_SIZE_BYTES, resolve_workspace_file_path
@@ -43,12 +44,14 @@ from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 from yuxi.utils.upload_utils import MAX_UPLOAD_SIZE_BYTES, read_upload_with_limit, write_upload_to_path
 
-from server.utils.auth_middleware import get_admin_user, get_required_user
 from server.utils.knowledge_response import serialize_knowledge_base, serialize_knowledge_base_list
+from server.utils.auth_middleware import get_authorization_context
 from server.utils.knowledge_permissions import (
     ensure_knowledge_base_permission as _ensure_database_permission,
     require_knowledge_base_manage,
+    require_knowledge_base_manage_permission,
     require_knowledge_base_read,
+    require_knowledge_base_read_permission,
 )
 
 knowledge = APIRouter(prefix="/knowledge", tags=["knowledge"])
@@ -143,7 +146,7 @@ async def _delete_document_storage_objects(kb_id: str, doc_id: str, file_path: s
 
 async def _require_manage_permission_if_kb_id(kb_id: str | None, current_user: User) -> None:
     """当请求携带 kb_id 时，校验当前用户对该知识库的管理权限。"""
-    if kb_id and getattr(current_user, "role", None):
+    if kb_id:
         await _ensure_database_permission(kb_id, current_user, ResourcePermission.MANAGE)
 
 
@@ -220,7 +223,7 @@ async def _has_running_graph_build_task(kb_id: str) -> bool:
 
 
 @knowledge.get("/databases")
-async def get_databases(current_user: User = Depends(get_admin_user)):
+async def get_databases(current_user: User = Depends(require_knowledge_base_read_permission)):
     """获取所有知识库（根据用户权限过滤）"""
     try:
         return serialize_knowledge_base_list(await knowledge_base.get_databases_by_uid(current_user.uid))
@@ -238,7 +241,7 @@ async def create_database(
     additional_params: dict | None = Body(None),
     llm_model_spec: str | None = Body(None),
     share_config: dict | None = Body(None),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(require_knowledge_base_manage_permission),
 ):
     """创建知识库"""
     logger.debug(
@@ -255,7 +258,6 @@ async def create_database(
             llm_model_spec=llm_model_spec,
             share_config=share_config,
             created_by=current_user.uid,
-            created_by_department_id=current_user.department_id,
             **(additional_params or {}),
         )
 
@@ -277,7 +279,7 @@ async def create_database(
 
 
 @knowledge.get("/databases/accessible")
-async def get_accessible_databases(current_user: User = Depends(get_required_user)):
+async def get_accessible_databases(current_user: User = Depends(require_knowledge_base_read_permission)):
     """获取当前用户有权访问的知识库列表（用于智能体配置）"""
     try:
         databases = await knowledge_base.get_databases_by_uid(current_user.uid)
@@ -301,7 +303,7 @@ async def get_accessible_databases(current_user: User = Depends(get_required_use
 
 
 @knowledge.get("/mindmap/databases")
-async def get_mindmap_databases(current_user: User = Depends(get_admin_user)):
+async def get_mindmap_databases(current_user: User = Depends(require_knowledge_base_read_permission)):
     """获取所有知识库的概览信息，用于思维导图界面选择。"""
     try:
         return await get_mindmap_databases_overview(current_user.uid)
@@ -371,6 +373,7 @@ async def get_database_info(
     kb_id: str,
     include_files: bool = Query(False, description="是否包含全量文件列表，默认关闭以避免大知识库响应过大"),
     current_user: User = Depends(require_knowledge_base_read),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
 ):
     """获取知识库详细信息"""
     database = await knowledge_base.get_database_info(kb_id, include_files=include_files)
@@ -380,7 +383,9 @@ async def get_database_info(
     return serialize_knowledge_base(
         database,
         permission=permission,
-        redact_secrets=permission != ResourcePermission.MANAGE,
+        redact_secrets=(
+            permission != ResourcePermission.MANAGE or not authorization.has_permission("knowledge_base:manage")
+        ),
     )
 
 
@@ -419,8 +424,6 @@ async def update_database_info(
             update_llm_model_spec=update_llm_model_spec,
             additional_params=data.additional_params,
             share_config=data.share_config,
-            operator_uid=current_user.uid,
-            operator_department_id=current_user.department_id,
         )
         return {"message": "更新成功", "database": serialize_knowledge_base(database)}
     except HTTPException:
@@ -1791,7 +1794,7 @@ async def move_document(
 async def fetch_url(
     url: str = Body(..., embed=True),
     kb_id: str | None = Body(None, embed=True),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(require_knowledge_base_manage_permission),
 ):
     """
     抓取 URL 内容并上传到 MinIO
@@ -1861,7 +1864,7 @@ async def fetch_url(
 @knowledge.post("/files/import-workspace")
 async def import_workspace_files(
     payload: WorkspaceImportRequest,
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(require_knowledge_base_manage_permission),
 ):
     """将当前用户工作区文件导入 MinIO，返回与普通文件上传一致的预处理结果。"""
     kb_id = payload.kb_id.strip()
@@ -1929,7 +1932,7 @@ async def import_workspace_files(
 async def upload_file(
     file: UploadFile = File(...),
     kb_id: str | None = Query(None),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(require_knowledge_base_manage_permission),
 ):
     """上传文件"""
     if not file.filename:
@@ -2001,13 +2004,15 @@ async def upload_file(
 
 
 @knowledge.get("/files/supported-types")
-async def get_supported_file_types(current_user: User = Depends(get_admin_user)):
+async def get_supported_file_types(current_user: User = Depends(require_knowledge_base_read_permission)):
     """获取当前支持的文件类型"""
     return {"message": "success", "file_types": sorted(SUPPORTED_FILE_EXTENSIONS)}
 
 
 @knowledge.post("/files/markdown")
-async def mark_it_down(file: UploadFile = File(...), current_user: User = Depends(get_admin_user)):
+async def mark_it_down(
+    file: UploadFile = File(...), current_user: User = Depends(require_knowledge_base_manage_permission)
+):
     """调用统一 Parser 将文件解析为 markdown，需要管理员权限"""
     import tempfile
 
@@ -2049,7 +2054,7 @@ async def mark_it_down(file: UploadFile = File(...), current_user: User = Depend
 
 
 @knowledge.get("/types")
-async def get_knowledge_base_types(current_user: User = Depends(get_admin_user)):
+async def get_knowledge_base_types(current_user: User = Depends(require_knowledge_base_read_permission)):
     """获取支持的知识库类型"""
     try:
         kb_types = knowledge_base.get_supported_kb_types()
@@ -2060,16 +2065,16 @@ async def get_knowledge_base_types(current_user: User = Depends(get_admin_user))
 
 
 @knowledge.get("/chunk-presets")
-async def get_knowledge_chunk_presets(current_user: User = Depends(get_admin_user)):
+async def get_knowledge_chunk_presets(current_user: User = Depends(require_knowledge_base_read_permission)):
     """获取支持的知识库分块策略"""
     return {"chunk_presets": get_chunk_preset_options(), "message": "success"}
 
 
 @knowledge.get("/stats")
-async def get_knowledge_base_statistics(current_user: User = Depends(get_admin_user)):
+async def get_knowledge_base_statistics(current_user: User = Depends(require_knowledge_base_manage_permission)):
     """获取知识库统计信息"""
     try:
-        stats = await knowledge_base.get_statistics()
+        stats = await knowledge_base.get_statistics(current_user)
         return {"stats": stats, "message": "success"}
     except Exception as e:
         logger.error(f"获取知识库统计失败 {e}, {traceback.format_exc()}")
@@ -2086,7 +2091,7 @@ async def generate_description(
     name: str = Body(..., description="知识库名称"),
     current_description: str = Body("", description="当前描述（可选，用于优化）"),
     file_list: list[str] | None = Body(None, description="文件列表"),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(require_knowledge_base_manage_permission),
 ):
     """使用 LLM 生成或优化知识库描述
 

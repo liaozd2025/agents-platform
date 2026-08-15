@@ -142,7 +142,7 @@ engineering skills（`/grill-with-docs` → `/to-spec` → `/to-tickets` → `/i
 
 ### Issue tracker
 
-GitHub Issues，仓库为 `origin`（`liaozd2025/Yuxi`）。**只发 `origin`，绝不发 `upstream`（`xerrors/Yuxi`）。** 见 [docs/agent-workflow/issue-tracker.md](docs/agent-workflow/issue-tracker.md)。
+GitHub Issues，仓库为 `origin`（`liaozd2025/agents-platform`，原名 `liaozd2025/Yuxi`）。**每条 `gh` 命令都要显式 `-R liaozd2025/agents-platform`**——`gh` 的自动推断会落到 `upstream`（`xerrors/Yuxi`），绝不能把 issue 发到上游。 见 [docs/agent-workflow/issue-tracker.md](docs/agent-workflow/issue-tracker.md)。
 
 ### Triage labels
 

@@ -140,6 +140,10 @@ const props = defineProps({
   agentId: {
     type: String,
     default: null
+  },
+  departmentId: {
+    type: Number,
+    default: null
   }
 })
 
@@ -205,7 +209,8 @@ const loadFeedbacks = async () => {
   try {
     const params = {
       rating: feedbackFilter.value === 'all' ? undefined : feedbackFilter.value,
-      agent_id: props.agentId || undefined
+      agent_id: props.agentId || undefined,
+      department_id: props.departmentId
     }
 
     const response = await dashboardApi.getFeedbacks(params)
@@ -227,9 +232,9 @@ const getFeedbackDefaultAvatarSrc = (feedback) =>
 // 格式化完整日期
 const formatFullDate = (dateString) => formatFullDateTime(dateString)
 
-// 监听 agentId 变化，重新加载数据
+// 监听筛选变化，重新加载数据
 watch(
-  () => props.agentId,
+  () => [props.agentId, props.departmentId],
   () => {
     if (modalVisible.value) {
       loadFeedbacks()

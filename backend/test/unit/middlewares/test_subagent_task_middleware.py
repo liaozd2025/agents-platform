@@ -174,7 +174,7 @@ async def test_create_task_middleware_loads_all_visible_subagents_when_empty(mon
     class _UserRepository:
         async def get_by_uid_with_db(self, _db, uid):
             assert uid == "user-1"
-            return SimpleNamespace(uid="user-1", role="user")
+            return SimpleNamespace(uid="user-1")
 
     class _AgentRepository:
         def __init__(self, _db):
@@ -424,9 +424,7 @@ async def test_task_tool_rejects_invalid_continuation_thread(monkeypatch) -> Non
             del db
 
         async def start(self, **kwargs):
-            raise ValueError(
-                f"无法继续子智能体线程 {kwargs['requested_thread_id']}：当前对话中没有找到对应的运行记录"
-            )
+            raise ValueError(f"无法继续子智能体线程 {kwargs['requested_thread_id']}：当前对话中没有找到对应的运行记录")
 
     _patch_session(monkeypatch)
     _patch_subagent_run_service(monkeypatch, _SubagentRunService)

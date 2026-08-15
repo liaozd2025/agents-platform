@@ -2,7 +2,7 @@ import asyncio
 import os
 import secrets
 import string
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -25,7 +25,12 @@ from yuxi.knowledge.read_models import (
 )
 from yuxi.knowledge.schemas import FindOutputSchema, OpenOutputSchema
 from yuxi.knowledge.utils.security import redact_sensitive_params
-from yuxi.permissions import ResourcePermission, normalize_permission_config, resolve_knowledge_base_permission
+from yuxi.permissions import (
+    ResourcePermission,
+    get_permission_department_ids,
+    normalize_permission_config,
+    resolve_knowledge_base_permission,
+)
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 from yuxi.utils.datetime_utils import utc_isoformat
@@ -181,8 +186,8 @@ class KnowledgeBaseManager:
         self,
         share_config: dict | None,
         *,
-        user_uid: str | None = None,
-        department_id: int | str | None = None,
+        strict: bool = False,
+        department_paths: Mapping[int, str] | None = None,
     ) -> dict:
         if share_config is None:
             return {
@@ -194,18 +199,26 @@ class KnowledgeBaseManager:
         if share_config and share_config.get("version") == 2:
             normalized = normalize_permission_config(
                 share_config,
-                strict=user_uid is not None or department_id is not None,
+                strict=strict,
+                department_paths=department_paths,
             )
-            if normalized["read_scope"] is None and (user_uid is not None or department_id is not None):
+            if normalized["read_scope"] is None and strict:
                 raise ValueError("知识库必须设置读取范围")
-            read_scope = normalized["read_scope"]
-            if read_scope and read_scope["access_level"] == "department" and department_id is not None:
-                read_scope["department_ids"] = sorted({*read_scope["department_ids"], int(department_id)})
-            elif read_scope and read_scope["access_level"] == "user" and user_uid:
-                read_scope["user_uids"] = sorted({*read_scope["user_uids"], str(user_uid)})
             return normalized
 
         raise ValueError("知识库共享配置必须使用 version 2")
+
+    async def _normalize_share_config_for_save(self, share_config: dict | None) -> dict:
+        """加载组织路径并校验待保存的知识库共享配置。"""
+
+        from yuxi.repositories.department_repository import DepartmentRepository
+
+        department_paths = await DepartmentRepository().get_paths_by_ids(get_permission_department_ids(share_config))
+        return self._normalize_share_config(
+            share_config,
+            strict=True,
+            department_paths=department_paths,
+        )
 
     @staticmethod
     def _normalize_database_stats(stats: dict | None) -> dict[str, int]:
@@ -331,10 +344,6 @@ class KnowledgeBaseManager:
         Returns:
             bool: 是否有权限
         """
-        # 超级管理员有权访问所有
-        if user.get("role") == "superadmin":
-            return True
-
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
         kb_repo = KnowledgeBaseRepository()
@@ -391,17 +400,15 @@ class KnowledgeBaseManager:
         else:
             user_info = {
                 "uid": user.uid,
-                "role": user.role,
                 "department_id": user.department_id,
+                "department_ancestor_ids": getattr(user, "department_ancestor_ids", ()),
             }
 
-        user_role = user_info.get("role")
         user_dept = user_info.get("department_id")
-        logger.info(f"Getting databases for user with role {user_role} and department {user_dept}")
+        logger.info(f"Getting databases for user in department {user_dept}")
 
         all_databases = await self.get_databases()
 
-        # 超级管理员可以看到所有知识库
         filtered_databases: list[KnowledgeBaseSummary] = []
         for database in all_databases:
             permission = resolve_knowledge_base_permission(user_info, database)
@@ -453,7 +460,6 @@ class KnowledgeBaseManager:
         llm_model_spec: str | None = None,
         share_config: dict | None = None,
         created_by: str | None = None,
-        created_by_department_id: int | str | None = None,
         **kwargs,
     ) -> KnowledgeBaseDetail:
         """
@@ -467,7 +473,6 @@ class KnowledgeBaseManager:
             llm_model_spec: LLM 模型 spec
             share_config: 共享配置
             created_by: 创建者 uid
-            created_by_department_id: 创建者部门 ID
             **kwargs: 其他配置参数
 
         Returns:
@@ -480,11 +485,7 @@ class KnowledgeBaseManager:
         if await self.database_name_exists(database_name):
             raise KBNameConflictError(f"知识库名称 '{database_name}' 已存在，请使用其他名称")
 
-        share_config = self._normalize_share_config(
-            share_config,
-            user_uid=created_by,
-            department_id=created_by_department_id,
-        )
+        share_config = await self._normalize_share_config_for_save(share_config)
 
         kb_instance = self._get_or_create_kb_instance(kb_type)
         additional_params = kwargs
@@ -1107,8 +1108,6 @@ class KnowledgeBaseManager:
         update_llm_model_spec: bool = False,
         additional_params: dict | None = None,
         share_config: dict | None = None,
-        operator_uid: str | None = None,
-        operator_department_id: int | str | None = None,
     ) -> KnowledgeBaseDetail:
         """更新数据库"""
         from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
@@ -1142,11 +1141,7 @@ class KnowledgeBaseManager:
             update_data["additional_params"] = merged_additional_params
 
         if share_config is not None:
-            update_data["share_config"] = self._normalize_share_config(
-                share_config,
-                user_uid=operator_uid,
-                department_id=operator_department_id,
-            )
+            update_data["share_config"] = await self._normalize_share_config_for_save(share_config)
 
         # 保存到数据库
         await kb_repo.update(kb_id, update_data)
@@ -1252,24 +1247,19 @@ class KnowledgeBaseManager:
             }
         return info
 
-    async def get_statistics(self) -> dict:
-        """获取统计信息"""
-        from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
-        from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+    async def get_statistics(self, user: User | dict) -> dict:
+        """获取当前用户可见知识库的统计信息。"""
 
-        kb_repo = KnowledgeBaseRepository()
-        rows = await kb_repo.get_all()
-
-        stats = {"total_databases": len(rows), "kb_types": {}, "total_files": 0}
+        databases = await self.get_databases_by_user(user)
+        stats = {"total_databases": len(databases), "kb_types": {}, "total_files": 0}
 
         # 按知识库类型统计
-        for row in rows:
-            kb_type = row.kb_type or "milvus"
+        for database in databases:
+            kb_type = database.kb_type or "milvus"
             if kb_type not in stats["kb_types"]:
                 stats["kb_types"][kb_type] = 0
             stats["kb_types"][kb_type] += 1
-
-        stats["total_files"] = await KnowledgeFileRepository().count_all()
+            stats["total_files"] += database.file_count
 
         return stats
 

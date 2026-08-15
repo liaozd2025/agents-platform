@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 import zipfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -24,7 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi import config as sys_config
 from yuxi.agents.mcp.service import get_enabled_mcp_server_slugs
 from yuxi.agents.skills.repository import SkillRepository
-from yuxi.permissions import ResourcePermission, normalize_permission_config, resolve_skill_permission
+from yuxi.permissions import (
+    ResourcePermission,
+    get_permission_department_ids,
+    normalize_permission_config,
+    resolve_skill_permission,
+)
+from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.storage.postgres.models_business import Skill, User
 from yuxi.storage.redis import get_async_redis_client
 from yuxi.utils.logging_config import logger
@@ -65,7 +71,6 @@ TEXT_FILE_EXTENSIONS = {
 
 BUILTIN_SKILL_OPERATOR = "builtin-system"
 SKILL_SOURCE_TYPES = {"builtin", "upload", "remote"}
-ADMIN_ROLES = {"admin", "superadmin"}
 DEFAULT_SKILL_SHARE_CONFIG = {"access_level": "user", "department_ids": [], "user_uids": []}
 BUILTIN_SKILL_SHARE_CONFIG = {"access_level": "global", "department_ids": [], "user_uids": []}
 SKILL_DRAFT_TTL_SECONDS = 60 * 60
@@ -167,19 +172,15 @@ def is_builtin_skill(item: Skill | dict) -> bool:
     return source_type == "builtin"
 
 
-def get_allowed_skill_access_levels(user: User) -> list[str]:
-    if user.role in ADMIN_ROLES:
-        return ["global", "department", "user"]
-    return ["user"]
-
-
 def normalize_skill_share_config(
     share_config: dict | None,
     *,
     operator_uid: str,
     source_type: str = "upload",
-    allowed_access_levels: set[str] | None = None,
+    department_paths: Mapping[int, str] | None = None,
 ) -> dict:
+    """规范化并校验 Skill 共享配置。"""
+
     if source_type == "builtin":
         return {"version": 2, "read_scope": BUILTIN_SKILL_SHARE_CONFIG.copy(), "manage_scope": None}
 
@@ -190,9 +191,36 @@ def normalize_skill_share_config(
     }
     return normalize_permission_config(
         share_config or {"version": 2, "read_scope": default_scope, "manage_scope": None},
-        allowed_access_levels=allowed_access_levels,
-        unauthorized_access_level_message="当前用户无权使用该 Skill 共享范围",
         strict=True,
+        department_paths=department_paths,
+    )
+
+
+async def _normalize_skill_share_config_for_save(
+    db: AsyncSession,
+    share_config: dict | None,
+    *,
+    operator_uid: str,
+    source_type: str = "upload",
+) -> dict:
+    """加载组织路径并校验待保存的 Skill 共享配置。"""
+
+    if source_type == "builtin":
+        return normalize_skill_share_config(
+            share_config,
+            operator_uid=operator_uid,
+            source_type=source_type,
+        )
+
+    department_paths = await DepartmentRepository().get_paths_by_ids(
+        get_permission_department_ids(share_config),
+        session=db,
+    )
+    return normalize_skill_share_config(
+        share_config,
+        operator_uid=operator_uid,
+        source_type=source_type,
+        department_paths=department_paths,
     )
 
 
@@ -204,11 +232,16 @@ def user_can_access_skill(user: User, skill: Skill, *, require_enabled: bool = T
 
 def user_can_manage_skill(user: User, skill: Skill) -> bool:
     if is_builtin_skill(skill):
-        return user.role in ADMIN_ROLES
+        return True
     return resolve_skill_permission(user, skill) == ResourcePermission.MANAGE
 
 
-def can_skill_depend_on(parent: Skill, dependency: Skill) -> bool:
+def can_skill_depend_on(
+    parent: Skill,
+    dependency: Skill,
+    *,
+    department_paths: Mapping[int, str] | None = None,
+) -> bool:
     if not dependency.enabled:
         return False
     if is_builtin_skill(dependency):
@@ -224,12 +257,20 @@ def can_skill_depend_on(parent: Skill, dependency: Skill) -> bool:
     if not parent_scopes:
         parent_scopes = [{**owner_scope, "user_uids": [str(parent.created_by or "")]}]
     return all(
-        any(_scope_contains(dependency_scope, parent_scope) for dependency_scope in dependency_scopes)
+        any(
+            _scope_contains(dependency_scope, parent_scope, department_paths=department_paths)
+            for dependency_scope in dependency_scopes
+        )
         for parent_scope in parent_scopes
     )
 
 
-def _scope_contains(container: dict, target: dict) -> bool:
+def _scope_contains(
+    container: dict,
+    target: dict,
+    *,
+    department_paths: Mapping[int, str] | None = None,
+) -> bool:
     """判断一个共享范围是否完整覆盖另一个范围。"""
 
     container_level = container.get("access_level")
@@ -241,6 +282,17 @@ def _scope_contains(container: dict, target: dict) -> bool:
     if target_level == "department":
         container_ids = {int(value) for value in container.get("department_ids") or []}
         target_ids = {int(value) for value in target.get("department_ids") or []}
+        if department_paths is not None:
+            container_paths = [department_paths.get(department_id) for department_id in container_ids]
+            target_paths = [department_paths.get(department_id) for department_id in target_ids]
+            return all(
+                target_path is not None
+                and any(
+                    container_path is not None and target_path.startswith(container_path)
+                    for container_path in container_paths
+                )
+                for target_path in target_paths
+            )
         return target_ids.issubset(container_ids)
     if target_level == "user":
         container_uids = {str(value) for value in container.get("user_uids") or []}
@@ -307,7 +359,7 @@ def _load_and_select_draft_items(
 ) -> tuple[Path, dict, list[dict]]:
     """加载安装草稿，校验权限与来源类型，并按需筛选选中的条目。"""
     draft_dir, data = _load_skill_draft(draft_id)
-    if data.get("created_by") != operator.uid and operator.role not in ADMIN_ROLES:
+    if data.get("created_by") != operator.uid:
         raise ValueError("无权确认该安装草稿")
     if data.get("source_type") not in {"upload", "remote"}:
         raise ValueError("无效的安装草稿来源")
@@ -609,6 +661,7 @@ async def _validate_dependencies(
     mcp_dependencies: list[str],
     skill_dependencies: list[str],
     available_skills: dict[str, Skill],
+    department_paths: Mapping[int, str],
 ) -> tuple[list[str], list[str], list[str]]:
     tools = normalize_string_list(tool_dependencies)
     mcps = normalize_string_list(mcp_dependencies)
@@ -632,7 +685,11 @@ async def _validate_dependencies(
     if parent.slug in skills:
         raise ValueError("skill_dependencies 不允许包含自身")
 
-    forbidden_skills = [name for name in skills if not can_skill_depend_on(parent, available_skills[name])]
+    forbidden_skills = [
+        name
+        for name in skills
+        if not can_skill_depend_on(parent, available_skills[name], department_paths=department_paths)
+    ]
     if forbidden_skills:
         raise ValueError(f"存在权限范围不匹配的 skill 依赖: {', '.join(forbidden_skills)}")
 
@@ -653,12 +710,18 @@ async def update_skill_dependencies(
     repo = SkillRepository(db)
     skill_items = await _list_accessible_shared_skills(db, operator)
     available_skills = {skill.slug: skill for skill in skill_items}
+    department_ids = get_permission_department_ids(item.share_config)
+    for dependency_slug in normalize_string_list(skill_dependencies):
+        if dependency := available_skills.get(dependency_slug):
+            department_ids.update(get_permission_department_ids(dependency.share_config))
+    department_paths = await DepartmentRepository().get_paths_by_ids(department_ids, session=db)
     tools, mcps, skills = await _validate_dependencies(
         parent=item,
         tool_dependencies=tool_dependencies,
         mcp_dependencies=mcp_dependencies,
         skill_dependencies=skill_dependencies,
         available_skills=available_skills,
+        department_paths=department_paths,
     )
 
     return await repo.update_dependencies(
@@ -1064,14 +1127,10 @@ async def _stage_skill_draft_item(
 
 
 def _build_default_share_payload(operator: User) -> dict[str, Any]:
-    default_share_config = normalize_skill_share_config(
-        None,
-        operator_uid=operator.uid,
-        allowed_access_levels=set(get_allowed_skill_access_levels(operator)),
-    )
+    default_share_config = normalize_skill_share_config(None, operator_uid=operator.uid)
     return {
         "default_share_config": default_share_config,
-        "allowed_access_levels": get_allowed_skill_access_levels(operator),
+        "allowed_access_levels": ["global", "department", "user"],
     }
 
 
@@ -1305,11 +1364,11 @@ async def confirm_skill_install_draft(
     draft_dir, data, draft_items = _load_and_select_draft_items(draft_id, slugs, operator)
     source_type = data.get("source_type")
 
-    normalized_share_config = normalize_skill_share_config(
+    normalized_share_config = await _normalize_skill_share_config_for_save(
+        db,
         share_config,
         operator_uid=operator.uid,
         source_type=source_type,
-        allowed_access_levels=set(get_allowed_skill_access_levels(operator)),
     )
 
     repo = SkillRepository(db)
@@ -1460,7 +1519,7 @@ async def confirm_personal_skill_install_draft(
 
 async def discard_skill_install_draft(*, draft_id: str, operator: User) -> None:
     draft_dir, data = _load_skill_draft(draft_id)
-    if data.get("created_by") != operator.uid and operator.role not in ADMIN_ROLES:
+    if data.get("created_by") != operator.uid:
         raise ValueError("无权删除该安装草稿")
     shutil.rmtree(draft_dir, ignore_errors=True)
 
@@ -1479,16 +1538,18 @@ async def import_skill_dir(
         raise ValueError("技能目录路径不合法")
     if not source_skill_dir.exists() or not source_skill_dir.is_dir():
         raise ValueError("技能目录不存在")
+    normalized_share_config = await _normalize_skill_share_config_for_save(
+        db,
+        share_config,
+        operator_uid=created_by or "",
+        source_type=source_type,
+    )
     return await _import_skill_dir_impl(
         db,
         source_skill_dir=source_skill_dir,
         created_by=created_by,
         source_type=source_type,
-        share_config=normalize_skill_share_config(
-            share_config,
-            operator_uid=created_by or "",
-            source_type=source_type,
-        ),
+        share_config=normalized_share_config,
     )
 
 
@@ -1709,11 +1770,11 @@ async def update_skill_share_config(
 ) -> Skill:
     item = await get_manageable_skill_or_raise(db, operator, slug)
     _ensure_non_builtin(item)
-    normalized = normalize_skill_share_config(
+    normalized = await _normalize_skill_share_config_for_save(
+        db,
         share_config,
         operator_uid=operator.uid,
         source_type=item.source_type,
-        allowed_access_levels=set(get_allowed_skill_access_levels(operator)),
     )
     return await SkillRepository(db).update_share_config(item, share_config=normalized, updated_by=operator.uid)
 

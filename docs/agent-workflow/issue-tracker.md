@@ -2,13 +2,16 @@
 
 本仓库的 issue 与 spec 都放在 GitHub Issues，统一用 `gh` CLI 操作。
 
-仓库：`liaozd2025/Yuxi`（`origin`）。`gh` 在 clone 内运行时会自动推断，无需显式指定。
+仓库：`liaozd2025/agents-platform`（`origin`，原名 `liaozd2025/Yuxi`，旧名仍可重定向访问）。
 
-> 注意：`upstream` 指向 `xerrors/Yuxi`（上游开源仓库）。**任何 issue 都只发 `origin`，绝不发 `upstream`。**
+> **每条 `gh` 命令都必须显式写 `-R liaozd2025/agents-platform`。**
+> `upstream` 指向 `xerrors/Yuxi`（上游开源仓库），而 `gh` 的自动推断会优先落到 `upstream`——实测 `gh label list` 列出的是上游的标签、`gh label create` 直接打到了上游仓库。省掉 `-R` 不是省事，是把写操作发到别人的仓库。
 
 ## 约定
 
-- **创建**：`gh issue create --title "..." --body "..."`，多行正文用 heredoc
+所有命令均以 `-R liaozd2025/agents-platform` 开头，下表省略不写。
+
+- **创建**：`gh issue create --title "..." --body-file <path>`，正文较长时用文件，避免 heredoc 转义问题
 - **读取**：`gh issue view <number> --comments`
 - **列表**：`gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'`，按需加 `--label` / `--state`
 - **评论**：`gh issue comment <number> --body "..."`
@@ -35,8 +38,8 @@ GitHub 的 issue 与 PR 共用一个编号空间，裸 `#42` 可能是任一种�
 
 ```bash
 # <blocker-db-id> 是阻塞方的数字 database id，不是 #number、也不是 node_id
-gh api repos/liaozd2025/Yuxi/issues/<n> --jq .id
-gh api --method POST repos/liaozd2025/Yuxi/issues/<child>/dependencies/blocked_by \
+gh api repos/liaozd2025/agents-platform/issues/<n> --jq .id
+gh api --method POST repos/liaozd2025/agents-platform/issues/<child>/dependencies/blocked_by \
   -F issue_id=<blocker-db-id>
 ```
 

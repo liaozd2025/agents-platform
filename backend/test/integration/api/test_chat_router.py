@@ -108,6 +108,16 @@ async def test_admin_can_list_agents(test_client, admin_headers):
         assert "agent_id" in payload["agents"][0]
 
 
+async def test_standard_user_cannot_create_agent(test_client, standard_user):
+    response = await test_client.post(
+        "/api/agent",
+        headers=standard_user["headers"],
+        json={"name": "无权创建的智能体", "backend_id": "ChatbotAgent"},
+    )
+
+    assert response.status_code == 403
+
+
 async def test_thread_tool_approval_mode_is_saved_in_conversation_metadata(test_client, admin_headers):
     thread_id = await _create_thread_for_user(test_client, admin_headers)
 
@@ -173,7 +183,7 @@ async def test_admin_can_read_default_agent(test_client, admin_headers):
     assert agent["agent_id"]
 
 
-async def test_agent_detail_filters_configurable_items_by_role(
+async def test_agent_detail_filters_configurable_items_by_effective_permission(
     test_client,
     admin_headers,
     standard_user,
@@ -207,7 +217,7 @@ async def test_agent_detail_filters_configurable_items_by_role(
     assert "max_execution_steps" in admin_items
 
 
-async def test_setting_default_agent_requires_admin(test_client, admin_headers, standard_user):
+async def test_setting_default_agent_requires_manage_permission(test_client, admin_headers, standard_user):
     agents_response = await test_client.get("/api/agent", headers=admin_headers)
     assert agents_response.status_code == 200, agents_response.text
     agents = agents_response.json().get("agents", [])

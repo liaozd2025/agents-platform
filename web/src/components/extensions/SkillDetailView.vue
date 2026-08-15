@@ -157,7 +157,6 @@
                     v-else
                     ref="shareConfigFormRef"
                     v-model="shareConfigForm"
-                    :auto-select-user-dept="true"
                     :allowed-access-levels="allowedSkillAccessLevels"
                   />
                 </section>
@@ -361,9 +360,11 @@ import { skillApi } from '@/apis/skill_api'
 import AgentFilePreview from '@/components/AgentFilePreview.vue'
 import FileTreeComponent from '@/components/FileTreeComponent.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
+import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
 const slug = computed(() => decodeURIComponent(route.params.slug))
 
 const loading = ref(false)
@@ -404,7 +405,9 @@ const isInstalledSkill = computed(() => !!currentSkill.value?.dir_path)
 const isBuiltinInstalledSkill = computed(() => {
   return !!(isInstalledSkill.value && currentSkill.value?.source_type === 'builtin')
 })
-const canManageCurrentSkill = computed(() => currentSkill.value?.can_manage !== false)
+const canManageCurrentSkill = computed(
+  () => userStore.hasPermission('skill:manage') && currentSkill.value?.can_manage !== false
+)
 const isReadOnlySkill = computed(() => isInstalledSkill.value && !canManageCurrentSkill.value)
 const canEditSkillFiles = computed(
   () => canManageCurrentSkill.value && !isBuiltinInstalledSkill.value
@@ -566,7 +569,9 @@ const fetchSkillDetail = async () => {
       await reloadTree()
       await loadSkillFile(found.slug)
     }
-    await fetchDependencyOptions(currentSkill.value?.slug)
+    if (canManageCurrentSkill.value && !isBuiltinInstalledSkill.value) {
+      await fetchDependencyOptions(currentSkill.value?.slug)
+    }
   } catch {
     message.error('加载失败')
   } finally {

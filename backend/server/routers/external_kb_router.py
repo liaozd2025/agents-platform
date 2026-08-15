@@ -6,7 +6,7 @@ from yuxi.knowledge.read_models import KnowledgeBaseSummary
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 
-from server.utils.auth_middleware import get_required_user
+from server.utils.knowledge_permissions import require_knowledge_base_read, require_knowledge_base_read_permission
 
 external_kb = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
@@ -26,7 +26,7 @@ class ExternalFindRequest(BaseModel):
 
 
 @external_kb.get("/databases/external")
-async def list_external_databases(current_user: User = Depends(get_required_user)):
+async def list_external_databases(current_user: User = Depends(require_knowledge_base_read_permission)):
     """列出当前登录用户可见的知识库，供 CLI 选择与展示。"""
     databases = await knowledge_base.get_databases_by_uid(current_user.uid)
     items = []
@@ -51,7 +51,7 @@ async def list_external_files(
     offset: int = Query(0, ge=0, description="偏移量，从 0 开始"),
     limit: int = Query(100, ge=1, le=500, description="每页数量"),
     status: str = Query("all", description="文件状态筛选"),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_knowledge_base_read),
 ):
     """列出或搜索知识库文件，供 CLI 浏览与定位。"""
     database = await knowledge_base.get_accessible_database_info_by_uid(current_user.uid, kb_id)
@@ -77,7 +77,7 @@ async def list_external_files(
 async def retrieve_external(
     kb_id: str,
     payload: ExternalRetrieveRequest,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_knowledge_base_read),
 ):
     """对知识库执行检索查询，返回结构化结果。"""
     if not payload.query:
@@ -101,7 +101,7 @@ async def open_external_file(
     file_id: str,
     offset: int = Query(0, ge=0, description="起始行偏移"),
     limit: int = Query(200, ge=1, le=1800, description="返回行数"),
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_knowledge_base_read),
 ):
     """按行窗口打开文件解析后的 Markdown 内容。"""
     await _require_accessible_kb(kb_id, current_user.uid, require_documents=True, operation="文档查看")
@@ -119,7 +119,7 @@ async def find_external_file(
     kb_id: str,
     file_id: str,
     payload: ExternalFindRequest,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_knowledge_base_read),
 ):
     """在指定文件内做关键词或正则定位，返回匹配窗口。"""
     await _require_accessible_kb(kb_id, current_user.uid, require_documents=True, operation="文档查找")

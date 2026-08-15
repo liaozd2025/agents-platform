@@ -258,8 +258,8 @@ async def test_get_databases_by_user_sets_permission_and_redacts_readonly_secret
     )
     manager = KnowledgeBaseManager("/tmp/yuxi-test")
 
-    readonly = await manager.get_databases_by_user({"uid": "user_2", "role": "admin", "department_id": None})
-    owner = await manager.get_databases_by_user({"uid": "user_1", "role": "admin", "department_id": None})
+    readonly = await manager.get_databases_by_user({"uid": "user_2", "department_id": None})
+    owner = await manager.get_databases_by_user({"uid": "user_1", "department_id": None})
 
     assert readonly[0].effective_permission == ResourcePermission.READ
     assert readonly[0].can_manage is False
@@ -411,3 +411,21 @@ async def test_list_document_file_ids_by_statuses_delegates_to_repository():
             "limit": 500,
         }
     ]
+
+
+async def test_statistics_only_aggregate_accessible_databases(monkeypatch):
+    manager = KnowledgeBaseManager("/tmp/yuxi-test")
+
+    async def fake_get_databases_by_user(_user):
+        return [
+            SimpleNamespace(kb_type="milvus", file_count=2),
+            SimpleNamespace(kb_type="dify", file_count=3),
+        ]
+
+    monkeypatch.setattr(manager, "get_databases_by_user", fake_get_databases_by_user)
+
+    assert await manager.get_statistics({"uid": "reader"}) == {
+        "total_databases": 2,
+        "kb_types": {"milvus": 1, "dify": 1},
+        "total_files": 5,
+    }

@@ -120,6 +120,7 @@
             <h3>安装位置</h3>
             <div class="install-target-options">
               <button
+                v-if="canInstallPersonal"
                 type="button"
                 class="install-target-option"
                 :class="{ selected: installTarget === 'personal' }"
@@ -130,7 +131,7 @@
                 <span>仅自己可用，保存在个人 workspace，不进入平台数据库。</span>
               </button>
               <button
-                v-if="userStore.isAdmin"
+                v-if="canInstallShared"
                 type="button"
                 class="install-target-option"
                 :class="{ selected: installTarget === 'shared' }"
@@ -150,7 +151,6 @@
             <ShareConfigForm
               ref="shareConfigFormRef"
               v-model="shareConfig"
-              :auto-select-user-dept="true"
               :allowed-access-levels="allowedAccessLevels"
             />
           </div>
@@ -236,6 +236,8 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'completed'])
 const userStore = useUserStore()
+const canInstallPersonal = computed(() => userStore.hasPermission('skill:use'))
+const canInstallShared = computed(() => userStore.hasPermission('skill:manage'))
 
 const stepLabels = ['选择', '加载', '位置', '完成']
 const phase = ref('selecting')
@@ -443,6 +445,14 @@ const prepareSuite = () => {
 }
 
 const installDrafts = async () => {
+  if (
+    (installTarget.value === 'personal' && !canInstallPersonal.value) ||
+    (installTarget.value === 'shared' && !canInstallShared.value)
+  ) {
+    flowError.value = '当前用户无权安装到该位置'
+    return
+  }
+
   if (installTarget.value === 'shared') {
     const validation = shareConfigFormRef.value?.validate?.()
     if (validation && !validation.valid) {
@@ -552,7 +562,7 @@ watch(
     drafts.value = []
     reviewItems.value = []
     installItems.value = []
-    installTarget.value = 'personal'
+    installTarget.value = canInstallPersonal.value ? 'personal' : 'shared'
 
     if (props.flow.kind === 'suite') {
       phase.value = 'selecting'

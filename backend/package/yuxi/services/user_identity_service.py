@@ -5,9 +5,7 @@ import time
 from fastapi import HTTPException, status
 from pypinyin import Style, lazy_pinyin
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
-
-from yuxi.storage.postgres.models_business import Department, User
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, Department, User
 from yuxi.utils.logging_config import logger
 
 
@@ -66,40 +64,24 @@ def normalize_phone_number(phone: str) -> str:
     return phone
 
 
-async def get_or_create_external_department(
-    db,
-    department_name: str | None = None,
-    department_description: str | None = None,
-    default_department: str | None = None,
-) -> Department | None:
-    """获取或创建外部身份所属部门。"""
-    processed_dept_name = department_name.strip()[:50] if department_name else None
-    processed_dept_desc = department_description.strip()[:255] if department_description else None
-    final_dept_name = processed_dept_name or default_department
-    if not final_dept_name:
-        return None
+async def resolve_external_department(db, department_name: str | None) -> Department:
+    """按外部身份部门名精确匹配已有组织节点，无法唯一定位时回落集团根。"""
 
-    result = await db.execute(select(Department).filter(Department.name == final_dept_name))
-    department = result.scalar_one_or_none()
-    if department:
-        logger.info(f"Using existing department: {final_dept_name}")
-        return department
+    normalized_name = department_name.strip() if isinstance(department_name, str) else None
+    matched = []
+    if normalized_name:
+        result = await db.execute(select(Department).where(Department.name == normalized_name))
+        matched = list(result.scalars().all())
 
-    department = Department(
-        name=final_dept_name,
-        description=processed_dept_desc or f"{final_dept_name}部门",
-    )
-    db.add(department)
-    try:
-        await db.commit()
-        await db.refresh(department)
-        logger.info(f"Created external identity department: {final_dept_name}")
-    except IntegrityError:
-        await db.rollback()
-        result = await db.execute(select(Department).filter(Department.name == final_dept_name))
-        department = result.scalar_one_or_none()
+    if len(matched) == 1:
+        logger.info(f"Using existing department: {normalized_name}")
+        return matched[0]
 
-    return department
+    logger.warning(f"Department claim {department_name!r} matched {len(matched)} org nodes, falling back to group root")
+    group_root = await db.get(Department, ROOT_DEPARTMENT_ID)
+    if group_root is None:
+        raise RuntimeError("集团根组织节点不存在")
+    return group_root
 
 
 async def build_unique_external_username(db, preferred_username: str, external_id: str) -> str:

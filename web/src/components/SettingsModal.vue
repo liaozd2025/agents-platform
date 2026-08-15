@@ -1,186 +1,123 @@
 <template>
-  <a-modal
-    v-model:open="visible"
-    :title="null"
-    width="90%"
-    :style="{ maxWidth: '980px', minWidth: '320px', top: '10%' }"
-    :footer="null"
-    :closable="false"
-    @cancel="handleClose"
-    class="settings-modal"
-    :destroyOnClose="true"
-    :bodyStyle="{ padding: 0 }"
-  >
+  <div class="settings-modal">
     <div class="settings-container">
-      <button class="settings-close-btn lucide-icon-btn" @click="handleClose" aria-label="关闭设置">
-        <X :size="16" />
-      </button>
+      <aside class="settings-sider" aria-label="系统设置导航">
+        <button type="button" class="settings-back-btn" @click="handleClose">
+          <ArrowLeft :size="16" />
+          <span>返回应用</span>
+        </button>
 
-      <!-- 侧边栏 (Desktop) -->
-      <div class="settings-sider">
-        <div class="settings-sider-nav">
-          <div
-            class="sider-item"
-            :class="{ activesec: activeTab === 'account' }"
-            @click="activeTab = 'account'"
-            v-if="userStore.isLoggedIn"
-          >
-            <CircleUser class="icon" :size="18" />
-            <span>账户设置</span>
-          </div>
-          <div
-            class="sider-item"
-            :class="{ activesec: activeTab === 'apiKeys' }"
-            @click="activeTab = 'apiKeys'"
-            v-if="userStore.isLoggedIn"
-          >
-            <Key class="icon" :size="18" />
-            <span>API Keys</span>
-          </div>
-          <div
-            class="sider-item"
-            :class="{ activesec: activeTab === 'base' }"
-            @click="activeTab = 'base'"
-            v-if="userStore.isAdmin"
-          >
-            <Settings class="icon" :size="18" />
-            <span>基本设置</span>
-          </div>
-          <div
-            class="sider-item"
-            :class="{ activesec: activeTab === 'ocr' }"
-            @click="activeTab = 'ocr'"
-            v-if="userStore.isAdmin"
-          >
-            <ScanText class="icon" :size="18" />
-            <span>OCR 配置</span>
-          </div>
-          <div
-            class="sider-item"
-            :class="{ activesec: activeTab === 'user' }"
-            @click="activeTab = 'user'"
-            v-if="userStore.isAdmin"
-          >
-            <User class="icon" :size="18" />
-            <span>用户管理</span>
-          </div>
-          <div
-            class="sider-item"
-            :class="{ activesec: activeTab === 'department' }"
-            @click="activeTab = 'department'"
-            v-if="userStore.isSuperAdmin"
-          >
-            <Users class="icon" :size="18" />
-            <span>部门管理</span>
-          </div>
-          <div
-            class="sider-item"
-            :class="{ activesec: activeTab === 'agentEnv' }"
-            @click="activeTab = 'agentEnv'"
-            v-if="userStore.isLoggedIn"
-          >
-            <SquareTerminal class="icon" :size="18" />
-            <span>环境变量</span>
-          </div>
-        </div>
+        <a-input
+          v-model:value="settingsSearch"
+          allow-clear
+          placeholder="搜索设置..."
+          class="settings-search"
+          aria-label="搜索设置"
+        >
+          <template #prefix><Search :size="15" /></template>
+        </a-input>
 
-        <div v-if="showStarCard" class="settings-star-card">
-          <div class="star-card-header">
-            <div class="star-card-badge">
-              <Star :size="12" />
-              <span>支持项目</span>
-            </div>
-            <button
-              class="star-card-close lucide-icon-btn"
-              @click="dismissStarCard"
-              aria-label="关闭 Star 提示"
+        <nav class="settings-sider-nav">
+          <section v-for="group in navigationGroups" :key="group.label" class="nav-group">
+            <div class="nav-group-label">{{ group.label }}</div>
+            <RouterLink
+              v-for="item in group.items"
+              :key="item.id"
+              :to="{ path: item.path, query: route.query }"
+              class="sider-item"
+              :class="{ activesec: activeTab === item.id }"
+              :aria-current="activeTab === item.id ? 'page' : undefined"
             >
-              <X :size="14" />
-            </button>
+              <component :is="settingsTabIcons[item.id]" class="icon" :size="17" />
+              <span>{{ item.label }}</span>
+            </RouterLink>
+          </section>
+
+          <a-empty
+            v-if="!navigationGroups.length"
+            :image="false"
+            description="未找到设置项"
+            class="settings-nav-empty"
+          />
+        </nav>
+
+        <div class="settings-sider-footer">
+          <div v-if="showStarCard" class="settings-star-card">
+            <div class="star-card-header">
+              <div class="star-card-badge">
+                <Star :size="12" />
+                <span>支持项目</span>
+              </div>
+              <button
+                type="button"
+                class="star-card-close lucide-icon-btn"
+                aria-label="关闭 Star 提示"
+                @click="dismissStarCard"
+              >
+                <X :size="14" />
+              </button>
+            </div>
+            <p class="star-card-title">给 Yuxi 点个 Star</p>
+            <p class="star-card-description">
+              如果这个项目帮到了你，欢迎去 GitHub 点亮一个 Star，让更多人看到它。
+            </p>
+            <a
+              class="star-card-link"
+              :href="projectRepoUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <img
+                class="star-card-link-image"
+                src="https://img.shields.io/github/stars/xerrors/Yuxi?label=Yuxi&style=social"
+                alt="GitHub stars for Yuxi"
+              />
+              <ExternalLink :size="13" />
+            </a>
           </div>
-          <p class="star-card-title">给 Yuxi 点个 Star</p>
-          <p class="star-card-description">
-            如果这个项目帮到了你，欢迎去 GitHub 点亮一个 Star，让更多人看到它。
-          </p>
-          <a
-            class="star-card-link"
-            :href="projectRepoUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <img
-              class="star-card-link-image"
-              src="https://img.shields.io/github/stars/xerrors/Yuxi?label=Yuxi&style=social"
-              alt="GitHub stars for Yuxi"
+
+          <div v-if="userStore.isLoggedIn" class="settings-user-summary">
+            <FallbackAvatar
+              :src="userStore.avatar"
+              :name="userStore.username"
+              :seed="userStore.uid || userStore.username"
+              kind="user"
+              :size="28"
+              shape="circle"
+              :alt="userStore.username"
             />
-            <ExternalLink :size="13" />
-          </a>
+            <span class="summary-name">{{ userStore.username || userStore.uid }}</span>
+            <span class="summary-role">{{ assignedRolesText }}</span>
+          </div>
         </div>
-      </div>
+      </aside>
 
-      <!-- 顶部导航 (Mobile) -->
-      <div class="settings-mobile-nav">
-        <div
-          class="nav-item"
-          :class="{ active: activeTab === 'account' }"
-          @click="activeTab = 'account'"
-          v-if="userStore.isLoggedIn"
-        >
-          账户设置
-        </div>
-        <div
-          class="nav-item"
-          :class="{ active: activeTab === 'apiKeys' }"
-          @click="activeTab = 'apiKeys'"
-          v-if="userStore.isLoggedIn"
-        >
-          API Keys
-        </div>
-        <div
-          class="nav-item"
-          :class="{ active: activeTab === 'agentEnv' }"
-          @click="activeTab = 'agentEnv'"
-          v-if="userStore.isLoggedIn"
-        >
-          沙盒环境变量
-        </div>
-        <div
-          class="nav-item"
-          :class="{ active: activeTab === 'base' }"
-          @click="activeTab = 'base'"
-          v-if="userStore.isAdmin"
-        >
-          基本设置
-        </div>
-        <div
-          class="nav-item"
-          :class="{ active: activeTab === 'ocr' }"
-          @click="activeTab = 'ocr'"
-          v-if="userStore.isAdmin"
-        >
-          OCR 配置
-        </div>
-        <div
-          class="nav-item"
-          :class="{ active: activeTab === 'user' }"
-          @click="activeTab = 'user'"
-          v-if="userStore.isAdmin"
-        >
-          用户管理
-        </div>
-        <div
-          class="nav-item"
-          :class="{ active: activeTab === 'department' }"
-          @click="activeTab = 'department'"
-          v-if="userStore.isSuperAdmin"
-        >
-          部门管理
-        </div>
-      </div>
+      <header class="settings-mobile-header">
+        <button type="button" class="settings-back-btn" @click="handleClose">
+          <ArrowLeft :size="16" />
+          <span>返回应用</span>
+        </button>
+        <span class="mobile-title">系统设置</span>
+      </header>
 
-      <!-- 内容区域 -->
-      <div class="settings-content-wrapper">
-        <div class="settings-content">
+      <nav class="settings-mobile-nav" aria-label="系统设置导航">
+        <RouterLink
+          v-for="item in mobileNavigationItems"
+          :key="item.id"
+          :to="{ path: item.path, query: route.query }"
+          class="nav-item"
+          :class="{ active: activeTab === item.id }"
+          :aria-current="activeTab === item.id ? 'page' : undefined"
+        >
+          {{ item.label }}
+        </RouterLink>
+      </nav>
+
+      <main class="settings-content-wrapper">
+        <div
+          class="settings-content"
+          :class="{ 'wide-settings-content': ['user', 'role'].includes(activeTab) }"
+        >
           <div v-show="activeTab === 'account'" v-if="userStore.isLoggedIn">
             <AccountSettingsComponent />
           </div>
@@ -193,38 +130,61 @@
             <AgentEnvSettingsCard />
           </div>
 
-          <div v-show="activeTab === 'base'" v-if="userStore.isAdmin">
+          <div v-show="activeTab === 'base'" v-if="userStore.hasPermission('system_config:manage')">
+            <div class="settings-page-header">
+              <div class="settings-page-title">基本设置</div>
+              <p class="settings-page-description">配置系统默认模型、内容审查与服务链接。</p>
+            </div>
             <BasicSettingsSection />
           </div>
 
-          <div v-show="activeTab === 'ocr'" v-if="userStore.isAdmin">
+          <div v-show="activeTab === 'ocr'" v-if="userStore.hasPermission('ocr:manage')">
+            <div class="settings-page-header">
+              <div class="settings-page-title">OCR 配置</div>
+              <p class="settings-page-description">配置系统默认 OCR 方法及相关服务参数。</p>
+            </div>
             <OCRSettingsSection />
           </div>
 
-          <div v-show="activeTab === 'user'" v-if="userStore.isAdmin">
+          <div v-if="activeTab === 'user' && userStore.hasPermission('user:read')">
             <UserManagementComponent />
           </div>
 
-          <div v-show="activeTab === 'department'" v-if="userStore.isSuperAdmin">
+          <div
+            v-show="activeTab === 'department'"
+            v-if="
+              userStore.hasPermission('department:read') ||
+              userStore.hasPermission('department:read_all')
+            "
+          >
             <DepartmentManagementComponent />
           </div>
+
+          <div v-if="activeTab === 'role' && userStore.hasPermission('role:read')">
+            <RoleManagementComponent />
+          </div>
         </div>
-      </div>
+      </main>
     </div>
-  </a-modal>
+  </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { useConfigStore } from '@/stores/config'
 import { useUserStore } from '@/stores/user'
 import {
+  ArrowLeft,
   CircleUser,
   ExternalLink,
-  Settings,
   Key,
   ScanText,
-  Star,
+  Search,
+  Settings,
+  ShieldCheck,
   SquareTerminal,
+  Star,
   User,
   Users,
   X
@@ -236,50 +196,49 @@ import OCRSettingsSection from '@/components/OCRSettingsSection.vue'
 import ApiKeyManagementComponent from '@/components/ApiKeyManagementComponent.vue'
 import UserManagementComponent from '@/components/UserManagementComponent.vue'
 import DepartmentManagementComponent from '@/components/DepartmentManagementComponent.vue'
+import RoleManagementComponent from '@/components/RoleManagementComponent.vue'
+import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
+import { getSettingsNavigationGroups } from '@/utils/settingsNavigation'
+import { sanitizeRedirect } from '@/utils/oidcAutoStart'
 
-const props = defineProps({
-  visible: {
-    type: Boolean,
-    default: false
-  },
-  initialTab: {
-    type: String,
-    default: ''
-  }
-})
-
-const emit = defineEmits(['update:visible', 'close'])
-
+const settingsTabIcons = {
+  account: CircleUser,
+  agentEnv: SquareTerminal,
+  base: Settings,
+  user: User,
+  department: Users,
+  role: ShieldCheck,
+  apiKeys: Key,
+  ocr: ScanText
+}
+const configStore = useConfigStore()
 const userStore = useUserStore()
-const activeTab = ref('account')
+const route = useRoute()
+const router = useRouter()
+const activeTab = computed(() => route.meta.settingsTab)
+const settingsSearch = ref('')
 const showStarCard = ref(true)
 
 const STAR_CARD_STORAGE_KEY = 'yuxi-settings-star-card-dismissed'
 const projectRepoUrl = 'https://github.com/xerrors/Yuxi'
 
-const visible = computed({
-  get: () => props.visible,
-  set: (value) => emit('update:visible', value)
-})
-
-const availableTabs = computed(() => {
-  const tabs = []
-  if (userStore.isLoggedIn) tabs.push('account', 'apiKeys', 'agentEnv')
-  if (userStore.isAdmin) tabs.push('base', 'ocr', 'user')
-  if (userStore.isSuperAdmin) tabs.push('department')
-  return tabs
-})
-
-const setActiveTab = (preferredTab) => {
-  if (preferredTab && availableTabs.value.includes(preferredTab)) {
-    activeTab.value = preferredTab
-    return
-  }
-  activeTab.value = userStore.isAdmin ? 'base' : availableTabs.value[0]
-}
+const permissions = computed(() => ({
+  isLoggedIn: userStore.isLoggedIn,
+  effectivePermissions: userStore.effectivePermissions
+}))
+const allNavigationGroups = computed(() => getSettingsNavigationGroups(permissions.value))
+const navigationGroups = computed(() =>
+  getSettingsNavigationGroups(permissions.value, settingsSearch.value)
+)
+const mobileNavigationItems = computed(() =>
+  allNavigationGroups.value.flatMap((group) => group.items)
+)
+const assignedRolesText = computed(
+  () => userStore.userRoles.map((role) => role.name).join('、') || '未分配角色'
+)
 
 const handleClose = () => {
-  emit('close')
+  router.push(sanitizeRedirect(route.query.returnTo || '/workspace'))
 }
 
 const dismissStarCard = () => {
@@ -287,131 +246,165 @@ const dismissStarCard = () => {
   localStorage.setItem(STAR_CARD_STORAGE_KEY, 'true')
 }
 
-onMounted(() => {
+onMounted(async () => {
   showStarCard.value = localStorage.getItem(STAR_CARD_STORAGE_KEY) !== 'true'
-})
-
-watch(
-  () => [props.visible, props.initialTab],
-  ([newVal]) => {
-    if (newVal) {
-      setActiveTab(props.initialTab)
-    }
+  if (!userStore.hasPermission('system_config:manage') || Object.keys(configStore.config).length) {
+    return
   }
-)
+
+  try {
+    await configStore.refreshConfig()
+  } catch (error) {
+    console.warn('加载系统配置失败:', error)
+  }
+})
 </script>
 
 <style lang="less">
-.settings-modal.ant-modal {
-  .ant-modal-content {
-    border-radius: 12px;
-    display: flex;
-    flex-direction: column;
-    position: relative;
-    padding: 0;
-    overflow: hidden;
-  }
-
-  .ant-modal-body {
-    padding: 0;
-  }
-}
-
-.settings-container {
-  display: flex;
-  height: 70vh;
+.settings-modal {
   width: 100%;
-  position: relative;
-
-  @media (max-width: 900px) {
-    flex-direction: column;
-    height: auto;
-    min-height: 70vh;
-  }
+  height: 100dvh;
+  overflow: hidden;
 }
 
-.settings-close-btn {
-  position: absolute;
-  top: 10px;
-  left: 14px;
-  width: 32px;
-  height: 32px;
+.settings-modal .settings-container {
+  display: flex;
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--gray-0);
+}
+
+.settings-modal .settings-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 8px 10px;
   border: none;
   border-radius: 8px;
-  background: var(--gray-50);
+  background: transparent;
   color: var(--gray-700);
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  font-size: 14px;
   cursor: pointer;
-  z-index: 2;
 
   &:hover {
-    background: var(--gray-200);
+    background: var(--gray-150);
     color: var(--gray-900);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--main-400);
+    outline-offset: 2px;
   }
 }
 
-/* Sidebar Styles - Matching SettingView.vue style */
-.settings-sider {
-  width: 176px;
-  height: 100%;
-  padding: 52px 10px 12px;
+.settings-modal .settings-sider {
   display: flex;
+  flex: 0 0 264px;
   flex-direction: column;
-  flex-shrink: 0;
-  background: var(--gray-50);
+  height: 100%;
+  padding: 14px 12px;
+  overflow: hidden;
   border-right: 1px solid var(--gray-150);
+  background: var(--gray-50);
 
-  @media (max-width: 900px) {
-    display: none;
-  }
-
-  .settings-sider-nav {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+  .settings-back-btn {
     width: 100%;
   }
+}
 
-  .sider-item {
-    width: 100%;
-    padding: 6px 12px; /* Matches SettingView .sider > * */
-    cursor: pointer;
-    transition: all 0.1s; /* Matches SettingView */
-    text-align: left;
-    font-size: 15px; /* Matches SettingView */
+.settings-modal .settings-search {
+  margin: 8px 2px 12px;
+
+  &.ant-input-affix-wrapper {
+    height: 34px;
+    border-color: var(--gray-200);
     border-radius: 8px;
-    color: var(--gray-700);
-    display: flex;
-    align-items: center;
-    gap: 10px;
+    background: var(--gray-0);
 
-    .icon {
-      font-size: 14px; /* Slightly adjusted to align better, SettingView uses h() icon defaults */
-    }
-
-    &:hover {
-      background: var(--gray-50);
-    }
-
-    &.activesec {
-      background: var(--gray-150);
-      color: var(--main-700);
+    .ant-input-prefix {
+      color: var(--gray-500);
     }
   }
+}
 
-  .settings-star-card {
-    width: 100%;
-    margin-top: auto;
-    padding: 14px 12px 12px;
-    border-radius: 12px;
-    border: 1px solid rgba(4, 106, 130, 0.12);
-    background:
-      radial-gradient(circle at top right, rgba(95, 174, 194, 0.18), transparent 48%),
-      linear-gradient(180deg, var(--main-5) 0%, var(--gray-0) 100%);
-    overflow: hidden;
+.settings-modal .settings-sider-nav {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.settings-modal .nav-group + .nav-group {
+  margin-top: 8px;
+}
+
+.settings-modal .nav-group-label {
+  padding: 8px 10px 4px;
+  color: var(--gray-500);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.settings-modal .sider-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--gray-700);
+  font-size: 14px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--gray-150);
   }
+
+  &:focus-visible {
+    outline: 2px solid var(--main-400);
+    outline-offset: -2px;
+  }
+
+  &.activesec {
+    background: var(--gray-200);
+    color: var(--main-700);
+    font-weight: 500;
+  }
+
+  .icon {
+    flex-shrink: 0;
+  }
+}
+
+.settings-modal .settings-nav-empty {
+  margin-top: 28px;
+
+  .ant-empty-description {
+    color: var(--gray-500);
+    font-size: 13px;
+  }
+}
+
+.settings-modal .settings-sider-footer {
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.settings-modal .settings-star-card {
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid var(--gray-150);
+  border-radius: 10px;
+  background: var(--gray-0);
 
   .star-card-header {
     display: flex;
@@ -421,44 +414,43 @@ watch(
   }
 
   .star-card-badge {
-    width: fit-content;
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 8px;
-    border-radius: 999px;
-    background: rgba(4, 106, 130, 0.08);
     color: var(--main-700);
     font-size: 12px;
     font-weight: 600;
-    line-height: 1;
   }
 
   .star-card-close {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
     width: 24px;
     height: 24px;
     border: none;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.72);
+    border-radius: 50%;
+    background: transparent;
     color: var(--gray-600);
-    display: flex;
-    align-items: center;
-    justify-content: center;
     cursor: pointer;
-    flex-shrink: 0;
 
     &:hover {
-      background: var(--gray-0);
+      background: var(--gray-150);
       color: var(--gray-900);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--main-400);
+      outline-offset: 1px;
     }
   }
 
   .star-card-title {
-    margin: 10px 0 6px;
+    margin: 9px 0 4px;
     color: var(--gray-900);
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
-    line-height: 1.35;
   }
 
   .star-card-description {
@@ -469,13 +461,12 @@ watch(
   }
 
   .star-card-link {
-    margin-top: 12px;
     display: inline-flex;
     align-items: center;
-    justify-content: flex-start;
     gap: 6px;
-    text-decoration: none;
+    margin-top: 10px;
     color: var(--gray-600);
+    text-decoration: none;
   }
 
   .star-card-link-image {
@@ -484,113 +475,234 @@ watch(
   }
 }
 
-/* Content Area */
-.settings-content-wrapper {
-  flex: 1;
-  height: 100%;
-  max-width: calc(100% - 176px);
-  min-width: 0;
+.settings-modal .settings-user-summary {
   display: flex;
-  flex-direction: column;
-  background: var(--gray-0);
-  padding: 0;
+  align-items: center;
+  gap: 9px;
+  margin-top: 12px;
+  padding: 12px 10px 2px;
+  border-top: 1px solid var(--gray-150);
+  color: var(--gray-700);
+  font-size: 13px;
 
-  @media (max-width: 900px) {
-    max-width: 100%;
-    padding: 8px;
+  .summary-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .settings-content {
-    padding: 16px 16px; /* Keep inner readability without outer panel padding */
-    // margin-bottom: 40px; /* Matches SettingView .setting margin-bottom */
-    overflow-y: scroll;
-    height: auto;
+  .summary-role {
+    margin-left: auto;
+    color: var(--gray-500);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+}
+
+.settings-modal .settings-content-wrapper {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  background: var(--gray-0);
+}
+
+.settings-modal .settings-content {
+  width: 100%;
+  max-width: 880px;
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 56px 48px 96px;
+
+  .model-providers-section,
+  .user-management,
+  .department-management,
+  .apikey-management {
+    min-height: auto;
+  }
+
+  .settings-page-header {
+    margin-bottom: 26px;
+  }
+
+  .header-section {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .header-content {
     flex: 1;
-    min-height: 0;
+    min-width: 0;
+  }
 
-    .model-providers-section,
-    .user-management,
-    .department-management,
-    .apikey-management {
-      min-height: auto;
-    }
+  .settings-page-title {
+    margin: 0;
+    color: var(--gray-900);
+    font-size: 26px;
+    font-weight: 600;
+    line-height: 1.3;
+  }
 
-    .header-section {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-end;
-      gap: 16px;
-      margin-bottom: 16px;
-    }
+  .settings-page-description {
+    margin: 7px 0 0;
+    color: var(--gray-600);
+    font-size: 14px;
+    line-height: 1.55;
+  }
 
-    .header-content {
-      flex: 1;
-      min-width: 0;
-    }
+  .section-subtitle {
+    margin: 0;
+    color: var(--gray-900);
+    font-size: 16px;
+    font-weight: 500;
+  }
 
-    .section-title {
-      font-size: 16px;
-      font-weight: 500;
-      color: var(--gray-900);
-      line-height: 1.4;
-      margin: 12px 0 12px;
-    }
+  .add-btn {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 6px;
+  }
 
-    .section-description {
-      font-size: 14px;
-      color: var(--gray-600);
-      line-height: 1.4;
-      margin: 0;
-    }
+  .account-settings,
+  .agent-env-settings,
+  .apikey-management,
+  .user-management,
+  .department-management {
+    // 子模块使用 scoped 样式，这里统一全屏设置中心的页面标题层级。
+    > .header-section {
+      align-items: flex-start !important;
+      margin-bottom: 26px !important;
 
-    .section-subtitle {
-      margin: 0;
-      font-size: 16px;
-      font-weight: 500;
-      color: var(--gray-900);
-    }
+      > .header-content {
+        > .section-title {
+          margin: 0 !important;
+          color: var(--gray-900) !important;
+          font-size: 26px !important;
+          font-weight: 600 !important;
+          line-height: 1.3 !important;
+        }
 
-    .add-btn {
-      flex-shrink: 0;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    @media (max-width: 900px) {
-      height: auto;
-      padding: 10px 12px 12px;
+        > .section-description {
+          margin: 7px 0 0 !important;
+          color: var(--gray-600) !important;
+          font-size: 14px !important;
+          line-height: 1.55 !important;
+        }
+      }
     }
   }
 }
 
-/* Mobile Styles */
-.settings-mobile-nav {
-  display: none;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--gray-150);
-  background: var(--gray-0);
-  padding: 0;
-  padding-left: 42px;
-  flex-shrink: 0;
+.settings-modal .settings-content.wide-settings-content {
+  max-width: 1120px;
+  padding-top: 36px;
+}
 
-  @media (max-width: 900px) {
-    display: flex;
+.settings-modal .settings-mobile-header,
+.settings-modal .settings-mobile-nav {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .settings-modal .settings-container {
+    flex-direction: column;
   }
 
-  .nav-item {
-    padding: 12px 16px;
-    white-space: nowrap;
-    cursor: pointer;
-    color: var(--gray-600);
-    font-weight: 500;
-    border-bottom: 2px solid transparent;
-    transition: all 0.2s;
+  .settings-modal .settings-sider {
+    display: none;
+  }
 
-    &.active {
-      color: var(--main-color);
-      border-bottom-color: var(--main-color);
+  .settings-modal .settings-mobile-header {
+    position: relative;
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    min-height: 52px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--gray-150);
+    background: var(--gray-50);
+
+    .mobile-title {
+      position: absolute;
+      left: 50%;
+      color: var(--gray-900);
+      font-size: 15px;
+      font-weight: 600;
+      transform: translateX(-50%);
     }
+  }
+
+  .settings-modal .settings-mobile-nav {
+    display: flex;
+    flex-shrink: 0;
+    padding: 0 8px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--gray-150);
+    background: var(--gray-0);
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+
+    .nav-item {
+      flex-shrink: 0;
+      padding: 12px 14px 10px;
+      border: none;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      color: var(--gray-600);
+      font-size: 14px;
+      font-weight: 500;
+      text-decoration: none;
+      white-space: nowrap;
+      cursor: pointer;
+
+      &.active {
+        border-bottom-color: var(--main-color);
+        color: var(--main-color);
+      }
+
+      &:focus-visible {
+        outline: 2px solid var(--main-400);
+        outline-offset: -3px;
+      }
+    }
+  }
+
+  .settings-modal .settings-content-wrapper {
+    height: auto;
+  }
+
+  .settings-modal .settings-content {
+    max-width: none;
+    padding: 28px 20px 64px;
+
+    .settings-page-title {
+      font-size: 22px;
+    }
+
+    .account-settings,
+    .agent-env-settings,
+    .apikey-management,
+    .user-management,
+    .department-management {
+      > .header-section {
+        flex-wrap: wrap;
+        margin-bottom: 22px !important;
+
+        > .header-content > .section-title {
+          font-size: 22px !important;
+        }
+      }
+    }
+  }
+
+  .settings-modal .settings-content.wide-settings-content {
+    padding-top: 28px;
   }
 }
 </style>

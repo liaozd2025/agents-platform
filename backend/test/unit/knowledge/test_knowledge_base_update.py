@@ -145,6 +145,21 @@ def make_file_records(files: dict[str, dict]) -> dict[str, types.SimpleNamespace
     return {file_id: make_file_record(file_id, meta) for file_id, meta in files.items()}
 
 
+def test_historical_manage_only_share_config_remains_readable(tmp_path):
+    manager = KnowledgeBaseManager(str(tmp_path))
+    share_config = {
+        "version": 2,
+        "read_scope": None,
+        "manage_scope": {"access_level": "department", "department_ids": [2]},
+    }
+
+    assert manager._normalize_share_config(share_config) == {
+        "version": 2,
+        "read_scope": None,
+        "manage_scope": {"access_level": "department", "department_ids": [2], "user_uids": []},
+    }
+
+
 async def test_create_database_persists_allowed_record_fields(tmp_path, monkeypatch):
     created_payloads = []
 

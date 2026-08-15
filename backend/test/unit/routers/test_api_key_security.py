@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -9,7 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from server.routers.auth_router import delete_user
 from server.routers.user_router import APIKeyCreate, create_api_key
-from server.utils.auth_middleware import _verify_api_key
+from server.utils.auth_middleware import _verify_api_key, get_required_user
 from yuxi.repositories import user_repository as user_repository_module
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.storage.postgres.models_business import APIKey, Base, Department, User
@@ -49,28 +50,24 @@ async def session():
             username="Super Admin",
             uid="superadmin",
             password_hash="$argon2id$placeholder",
-            role="superadmin",
             department=dept_a,
         )
         dept_b_admin = User(
             username="Dept B Admin",
             uid="dept_b_admin",
             password_hash="$argon2id$placeholder",
-            role="admin",
             department=dept_b,
         )
         regular_user = User(
             username="Regular",
             uid="regular",
             password_hash="$argon2id$placeholder",
-            role="user",
             department=dept_a,
         )
         deleted_user = User(
             username="Deleted",
             uid="deleted",
             password_hash="$argon2id$placeholder",
-            role="user",
             department=dept_a,
             is_deleted=1,
         )
@@ -78,6 +75,9 @@ async def session():
         await db.commit()
         for item in [dept_a, dept_b, superadmin, dept_b_admin, regular_user, deleted_user]:
             await db.refresh(item)
+        dept_a.path = f"/{dept_a.id}/"
+        dept_b.path = f"/{dept_b.id}/"
+        await db.commit()
         yield {
             "db": db,
             "dept_a": dept_a,
@@ -110,6 +110,41 @@ async def test_api_key_rejects_deleted_bound_user_without_department_or_superadm
     assert verified_key is None
 
 
+async def test_api_key_user_loads_department_ancestor_ids(session):
+    db = session["db"]
+    secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+    api_key = APIKey(
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name="ancestor key",
+        user_id=session["regular_user"].id,
+        created_by=str(session["regular_user"].id),
+    )
+    db.add(api_key)
+    await db.commit()
+
+    user, verified_key = await _verify_api_key(secret, db)
+
+    assert verified_key is not None
+    assert user.department_ancestor_ids == (session["dept_a"].id,)
+
+
+async def test_user_repository_rejects_bound_user_without_materialized_path(session):
+    department = Department(name="Broken Department")
+    user = User(username="Broken", uid="broken", password_hash="x", department=department)
+    session["db"].add_all([department, user])
+    await session["db"].commit()
+
+    with pytest.raises(ValueError, match="缺少有效物化路径"):
+        await UserRepository().get_by_uid_with_db(session["db"], user.uid)
+
+
+async def test_required_user_allows_user_without_valid_department():
+    user = User(username="Unbound", uid="unbound", password_hash="x", department_id=None)
+
+    assert await get_required_user(user) is user
+
+
 async def test_api_key_without_user_binding_is_rejected_before_department_mapping(session):
     secret, key_hash, key_prefix = AuthUtils.generate_api_key()
     api_key = APIKey(
@@ -135,7 +170,7 @@ async def test_create_api_key_rejects_mismatched_department(session):
     with pytest.raises(HTTPException) as exc:
         await create_api_key(
             APIKeyCreate(name="wrong department", department_id=session["dept_b"].id),
-            current_user=session["regular_user"],
+            authorization=SimpleNamespace(user=session["regular_user"]),
             db=db,
         )
 
@@ -147,7 +182,7 @@ async def test_create_api_key_allows_current_user_department(session):
 
     response = await create_api_key(
         APIKeyCreate(name="own department", department_id=session["dept_a"].id),
-        current_user=session["regular_user"],
+        authorization=SimpleNamespace(user=session["regular_user"]),
         db=db,
     )
 
@@ -156,7 +191,7 @@ async def test_create_api_key_allows_current_user_department(session):
     assert response.secret.startswith(response.api_key.key_prefix)
 
 
-async def test_delete_user_disables_owned_api_keys(session):
+async def test_delete_user_disables_owned_api_keys(session, monkeypatch):
     db = session["db"]
     _secret, key_hash, key_prefix = AuthUtils.generate_api_key()
     api_key = APIKey(
@@ -169,8 +204,16 @@ async def test_delete_user_disables_owned_api_keys(session):
     db.add(api_key)
     await db.commit()
     await db.refresh(api_key)
+    await db.refresh(session["regular_user"], ["role_assignments"])
 
-    result = await delete_user(session["regular_user"].id, None, session["superadmin"], db)
+    async def get_target_user(*_args, **_kwargs):
+        """隔离本用例无关的管理域查询。"""
+
+        return session["regular_user"]
+
+    monkeypatch.setattr("server.routers.auth_router._get_authorized_user", get_target_user)
+    authorization = SimpleNamespace(user=session["superadmin"])
+    result = await delete_user(session["regular_user"].id, None, authorization, db)
     await db.refresh(api_key)
 
     assert result["success"] is True

@@ -67,7 +67,7 @@
                     <a-button
                       size="small"
                       class="select-action lucide-icon-btn"
-                      :aria-label="option.value === 'department' ? '选择部门' : '选择用户'"
+                      :aria-label="option.value === 'department' ? '选择组织节点' : '选择用户'"
                       :disabled="disabled"
                     >
                       <UserPlus class="select-action-icon" :size="14" />
@@ -80,7 +80,7 @@
                         <div class="selection-dropdown-header">
                           <div class="selection-dropdown-title">
                             {{ scope.key === 'manage_scope' ? '可管理' : '可读取'
-                            }}{{ option.value === 'department' ? '部门' : '用户' }}
+                            }}{{ option.value === 'department' ? '组织节点' : '用户' }}
                           </div>
                           <div class="selection-dropdown-subtitle">
                             {{ getAccessSummary(scope.key, option.value) }}
@@ -91,16 +91,67 @@
                           size="small"
                           allow-clear
                           class="selection-search"
-                          :placeholder="option.value === 'department' ? '搜索部门' : '搜索用户'"
+                          :placeholder="option.value === 'department' ? '搜索组织节点' : '搜索用户'"
                           @mousedown.stop
                           @click.stop
                         />
+                        <div v-if="option.value === 'department'" class="selection-tree">
+                          <div v-if="departmentsLoading" class="selection-loading">
+                            <a-spin size="small" />
+                          </div>
+                          <div v-else-if="departmentLoadError" class="selection-error">
+                            <span>{{ departmentLoadError }}</span>
+                            <a-button type="link" size="small" @click="loadDepartments"
+                              >重试</a-button
+                            >
+                          </div>
+                          <a-tree
+                            v-else-if="getDepartmentTree(scope.key).length"
+                            checkable
+                            check-strictly
+                            block-node
+                            :selectable="false"
+                            :disabled="disabled"
+                            :tree-data="getDepartmentTree(scope.key)"
+                            :checked-keys="scopes[scope.key]?.department_ids || []"
+                            :expanded-keys="getDepartmentExpandedKeys(scope.key)"
+                            @check="(keys) => updateDepartmentSelection(scope.key, keys)"
+                            @expand="(keys) => updateDepartmentExpandedKeys(scope.key, keys)"
+                          >
+                            <template #title="{ data }">
+                              <span class="department-tree-title">
+                                <span class="department-tree-name" :title="data.title">
+                                  {{ data.title }}
+                                </span>
+                                <span v-if="data.inherited" class="inherited-label">
+                                  已由上级授权
+                                </span>
+                              </span>
+                            </template>
+                          </a-tree>
+                          <div v-else class="selection-empty">暂无可选组织节点</div>
+                        </div>
                         <div
-                          v-if="getSelectionOptions(scope.key, option.value).length"
+                          v-else-if="option.value === 'user' && usersLoading"
+                          class="selection-loading"
+                        >
+                          <a-spin size="small" />
+                        </div>
+                        <div
+                          v-else-if="option.value === 'user' && userLoadError"
+                          class="selection-error"
+                        >
+                          <span>{{ userLoadError }}</span>
+                          <a-button type="link" size="small" @click="loadUsers">重试</a-button>
+                        </div>
+                        <div
+                          v-else-if="
+                            option.value === 'user' && getSelectionOptions(scope.key).length
+                          "
                           class="selection-list"
                         >
                           <div
-                            v-for="item in getSelectionOptions(scope.key, option.value)"
+                            v-for="item in getSelectionOptions(scope.key)"
                             :key="item.value"
                             role="checkbox"
                             :aria-checked="isSelected(scope.key, option.value, item.value)"
@@ -185,13 +236,21 @@
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { Building2, Globe, Users, UserPlus } from 'lucide-vue-next'
-import { useUserStore } from '@/stores/user'
 import { authApi } from '@/apis/auth_api'
 import { departmentApi } from '@/apis/department_api'
+import {
+  buildDepartmentShareTree,
+  getDepartmentSelectionSummary,
+  isDepartmentSelectionCovered,
+  normalizeDepartmentSelection
+} from '@/utils/departmentTree'
 
-const userStore = useUserStore()
 const departments = ref([])
 const users = ref([])
+const departmentsLoading = ref(true)
+const usersLoading = ref(true)
+const departmentLoadError = ref('')
+const userLoadError = ref('')
 const syncingFromProps = ref(false)
 
 const props = defineProps({
@@ -204,7 +263,6 @@ const props = defineProps({
       manage_scope: null
     })
   },
-  autoSelectUserDept: { type: Boolean, default: false },
   disabled: { type: Boolean, default: false },
   disabledReason: { type: String, default: '' },
   requireReadScope: { type: Boolean, default: false },
@@ -233,8 +291,8 @@ const baseShareModeOptions = [
   { value: 'global', title: '全局共享', description: '所有用户都可以访问', icon: Globe },
   {
     value: 'department',
-    title: '部门共享',
-    description: '选中的部门成员可以访问',
+    title: '组织共享',
+    description: '选中节点及其下级组织可以访问',
     icon: Building2
   },
   { value: 'user', title: '指定人', description: '选中的用户可以访问', icon: Users }
@@ -245,11 +303,7 @@ const selectionSearch = reactive({
   read_scope: { department: '', user: '' },
   manage_scope: { department: '', user: '' }
 })
-
-const currentDepartmentId = computed(() =>
-  userStore.departmentId ? Number(userStore.departmentId) : null
-)
-const currentUserUid = computed(() => userStore.uid || '')
+const departmentExpandedKeys = reactive({ read_scope: [], manage_scope: [] })
 const normalizedAllowedAccessLevels = computed(() => {
   const allowed = props.allowedAccessLevels.filter((level) =>
     ['global', 'department', 'user'].includes(level)
@@ -272,7 +326,7 @@ const createScope = (scope) => ({
   )
 })
 
-const normalizeScope = (scope, { includeCurrent = false } = {}) => {
+const normalizeScope = (scope) => {
   if (!scope) return null
   const normalized = createScope(scope)
   if (!normalizedAllowedAccessLevels.value.includes(normalized.access_level)) {
@@ -283,22 +337,8 @@ const normalizeScope = (scope, { includeCurrent = false } = {}) => {
     normalized.user_uids = []
   } else if (normalized.access_level === 'department') {
     normalized.user_uids = []
-    if (
-      includeCurrent &&
-      currentDepartmentId.value &&
-      !normalized.department_ids.includes(currentDepartmentId.value)
-    ) {
-      normalized.department_ids.unshift(currentDepartmentId.value)
-    }
   } else {
     normalized.department_ids = []
-    if (
-      includeCurrent &&
-      currentUserUid.value &&
-      !normalized.user_uids.includes(currentUserUid.value)
-    ) {
-      normalized.user_uids.unshift(currentUserUid.value)
-    }
   }
   return normalized
 }
@@ -313,7 +353,11 @@ const isManageScopeWithinRead = (manageScope, readScope = scopes.read_scope) => 
     )
   }
   if (manageScope.access_level === 'department') {
-    return manageScope.department_ids.every((id) => readScope.department_ids.includes(id))
+    return isDepartmentSelectionCovered(
+      departments.value,
+      readScope.department_ids,
+      manageScope.department_ids
+    )
   }
   return true
 }
@@ -323,7 +367,7 @@ const initConfig = () => {
   const source = props.modelValue || {}
   const isV2 = source.version === 2
   const readScope = isV2 ? source.read_scope : source
-  scopes.read_scope = normalizeScope(readScope, { includeCurrent: props.autoSelectUserDept })
+  scopes.read_scope = normalizeScope(readScope)
   scopes.manage_scope = normalizeScope(isV2 ? source.manage_scope : null)
   const hadMissingRequiredRead = props.requireReadScope && !scopes.read_scope
   if (hadMissingRequiredRead) {
@@ -359,17 +403,9 @@ const setAccessLevel = (scopeKey, accessLevel) => {
   )
     return
   scopes[scopeKey].access_level = accessLevel
-  scopes[scopeKey] = normalizeScope(scopes[scopeKey], {
-    includeCurrent: scopeKey === 'read_scope' && props.autoSelectUserDept
-  })
+  scopes[scopeKey] = normalizeScope(scopes[scopeKey])
 }
 
-const departmentOptions = computed(() =>
-  departments.value.map((dept) => ({
-    label: dept.name,
-    value: Number(dept.id)
-  }))
-)
 const userOptions = computed(() =>
   users.value.map((user) => ({
     label: user.department_name ? `${user.username}（${user.department_name}）` : user.username,
@@ -387,14 +423,16 @@ const getAccessCount = (scopeKey, accessLevel) => {
 const getAccessSummary = (scopeKey, accessLevel) => {
   const scope = scopes[scopeKey]
   if (accessLevel === 'global') return '所有用户可访问'
-  if (accessLevel === 'department') return `${scope?.department_ids.length || 0} 个部门可访问`
+  if (accessLevel === 'department') {
+    return getDepartmentSelectionSummary(departments.value, scope?.department_ids || [])
+  }
   return `${scope?.user_uids.length || 0} 个用户可访问`
 }
-const getSelectionOptions = (scopeKey, accessLevel) => {
-  let options = accessLevel === 'department' ? departmentOptions.value : userOptions.value
-
-  const query = selectionSearch[scopeKey][accessLevel].trim().toLowerCase()
-  return query ? options.filter((item) => item.label.toLowerCase().includes(query)) : options
+const getSelectionOptions = (scopeKey) => {
+  const query = selectionSearch[scopeKey].user.trim().toLowerCase()
+  return query
+    ? userOptions.value.filter((item) => item.label.toLowerCase().includes(query))
+    : userOptions.value
 }
 const isSelected = (scopeKey, accessLevel, value) => {
   const scope = scopes[scopeKey]
@@ -406,15 +444,7 @@ const isSelected = (scopeKey, accessLevel, value) => {
 const toggleSelection = (scopeKey, accessLevel, value, checked) => {
   if (props.disabled || !scopes[scopeKey]) return
   const scope = scopes[scopeKey]
-  if (accessLevel === 'department') {
-    scope.department_ids = Array.from(
-      new Set(
-        checked
-          ? [...scope.department_ids, Number(value)]
-          : scope.department_ids.filter((id) => id !== Number(value))
-      )
-    )
-  } else {
+  if (accessLevel === 'user') {
     scope.user_uids = Array.from(
       new Set(
         checked
@@ -425,19 +455,57 @@ const toggleSelection = (scopeKey, accessLevel, value, checked) => {
   }
 }
 
+const getDepartmentTree = (scopeKey) =>
+  buildDepartmentShareTree(
+    departments.value,
+    scopes[scopeKey]?.department_ids || [],
+    selectionSearch[scopeKey].department
+  )
+const collectExpandedKeys = (tree) =>
+  tree.flatMap((node) =>
+    node.children?.length ? [node.key, ...collectExpandedKeys(node.children)] : []
+  )
+const getDepartmentExpandedKeys = (scopeKey) =>
+  selectionSearch[scopeKey].department
+    ? collectExpandedKeys(getDepartmentTree(scopeKey))
+    : departmentExpandedKeys[scopeKey]
+const updateDepartmentExpandedKeys = (scopeKey, keys) => {
+  departmentExpandedKeys[scopeKey] = keys.map(Number)
+}
+const updateDepartmentSelection = (scopeKey, checkedKeys) => {
+  if (props.disabled || !scopes[scopeKey]) return
+  const keys = Array.isArray(checkedKeys) ? checkedKeys : checkedKeys.checked
+  scopes[scopeKey].department_ids = normalizeDepartmentSelection(departments.value, keys || [])
+}
+
 const loadDepartments = async () => {
+  departmentsLoading.value = true
+  departmentLoadError.value = ''
   try {
     const result = await departmentApi.getDepartments()
     departments.value = result.departments || result || []
+    const rootKeys = departments.value
+      .filter((department) => department.parent_id == null)
+      .map((department) => Number(department.id))
+    departmentExpandedKeys.read_scope = rootKeys
+    departmentExpandedKeys.manage_scope = rootKeys
   } catch (error) {
     console.error('加载部门列表失败:', error)
+    departmentLoadError.value = '组织节点加载失败'
+  } finally {
+    departmentsLoading.value = false
   }
 }
 const loadUsers = async () => {
+  usersLoading.value = true
+  userLoadError.value = ''
   try {
     users.value = await authApi.getUserAccessOptions()
   } catch (error) {
     console.error('加载用户列表失败:', error)
+    userLoadError.value = '用户列表加载失败'
+  } finally {
+    usersLoading.value = false
   }
 }
 
@@ -454,7 +522,14 @@ watch(
 const validateScope = (scope, title) => {
   if (!scope || scope.access_level === 'global') return { valid: true, message: '' }
   if (scope.access_level === 'department' && !scope.department_ids.length) {
-    return { valid: false, message: `${title}至少需要选择一个部门` }
+    return { valid: false, message: `${title}至少需要选择一个组织节点` }
+  }
+  if (
+    scope.access_level === 'department' &&
+    normalizeDepartmentSelection(departments.value, scope.department_ids).length !==
+      scope.department_ids.length
+  ) {
+    return { valid: false, message: `${title}不能同时选择上级和下级组织节点` }
   }
   if (scope.access_level === 'user' && !scope.user_uids.length) {
     return { valid: false, message: `${title}至少需要选择一个用户` }
@@ -633,6 +708,47 @@ defineExpose({ scopes, validate })
 .selection-list {
   max-height: 240px;
   overflow-y: auto;
+}
+
+.selection-tree {
+  max-height: 280px;
+  overflow-y: auto;
+
+  :deep(.ant-tree) {
+    background: transparent;
+  }
+}
+
+.department-tree-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.department-tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inherited-label {
+  flex: none;
+  color: var(--gray-500);
+  font-size: 11px;
+}
+
+.selection-loading,
+.selection-error {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: center;
+}
+
+.selection-error {
+  color: var(--gray-500);
+  font-size: 12px;
 }
 
 .selection-item {

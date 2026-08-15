@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from server.routers import model_provider_router
@@ -48,7 +50,7 @@ async def test_update_provider_commits_before_refreshing_cache(monkeypatch):
     result = await model_provider_router.update_provider(
         "alibaba",
         ModelProviderPayload(enabled_models=[]),
-        current_user=User(),
+        authorization=SimpleNamespace(user=User()),
         db=Db(),
     )
 

@@ -8,6 +8,7 @@ from psycopg_pool import AsyncConnectionPool
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
+from yuxi.permissions.role_catalog import BUILTIN_ROLES
 from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES, UNVIEWED_RUN_MARKER
 from yuxi.storage.postgres.models_business import Base as BusinessBase
 from yuxi.storage.postgres.models_knowledge import Base as KnowledgeBase
@@ -17,6 +18,13 @@ from yuxi.utils.singleton import SingletonMeta
 # 合并两个 Base
 CombinedBase = declarative_base()
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
+
+
+def _sql_literal(value: str) -> str:
+    """把受代码控制的目录文本转为 PostgreSQL 字符串字面量。"""
+
+    return "'" + value.replace("'", "''") + "'"
+
 
 # 继承所有表
 for module in [KnowledgeBase, BusinessBase]:
@@ -495,7 +503,185 @@ class PostgresManager(metaclass=SingletonMeta):
     async def ensure_business_schema(self):
         """确保业务 schema 包含后续新增字段（运行时 schema 演进）。"""
         self._check_initialized()
+        builtin_role_values = ", ".join(
+            "("
+            + ", ".join(
+                (
+                    _sql_literal(role.code),
+                    _sql_literal(role.name),
+                    _sql_literal(role.description),
+                    "TRUE",
+                    "TRUE",
+                    _sql_literal(role.default_scope_type),
+                )
+            )
+            + ")"
+            for role in BUILTIN_ROLES
+        )
+        builtin_permission_values = ", ".join(
+            f"({_sql_literal(role.code)}, {_sql_literal(permission_key)})"
+            for role in BUILTIN_ROLES
+            for permission_key in role.permission_keys
+        )
         stmts = [
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+                id SERIAL PRIMARY KEY,
+                code VARCHAR(64) NOT NULL UNIQUE,
+                name VARCHAR(100) NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                default_scope_type VARCHAR(48) NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                CONSTRAINT ck_roles_default_scope_type CHECK (
+                    default_scope_type IN (
+                        'none', 'self', 'organization_and_descendants',
+                        'selected_organizations_and_descendants', 'all'
+                    )
+                )
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                permission_key VARCHAR(96) NOT NULL,
+                PRIMARY KEY (role_id, permission_key)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS role_default_departments (
+                role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                PRIMARY KEY (role_id, department_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_role_assignments (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                scope_mode VARCHAR(16) NOT NULL DEFAULT 'inherit',
+                override_scope_type VARCHAR(48),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                CONSTRAINT uq_user_role_assignments_user_role UNIQUE (user_id, role_id),
+                CONSTRAINT ck_user_role_assignments_scope_mode CHECK (scope_mode IN ('inherit', 'override')),
+                CONSTRAINT ck_user_role_assignments_override_scope_type CHECK (
+                    override_scope_type IS NULL OR override_scope_type IN (
+                        'none', 'self', 'organization_and_descendants',
+                        'selected_organizations_and_descendants', 'all'
+                    )
+                )
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_role_assignment_departments (
+                assignment_id INTEGER NOT NULL REFERENCES user_role_assignments(id) ON DELETE CASCADE,
+                department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                PRIMARY KEY (assignment_id, department_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS security_audits (
+                id SERIAL PRIMARY KEY,
+                actor_user_id INTEGER NOT NULL REFERENCES users(id),
+                action VARCHAR(64) NOT NULL,
+                target_type VARCHAR(32) NOT NULL,
+                target_id INTEGER NOT NULL,
+                target_code VARCHAR(64) NOT NULL,
+                reason TEXT,
+                before_value JSONB,
+                after_value JSONB,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_roles_is_active ON roles(is_active)",
+            "CREATE INDEX IF NOT EXISTS ix_user_role_assignments_user_id ON user_role_assignments(user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_user_role_assignments_role_id ON user_role_assignments(role_id)",
+            "CREATE INDEX IF NOT EXISTS ix_security_audits_actor_user_id ON security_audits(actor_user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_security_audits_target ON security_audits(target_type, target_id)",
+            "ALTER TABLE security_audits ADD COLUMN IF NOT EXISTS reason TEXT",
+            f"""
+            INSERT INTO roles (code, name, description, is_builtin, is_active, default_scope_type)
+            VALUES {builtin_role_values}
+            ON CONFLICT (code) DO UPDATE SET
+                name = EXCLUDED.name,
+                description = EXCLUDED.description,
+                is_builtin = TRUE,
+                is_active = TRUE,
+                default_scope_type = EXCLUDED.default_scope_type,
+                updated_at = NOW()
+            """,
+            "DELETE FROM role_permissions WHERE role_id IN (SELECT id FROM roles WHERE is_builtin IS TRUE)",
+            "DELETE FROM role_permissions WHERE permission_key = 'agent:use'",
+            f"""
+            INSERT INTO role_permissions (role_id, permission_key)
+            SELECT roles.id, seed.permission_key
+            FROM (VALUES {builtin_permission_values}) AS seed(role_code, permission_key)
+            JOIN roles ON roles.code = seed.role_code
+            ON CONFLICT (role_id, permission_key) DO NOTHING
+            """,
+            """
+            DO $$
+            DECLARE
+                has_unknown_role BOOLEAN;
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'users'
+                      AND column_name = 'role'
+                ) THEN
+                    EXECUTE 'SELECT EXISTS (
+                        SELECT 1 FROM users WHERE role NOT IN (''superadmin'', ''admin'', ''user'')
+                    )' INTO has_unknown_role;
+                    IF has_unknown_role THEN
+                        RAISE EXCEPTION 'users.role 存在未知角色，无法安全回填用户角色分配';
+                    END IF;
+
+                    EXECUTE 'INSERT INTO user_role_assignments (user_id, role_id, scope_mode)
+                        SELECT users.id, roles.id, ''inherit''
+                        FROM users
+                        JOIN roles ON roles.code = users.role
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM user_role_assignments existing
+                            WHERE existing.user_id = users.id
+                        )
+                        ON CONFLICT (user_id, role_id) DO NOTHING';
+                    EXECUTE 'ALTER TABLE users DROP COLUMN role';
+                END IF;
+
+                IF EXISTS (
+                    SELECT 1
+                    FROM users
+                    WHERE users.is_deleted = 0
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM user_role_assignments assignments
+                          JOIN roles ON roles.id = assignments.role_id AND roles.is_active IS TRUE
+                          WHERE assignments.user_id = users.id
+                      )
+                ) THEN
+                    RAISE EXCEPTION '有效用户缺少有效角色分配';
+                END IF;
+
+                IF EXISTS (SELECT 1 FROM users WHERE is_deleted = 0)
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM users
+                       JOIN user_role_assignments assignments ON assignments.user_id = users.id
+                       JOIN roles ON roles.id = assignments.role_id
+                       WHERE users.is_deleted = 0
+                         AND roles.is_active IS TRUE
+                         AND roles.code = 'superadmin'
+                   ) THEN
+                    RAISE EXCEPTION '系统必须至少保留一个有效超级管理员';
+                END IF;
+            END $$;
+            """,
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS mcp_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS skill_dependencies JSONB DEFAULT '[]'::jsonb",
@@ -911,6 +1097,183 @@ class PostgresManager(metaclass=SingletonMeta):
             ON agent_run_requests(uid, agent_slug, conversation_thread_id, status, created_at, id)
             """,
             "CREATE INDEX IF NOT EXISTS ix_agent_run_requests_dispatched_run_id ON agent_run_requests(dispatched_run_id)",  # noqa: E501
+            # 组织节点由扁平表升级为树：加父节点、展示用节点类型与物化路径
+            "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES departments(id)",
+            (
+                "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS "
+                "node_type VARCHAR(16) NOT NULL DEFAULT 'department'"
+            ),
+            "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS path VARCHAR(512) NOT NULL DEFAULT ''",
+            # 集团根原地改造：id=1 升为根，尚未挂靠的存量节点挂到它下面，再回填还没有路径的节点。
+            # 后两条 UPDATE 带幂等条件，重复执行不会覆盖人工调整过的树结构；第一条每次都把根写回
+            # 根形态，因为集团根的层级身份不允许被改动。
+            # 表非空却没有 id=1 时不静默跳过：那意味着树没有根，回填出来的路径全是错的。
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM departments WHERE id = 1) THEN
+                    UPDATE departments
+                    SET parent_id = NULL, node_type = 'group', path = '/1/'
+                    WHERE id = 1;
+
+                    UPDATE departments SET parent_id = 1 WHERE id <> 1 AND parent_id IS NULL;
+
+                    UPDATE departments SET path = '/1/' || id || '/' WHERE id <> 1 AND path = '';
+                ELSIF EXISTS (SELECT 1 FROM departments) THEN
+                    RAISE EXCEPTION
+                        'departments 非空但缺少 id=1 的集团根，组织机构树未完成迁移，祖先链不可用';
+                END IF;
+            END $$;
+            """,
+            # 名称唯一性由全局唯一收敛为同级唯一：不同分子公司可以各有一个「人力资源部」
+            "DROP INDEX IF EXISTS ix_departments_name",
+            "CREATE INDEX IF NOT EXISTS ix_departments_name ON departments(name)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_parent_name ON departments(parent_id, name)",
+            "CREATE INDEX IF NOT EXISTS ix_departments_parent_id ON departments(parent_id)",
+            "CREATE INDEX IF NOT EXISTS ix_departments_path ON departments(path)",
+            # 历史事件保存写入时组织路径；旧记录按当前用户归属回填，并显式标记为推算。
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY[
+                    'conversations', 'tool_calls', 'message_feedbacks', 'operation_logs', 'security_audits'
+                ] LOOP
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_id_snapshot INTEGER', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_path_snapshot VARCHAR(512)', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_snapshot_inferred BOOLEAN', target_table
+                    );
+                END LOOP;
+            END $$;
+            """,
+            """
+            UPDATE conversations AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.uid = users.uid AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE tool_calls AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM messages
+            JOIN conversations ON conversations.id = messages.conversation_id
+            JOIN users ON users.uid = conversations.uid
+            LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.message_id = messages.id AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE message_feedbacks AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.uid = users.uid AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE operation_logs AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.user_id = users.id AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE security_audits AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.actor_user_id = users.id AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY[
+                    'conversations', 'tool_calls', 'message_feedbacks', 'operation_logs', 'security_audits'
+                ] LOOP
+                    EXECUTE format(
+                        'UPDATE %I SET organization_snapshot_inferred = TRUE '
+                        'WHERE organization_snapshot_inferred IS NULL', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET DEFAULT FALSE', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET NOT NULL', target_table
+                    );
+                END LOOP;
+            END $$;
+            """,
+            # 可共享资源保存创建者的组织快照；共享范围仍由各资源原有 share_config 决定。
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY['knowledge_bases', 'agents', 'skills'] LOOP
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_id_snapshot INTEGER', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_path_snapshot VARCHAR(512)', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_snapshot_inferred BOOLEAN', target_table
+                    );
+                END LOOP;
+            END $$;
+            """,
+            """
+            UPDATE knowledge_bases AS resource
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE agents AS resource
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE skills AS resource
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL
+            """,
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY['knowledge_bases', 'agents', 'skills'] LOOP
+                    EXECUTE format(
+                        'UPDATE %I SET organization_snapshot_inferred = TRUE '
+                        'WHERE organization_snapshot_inferred IS NULL', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET DEFAULT FALSE', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET NOT NULL', target_table
+                    );
+                END LOOP;
+            END $$;
+            """,
         ]
         async with self.async_engine.begin() as conn:
             # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警
