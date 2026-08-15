@@ -1,7 +1,26 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { getSettingsNavigationGroups } from '../../src/utils/settingsNavigation.js'
+import {
+  SETTINGS_ROUTES,
+  getSettingsNavigationGroups
+} from '../../src/utils/settingsNavigation.js'
+
+test('所有设置菜单都有独立路由', () => {
+  assert.deepEqual(
+    SETTINGS_ROUTES.map(({ id, path }) => [id, path]),
+    [
+      ['account', '/settings/account'],
+      ['agentEnv', '/settings/agent-env'],
+      ['base', '/settings/base'],
+      ['user', '/settings/user'],
+      ['department', '/settings/department'],
+      ['role', '/settings/role'],
+      ['apiKeys', '/settings/api-keys'],
+      ['ocr', '/settings/ocr']
+    ]
+  )
+})
 
 test('设置导航按权限分组并支持搜索', () => {
   const fullPermissionGroups = getSettingsNavigationGroups(
@@ -75,7 +94,10 @@ test('设置导航按权限分组并支持搜索', () => {
     '组织'
   )
   assert.deepEqual(searchResult, [
-    { label: '系统', items: [{ id: 'department', label: '组织机构' }] }
+    {
+      label: '系统',
+      items: [{ id: 'department', label: '组织机构', path: '/settings/department' }]
+    }
   ])
 
   assert.deepEqual(
@@ -92,7 +114,12 @@ test('设置导航按权限分组并支持搜索', () => {
       },
       '角色'
     ),
-    [{ label: '系统', items: [{ id: 'role', label: '角色与权限' }] }]
+    [
+      {
+        label: '系统',
+        items: [{ id: 'role', label: '角色与权限', path: '/settings/role' }]
+      }
+    ]
   )
 
   assert.deepEqual(
@@ -100,7 +127,12 @@ test('设置导航按权限分组并支持搜索', () => {
       { isLoggedIn: true, effectivePermissions: [] },
       'env'
     ),
-    [{ label: '个人', items: [{ id: 'agentEnv', label: '环境变量' }] }]
+    [
+      {
+        label: '个人',
+        items: [{ id: 'agentEnv', label: '环境变量', path: '/settings/agent-env' }]
+      }
+    ]
   )
 })
 

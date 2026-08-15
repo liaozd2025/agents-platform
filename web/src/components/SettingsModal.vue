@@ -1,20 +1,5 @@
 <template>
-  <a-modal
-    v-model:open="visible"
-    :title="null"
-    width="100%"
-    :style="{ top: 0, maxWidth: 'none', paddingBottom: 0 }"
-    :footer="null"
-    :closable="false"
-    :keyboard="true"
-    transition-name=""
-    mask-transition-name=""
-    @cancel="handleClose"
-    class="settings-modal"
-    wrap-class-name="settings-modal-wrap"
-    :destroyOnClose="true"
-    :bodyStyle="{ padding: 0 }"
-  >
+  <div class="settings-modal">
     <div class="settings-container">
       <aside class="settings-sider" aria-label="系统设置导航">
         <button type="button" class="settings-back-btn" @click="handleClose">
@@ -35,23 +20,22 @@
         <nav class="settings-sider-nav">
           <section v-for="group in navigationGroups" :key="group.label" class="nav-group">
             <div class="nav-group-label">{{ group.label }}</div>
-            <button
+            <RouterLink
               v-for="item in group.items"
               :key="item.id"
-              type="button"
+              :to="{ path: item.path, query: route.query }"
               class="sider-item"
               :class="{ activesec: activeTab === item.id }"
               :aria-current="activeTab === item.id ? 'page' : undefined"
-              @click="activeTab = item.id"
             >
               <component :is="settingsTabIcons[item.id]" class="icon" :size="17" />
               <span>{{ item.label }}</span>
-            </button>
+            </RouterLink>
           </section>
 
           <a-empty
             v-if="!navigationGroups.length"
-            :image="null"
+            :image="false"
             description="未找到设置项"
             class="settings-nav-empty"
           />
@@ -117,17 +101,16 @@
       </header>
 
       <nav class="settings-mobile-nav" aria-label="系统设置导航">
-        <button
+        <RouterLink
           v-for="item in mobileNavigationItems"
           :key="item.id"
-          type="button"
+          :to="{ path: item.path, query: route.query }"
           class="nav-item"
           :class="{ active: activeTab === item.id }"
           :aria-current="activeTab === item.id ? 'page' : undefined"
-          @click="activeTab = item.id"
         >
           {{ item.label }}
-        </button>
+        </RouterLink>
       </nav>
 
       <main class="settings-content-wrapper">
@@ -186,11 +169,13 @@
         </div>
       </main>
     </div>
-  </a-modal>
+  </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { useConfigStore } from '@/stores/config'
 import { useUserStore } from '@/stores/user'
 import {
   ArrowLeft,
@@ -217,19 +202,7 @@ import DepartmentManagementComponent from '@/components/DepartmentManagementComp
 import RoleManagementComponent from '@/components/RoleManagementComponent.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { getSettingsNavigationGroups } from '@/utils/settingsNavigation'
-
-const props = defineProps({
-  visible: {
-    type: Boolean,
-    default: false
-  },
-  initialTab: {
-    type: String,
-    default: ''
-  }
-})
-
-const emit = defineEmits(['update:visible', 'close'])
+import { sanitizeRedirect } from '@/utils/oidcAutoStart'
 
 const settingsTabIcons = {
   account: CircleUser,
@@ -241,18 +214,17 @@ const settingsTabIcons = {
   apiKeys: Key,
   ocr: ScanText
 }
+const configStore = useConfigStore()
 const userStore = useUserStore()
-const activeTab = ref('account')
+const route = useRoute()
+const router = useRouter()
+const activeTab = computed(() => route.meta.settingsTab)
 const settingsSearch = ref('')
 const showStarCard = ref(true)
 
 const STAR_CARD_STORAGE_KEY = 'yuxi-settings-star-card-dismissed'
 const projectRepoUrl = 'https://github.com/xerrors/Yuxi'
 
-const visible = computed({
-  get: () => props.visible,
-  set: (value) => emit('update:visible', value)
-})
 const permissions = computed(() => ({
   isLoggedIn: userStore.isLoggedIn,
   effectivePermissions: userStore.effectivePermissions
@@ -264,21 +236,12 @@ const navigationGroups = computed(() =>
 const mobileNavigationItems = computed(() =>
   allNavigationGroups.value.flatMap((group) => group.items)
 )
-const availableTabs = computed(() => mobileNavigationItems.value.map((item) => item.id))
 const assignedRolesText = computed(
   () => userStore.userRoles.map((role) => role.name).join('、') || '未分配角色'
 )
 
-const setActiveTab = (preferredTab) => {
-  if (preferredTab && availableTabs.value.includes(preferredTab)) {
-    activeTab.value = preferredTab
-    return
-  }
-  activeTab.value = availableTabs.value.includes('base') ? 'base' : availableTabs.value[0]
-}
-
 const handleClose = () => {
-  emit('close')
+  router.push(sanitizeRedirect(route.query.returnTo || '/workspace'))
 }
 
 const dismissStarCard = () => {
@@ -286,46 +249,25 @@ const dismissStarCard = () => {
   localStorage.setItem(STAR_CARD_STORAGE_KEY, 'true')
 }
 
-onMounted(() => {
+onMounted(async () => {
   showStarCard.value = localStorage.getItem(STAR_CARD_STORAGE_KEY) !== 'true'
-})
-
-watch(
-  () => [props.visible, props.initialTab],
-  ([isVisible]) => {
-    if (isVisible) {
-      settingsSearch.value = ''
-      setActiveTab(props.initialTab)
-    }
+  if (!userStore.hasPermission('system_config:manage') || Object.keys(configStore.config).length) {
+    return
   }
-)
+
+  try {
+    await configStore.refreshConfig()
+  } catch (error) {
+    console.warn('加载系统配置失败:', error)
+  }
+})
 </script>
 
 <style lang="less">
-.settings-modal-wrap {
-  overflow: hidden;
-}
-
-.settings-modal.ant-modal {
+.settings-modal {
   width: 100%;
   height: 100dvh;
-  margin: 0;
-
-  .ant-modal-content {
-    display: flex;
-    width: 100%;
-    height: 100dvh;
-    padding: 0;
-    overflow: hidden;
-    border-radius: 0;
-    box-shadow: none;
-  }
-
-  .ant-modal-body {
-    flex: 1;
-    min-width: 0;
-    min-height: 0;
-  }
+  overflow: hidden;
 }
 
 .settings-modal .settings-container {
@@ -366,7 +308,7 @@ watch(
   flex-direction: column;
   height: 100%;
   padding: 14px 12px;
-  overflow-y: auto;
+  overflow: hidden;
   border-right: 1px solid var(--gray-150);
   background: var(--gray-50);
 
@@ -392,8 +334,10 @@ watch(
 
 .settings-modal .settings-sider-nav {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .settings-modal .nav-group + .nav-group {
@@ -421,6 +365,7 @@ watch(
   color: var(--gray-700);
   font-size: 14px;
   text-align: left;
+  text-decoration: none;
   cursor: pointer;
 
   &:hover {
@@ -710,6 +655,7 @@ watch(
       color: var(--gray-600);
       font-size: 14px;
       font-weight: 500;
+      text-decoration: none;
       white-space: nowrap;
       cursor: pointer;
 

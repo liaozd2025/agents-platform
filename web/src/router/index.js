@@ -3,6 +3,7 @@ import AppLayout from '@/layouts/AppLayout.vue'
 import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
 import { sanitizeRedirect } from '@/utils/oidcAutoStart'
+import { SETTINGS_ROUTES } from '@/utils/settingsNavigation'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -148,6 +149,20 @@ const router = createRouter({
         }
       ]
     },
+    ...SETTINGS_ROUTES.map(
+      ({ id, path, routeName, requiredPermission, requiredAnyPermissions }) => ({
+        path,
+        name: routeName,
+        component: () => import('@/components/SettingsModal.vue'),
+        meta: {
+          keepAlive: false,
+          requiresAuth: true,
+          settingsTab: id,
+          requiredPermission,
+          requiredAnyPermissions
+        }
+      })
+    ),
     {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',

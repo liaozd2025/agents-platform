@@ -94,7 +94,7 @@
                 </div>
               </div>
             </div>
-            <a-empty v-else :image="null" description="暂无功能权限" />
+            <a-empty v-else :image="false" description="暂无功能权限" />
           </section>
 
           <section class="role-detail-section">
@@ -105,7 +105,7 @@
                 <code>{{ member.uid }}</code>
               </div>
             </div>
-            <a-empty v-else :image="null" description="暂无成员" />
+            <a-empty v-else :image="false" description="暂无成员" />
           </section>
 
           <section class="role-detail-section">
@@ -132,7 +132,7 @@
                 </details>
               </article>
             </div>
-            <a-empty v-else :image="null" description="暂无相关审计" />
+            <a-empty v-else :image="false" description="暂无相关审计" />
           </section>
         </article>
       </div>

@@ -26,9 +26,9 @@ import { storeToRefs } from 'pinia'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
 import DebugComponent from '@/components/DebugComponent.vue'
 import TaskCenterDrawer from '@/components/TaskCenterDrawer.vue'
-import SettingsModal from '@/components/SettingsModal.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import ConversationSearchModal from '@/components/ConversationSearchModal.vue'
+import { SETTINGS_ROUTES } from '@/utils/settingsNavigation'
 
 const configStore = useConfigStore()
 const agentStore = useAgentStore()
@@ -38,6 +38,8 @@ const databaseStore = useDatabaseStore()
 const infoStore = useInfoStore()
 const taskerStore = useTaskerStore()
 const userStore = useUserStore()
+const route = useRoute()
+const router = useRouter()
 const { activeCount: activeCountRef, isDrawerOpen } = storeToRefs(taskerStore)
 const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
   storeToRefs(chatThreadsStore)
@@ -48,10 +50,6 @@ const isLoadingStars = ref(false)
 
 // Add state for debug modal
 const showDebugModal = ref(false)
-
-// Add state for settings modal
-const showSettingsModal = ref(false)
-const settingsInitialTab = ref('')
 
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
 const conversationSearchOpen = ref(false)
@@ -69,9 +67,11 @@ const canAccessExtensions = computed(() =>
 
 // Provide settings modal methods to child components
 const openSettingsModal = (tab) => {
-  settingsInitialTab.value =
-    tab || (userStore.hasPermission('system_config:manage') ? 'base' : 'account')
-  showSettingsModal.value = true
+  const tabId = tab || (userStore.hasPermission('system_config:manage') ? 'base' : 'account')
+  const target = SETTINGS_ROUTES.find((item) => item.id === tabId)
+  if (!target) return
+
+  router.push({ path: target.path, query: { returnTo: route.fullPath } })
 }
 
 // Handle debug modal close
@@ -121,9 +121,6 @@ onMounted(async () => {
     fetchGithubStars() // Fetch GitHub stars on mount
   }
 })
-
-const route = useRoute()
-const router = useRouter()
 
 const activeTaskCount = computed(() => activeCountRef.value || 0)
 const activeConversationThreadId = computed(() => {
@@ -465,11 +462,6 @@ provide('settingsModal', {
       <DebugComponent />
     </a-modal>
     <TaskCenterDrawer v-if="userStore.hasPermission('system_task:manage')" />
-    <SettingsModal
-      v-model:visible="showSettingsModal"
-      :initial-tab="settingsInitialTab"
-      @close="() => (showSettingsModal = false)"
-    />
   </div>
 </template>
 
