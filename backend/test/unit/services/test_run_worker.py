@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import importlib
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -92,6 +92,27 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, run_obj: SimpleNamespace):
     monkeypatch.setattr(run_worker.RunContext, "start", fake_noop)
     monkeypatch.setattr(run_worker.RunContext, "close", fake_noop)
     monkeypatch.setattr(run_worker.RunContext, "is_cancelled", fake_not_cancelled)
+
+
+@pytest.mark.asyncio
+async def test_load_user_includes_department_ancestor_ids(monkeypatch: pytest.MonkeyPatch):
+    db = object()
+    user = SimpleNamespace(uid="user-1", is_deleted=0, department_ancestor_ids=(1, 2))
+
+    @asynccontextmanager
+    async def fake_session_ctx():
+        yield db
+
+    class UserRepo:
+        async def get_by_uid_with_db(self, db_session, uid):
+            assert db_session is db
+            assert uid == "user-1"
+            return user
+
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_ctx)
+    monkeypatch.setattr(run_worker, "UserRepository", UserRepo)
+
+    assert await run_worker._load_user("user-1") is user
 
 
 @pytest.mark.asyncio
@@ -323,11 +344,19 @@ async def test_process_agent_run_publishes_interrupt_after_final_state(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_process_agent_run_non_retryable_error_marks_failed(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(
+    "stream_error",
+    [RuntimeError("boom"), ExceptionGroup("boom", [RuntimeError("nested")])],
+)
+async def test_process_agent_run_non_retryable_error_marks_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    stream_error: Exception,
+):
     run_obj = _build_run()
     _patch_common(monkeypatch, run_obj)
 
     terminal_statuses: list[str] = []
+    terminal_token_usage: list[dict] = []
     events: list[str] = []
 
     async def fake_append_event(run_id: str, event_type: str, payload: dict, **kwargs):
@@ -335,22 +364,28 @@ async def test_process_agent_run_non_retryable_error_marks_failed(monkeypatch: p
         events.append(event_type)
 
     async def fake_mark_terminal(run_id: str, status: str, **kwargs):
-        del run_id, kwargs
+        del run_id
         terminal_statuses.append(status)
+        terminal_token_usage.append(kwargs["token_usage"])
         return run_worker.TerminalTransition(status=status, changed=True)
+
+    async def fake_read_usage(**_kwargs):
+        return {"available": True, "total_tokens": 3}
 
     monkeypatch.setattr(run_worker, "append_run_event", fake_append_event)
     monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
+    monkeypatch.setattr(run_worker, "_read_run_token_usage_from_state", fake_read_usage)
     monkeypatch.setattr(
         run_worker,
         "_consume_stream_with_cancel",
-        lambda stream, run_ctx: _RaisingAsyncIter(RuntimeError("boom")),
+        lambda stream, run_ctx: _RaisingAsyncIter(stream_error),
     )
 
     await run_worker.process_agent_run({"job_try": 1}, "run-1")
 
     assert "error" in events
     assert terminal_statuses == ["failed"]
+    assert terminal_token_usage == [{"available": True, "total_tokens": 3}]
 
 
 @pytest.mark.asyncio
@@ -396,7 +431,7 @@ async def test_process_agent_run_retryable_error_retries_then_completes(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_finish_run_terminal_loser_does_not_append_end_event(monkeypatch: pytest.MonkeyPatch):
+async def test_finish_run_terminal_loser_does_not_append_terminal_events(monkeypatch: pytest.MonkeyPatch):
     events: list[tuple[str, dict]] = []
 
     async def fake_mark_terminal(run_id: str, status: str, **kwargs):
@@ -412,9 +447,9 @@ async def test_finish_run_terminal_loser_does_not_append_end_event(monkeypatch: 
 
     transition = await run_worker._finish_run(
         "run-1",
-        "completed",
+        "failed",
         thread_id="thread-1",
-        chunk={"status": "finished"},
+        chunk={"status": "error", "retryable": False},
         current_user=SimpleNamespace(uid="user-1"),
     )
 
@@ -626,6 +661,8 @@ async def test_chunked_event_writer_flushes_semantic_tool_call_immediately(monke
 
 @pytest.mark.asyncio
 async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.MonkeyPatch):
+    from yuxi.config import options
+
     calls: list[str] = []
 
     def fake_initialize():

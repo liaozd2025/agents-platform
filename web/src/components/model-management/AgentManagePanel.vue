@@ -7,6 +7,7 @@ import { useRouter } from 'vue-router'
 import { agentApi } from '@/apis/agent_api'
 import AgentEditModal from '@/components/model-management/AgentEditModal.vue'
 import { isBuiltinAgent, useAgentStore } from '@/stores/agent'
+import { useUserStore } from '@/stores/user'
 import PageShoulder from '@/components/shared/PageShoulder.vue'
 import InfoCard from '@/components/shared/InfoCard.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
@@ -15,6 +16,7 @@ import { generatePixelAvatar } from '@/utils/pixelAvatar'
 import { getShareConfigLabel } from '@/utils/shareConfig'
 
 const agentStore = useAgentStore()
+const userStore = useUserStore()
 const router = useRouter()
 const agentLoading = ref(false)
 const searchQuery = ref('')
@@ -70,7 +72,9 @@ const agentStats = computed(() => ({
     (agent) => (agent.share_config?.read_scope || agent.share_config)?.access_level === 'global'
   ).length
 }))
-const canManageAgent = (agent) => !!agent?.can_manage
+const canManageAgents = computed(() => userStore.hasPermission('agent:manage'))
+const canUseAgents = computed(() => userStore.hasPermission('agent:use'))
+const canManageAgent = (agent) => canManageAgents.value && !!agent?.can_manage
 const getAgentDefaultIconSrc = (agent) => (agent.id ? generatePixelAvatar(agent.id) : '')
 
 /** 返回智能体共享范围的简短展示文案。 */
@@ -143,7 +147,7 @@ const deleteAgent = async (agent) => {
 }
 
 onMounted(async () => {
-  await Promise.all([loadAgentBackends(), loadAgents()])
+  await Promise.all([canManageAgents.value ? loadAgentBackends() : null, loadAgents()])
 })
 
 defineExpose({
@@ -157,7 +161,12 @@ defineExpose({
   <div class="agent-manage-panel">
     <PageShoulder v-model:search="searchQuery" search-placeholder="搜索智能体...">
       <template #actions>
-        <a-button type="primary" class="lucide-icon-btn" @click="openCreateAgentModal">
+        <a-button
+          v-if="canManageAgents"
+          type="primary"
+          class="lucide-icon-btn"
+          @click="openCreateAgentModal"
+        >
           <Plus :size="14" />
           新增智能体
         </a-button>
@@ -224,7 +233,7 @@ defineExpose({
               </a-menu>
             </template>
 
-            <template v-if="group.key === 'agents'" #tag-actions>
+            <template v-if="group.key === 'agents' && canUseAgents" #tag-actions>
               <a-button
                 type="text"
                 size="small"

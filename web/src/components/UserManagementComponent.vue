@@ -19,7 +19,12 @@
             <RefreshCw :size="16" :class="{ spin: userManagement.refreshing }" />
           </template>
         </a-button>
-        <a-button type="primary" @click="showAddUserModal" class="add-btn lucide-icon-btn">
+        <a-button
+          v-if="canCreateUsers"
+          type="primary"
+          @click="showAddUserModal"
+          class="add-btn lucide-icon-btn"
+        >
           <template #icon><Plus :size="16" /></template>
           添加用户
         </a-button>
@@ -36,128 +41,150 @@
         <template #prefix><Search :size="16" /></template>
       </a-input>
       <div class="filter-actions">
-        <a-select v-model:value="userManagement.departmentFilter" class="filter-select">
-          <a-select-option value="">全部部门</a-select-option>
-          <a-select-option
-            v-for="dept in departmentFilterOptions"
-            :key="dept.value"
-            :value="dept.value"
-          >
-            {{ dept.label }}
+        <a-tree-select
+          v-model:value="userManagement.departmentFilter"
+          :tree-data="departmentTree"
+          :field-names="treeFieldNames"
+          class="filter-select"
+          placeholder="全部组织机构"
+          tree-node-filter-prop="name"
+          tree-default-expand-all
+          show-search
+          allow-clear
+          :dropdown-style="{ maxHeight: '360px', overflow: 'auto' }"
+        />
+        <a-select v-model:value="userManagement.roleFilter" class="filter-select">
+          <a-select-option value="">全部角色</a-select-option>
+          <a-select-option v-for="role in roleFilterOptions" :key="role.code" :value="role.code">
+            {{ role.name }}
           </a-select-option>
         </a-select>
-        <a-select v-model:value="userManagement.roleFilter" class="filter-select">
-          <a-select-option value="">全部权限</a-select-option>
-          <a-select-option value="superadmin">超级管理员</a-select-option>
-          <a-select-option value="admin">管理员</a-select-option>
-          <a-select-option value="user">普通用户</a-select-option>
-        </a-select>
+        <a-button v-if="hasActiveFilters" @click="resetFilters">重置</a-button>
       </div>
+      <span class="filter-summary">
+        共 {{ filteredUsers.length }} 名用户 · 全部 {{ userManagement.users.length }} 名
+      </span>
     </div>
 
     <!-- 主内容区域 -->
     <div class="content-section">
-      <a-spin :spinning="userManagement.loading">
-        <div v-if="userManagement.error" class="error-message">
-          <a-alert type="error" :message="userManagement.error" show-icon />
-        </div>
+      <div v-if="userManagement.error" class="error-message">
+        <a-alert type="error" :message="userManagement.error" show-icon />
+      </div>
 
-        <div class="cards-container">
-          <div v-if="filteredUsers.length === 0" class="empty-state">
-            <a-empty
-              :description="userManagement.users.length === 0 ? '暂无用户数据' : '没有匹配的用户'"
-            />
-          </div>
-          <div v-else class="user-cards-grid">
-            <InfoCard
-              v-for="user in paginatedUsers"
-              :key="user.id"
-              :title="user.username"
-              :subtitle="`ID: ${user.uid || '-'}`"
-              class="user-card"
-            >
-              <template #icon>
-                <FallbackAvatar
-                  :src="user.avatar"
-                  :default-src="getUserDefaultAvatarSrc(user)"
-                  :name="user.username"
-                  :seed="user.uid || user.username"
-                  kind="user"
-                  :size="40"
-                  shape="circle"
-                  :alt="user.username"
-                  class="avatar-img"
-                />
-              </template>
+      <a-table
+        :columns="userTableColumns"
+        :data-source="filteredUsers"
+        :loading="userManagement.loading"
+        :pagination="tablePagination"
+        :scroll="{ x: 920 }"
+        row-key="id"
+        size="middle"
+        class="user-table"
+        @change="handleTableChange"
+      >
+        <template #bodyCell="{ column, record: user }">
+          <template v-if="column.key === 'user'">
+            <div class="user-identity">
+              <FallbackAvatar
+                :src="user.avatar"
+                :default-src="getUserDefaultAvatarSrc(user)"
+                :name="user.username"
+                :seed="user.uid || user.username"
+                kind="user"
+                :size="32"
+                shape="circle"
+                :alt="user.username"
+              />
+              <div class="user-identity-copy">
+                <strong :title="user.username">{{ user.username }}</strong>
+                <code :title="`登录 ID：${user.uid || '-'}`">登录 ID：{{ user.uid || '-' }}</code>
+              </div>
+            </div>
+          </template>
 
-              <template #status>
-                <div
-                  v-if="user.role === 'admin' || user.role === 'superadmin' || user.department_name"
-                  class="role-dept-badge"
+          <template v-else-if="column.key === 'department'">
+            <span class="department-text" :title="user.department_name || '未分配组织机构'">
+              {{ user.department_name || '未分配' }}
+            </span>
+          </template>
+
+          <template v-else-if="column.key === 'roles'">
+            <div v-if="user.roles?.length" class="role-tags">
+              <a-tag
+                v-for="role in user.roles"
+                :key="role.assignment_id || role.id"
+                :bordered="false"
+                class="role-tag"
+                :class="{ inactive: !role.is_active }"
+              >
+                {{ role.name }}
+              </a-tag>
+            </div>
+            <span v-else class="empty-value">-</span>
+          </template>
+
+          <template v-else-if="column.key === 'phone'">
+            <code class="phone-text">{{ user.phone_number || '-' }}</code>
+          </template>
+
+          <template v-else-if="column.key === 'created'">
+            <div class="time-cell">
+              <span>{{ formatTime(user.created_at) }}</span>
+              <small>最后登录 {{ formatTime(user.last_login) }}</small>
+            </div>
+          </template>
+
+          <template v-else-if="column.key === 'actions'">
+            <div class="row-actions">
+              <a-button
+                v-if="canUpdateUsers || canAssignRoles"
+                type="text"
+                size="small"
+                @click="showEditUserModal(user)"
+              >
+                编辑
+              </a-button>
+              <a-dropdown v-if="canDeleteUsers" :trigger="['click']">
+                <a-button
+                  size="small"
+                  class="more-action lucide-icon-btn"
+                  :aria-label="`更多操作：${user.username}`"
                 >
-                  <span class="role-icon-wrapper" :class="getRoleClass(user.role)">
-                    <UserLock v-if="user.role === 'superadmin'" :size="14" />
-                    <UserStar v-else-if="user.role === 'admin'" :size="14" />
-                    <User v-else :size="14" />
-                  </span>
-                  <span v-if="user.department_name" class="dept-text">
-                    {{ user.department_name }}
-                  </span>
-                </div>
-              </template>
+                  <MoreHorizontal :size="16" />
+                </a-button>
+                <template #overlay>
+                  <a-menu>
+                    <a-menu-item
+                      key="delete"
+                      :disabled="isUserDeleteDisabled(user)"
+                      :danger="!isUserDeleteDisabled(user)"
+                      @click="confirmDeleteUser(user)"
+                    >
+                      <span class="lucide-menu-item">
+                        <Trash2 :size="14" />
+                        <span>删除用户</span>
+                      </span>
+                    </a-menu-item>
+                  </a-menu>
+                </template>
+              </a-dropdown>
+            </div>
+          </template>
+        </template>
 
-              <template #card-more-action-corner>
-                <a-menu>
-                  <a-menu-item key="edit" @click.stop="showEditUserModal(user)">
-                    <span class="lucide-menu-item">
-                      <SquarePen :size="14" />
-                      <span>编辑用户</span>
-                    </span>
-                  </a-menu-item>
-                  <a-menu-item
-                    key="delete"
-                    :disabled="isUserDeleteDisabled(user)"
-                    :danger="!isUserDeleteDisabled(user)"
-                    @click.stop="confirmDeleteUser(user)"
-                  >
-                    <span class="lucide-menu-item">
-                      <Trash2 :size="14" />
-                      <span>删除用户</span>
-                    </span>
-                  </a-menu-item>
-                </a-menu>
-              </template>
-
-              <template #info>
-                <div class="card-content">
-                  <div class="info-item">
-                    <span class="info-label">手机号:</span>
-                    <span class="info-value phone-text">{{ user.phone_number || '-' }}</span>
-                  </div>
-                  <div class="info-item">
-                    <span class="info-label">创建时间:</span>
-                    <span class="info-value time-text">{{ formatTime(user.created_at) }}</span>
-                  </div>
-                  <div class="info-item">
-                    <span class="info-label">最后登录:</span>
-                    <span class="info-value time-text">{{ formatTime(user.last_login) }}</span>
-                  </div>
-                </div>
-              </template>
-            </InfoCard>
-          </div>
-          <div v-if="filteredUsers.length > userManagement.pageSize" class="pagination-section">
-            <a-pagination
-              v-model:current="userManagement.currentPage"
-              v-model:page-size="userManagement.pageSize"
-              :total="filteredUsers.length"
-              :page-size-options="['20', '50', '100']"
-              show-size-changer
-              size="small"
-            />
-          </div>
-        </div>
-      </a-spin>
+        <template #emptyText>
+          <a-empty
+            :description="
+              userManagement.users.length === 0
+                ? canCreateUsers
+                  ? '暂无用户数据，可使用右上角“添加用户”创建'
+                  : '暂无用户数据'
+                : '没有匹配的用户，请调整筛选条件'
+            "
+          />
+        </template>
+      </a-table>
     </div>
 
     <!-- 用户表单模态框 -->
@@ -168,7 +195,7 @@
       :confirmLoading="userManagement.loading"
       @cancel="userManagement.modalVisible = false"
       :maskClosable="false"
-      width="480px"
+      width="720px"
       class="user-modal"
     >
       <a-form layout="vertical" class="user-form">
@@ -178,6 +205,7 @@
             placeholder="请输入用户名（2-20个字符）"
             @blur="validateAndGenerateUid"
             :maxlength="20"
+            :disabled="userManagement.editMode && !canUpdateUsers"
           />
           <div v-if="userManagement.form.usernameError" class="error-text">
             {{ userManagement.form.usernameError }}
@@ -196,13 +224,14 @@
             v-model:value="userManagement.form.phoneNumber"
             placeholder="请输入手机号（可选，可用于登录）"
             :maxlength="11"
+            :disabled="userManagement.editMode && !canUpdateUsers"
           />
           <div v-if="userManagement.form.phoneError" class="error-text">
             {{ userManagement.form.phoneError }}
           </div>
         </a-form-item>
 
-        <template v-if="userManagement.editMode">
+        <template v-if="userManagement.editMode && canUpdateUsers">
           <div class="password-toggle">
             <a-checkbox v-model:checked="userManagement.displayPasswordFields">
               修改密码
@@ -210,7 +239,11 @@
           </div>
         </template>
 
-        <template v-if="!userManagement.editMode || userManagement.displayPasswordFields">
+        <template
+          v-if="
+            !userManagement.editMode || (canUpdateUsers && userManagement.displayPasswordFields)
+          "
+        >
           <a-form-item label="密码" required class="form-item">
             <a-input-password
               v-model:value="userManagement.form.password"
@@ -227,24 +260,107 @@
           </a-form-item>
         </template>
 
-        <a-form-item v-if="!userManagement.editMode" label="角色" class="form-item">
-          <a-select v-model:value="userManagement.form.role">
-            <a-select-option value="user">普通用户</a-select-option>
-            <a-select-option value="admin" v-if="userStore.isSuperAdmin">管理员</a-select-option>
-          </a-select>
+        <a-form-item v-if="canEditRoleAssignments" label="角色分配" required class="form-item">
+          <div class="role-assignment-list">
+            <section
+              v-for="(assignment, index) in userManagement.form.roleAssignments"
+              :key="index"
+              class="role-assignment"
+            >
+              <div class="role-assignment-header">
+                <a-select
+                  v-model:value="assignment.role_id"
+                  placeholder="请选择角色"
+                  style="flex: 1"
+                  @change="handleRoleChange(index)"
+                >
+                  <a-select-option
+                    v-for="role in activeRoles"
+                    :key="role.id"
+                    :value="role.id"
+                    :disabled="isRoleSelectedByOther(role.id, index)"
+                  >
+                    {{ role.name }}{{ role.is_builtin ? '（内置）' : '' }}
+                  </a-select-option>
+                </a-select>
+                <a-button
+                  danger
+                  :disabled="userManagement.form.roleAssignments.length === 1"
+                  @click="removeRoleAssignment(index)"
+                >
+                  移除
+                </a-button>
+              </div>
+
+              <template v-if="getRoleById(assignment.role_id)">
+                <p class="role-default-scope">
+                  默认范围：{{ getScopeLabel(getRoleById(assignment.role_id).default_scope_type) }}
+                </p>
+                <a-radio-group
+                  v-model:value="assignment.scope_mode"
+                  @change="handleScopeModeChange(assignment)"
+                >
+                  <a-radio
+                    value="inherit"
+                    :disabled="
+                      getRoleById(assignment.role_id)?.assignment_constraints?.can_inherit === false
+                    "
+                  >
+                    继承角色默认范围
+                  </a-radio>
+                  <a-radio value="override">个性化收窄</a-radio>
+                </a-radio-group>
+
+                <div v-if="assignment.scope_mode === 'override'" class="role-override-fields">
+                  <a-select
+                    v-model:value="assignment.override_scope_type"
+                    :options="getOverrideScopeOptions(assignment.role_id)"
+                    placeholder="请选择更窄的数据范围"
+                    @change="handleOverrideScopeChange(assignment)"
+                  />
+                  <a-tree-select
+                    v-if="
+                      assignment.override_scope_type === 'selected_organizations_and_descendants'
+                    "
+                    v-model:value="assignment.override_department_ids"
+                    :tree-data="getOverrideDepartmentTree(assignment.role_id)"
+                    :field-names="treeFieldNames"
+                    tree-checkable
+                    tree-default-expand-all
+                    allow-clear
+                    placeholder="请选择组织子树"
+                  />
+                </div>
+              </template>
+            </section>
+
+            <a-button v-if="canAddRoleAssignment" block @click="addRoleAssignment">
+              添加角色
+            </a-button>
+          </div>
         </a-form-item>
 
-        <!-- 部门选择器（仅超级管理员可见） -->
-        <a-form-item v-if="userStore.isSuperAdmin" label="部门" class="form-item">
-          <a-select v-model:value="userManagement.form.departmentId" placeholder="请选择部门">
-            <a-select-option
-              v-for="dept in departmentManagement.departments"
-              :key="dept.id"
-              :value="dept.id"
-            >
-              {{ dept.name }}
-            </a-select-option>
-          </a-select>
+        <a-form-item v-if="requiresSuperadminReason" label="变更原因" required class="form-item">
+          <a-textarea
+            v-model:value="userManagement.form.reason"
+            :maxlength="500"
+            :rows="2"
+            placeholder="请说明授予或撤销超级管理员的原因"
+          />
+        </a-form-item>
+
+        <a-form-item v-if="canChooseUserDepartment" label="所属组织机构" class="form-item">
+          <a-tree-select
+            v-model:value="userManagement.form.departmentId"
+            :tree-data="departmentTree"
+            :field-names="treeFieldNames"
+            placeholder="请选择组织机构"
+            tree-node-filter-prop="name"
+            tree-default-expand-all
+            show-search
+            :dropdown-style="{ maxHeight: '360px', overflow: 'auto' }"
+            @change="handleUserDepartmentChange"
+          />
         </a-form-item>
       </a-form>
     </a-modal>
@@ -256,21 +372,19 @@ import { reactive, onMounted, watch, computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis'
-import {
-  Plus,
-  SquarePen,
-  Trash2,
-  User,
-  UserLock,
-  UserStar,
-  RefreshCw,
-  Search
-} from 'lucide-vue-next'
+import { getRoleOverview } from '@/apis/role_api'
+import { MoreHorizontal, Plus, Trash2, RefreshCw, Search } from 'lucide-vue-next'
 import { formatDateTime } from '@/utils/time'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
+import {
+  buildDepartmentScopeTree,
+  buildDepartmentTree,
+  isDepartmentSelectionCovered,
+  normalizeDepartmentSelection
+} from '@/utils/departmentTree'
+import { getAssignableScopeTypes, resetRoleAssignmentScope } from '@/utils/roleOverview'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
-import InfoCard from '@/components/shared/InfoCard.vue'
 
 const userStore = useUserStore()
 
@@ -280,22 +394,24 @@ const userManagement = reactive({
   refreshing: false,
   users: [],
   searchKeyword: '',
-  departmentFilter: '',
+  departmentFilter: null,
   roleFilter: '',
   currentPage: 1,
-  pageSize: 50,
+  pageSize: 10,
   error: null,
   modalVisible: false,
   modalTitle: '添加用户',
   editMode: false,
   editUserId: null,
+  originalHadSuperadmin: false,
   form: {
     username: '',
     generatedUid: '', // 自动生成的uid
     phoneNumber: '', // 手机号
     password: '',
     confirmPassword: '',
-    role: 'user', // 默认角色
+    roleAssignments: [],
+    reason: '',
     departmentId: null, // 部门ID
     usernameError: '', // 用户名错误信息
     phoneError: '' // 手机号错误信息
@@ -303,39 +419,66 @@ const userManagement = reactive({
   displayPasswordFields: true // 编辑时是否显示密码字段
 })
 
-// 部门列表（仅超级管理员使用）
+// 组织机构列表
 const departmentManagement = reactive({
   departments: []
 })
+const roleOverview = reactive({ roles: [], dataScopeTypes: [], targetUserId: null })
 
-const departmentFilterOptions = computed(() => {
-  const options = new Map()
-
-  departmentManagement.departments.forEach((dept) => {
-    options.set(String(dept.id), {
-      value: String(dept.id),
-      label: dept.name
-    })
-  })
-
-  userManagement.users.forEach((user) => {
-    const departmentId = user.department_id
-    const departmentName = user.department_name
-
-    if (departmentId == null && !departmentName) return
-
-    const value = String(departmentId ?? departmentName)
-
-    if (!options.has(value)) {
-      options.set(value, {
-        value,
-        label: departmentName || `部门 ${departmentId}`
-      })
-    }
-  })
-
-  return [...options.values()]
-})
+const treeFieldNames = { children: 'children', label: 'name', value: 'id' }
+const userTableColumnsWithActions = [
+  { title: '用户', key: 'user', width: 210 },
+  { title: '组织机构', key: 'department', width: 140 },
+  { title: '角色', key: 'roles', width: 150 },
+  { title: '手机号', key: 'phone', width: 130 },
+  { title: '创建时间', key: 'created', width: 180 },
+  { title: '', key: 'actions', width: 100, align: 'right' }
+]
+const departmentTree = computed(() => buildDepartmentTree(departmentManagement.departments))
+const canCreateUsers = computed(() => userStore.hasPermission('user:create'))
+const canUpdateUsers = computed(() => userStore.hasPermission('user:update'))
+const canAssignRoles = computed(() => userStore.hasPermission('user:role_assign'))
+const canDeleteUsers = computed(() => userStore.hasPermission('user:delete'))
+const userTableColumns = computed(() =>
+  canUpdateUsers.value || canAssignRoles.value || canDeleteUsers.value
+    ? userTableColumnsWithActions
+    : userTableColumnsWithActions.slice(0, -1)
+)
+const canEditRoleAssignments = computed(
+  () => canAssignRoles.value && (userManagement.editMode || userStore.hasPermission('role:read'))
+)
+const canChooseUserDepartment = computed(() =>
+  userManagement.editMode ? canUpdateUsers.value : canCreateUsers.value
+)
+const activeRoles = computed(() => roleOverview.roles.filter((role) => role.is_active))
+const roleFilterOptions = computed(() =>
+  activeRoles.value.length
+    ? activeRoles.value
+    : Array.from(
+        new Map(
+          userManagement.users.flatMap((user) => user.roles || []).map((role) => [role.code, role])
+        ).values()
+      )
+)
+const hasSuperadminAssignment = computed(() =>
+  userManagement.form.roleAssignments.some(
+    (assignment) => getRoleById(assignment.role_id)?.code === 'superadmin'
+  )
+)
+const requiresSuperadminReason = computed(
+  () => hasSuperadminAssignment.value !== userManagement.originalHadSuperadmin
+)
+const canAddRoleAssignment = computed(
+  () =>
+    !hasSuperadminAssignment.value &&
+    userManagement.form.roleAssignments.length < activeRoles.value.length
+)
+const hasActiveFilters = computed(
+  () =>
+    Boolean(userManagement.searchKeyword.trim()) ||
+    userManagement.departmentFilter != null ||
+    Boolean(userManagement.roleFilter)
+)
 
 const filteredUsers = computed(() => {
   const keyword = userManagement.searchKeyword.trim().toLowerCase()
@@ -349,28 +492,185 @@ const filteredUsers = computed(() => {
           .includes(keyword)
       )
     const matchesDepartment =
-      !userManagement.departmentFilter ||
-      String(user.department_id ?? user.department_name ?? '') === userManagement.departmentFilter
-    const matchesRole = !userManagement.roleFilter || user.role === userManagement.roleFilter
+      userManagement.departmentFilter == null ||
+      isDepartmentSelectionCovered(
+        departmentManagement.departments,
+        [userManagement.departmentFilter],
+        [user.department_id]
+      )
+    const matchesRole =
+      !userManagement.roleFilter ||
+      (user.roles || []).some((role) => role.code === userManagement.roleFilter)
 
     return matchesKeyword && matchesDepartment && matchesRole
   })
 })
 
-const paginatedUsers = computed(() => {
-  const pageSize = Number(userManagement.pageSize)
-  const start = (userManagement.currentPage - 1) * pageSize
-  return filteredUsers.value.slice(start, start + pageSize)
+const tablePagination = computed(() => ({
+  current: userManagement.currentPage,
+  pageSize: Number(userManagement.pageSize),
+  total: filteredUsers.value.length,
+  pageSizeOptions: ['10', '20', '50'],
+  showSizeChanger: true,
+  showTotal: (total, range) => `第 ${range[0]}–${range[1]} 条，共 ${total} 条`
+}))
+
+/** 清空筛选后由现有 watch 统一将表格退回第一页。 */
+const resetFilters = () => {
+  userManagement.searchKeyword = ''
+  userManagement.departmentFilter = null
+  userManagement.roleFilter = ''
+}
+
+/** 保持表格分页受控，以便筛选和数据刷新时能校正当前页。 */
+const handleTableChange = (pagination) => {
+  userManagement.currentPage = pagination.current
+  userManagement.pageSize = pagination.pageSize
+}
+
+// 获取组织机构列表
+const fetchDepartments = async () => {
+  departmentManagement.departments = []
+  try {
+    departmentManagement.departments = await departmentApi.getDepartments()
+  } catch (error) {
+    message.error(error.message || '获取组织机构列表失败')
+    throw error
+  }
+}
+
+const fetchRoleOptions = async (force = false, targetUserId = null) => {
+  if (targetUserId == null && !userStore.hasPermission('role:read')) return
+  if (targetUserId != null && !canAssignRoles.value) return
+  if (!force && roleOverview.roles.length && roleOverview.targetUserId === targetUserId) return
+
+  try {
+    const overview = await getRoleOverview(targetUserId)
+    roleOverview.roles = overview.roles
+    roleOverview.dataScopeTypes = overview.data_scope_types
+    roleOverview.targetUserId = targetUserId
+  } catch (error) {
+    console.error('获取角色列表失败:', error)
+    message.error(error.message || '获取角色列表失败')
+    throw error
+  }
+}
+
+const getRoleById = (roleId) => roleOverview.roles.find((role) => role.id === roleId)
+const getScopeLabel = (scopeType) =>
+  roleOverview.dataScopeTypes.find((scope) => scope.key === scopeType)?.label || scopeType
+const makeRoleAssignment = (role, existing = null) => ({
+  role_id: role?.id ?? existing?.id ?? null,
+  scope_mode: existing?.scope_mode || 'inherit',
+  override_scope_type: existing?.override_scope_type || null,
+  override_department_ids: [...(existing?.override_department_ids || [])]
 })
 
-// 获取部门列表
-const fetchDepartments = async () => {
-  if (!userStore.isSuperAdmin) return // 普通管理员不需要获取所有部门列表
-  try {
-    const departments = await departmentApi.getDepartments()
-    departmentManagement.departments = departments
-  } catch (error) {
-    console.error('获取部门列表失败:', error)
+const getDefaultRoleAssignments = () => {
+  const defaultRole = roleOverview.roles.find((role) => role.code === 'user')
+  return defaultRole ? [makeRoleAssignment(defaultRole)] : []
+}
+
+const getOverrideScopeOptions = (roleId) => {
+  const role = getRoleById(roleId)
+  const scopes = getAssignableScopeTypes(
+    role?.default_scope_type,
+    roleOverview.dataScopeTypes,
+    departmentManagement.departments,
+    userManagement.form.departmentId,
+    role?.default_department_ids,
+    role?.assignment_constraints
+  )
+  return scopes.map((scope) => ({
+    value: scope.key,
+    label: scope.label
+  }))
+}
+
+const getOverrideDepartmentTree = (roleId) => {
+  const role = getRoleById(roleId)
+  let allowedRootIds = role?.assignment_constraints
+    ? normalizeDepartmentSelection(
+        departmentManagement.departments,
+        role.assignment_constraints.override_department_ids
+      )
+    : null
+  if (allowedRootIds === null && role?.default_scope_type === 'organization_and_descendants') {
+    allowedRootIds = userManagement.form.departmentId ? [userManagement.form.departmentId] : []
+  } else if (
+    allowedRootIds === null &&
+    role?.default_scope_type === 'selected_organizations_and_descendants'
+  ) {
+    allowedRootIds = role.default_department_ids
+  }
+  return buildDepartmentScopeTree(departmentManagement.departments, allowedRootIds)
+}
+
+const isRoleSelectedByOther = (roleId, currentIndex) =>
+  userManagement.form.roleAssignments.some(
+    (assignment, index) => index !== currentIndex && assignment.role_id === roleId
+  )
+
+const addRoleAssignment = () => {
+  const selected = new Set(userManagement.form.roleAssignments.map((item) => item.role_id))
+  const role = activeRoles.value.find(
+    (item) => !selected.has(item.id) && item.code !== 'superadmin'
+  )
+  if (role) {
+    userManagement.form.roleAssignments.push(makeRoleAssignment(role))
+    handleRoleChange(userManagement.form.roleAssignments.length - 1)
+  }
+}
+
+const removeRoleAssignment = (index) => {
+  userManagement.form.roleAssignments.splice(index, 1)
+}
+
+const handleRoleChange = (index) => {
+  const assignment = userManagement.form.roleAssignments[index]
+  const role = getRoleById(assignment.role_id)
+  const isSuperadmin = role?.code === 'superadmin'
+  userManagement.form.roleAssignments = resetRoleAssignmentScope(
+    userManagement.form.roleAssignments,
+    index,
+    isSuperadmin
+  )
+  const changed = userManagement.form.roleAssignments[isSuperadmin ? 0 : index]
+  if (role?.assignment_constraints?.can_inherit === false) {
+    changed.scope_mode = 'override'
+    changed.override_scope_type = getOverrideScopeOptions(role.id)[0]?.value || null
+  }
+}
+
+const handleScopeModeChange = (assignment) => {
+  if (assignment.scope_mode === 'inherit') {
+    assignment.override_scope_type = null
+    assignment.override_department_ids = []
+    return
+  }
+
+  assignment.override_scope_type = getOverrideScopeOptions(assignment.role_id)[0]?.value || null
+}
+
+const handleOverrideScopeChange = (assignment) => {
+  if (assignment.override_scope_type !== 'selected_organizations_and_descendants') {
+    assignment.override_department_ids = []
+  }
+}
+
+const handleUserDepartmentChange = () => {
+  for (const assignment of userManagement.form.roleAssignments) {
+    const defaultScopeType = getRoleById(assignment.role_id)?.default_scope_type
+    if (
+      assignment.scope_mode === 'override' &&
+      ['organization_and_descendants', 'selected_organizations_and_descendants'].includes(
+        defaultScopeType
+      )
+    ) {
+      assignment.scope_mode = 'inherit'
+      assignment.override_scope_type = null
+      assignment.override_department_ids = []
+    }
   }
 }
 
@@ -457,8 +757,7 @@ const formatTime = (timeStr) => formatDateTime(timeStr)
 const getUserDefaultAvatarSrc = (user) => (user.uid ? generatePixelAvatar(user.uid) : '')
 
 const isUserDeleteDisabled = (user) =>
-  user.id === userStore.userId ||
-  (user.role === 'superadmin' && userStore.userRole !== 'superadmin')
+  user.id === userStore.userId || (user.roles || []).some((role) => role.code === 'superadmin')
 
 // 获取用户列表
 const fetchUsers = async () => {
@@ -480,29 +779,35 @@ const handleRefresh = async () => {
   if (userManagement.refreshing) return
   userManagement.refreshing = true
   try {
-    await Promise.all([fetchUsers(), fetchDepartments()])
+    await Promise.all([
+      fetchUsers(),
+      fetchDepartments(),
+      fetchRoleOptions(true, userManagement.editMode ? userManagement.editUserId : null)
+    ])
     message.success('刷新成功')
   } catch (error) {
     console.error('刷新失败:', error)
-    message.error('刷新失败')
   } finally {
     userManagement.refreshing = false
   }
 }
 
 // 打开添加用户模态框
-const showAddUserModal = () => {
+const showAddUserModal = async () => {
+  await Promise.all([fetchDepartments(), fetchRoleOptions()])
   userManagement.modalTitle = '添加用户'
   userManagement.editMode = false
   userManagement.editUserId = null
+  userManagement.originalHadSuperadmin = false
   userManagement.form = {
     username: '',
     generatedUid: '',
     phoneNumber: '',
     password: '',
     confirmPassword: '',
-    role: 'user', // 默认角色为普通用户
-    departmentId: null,
+    roleAssignments: getDefaultRoleAssignments(),
+    reason: '',
+    departmentId: userStore.departmentId,
     usernameError: '',
     phoneError: ''
   }
@@ -511,16 +816,36 @@ const showAddUserModal = () => {
 }
 
 // 打开编辑用户模态框
-const showEditUserModal = (user) => {
+const showEditUserModal = async (user) => {
   userManagement.modalTitle = '编辑用户'
   userManagement.editMode = true
   userManagement.editUserId = user.id
+  await Promise.all([fetchDepartments(), fetchRoleOptions(false, user.id)])
+  userManagement.originalHadSuperadmin = (user.roles || []).some(
+    (role) => role.code === 'superadmin'
+  )
+  const roleAssignments = (user.roles || [])
+    .filter((role) => getRoleById(role.id))
+    .map((role) => makeRoleAssignment(null, role))
+  for (const assignment of roleAssignments) {
+    const role = getRoleById(assignment.role_id)
+    if (
+      assignment.scope_mode === 'inherit' &&
+      role?.assignment_constraints?.can_inherit === false
+    ) {
+      assignment.scope_mode = 'override'
+      assignment.override_scope_type = getOverrideScopeOptions(role.id)[0]?.value || null
+      assignment.override_department_ids = []
+    }
+  }
   userManagement.form = {
     username: user.username,
     generatedUid: user.uid || '', // 编辑模式显示现有的uid
     phoneNumber: user.phone_number || '',
     password: '',
     confirmPassword: '',
+    roleAssignments,
+    reason: '',
     departmentId: user.department_id || null,
     usernameError: '',
     phoneError: ''
@@ -570,23 +895,67 @@ const handleUserFormSubmit = async () => {
       }
     }
 
+    if (canEditRoleAssignments.value) {
+      if (!userManagement.form.roleAssignments.length) {
+        message.error('请至少分配一个角色')
+        return
+      }
+      for (const assignment of userManagement.form.roleAssignments) {
+        if (!assignment.role_id) {
+          message.error('请选择角色')
+          return
+        }
+        if (assignment.scope_mode === 'override' && !assignment.override_scope_type) {
+          message.error('请选择个性化数据范围')
+          return
+        }
+        if (
+          assignment.override_scope_type === 'selected_organizations_and_descendants' &&
+          !assignment.override_department_ids.length
+        ) {
+          message.error('指定组织及下级范围至少需要选择一个组织节点')
+          return
+        }
+      }
+      if (requiresSuperadminReason.value && !userManagement.form.reason.trim()) {
+        message.error('授予或撤销超级管理员必须填写原因')
+        return
+      }
+    }
+
     userManagement.loading = true
+
+    const roleAssignments = userManagement.form.roleAssignments.map((assignment) => ({
+      role_id: assignment.role_id,
+      scope_mode: assignment.scope_mode,
+      override_scope_type:
+        assignment.scope_mode === 'override' ? assignment.override_scope_type : null,
+      override_department_ids:
+        assignment.scope_mode === 'override'
+          ? normalizeDepartmentSelection(
+              departmentManagement.departments,
+              assignment.override_department_ids
+            )
+          : []
+    }))
 
     // 根据模式决定创建还是更新用户
     if (userManagement.editMode) {
       // 创建更新数据对象
-      const updateData = {
-        username: userManagement.form.username.trim()
+      const updateData = {}
+      if (canUpdateUsers.value) {
+        updateData.username = userManagement.form.username.trim()
+        if (userManagement.form.phoneNumber) {
+          updateData.phone_number = userManagement.form.phoneNumber
+        }
+        if (userManagement.form.departmentId) {
+          updateData.department_id = userManagement.form.departmentId
+        }
       }
 
-      // 添加手机号字段
-      if (userManagement.form.phoneNumber) {
-        updateData.phone_number = userManagement.form.phoneNumber
-      }
-
-      // 超级管理员可以修改部门
-      if (userStore.isSuperAdmin && userManagement.form.departmentId) {
-        updateData.department_id = userManagement.form.departmentId
+      if (canEditRoleAssignments.value) {
+        updateData.role_assignments = roleAssignments
+        if (requiresSuperadminReason.value) updateData.reason = userManagement.form.reason.trim()
       }
 
       // 如果显示了密码字段并且填写了密码，才更新密码
@@ -600,12 +969,15 @@ const handleUserFormSubmit = async () => {
       // 创建新用户
       const createData = {
         username: userManagement.form.username.trim(),
-        password: userManagement.form.password,
-        role: userManagement.form.role
+        password: userManagement.form.password
       }
 
-      // 超级管理员可以指定部门
-      if (userStore.isSuperAdmin && userManagement.form.departmentId) {
+      if (canEditRoleAssignments.value) {
+        createData.role_assignments = roleAssignments
+        if (requiresSuperadminReason.value) createData.reason = userManagement.form.reason.trim()
+      }
+
+      if (canCreateUsers.value && userManagement.form.departmentId) {
         createData.department_id = userManagement.form.departmentId
       }
 
@@ -661,23 +1033,9 @@ const confirmDeleteUser = (user) => {
   })
 }
 
-const getRoleClass = (role) => {
-  switch (role) {
-    case 'superadmin':
-      return 'role-superadmin'
-    case 'admin':
-      return 'role-admin'
-    case 'user':
-      return 'role-user'
-    default:
-      return 'role-default'
-  }
-}
-
 // 在组件挂载时获取用户列表
 onMounted(async () => {
-  await fetchUsers()
-  await fetchDepartments()
+  await Promise.all([fetchUsers(), fetchDepartments(), fetchRoleOptions()])
 })
 </script>
 
@@ -768,6 +1126,13 @@ onMounted(async () => {
     .filter-select {
       width: 150px;
     }
+
+    .filter-summary {
+      margin-left: auto;
+      color: var(--gray-500);
+      font-size: 12.5px;
+      white-space: nowrap;
+    }
   }
 
   @media (max-width: 640px) {
@@ -783,6 +1148,10 @@ onMounted(async () => {
         margin-left: 0;
       }
 
+      .filter-summary {
+        margin-left: 0;
+      }
+
       .filter-select {
         flex: 1;
         min-width: 0;
@@ -791,132 +1160,139 @@ onMounted(async () => {
   }
 
   .content-section {
-    overflow: hidden;
+    border: 1px solid var(--gray-150);
+    border-radius: 8px;
+    background: var(--gray-0);
 
     .error-message {
-      padding: 16px 24px;
+      padding: 16px;
     }
 
-    .cards-container {
-      .empty-state {
-        padding: 60px 20px;
-        text-align: center;
+    .user-table {
+      :deep(.ant-table) {
+        background: var(--gray-0);
       }
 
-      .user-cards-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-        gap: 16px;
-        // padding: 16px;
-
-        .user-card {
-          cursor: default;
-
-          :deep(.info-card-icon) {
-            border-radius: 50%;
-          }
-
-          :deep(.info-card-body) {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-          }
-
-          .avatar-img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-          }
-
-          .role-dept-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            padding: 2px 8px 2px 4px;
-            background: var(--gray-50);
-            border-radius: 4px;
-
-            .role-icon-wrapper {
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              width: 16px;
-              height: 16px;
-
-              &.role-superadmin {
-                color: var(--color-error-700);
-              }
-              &.role-admin {
-                color: var(--color-info-700);
-              }
-              &.role-user {
-                color: var(--color-success-700);
-              }
-            }
-
-            .dept-text {
-              font-size: 12px;
-              color: var(--gray-700);
-              font-weight: 500;
-            }
-          }
-
-          .card-content {
-            .info-item {
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              padding: 2px 0;
-              border-bottom: 1px solid var(--gray-25);
-
-              &:last-child {
-                border-bottom: none;
-              }
-
-              .info-label {
-                font-size: 12px;
-                color: var(--gray-600);
-                font-weight: 500;
-                min-width: 70px;
-              }
-
-              .info-value {
-                font-size: 12px;
-                color: var(--gray-900);
-                text-align: right;
-                flex: 1;
-
-                &.time-text {
-                  color: var(--gray-700);
-                }
-
-                &.phone-text {
-                  font-family: 'Monaco', 'Consolas', monospace;
-                }
-              }
-            }
-          }
-        }
+      :deep(.ant-table-thead > tr > th) {
+        padding: 11px 16px;
+        background: var(--gray-25);
+        color: var(--gray-500);
+        font-size: 12px;
+        font-weight: 500;
       }
 
-      .pagination-section {
-        display: flex;
-        justify-content: flex-end;
-        margin-top: 16px;
+      :deep(.ant-table-tbody > tr > td) {
+        padding: 12px 16px;
+        color: var(--gray-700);
+        border-bottom-color: var(--gray-100);
+      }
+
+      :deep(.ant-table-tbody > tr:hover > td) {
+        background: var(--gray-25);
+      }
+
+      :deep(.ant-table-pagination.ant-pagination) {
+        margin: 12px 16px;
+      }
+    }
+
+    .user-identity {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      gap: 10px;
+    }
+
+    .user-identity-copy {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      line-height: 1.35;
+
+      strong,
+      code {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      strong {
+        color: var(--gray-900);
+        font-size: 13.5px;
+      }
+
+      code {
+        color: var(--gray-500);
+        font-size: 11.5px;
+      }
+    }
+
+    .department-text {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .role-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+
+    .role-tag {
+      margin: 0;
+
+      &.inactive {
+        color: var(--gray-500);
+        text-decoration: line-through;
+      }
+    }
+
+    .empty-value {
+      color: var(--gray-400);
+    }
+
+    .phone-text {
+      color: var(--gray-700);
+      font-size: 12.5px;
+    }
+
+    .time-cell {
+      display: flex;
+      flex-direction: column;
+      color: var(--gray-600);
+      font-size: 12.5px;
+      line-height: 1.5;
+
+      small {
+        color: var(--gray-400);
+        font-size: 11.5px;
+      }
+    }
+
+    .row-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+
+      .more-action {
+        width: 28px;
+        padding: 0;
       }
     }
   }
+}
 
-  .time-text {
-    font-size: 13px;
-    color: var(--gray-700);
-  }
+@media (max-width: 640px) {
+  .user-management .content-section .row-actions {
+    :deep(.ant-btn) {
+      min-height: 40px;
+    }
 
-  .phone-text,
-  .user-id-text {
-    font-size: 13px;
-    color: var(--gray-900);
-    font-family: 'Monaco', 'Consolas', monospace;
+    .more-action {
+      width: 40px;
+    }
   }
 }
 
@@ -986,6 +1362,47 @@ onMounted(async () => {
         color: var(--gray-700);
         font-size: 13px;
       }
+    }
+
+    .role-assignment-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .role-assignment {
+      padding: 12px;
+      border: 1px solid var(--gray-150);
+      border-radius: 8px;
+      background: var(--gray-25);
+    }
+
+    .role-assignment-header,
+    .role-override-fields {
+      display: flex;
+      gap: 8px;
+    }
+
+    .role-default-scope {
+      margin: 8px 0;
+      color: var(--gray-600);
+      font-size: 12px;
+    }
+
+    .role-override-fields {
+      margin-top: 10px;
+
+      > * {
+        flex: 1;
+      }
+    }
+  }
+}
+
+@media (max-width: 640px) {
+  .user-modal .user-form {
+    .role-assignment-header,
+    .role-override-fields {
+      flex-direction: column;
     }
   }
 }

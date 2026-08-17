@@ -21,7 +21,8 @@ from yuxi.services.run_submission_service import RunOrigin, RunSubmissionCommand
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.hash_utils import hash_id
 
-from server.utils.auth_middleware import get_db, get_required_user
+from server.utils.agent_permissions import require_agent_use_permission
+from server.utils.auth_middleware import get_db
 
 agent_invocation_channel_router = APIRouter(prefix="/agent-invocation/channel", tags=["agent-invocation"])
 
@@ -51,7 +52,7 @@ class ChannelMessageRequest(BaseModel):
 @agent_invocation_channel_router.post("/messages")
 async def receive_channel_message(
     payload: ChannelMessageRequest,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
     db: AsyncSession = Depends(get_db),
 ):
     """处理纯文本 Channel 消息或最小 slash command。"""

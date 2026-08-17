@@ -144,7 +144,6 @@ async def test_ocr_parse_file_accepts_disable_for_pdf(tmp_path, monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "file_path",
     [

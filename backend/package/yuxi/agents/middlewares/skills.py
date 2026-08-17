@@ -23,6 +23,7 @@ from yuxi.agents.skills.service import (
     normalize_string_list,
 )
 from yuxi.agents.toolkits import get_all_tool_instances
+from yuxi.permissions.authorization import build_authorization_context
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import VIRTUAL_PATH_WORKSPACE_SKILLS, VIRTUAL_SKILLS_PATH
@@ -51,6 +52,9 @@ class SkillDependencyNode(TypedDict):
 
 async def _list_skills_from_db(db: AsyncSession | None = None, user=None) -> list:
     """从数据库加载 skills 列表"""
+    if user is not None and not build_authorization_context(user).has_permission("skill:use"):
+        return []
+
     if db is not None:
         if user is not None:
             return await list_accessible_skills(db, user)

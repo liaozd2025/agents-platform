@@ -227,11 +227,6 @@ class KnowledgeFileRepository:
             )
             return result.scalar_one_or_none() is not None
 
-    async def count_all(self) -> int:
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(func.count()).select_from(KnowledgeFile))
-            return int(result.scalar() or 0)
-
     async def list_file_ids_by_exact_statuses(
         self,
         *,

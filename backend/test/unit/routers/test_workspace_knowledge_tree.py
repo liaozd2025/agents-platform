@@ -5,7 +5,6 @@ from fastapi.testclient import TestClient
 
 from server.routers import workspace_router
 from server.routers.workspace_router import workspace
-from server.utils.auth_middleware import get_required_user
 from yuxi.knowledge.read_models import KnowledgeBaseDetail
 from yuxi.storage.postgres.models_business import User
 
@@ -14,9 +13,6 @@ class FakeKnowledgeBase:
     def __init__(self, *, supports: bool = True):
         self.supports = supports
         self.list_calls = []
-
-    async def check_accessible(self, _user, _kb_id):
-        return True
 
     async def get_database_document_support(self, kb_id):
         database = KnowledgeBaseDetail(
@@ -79,9 +75,9 @@ def _build_client(monkeypatch, fake_kb: FakeKnowledgeBase) -> TestClient:
     app.include_router(workspace, prefix="/api")
 
     async def fake_required_user():
-        return User(username="user", uid="user", password_hash="x", role="user", department_id=1)
+        return User(username="user", uid="user", password_hash="x", department_id=1)
 
-    app.dependency_overrides[get_required_user] = fake_required_user
+    app.dependency_overrides[workspace_router.require_knowledge_base_read] = fake_required_user
     monkeypatch.setattr(workspace_router, "knowledge_base", fake_kb)
     return TestClient(app)
 

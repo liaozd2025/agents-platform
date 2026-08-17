@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import select
 
 from yuxi.knowledge.cache import cache_kb_config, delete_cached_kb_config, kb_config_cache_lock
+from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_knowledge import KnowledgeBase
 
@@ -21,8 +22,9 @@ class KnowledgeBaseRepository:
             return result.scalar_one_or_none()
 
     async def create(self, data: dict[str, Any]) -> KnowledgeBase:
-        kb = KnowledgeBase(**data)
         async with pg_manager.get_async_session_context() as session:
+            snapshot = await get_user_organization_snapshot(session, uid=data.get("created_by"))
+            kb = KnowledgeBase(**data, **snapshot)
             session.add(kb)
         await cache_kb_config(kb)
         return kb

@@ -98,8 +98,8 @@
           <div class="identity-item">
             <span class="identity-icon"><ShieldCheck :size="15" /></span>
             <span class="profile-label">权限</span>
-            <span class="profile-value" :style="{ color: getRoleColor(userStore.userRole) }">
-              {{ userRoleText }}
+            <span class="profile-value">
+              {{ assignedRolesText }}
             </span>
           </div>
           <div class="identity-item">
@@ -139,18 +139,9 @@ const profileDraft = reactive({
 
 const avatarDefaultSrc = computed(() => (userStore.uid ? generatePixelAvatar(userStore.uid) : ''))
 
-const userRoleText = computed(() => {
-  switch (userStore.userRole) {
-    case 'superadmin':
-      return '超级管理员'
-    case 'admin':
-      return '管理员'
-    case 'user':
-      return '普通用户'
-    default:
-      return '未知角色'
-  }
-})
+const assignedRolesText = computed(
+  () => userStore.userRoles.map((role) => role.name).join('、') || '未分配角色'
+)
 
 const syncProfileDraft = () => {
   profileDraft.username = userStore.username || ''
@@ -224,19 +215,6 @@ const saveField = async (field) => {
     message.error('更新失败：' + (error.message || '请稍后重试'))
   } finally {
     savingField.value = ''
-  }
-}
-
-const getRoleColor = (role) => {
-  switch (role) {
-    case 'superadmin':
-      return 'var(--color-error-700)'
-    case 'admin':
-      return 'var(--color-primary-500)'
-    case 'user':
-      return 'var(--color-success-500)'
-    default:
-      return 'var(--gray-600)'
   }
 }
 

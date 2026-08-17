@@ -1,44 +1,36 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from yuxi.agents.mcp.service import MCPServerNotFoundError
 from yuxi.storage.postgres.models_business import User
 
 from server.routers.mcp_router import mcp
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from server.utils.auth_middleware import get_authorization_context, get_db
 
 
-def _build_app(*, allow_admin: bool = True) -> FastAPI:
+def _build_app(*, can_manage: bool = True) -> FastAPI:
     app = FastAPI()
     app.include_router(mcp, prefix="/api")
 
     async def fake_db():
         return None
 
-    async def fake_admin_user():
-        if not allow_admin:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=403, detail="需要管理员权限")
-        return User(
-            username="admin",
-            uid="admin",
+    async def fake_authorization():
+        user = User(
+            username="manager" if can_manage else "user",
+            uid="manager" if can_manage else "user",
             password_hash="x",
-            role="admin",
         )
-
-    async def fake_required_user():
-        return User(
-            username="admin" if allow_admin else "user",
-            uid="admin" if allow_admin else "user",
-            password_hash="x",
-            role="admin" if allow_admin else "user",
+        return SimpleNamespace(
+            user=user,
+            has_permission=lambda permission: can_manage and permission == "mcp:manage",
         )
 
     app.dependency_overrides[get_db] = fake_db
-    app.dependency_overrides[get_admin_user] = fake_admin_user
-    app.dependency_overrides[get_required_user] = fake_required_user
+    app.dependency_overrides[get_authorization_context] = fake_authorization
     return app
 
 
@@ -69,7 +61,7 @@ def test_update_mcp_server_status(monkeypatch):
     assert payload["success"] is True
     assert payload["enabled"] is False
     assert payload["data"]["enabled"] is False
-    assert captured == {"name": "demo-mcp", "enabled": False, "updated_by": "admin"}
+    assert captured == {"name": "demo-mcp", "enabled": False, "updated_by": "manager"}
 
 
 def test_update_mcp_server_status_not_found(monkeypatch):
@@ -94,7 +86,7 @@ def test_update_mcp_server_status_rejects_legacy_stdio(monkeypatch):
     assert resp.status_code == 400, resp.text
 
 
-def test_get_mcp_servers_normal_user_is_stripped(monkeypatch):
+def test_get_mcp_servers_without_manage_permission_is_stripped(monkeypatch):
     class DummyServer:
         def __init__(self):
             self.name = "test-mcp"
@@ -127,7 +119,7 @@ def test_get_mcp_servers_normal_user_is_stripped(monkeypatch):
     monkeypatch.setattr("server.routers.mcp_router.get_all_mcp_servers", fake_get_all_mcp_servers)
 
     # 1. 管理员请求，应该返回全部字段
-    client_admin = TestClient(_build_app(allow_admin=True))
+    client_admin = TestClient(_build_app(can_manage=True))
     resp_admin = client_admin.get("/api/system/mcp-servers")
     assert resp_admin.status_code == 200
     data_admin = resp_admin.json()["data"][0]
@@ -136,7 +128,7 @@ def test_get_mcp_servers_normal_user_is_stripped(monkeypatch):
     assert data_admin["env"] == {"API_KEY": "secret"}
 
     # 2. 普通用户请求，敏感字段及一切非安全白名单字段应该被彻底脱敏
-    client_user = TestClient(_build_app(allow_admin=False))
+    client_user = TestClient(_build_app(can_manage=False))
     resp_user = client_user.get("/api/system/mcp-servers")
     assert resp_user.status_code == 200
     data_user = resp_user.json()["data"][0]

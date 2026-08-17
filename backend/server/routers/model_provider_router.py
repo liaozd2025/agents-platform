@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from server.utils.auth_middleware import get_db, get_required_user, require_permission
 from yuxi.models.providers.service import (
     check_credential_status,
     create_provider_config,
@@ -18,6 +18,7 @@ from yuxi.models.providers.service import (
     test_model_status_by_spec,
     update_provider_config,
 )
+from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.storage.postgres.models_business import User
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.utils import logger
@@ -61,7 +62,7 @@ class ModelProviderPayload(BaseModel):
 
 @model_providers.get("")
 async def list_providers(
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("model_provider:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """获取独立模型供应商配置列表。"""
@@ -77,7 +78,7 @@ async def list_providers(
 @model_providers.post("")
 async def create_provider(
     payload: ModelProviderPayload,
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(require_permission("model_provider:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """创建独立模型供应商配置。"""
@@ -85,7 +86,7 @@ async def create_provider(
         provider = await create_provider_config(
             db,
             payload.model_dump(exclude_none=True),
-            current_user.username,
+            authorization.user.username,
         )
         await db.commit()
         await _refresh_model_cache()
@@ -100,7 +101,7 @@ async def create_provider(
 @model_providers.get("/{provider_id}")
 async def get_provider(
     provider_id: str,
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("model_provider:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """获取单个独立模型供应商配置。"""
@@ -116,7 +117,7 @@ async def get_provider(
 async def update_provider(
     provider_id: str,
     payload: ModelProviderPayload,
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(require_permission("model_provider:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """更新独立模型供应商配置。"""
@@ -136,7 +137,7 @@ async def update_provider(
         ):
             if nullable_field in unset_fields and getattr(payload, nullable_field) is None:
                 data[nullable_field] = None
-        provider = await update_provider_config(db, provider_id, data, current_user.username)
+        provider = await update_provider_config(db, provider_id, data, authorization.user.username)
         if provider is None:
             raise HTTPException(status_code=404, detail=f"供应商 {provider_id} 不存在")
         await db.commit()
@@ -154,7 +155,7 @@ async def update_provider(
 @model_providers.delete("/{provider_id}")
 async def delete_provider(
     provider_id: str,
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("model_provider:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """删除独立模型供应商配置。"""
@@ -169,7 +170,7 @@ async def delete_provider(
 @model_providers.get("/{provider_id}/remote-models")
 async def get_remote_models(
     provider_id: str,
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("model_provider:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """实时拉取远端 /models，不落库。"""
@@ -192,7 +193,7 @@ async def get_remote_models(
 
 @model_providers.post("/models/cache/refresh")
 async def refresh_model_cache(
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("model_provider:manage")),
 ):
     """强制刷新模型缓存，从数据库重新加载所有供应商配置到 Redis。"""
     await _refresh_model_cache()
@@ -234,7 +235,7 @@ async def get_v2_models(
                     "batch_size": m.batch_size,
                 }
                 for m in models
-            ]
+            ],
         }
 
     return {"success": True, "data": result}
@@ -243,7 +244,7 @@ async def get_v2_models(
 @model_providers.get("/models/status")
 async def get_model_status_by_spec(
     spec: str,
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("model_provider:manage")),
 ):
     """根据 full spec 检查模型状态（自动识别 V1/V2、Chat/Embedding）。"""
     try:

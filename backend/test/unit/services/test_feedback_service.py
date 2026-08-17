@@ -40,6 +40,14 @@ class _FakeSession:
         self.rolled_back = True
 
 
+async def _organization_snapshot(*_args, **_kwargs):
+    return {
+        "organization_id_snapshot": 2,
+        "organization_path_snapshot": "/1/2/",
+        "organization_snapshot_inferred": False,
+    }
+
+
 @pytest.mark.asyncio
 async def test_submit_message_feedback_syncs_langfuse_score(monkeypatch: pytest.MonkeyPatch):
     message = SimpleNamespace(
@@ -52,6 +60,7 @@ async def test_submit_message_feedback_syncs_langfuse_score(monkeypatch: pytest.
     calls = []
 
     monkeypatch.setattr(svc, "submit_user_feedback_score", lambda **kwargs: calls.append(kwargs) or True)
+    monkeypatch.setattr(svc, "get_user_organization_snapshot", _organization_snapshot)
 
     result = await svc.submit_message_feedback_view(
         message_id=3,
@@ -70,6 +79,7 @@ async def test_submit_message_feedback_syncs_langfuse_score(monkeypatch: pytest.
     }
     assert db.committed is True
     assert db.rolled_back is False
+    assert db.added[0].organization_path_snapshot == "/1/2/"
     assert calls == [
         {
             "trace_id": "trace-1",
@@ -91,6 +101,7 @@ async def test_submit_message_feedback_skips_langfuse_without_trace_id(monkeypat
     calls = []
 
     monkeypatch.setattr(svc, "submit_user_feedback_score", lambda **kwargs: calls.append(kwargs) or True)
+    monkeypatch.setattr(svc, "get_user_organization_snapshot", _organization_snapshot)
 
     result = await svc.submit_message_feedback_view(
         message_id=3,

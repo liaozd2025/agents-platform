@@ -1,6 +1,53 @@
 <template>
   <div class="dashboard-container">
-    <!-- 顶部状态条 -->
+    <div class="organization-filter">
+      <div>
+        <div class="filter-title">当前筛选组织：{{ currentStats.selected_department_name }}</div>
+        <div class="filter-hint">包含下级组织</div>
+      </div>
+      <a-tree-select
+        v-model:value="selectedDepartmentId"
+        class="department-select"
+        :tree-data="departmentTree"
+        :field-names="{ label: 'name', value: 'id' }"
+        tree-default-expand-all
+        allow-clear
+        placeholder="全部授权组织"
+        @change="handleDepartmentChange"
+      />
+      <div class="current-stat">
+        <span>人员</span>
+        <strong>{{ currentStats.total_users }}</strong>
+      </div>
+      <div class="current-stat">
+        <span>组织</span>
+        <strong>{{ currentStats.total_departments }}</strong>
+      </div>
+    </div>
+
+    <a-alert
+      v-if="containsInferredData"
+      class="inferred-warning"
+      type="warning"
+      show-icon
+      message="当前结果包含迁移前数据，组织归属按创建者或用户当前关系推算。"
+    />
+
+    <a-card title="资源归属与共享可见" class="resource-scope-card" :loading="loading">
+      <div class="resource-scope-hint">
+        创建归属按创建时组织；共享可见按当前共享范围，均包含所选组织的下级组织。
+      </div>
+      <div class="resource-scope-grid">
+        <div v-for="item in resourceMetrics" :key="item.key" class="resource-scope-item">
+          <div class="resource-name">
+            {{ item.name }}
+            <a-tag v-if="item.metric.contains_inferred_data" color="orange">含推算</a-tag>
+          </div>
+          <a-statistic title="创建归属" :value="item.metric.creation_count" />
+          <a-statistic title="共享可见" :value="item.metric.shared_visible_count" />
+        </div>
+      </div>
+    </a-card>
 
     <!-- 现代化顶部统计栏 -->
     <div class="modern-stats-header">
@@ -11,7 +58,11 @@
     <!-- Grid布局的主要内容区域 -->
     <div class="dashboard-grid">
       <!-- 调用统计模块 - 占据2x1网格 -->
-      <CallStatsComponent :loading="loading" ref="callStatsRef" />
+      <CallStatsComponent
+        :loading="loading"
+        :department-id="selectedDepartmentId"
+        ref="callStatsRef"
+      />
 
       <!-- 用户活跃度分析 - 占据1x1网格 -->
       <div class="grid-item user-stats">
@@ -51,14 +102,15 @@
     </div>
 
     <!-- 反馈模态框 -->
-    <FeedbackModalComponent ref="feedbackModal" />
+    <FeedbackModalComponent ref="feedbackModal" :department-id="selectedDepartmentId" />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { dashboardApi } from '@/apis/dashboard_api'
+import { buildDepartmentTree } from '@/utils/departmentTree'
 
 // 导入子组件
 import StatusBar from '@/components/StatusBar.vue'
@@ -72,15 +124,42 @@ import FeedbackModalComponent from '@/components/dashboard/FeedbackModalComponen
 
 // 组件引用
 const feedbackModal = ref(null)
-
+const selectedDepartmentId = ref()
+const currentStats = ref({
+  selected_department_name: '全部授权组织',
+  total_users: 0,
+  total_departments: 0,
+  departments: []
+})
+const departmentTree = computed(() =>
+  buildDepartmentTree(
+    currentStats.value.departments.map((department) => ({
+      ...department,
+      disabled: !department.selectable
+    }))
+  )
+)
 // 统计数据 - 使用新的响应式结构
 const basicStats = ref({})
 const allStatsData = ref({
   users: null,
   tools: null,
   knowledge: null,
-  agents: null
+  agents: null,
+  resources: null
 })
+const resourceMetrics = computed(() => {
+  const resources = allStatsData.value.resources || {}
+  return [
+    { key: 'knowledge_bases', name: '知识库', metric: resources.knowledge_bases || {} },
+    { key: 'agents', name: '智能体', metric: resources.agents || {} },
+    { key: 'skills', name: 'Skill', metric: resources.skills || {} }
+  ]
+})
+const containsInferredData = computed(
+  () =>
+    basicStats.value.contains_inferred_data || allStatsData.value.resources?.contains_inferred_data
+)
 
 // 对话列表
 const loading = ref(false)
@@ -94,12 +173,26 @@ const toolStatsRef = ref(null)
 const knowledgeStatsRef = ref(null)
 const agentStatsRef = ref(null)
 
+const loadCurrentStats = async () => {
+  try {
+    currentStats.value = await dashboardApi.getCurrentOrganizationStats(selectedDepartmentId.value)
+  } catch (error) {
+    console.error('加载当前组织统计失败:', error)
+    message.error('加载当前组织统计失败')
+  }
+}
+
+const handleDepartmentChange = () => {
+  loadCurrentStats()
+  loadAllStats()
+}
+
 // 加载统计数据 - 使用并行API调用
 const loadAllStats = async () => {
   loading.value = true
   try {
     // 使用并行API调用获取所有统计数据
-    const response = await dashboardApi.getAllStats()
+    const response = await dashboardApi.getAllStats(selectedDepartmentId.value)
 
     // 更新基础统计数据
     basicStats.value = response.basic
@@ -109,7 +202,8 @@ const loadAllStats = async () => {
       users: response.users,
       tools: response.tools,
       knowledge: response.knowledge,
-      agents: response.agents
+      agents: response.agents,
+      resources: response.resources
     }
 
     console.log('Dashboard 数据加载完成:', response)
@@ -120,7 +214,7 @@ const loadAllStats = async () => {
 
     // 如果并行请求失败，尝试单独加载基础数据
     try {
-      const basicResponse = await dashboardApi.getStats()
+      const basicResponse = await dashboardApi.getStats(selectedDepartmentId.value)
       basicStats.value = basicResponse
       message.warning('详细数据加载失败，仅显示基础统计')
     } catch (basicError) {
@@ -148,6 +242,7 @@ const cleanupCharts = () => {
 
 // 初始化
 onMounted(() => {
+  loadCurrentStats()
   loadAllStats()
 })
 
@@ -162,6 +257,82 @@ onUnmounted(() => {
   background-color: var(--gray-25);
   min-height: calc(100vh - 64px);
   overflow-x: hidden;
+}
+
+.organization-filter {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: var(--page-padding) var(--page-padding) 0;
+  padding: 16px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  background: var(--gray-0);
+}
+
+.inferred-warning {
+  margin: 12px var(--page-padding) 0;
+}
+
+.resource-scope-card {
+  margin: 12px var(--page-padding) 0;
+}
+
+.resource-scope-hint {
+  margin-bottom: 12px;
+  color: var(--gray-500);
+  font-size: 12px;
+}
+
+.resource-scope-grid,
+.resource-scope-item {
+  display: grid;
+  gap: 16px;
+}
+
+.resource-scope-grid {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.resource-scope-item {
+  grid-template-columns: 1fr 1fr 1fr;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+}
+
+.resource-name {
+  color: var(--gray-900);
+  font-weight: 600;
+}
+
+.filter-title {
+  color: var(--gray-900);
+  font-weight: 600;
+}
+
+.filter-hint {
+  margin-top: 4px;
+  color: var(--gray-500);
+  font-size: 12px;
+}
+
+.department-select {
+  width: 280px;
+  margin-left: auto;
+}
+
+.current-stat {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--gray-600);
+
+  strong {
+    color: var(--gray-900);
+    font-size: 24px;
+  }
 }
 
 // Dashboard 特有的网格布局

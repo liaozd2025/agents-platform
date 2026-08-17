@@ -42,6 +42,9 @@ class KnowledgeBase(Base):
     mindmap_metadata = Column(JSON_VALUE)
     sample_questions = Column(JSON_VALUE)
     created_by = Column(String(64))
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 

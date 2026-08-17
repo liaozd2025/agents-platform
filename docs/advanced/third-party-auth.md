@@ -57,11 +57,7 @@ Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有�
 # 是否自动创建用户 (true/false，默认: true)
 # OIDC_AUTO_CREATE_USER=true
 
-# OIDC 用户的默认角色 (user/admin，默认: user)
-# OIDC_DEFAULT_ROLE=user
-
-# OIDC 用户的默认部门名称 (默认: OIDC用户)
-# OIDC_DEFAULT_DEPARTMENT=OIDC用户
+# OIDC 首次登录创建的新用户固定获得内置 user 角色，管理员可在用户管理中调整
 
 # 用户名映射字段 (默认: preferred_username)
 # OIDC_USERNAME_CLAIM=preferred_username
@@ -75,6 +71,9 @@ Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有�
 # 是否使用原始用户名（不带 oidc: 前缀），允许映射到 Yuxi 已有的本地账号 (true/false，默认: false)
 # 开启后，OIDC 返回的 username 会直接作为业务登录标识 uid 登录，需要管理员提前创建好用户账号
 # OIDC_USE_RAW_USERNAME=false
+
+# 是否从 OIDC userinfo 中获取部门 claim (true/false，默认: false)
+# OIDC_FETCH_DEPARTMENT_INFO=false
 
 # 部门名称字段映射 (默认: department)
 # OIDC_DEPARTMENT_CLAIM=department
@@ -100,8 +99,7 @@ docker restart api-dev web-dev
 
 系统会验证 `id_token` 的签名、`iss`、`aud`、`exp`、`iat`、`sub` 和 `nonce`。使用显式端点配置时，必须同时设置 `OIDC_ISSUER_URL` 和 `OIDC_JWKS_URI`；discovery 返回的 `issuer` 必须与 `OIDC_ISSUER_URL` 完全一致。OIDC 端点必须使用 HTTPS，仅 `YUXI_ENV=development` 时允许本机 HTTP Provider。
 
-系统会从 OIDC claims 中读取 `OIDC_DEPARTMENT_CLAIM` 指定的部门名称和描述，自动创建部门并关联用户。
+开启 `OIDC_FETCH_DEPARTMENT_INFO` 后，系统会从 OIDC claims 的 `OIDC_DEPARTMENT_CLAIM` 字段读取组织节点名称，仅在全部已有组织节点中精确命中一个时关联用户；已有用户再次登录也会按本次 claim 更新归属节点。
 
-- 对从 OIDC 获取的部门名称会自动做 `strip()` 去空格，并截断到 50 字符
-- 部门描述会自动截断到 255 字符
-- 如果部门名称处理后为空，会回退到使用 `OIDC_DEFAULT_DEPARTMENT` 默认部门
+- claim 命中 0 个或多个同名节点时，用户回落到集团根，并写入 warning 日志
+- 登录流程不会创建组织节点，不做模糊匹配或路径字符串解析

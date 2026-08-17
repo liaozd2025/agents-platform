@@ -63,8 +63,7 @@ async def create_thread_view(
     db: AsyncSession,
     current_uid: str,
 ) -> dict:
-    user_result = await db.execute(select(User).where(User.uid == str(current_uid)))
-    current_user = user_result.scalar_one_or_none()
+    current_user = await UserRepository().get_by_uid_with_db(db, str(current_uid))
     if not current_user:
         raise HTTPException(status_code=404, detail="用户不存在")
 

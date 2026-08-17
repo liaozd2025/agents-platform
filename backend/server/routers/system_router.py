@@ -8,12 +8,35 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi import get_version
 from yuxi.config.options import invalidate_option_cache, system_options, update_option_value
+from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
 
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from server.utils.auth_middleware import get_authorization_context, get_db, get_required_user, require_permission
 
 system = APIRouter(prefix="/system", tags=["system"])
+
+OCR_CONFIG_KEYS = frozenset({"default_ocr_engine"})
+OCR_OPTION_KEYS = frozenset(
+    {
+        "mineru_ocr_host_opts",
+        "mineru_official_api_opts",
+        "pp_structure_v3_ocr_host_opts",
+        "paddleocr_api_opts",
+    }
+)
+
+
+def _require_config_permissions(authorization: AuthorizationContext, keys: set[str]) -> None:
+    """按配置项类别检查系统配置或 OCR 管理权限。"""
+
+    required = {"ocr:manage" if key in OCR_CONFIG_KEYS else "system_config:manage" for key in keys}
+    if not required:
+        required.add("system_config:manage")
+    for permission_key in required:
+        if not authorization.has_permission(permission_key):
+            raise HTTPException(status_code=403, detail=f"缺少功能权限: {permission_key}")
+
 
 # =============================================================================
 # === 健康检查分组 ===
@@ -76,10 +99,10 @@ def _serialize_system_config(values: dict) -> dict:
 
 @system.get("/config")
 async def get_config(
-    current_user: User = Depends(get_required_user),
+    _authorization: AuthorizationContext = Depends(require_permission("system_config:manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    """获取系统配置"""
+    """返回当前管理员可维护的系统配置。"""
     return _serialize_system_config(await system_options.get(db))
 
 
@@ -87,14 +110,15 @@ async def get_config(
 async def update_config_single(
     key=Body(...),
     value=Body(...),
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """更新单个配置项"""
+    _require_config_permissions(authorization, {key} if isinstance(key, str) else {""})
     if not isinstance(key, str) or key not in {field["key"] for field in system_options.fields}:
         raise HTTPException(status_code=400, detail=f"未知配置项: {key}")
     try:
-        await update_option_value(db, system_options.key, {key: value}, current_user.username)
+        await update_option_value(db, system_options.key, {key: value}, authorization.user.username)
         await db.commit()
         await invalidate_option_cache(system_options.key)
     except ValueError as exc:
@@ -105,12 +129,13 @@ async def update_config_single(
 @system.post("/config/update")
 async def update_config_batch(
     items: dict = Body(...),
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """批量更新配置项"""
+    _require_config_permissions(authorization, set(items))
     try:
-        await update_option_value(db, system_options.key, items, current_user.username)
+        await update_option_value(db, system_options.key, items, authorization.user.username)
         await db.commit()
         await invalidate_option_cache(system_options.key)
     except ValueError as exc:
@@ -119,7 +144,10 @@ async def update_config_batch(
 
 
 @system.get("/logs")
-async def get_system_logs(levels: str | None = None, current_user: User = Depends(get_admin_user)):
+async def get_system_logs(
+    levels: str | None = None,
+    _authorization: AuthorizationContext = Depends(require_permission("system_log:read")),
+):
     """获取系统日志
 
     Args:
@@ -206,7 +234,9 @@ async def get_info_config():
 
 
 @system.post("/info/reload")
-async def reload_info_config(current_user: User = Depends(get_admin_user)):
+async def reload_info_config(
+    _authorization: AuthorizationContext = Depends(require_permission("system_config:manage")),
+):
     """重新加载信息配置"""
     try:
         config = await load_info_config()
@@ -229,29 +259,46 @@ class ConfigOptionValuePayload(BaseModel):
 
 @system.get("/config/options")
 async def get_config_options(
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
     """返回系统定义的通用配置表单和值。"""
 
     from yuxi.config.options import list_options, serialize_option
 
-    return {"options": [serialize_option(record) for record in await list_options(db)]}
+    can_manage_system = authorization.has_permission("system_config:manage")
+    can_manage_ocr = authorization.has_permission("ocr:manage")
+    if not can_manage_system and not can_manage_ocr:
+        raise HTTPException(status_code=403, detail="缺少系统配置或 OCR 管理权限")
+
+    records = await list_options(db)
+    return {
+        "options": [
+            serialize_option(record)
+            for record in records
+            if (record.key in OCR_OPTION_KEYS and can_manage_ocr)
+            or (record.key not in OCR_OPTION_KEYS and can_manage_system)
+        ]
+    }
 
 
 @system.put("/config/options/{key}")
 async def put_config_option(
     key: str,
     payload: ConfigOptionValuePayload,
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
     """保存一个通用配置项的 JSON 值。"""
 
     from yuxi.config.options import serialize_option, update_option_value
 
+    permission_key = "ocr:manage" if key in OCR_OPTION_KEYS else "system_config:manage"
+    if not authorization.has_permission(permission_key):
+        raise HTTPException(status_code=403, detail=f"缺少功能权限: {permission_key}")
+
     try:
-        record = await update_option_value(db, key, payload.value, current_user.username)
+        record = await update_option_value(db, key, payload.value, authorization.user.username)
         if record is None:
             raise HTTPException(status_code=404, detail=f"配置项不存在: {key}")
         await db.commit()

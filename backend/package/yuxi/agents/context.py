@@ -51,16 +51,6 @@ DEFAULT_YUXI_SUMMARY_PROMPT = """你是对话上下文压缩助手。
 只输出压缩后的上下文，不要添加额外说明。"""
 
 
-def _role_can_access(auth: str | None, role: str | None) -> bool:
-    if not auth:
-        return True
-    if auth == "admin":
-        return role in {"admin", "superadmin"}
-    if auth == "superadmin":
-        return role == "superadmin"
-    return False
-
-
 def _load_workspace_agent_context(thread_id: str, uid: str) -> str:
     sections: list[str] = []
     for filename in WORKSPACE_AGENT_CONTEXT_FILES:
@@ -105,21 +95,17 @@ async def build_agent_input_context(
     return input_context
 
 
-def filter_config_by_role(
+def filter_agent_config_for_management(
     config_json: dict,
-    role: str | None,
+    can_manage: bool,
     context_schema: type["BaseContext"] | None = None,
 ) -> dict:
-    """按 Context 字段 metadata.auth 过滤 config_json.context。"""
+    """按智能体管理权限过滤 config_json.context。"""
     if not isinstance(config_json, dict):
         return {}
 
     schema = context_schema or BaseContext
-    restricted_fields = {
-        f.name
-        for f in fields(schema)
-        if f.metadata.get("auth") and not _role_can_access(str(f.metadata.get("auth")), role)
-    }
+    restricted_fields = {f.name for f in fields(schema) if f.metadata.get("manage_only") and not can_manage}
     if not restricted_fields:
         return dict(config_json)
 
@@ -191,7 +177,7 @@ class BaseContext:
                 {"key": "always_trust", "name": "完全信任", "description": "敏感工具无需确认，自动执行"},
             ],
             "type": "string",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -250,7 +236,7 @@ class BaseContext:
                 f"{DEFAULT_SUMMARY_THRESHOLD_K}K。"
             ),
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -262,7 +248,7 @@ class BaseContext:
                 f"上下文摘要触发后，除摘要消息外保留最近的消息数量，默认 {DEFAULT_SUMMARY_KEEP_MESSAGES} 条。"
             ),
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -273,7 +259,7 @@ class BaseContext:
             "description": "触发上下文摘要时使用的提示词，必须能接收 {messages} 作为待摘要消息占位符。",
             "type": "string",
             "kind": "prompt",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -287,7 +273,7 @@ class BaseContext:
                 f"{DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT}。"
             ),
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -301,7 +287,7 @@ class BaseContext:
                 f"{DEFAULT_SUMMARY_L2_TRIGGER_RATIO}。"
             ),
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -314,7 +300,7 @@ class BaseContext:
                 f"{DEFAULT_MAX_EXECUTION_STEPS}。"
             ),
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -324,17 +310,17 @@ class BaseContext:
             "name": "模型重试次数",
             "description": "模型调用失败时的最大重试次数，默认值为 2。",
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
     @classmethod
-    def get_configurable_items(cls, user_role: str | None = None):
+    def get_configurable_items(cls, can_manage: bool = False):
         """实现一个可配置的参数列表，在 UI 上配置时使用"""
         configurable_items = {}
         for f in fields(cls):
             if f.init and not f.metadata.get("hide", False):
-                if user_role is not None and not _role_can_access(f.metadata.get("auth"), user_role):
+                if f.metadata.get("manage_only") and not can_manage:
                     continue
                 if f.metadata.get("configurable", True):
                     type_name = cls._get_type_name(f.type)
@@ -451,8 +437,13 @@ async def resolve_agent_resource_options(
         ]
     if "knowledges" in fields_to_load:
         from yuxi.knowledge.runtime import knowledge_base
+        from yuxi.permissions.authorization import build_authorization_context
 
-        databases = await knowledge_base.get_databases_by_user(user)
+        databases = (
+            await knowledge_base.get_databases_by_user(user)
+            if build_authorization_context(user).has_permission("knowledge_base:read")
+            else []
+        )
         options["knowledges"] = [
             _resource_option(item.kb_id, item.name, item.description) for item in databases if item.kb_id
         ]
@@ -468,8 +459,13 @@ async def resolve_agent_resource_options(
         ]
     if "skills" in fields_to_load:
         from yuxi.agents.skills.service import list_accessible_skills
+        from yuxi.permissions.authorization import build_authorization_context
 
-        skills = await list_accessible_skills(db, user)
+        skills = (
+            await list_accessible_skills(db, user)
+            if build_authorization_context(user).has_permission("skill:use")
+            else []
+        )
         options["skills"] = [
             _resource_option(skill.slug, skill.name, skill.description) for skill in skills if skill.slug
         ]
@@ -493,8 +489,7 @@ async def normalize_agent_context_config(
 ) -> dict:
     schema = context_schema or BaseContext
     raw_context = dict(context) if isinstance(context, dict) else {}
-    filtered = filter_config_by_role({"context": raw_context}, getattr(user, "role", None), schema)
-    normalized = dict(filtered.get("context") or {})
+    normalized = raw_context
     field_names = {item.name for item in fields(schema)}
     resource_fields = _AGENT_RESOURCE_FIELDS & field_names
     if not resource_fields:

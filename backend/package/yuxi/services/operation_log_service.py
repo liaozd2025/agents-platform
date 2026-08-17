@@ -1,5 +1,6 @@
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
 from yuxi.storage.postgres.models_business import OperationLog
 
 
@@ -12,7 +13,16 @@ async def log_operation(
 ) -> None:
     try:
         ip_address = request.client.host if request and request.client else None
-        db.add(OperationLog(user_id=user_id, operation=operation, details=details, ip_address=ip_address))
+        snapshot = await get_user_organization_snapshot(db, user_id=user_id)
+        db.add(
+            OperationLog(
+                user_id=user_id,
+                operation=operation,
+                details=details,
+                ip_address=ip_address,
+                **snapshot,
+            )
+        )
         await db.commit()
     except Exception:
         pass

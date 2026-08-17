@@ -112,13 +112,13 @@ class SubAgentBackend(BaseAgent):
     async def get_info(
         self,
         include_configurable_items: bool = True,
-        user_role: str | None = None,
+        can_manage: bool = False,
         db=None,
         user=None,
     ):
         info = await super().get_info(
             include_configurable_items=include_configurable_items,
-            user_role=user_role,
+            can_manage=can_manage,
             db=db,
             user=user,
         )

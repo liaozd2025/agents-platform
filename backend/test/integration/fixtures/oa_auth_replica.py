@@ -3,8 +3,9 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from server.routers.auth_router import auth
 from yuxi.storage.postgres.manager import pg_manager
+
+from server.routers.auth_router import auth
 
 
 @asynccontextmanager

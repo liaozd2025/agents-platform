@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
 from yuxi.storage.postgres.models_business import Skill
 from yuxi.utils.datetime_utils import utc_now_naive
 
@@ -75,6 +76,10 @@ class SkillRepository:
             updated_by=created_by,
             created_at=now,
             updated_at=now,
+            **await get_user_organization_snapshot(
+                self.db,
+                uid=created_by if source_type != "builtin" else None,
+            ),
         )
         self.db.add(item)
         await self.db.commit()

@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiPut, apiDelete, apiAdminGet, apiAdminPost } from './base'
+import { apiGet, apiPost, apiPut, apiDelete } from './base'
 
 const BASE_URL = '/api/system/skills'
 const USER_BASE_URL = '/api/skills'
@@ -60,11 +60,11 @@ export const getSkillDependencyOptions = async (slug) => {
 }
 
 export const listBuiltinSkills = async () => {
-  return apiAdminGet(`${BASE_URL}/builtin`)
+  return apiGet(`${BASE_URL}/builtin`)
 }
 
 export const syncBuiltinSkills = async () => {
-  return apiAdminPost(`${BASE_URL}/builtin/sync`)
+  return apiPost(`${BASE_URL}/builtin/sync`)
 }
 
 export const getSkillTree = async (slug) => {

@@ -11,12 +11,11 @@ from fastapi import HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-
+from yuxi.permissions.authorization import build_authorization_context
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.operation_log_service import log_operation
-from yuxi.services.user_identity_service import (
-    build_unique_external_username,
-    get_or_create_external_department,
-)
+from yuxi.services.user_identity_service import build_unique_external_username, resolve_external_department
+from yuxi.services.user_role_service import serialize_user
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -176,11 +175,8 @@ async def exchange_oa_token_handler(token: str, db, request: Request | None = No
 
     account = extract_oa_token_account(token)
     identity = await fetch_oa_identity(token, account)
-    department = await get_or_create_external_department(
-        db,
-        identity.department_name,
-        f"OA 部门编码：{identity.department_code}" if identity.department_code else None,
-    )
+    department = await resolve_external_department(db, identity.department_name)
+    user_repo = UserRepository()
 
     result = await db.execute(select(User).where(User.uid == identity.uid))
     user = result.scalar_one_or_none()
@@ -195,17 +191,18 @@ async def exchange_oa_token_handler(token: str, db, request: Request | None = No
         await db.refresh(user)
     else:
         username = await build_unique_external_username(db, identity.full_name, identity.uid)
-        user = User(
-            username=username,
-            uid=identity.uid,
-            phone_number=None,
-            avatar=None,
-            password_hash=AuthUtils.hash_password(secrets.token_urlsafe(32)),
-            role="user",
-            department_id=department.id if department else None,
-            last_login=utc_now_naive(),
+        user = await user_repo.create_with_db(
+            db,
+            {
+                "username": username,
+                "uid": identity.uid,
+                "phone_number": None,
+                "avatar": None,
+                "password_hash": AuthUtils.hash_password(secrets.token_urlsafe(32)),
+                "department_id": department.id,
+                "last_login": utc_now_naive(),
+            },
         )
-        db.add(user)
         try:
             await db.commit()
             await db.refresh(user)
@@ -216,16 +213,15 @@ async def exchange_oa_token_handler(token: str, db, request: Request | None = No
             if not user:
                 raise HTTPException(status.HTTP_409_CONFLICT, "OA 用户创建冲突，请重试") from exc
 
+    user = await user_repo.get_by_id_with_db(db, user.id)
+    if user is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "OA 用户不存在")
+
     await log_operation(db, user.id, "OA SSO 登录", request=request)
     return {
         "access_token": AuthUtils.create_access_token({"sub": str(user.id)}),
         "token_type": "bearer",
         "user_id": user.id,
-        "username": user.username,
-        "uid": user.uid,
-        "phone_number": None,
-        "avatar": None,
-        "role": user.role,
-        "department_id": user.department_id,
-        "department_name": department.name if department else None,
+        **serialize_user(user, department.name),
+        "effective_permissions": list(build_authorization_context(user).effective_permissions),
     }

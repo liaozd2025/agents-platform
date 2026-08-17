@@ -9,8 +9,10 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.utils.auth_middleware import get_current_user, get_db, get_required_user
+from server.utils.auth_middleware import get_authorization_context, get_current_user, get_db, get_required_user
 from yuxi.config import UserConfig, UserConfigSchema
+from yuxi.permissions.authorization import AuthorizationContext
+from yuxi.services.user_management_service import get_authorized_user, list_authorized_users
 from yuxi.storage.minio import upload_image_to_minio
 from yuxi.storage.postgres.models_business import APIKey, AgentEnv, User
 from yuxi.utils.auth_utils import AuthUtils
@@ -134,17 +136,22 @@ def validate_agent_env(env: dict[str, Any]) -> dict[str, str]:
     return normalized
 
 
-def ensure_api_key_owner(api_key: APIKey, current_user: User) -> None:
-    if api_key.user_id != current_user.id and current_user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="无权操作此 API Key")
+async def get_accessible_api_key(
+    db: AsyncSession,
+    api_key_id: int,
+    authorization: AuthorizationContext,
+) -> APIKey:
+    """返回本人或跨用户管理域内的 API Key。"""
 
-
-async def get_accessible_api_key(db: AsyncSession, api_key_id: int, current_user: User) -> APIKey:
     result = await db.execute(select(APIKey).filter(APIKey.id == api_key_id))
     api_key = result.scalar_one_or_none()
     if not api_key:
         raise HTTPException(status_code=404, detail="API Key 不存在")
-    ensure_api_key_owner(api_key, current_user)
+    if api_key.user_id != authorization.user.id:
+        if not authorization.has_permission("api_key:manage_all"):
+            raise HTTPException(status_code=403, detail="无权操作此 API Key")
+        if await get_authorized_user(db, authorization, "api_key:manage_all", api_key.user_id) is None:
+            raise HTTPException(status_code=404, detail="API Key 不存在")
     return api_key
 
 
@@ -152,14 +159,16 @@ async def get_accessible_api_key(db: AsyncSession, api_key_id: int, current_user
 async def list_api_keys(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    current_user: User = Depends(get_required_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
-    query = select(APIKey).order_by(APIKey.created_at.desc()).offset(skip).limit(limit)
-    count_query = select(func.count(APIKey.id))
-    if current_user.role != "superadmin":
-        query = query.filter(APIKey.user_id == current_user.id)
-        count_query = count_query.filter(APIKey.user_id == current_user.id)
+    visible_user_ids = {authorization.user.id}
+    if authorization.has_permission("api_key:manage_all"):
+        visible_user_ids.update(user.id for user, _ in await list_authorized_users(authorization, "api_key:manage_all"))
+
+    visibility_filter = APIKey.user_id.in_(visible_user_ids)
+    query = select(APIKey).where(visibility_filter).order_by(APIKey.created_at.desc()).offset(skip).limit(limit)
+    count_query = select(func.count(APIKey.id)).where(visibility_filter)
 
     result = await db.execute(query)
     api_keys = result.scalars().all()
@@ -174,17 +183,17 @@ async def list_api_keys(
 @user_router.post("/apikey/", response_model=APIKeyCreateResponse)
 async def create_api_key(
     data: APIKeyCreate,
-    current_user: User = Depends(get_required_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
-    if data.user_id and data.user_id != current_user.id and current_user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="无权为其他用户创建 API Key")
+    current_user = authorization.user
 
     target_user = current_user
-    if data.user_id:
-        result = await db.execute(select(User).filter(User.id == data.user_id))
-        user = result.scalar_one_or_none()
-        if not user or user.is_deleted:
+    if data.user_id and data.user_id != current_user.id:
+        if not authorization.has_permission("api_key:manage_all"):
+            raise HTTPException(status_code=403, detail="无权为其他用户创建 API Key")
+        user = await get_authorized_user(db, authorization, "api_key:manage_all", data.user_id)
+        if user is None:
             raise HTTPException(status_code=404, detail="关联的用户不存在")
         target_user = user
 
@@ -221,10 +230,10 @@ async def create_api_key(
 @user_router.get("/apikey/{api_key_id}", response_model=dict)
 async def get_api_key(
     api_key_id: int,
-    current_user: User = Depends(get_required_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
-    api_key = await get_accessible_api_key(db, api_key_id, current_user)
+    api_key = await get_accessible_api_key(db, api_key_id, authorization)
     return {"api_key": api_key.to_dict()}
 
 
@@ -232,10 +241,10 @@ async def get_api_key(
 async def update_api_key(
     api_key_id: int,
     data: APIKeyUpdate,
-    current_user: User = Depends(get_required_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
-    api_key = await get_accessible_api_key(db, api_key_id, current_user)
+    api_key = await get_accessible_api_key(db, api_key_id, authorization)
 
     if data.name is not None:
         api_key.name = data.name
@@ -253,10 +262,10 @@ async def update_api_key(
 @user_router.delete("/apikey/{api_key_id}", response_model=dict)
 async def delete_api_key(
     api_key_id: int,
-    current_user: User = Depends(get_required_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
-    api_key = await get_accessible_api_key(db, api_key_id, current_user)
+    api_key = await get_accessible_api_key(db, api_key_id, authorization)
 
     await db.delete(api_key)
     await db.commit()

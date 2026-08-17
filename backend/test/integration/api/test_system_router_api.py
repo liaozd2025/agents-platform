@@ -40,10 +40,13 @@ async def test_info_endpoint_is_public(test_client):
     assert "data" in payload
 
 
-async def test_config_get_requires_login_and_update_requires_admin(test_client, standard_user):
+async def test_config_requires_system_config_permission(test_client, standard_user, admin_headers):
     assert (await test_client.get("/api/system/config")).status_code == 401
     user_config_response = await test_client.get("/api/system/config", headers=standard_user["headers"])
-    assert user_config_response.status_code == 200, user_config_response.text
+    assert user_config_response.status_code == 403, user_config_response.text
+
+    admin_config_response = await test_client.get("/api/system/config", headers=admin_headers)
+    assert admin_config_response.status_code == 200, admin_config_response.text
 
     update_response = await test_client.post(
         "/api/system/config/update",

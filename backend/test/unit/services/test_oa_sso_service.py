@@ -9,9 +9,15 @@ import pytest_asyncio
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 from yuxi.services import oa_sso_service
-from yuxi.storage.postgres.models_business import Department, User
+from yuxi.storage.postgres.models_business import (
+    GROUP_NODE_TYPE,
+    ROOT_DEPARTMENT_ID,
+    Base,
+    Department,
+    Role,
+    User,
+)
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -30,11 +36,34 @@ async def oa_session():
     """创建 OA SSO 用户映射所需的最小数据库。"""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
-        await connection.run_sync(Department.__table__.create)
-        await connection.run_sync(User.__table__.create)
+        await connection.run_sync(Base.metadata.create_all)
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
+        session.add_all(
+            [
+                Department(
+                    id=ROOT_DEPARTMENT_ID,
+                    name="集团",
+                    node_type=GROUP_NODE_TYPE,
+                    path=f"/{ROOT_DEPARTMENT_ID}/",
+                ),
+                Department(
+                    id=2,
+                    name="主部门",
+                    parent_id=ROOT_DEPARTMENT_ID,
+                    path=f"/{ROOT_DEPARTMENT_ID}/2/",
+                ),
+                Role(
+                    code="user",
+                    name="普通用户",
+                    is_builtin=True,
+                    is_active=True,
+                    default_scope_type="self",
+                ),
+            ]
+        )
+        await session.commit()
         yield session
     await engine.dispose()
 
@@ -168,7 +197,8 @@ async def test_oa_exchange_creates_one_local_user_and_issues_yuxi_token(monkeypa
 
     assert first["access_token"] == second["access_token"]
     assert first["uid"] == "oa:TEST:oa-user-1"
-    assert first["role"] == "user"
+    assert [role["code"] for role in first["roles"]] == ["user"]
+    assert first["effective_permissions"] == ["agent:use"]
     assert first["phone_number"] is None
     assert first["department_name"] == "主部门"
     assert await oa_session.scalar(select(func.count(User.id))) == 1

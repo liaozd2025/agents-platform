@@ -73,6 +73,31 @@ async def test_resolve_runtime_skills_derives_prompt_and_readable_closure(monkey
 
 
 @pytest.mark.asyncio
+async def test_resolve_runtime_skills_requires_use_permission(monkeypatch):
+    async def fail_if_loaded(*_args, **_kwargs):
+        raise AssertionError("缺少 Skill 使用权限时不应加载运行时资源")
+
+    role = SimpleNamespace(
+        is_active=True,
+        default_scope_type="all",
+        default_departments=[],
+        permissions=[],
+    )
+    user = SimpleNamespace(
+        id=1,
+        uid="u1",
+        department_id=1,
+        role_assignments=[SimpleNamespace(role=role, scope_mode="inherit")],
+    )
+    monkeypatch.setattr(skills_middleware, "list_accessible_skills", fail_if_loaded)
+
+    scope = await resolve_runtime_skills_for_context(SimpleNamespace(skills=["alpha"]), user=user)
+
+    assert scope["context_skills"] == []
+    assert scope["runtime_skill_metadata"] == {}
+
+
+@pytest.mark.asyncio
 async def test_skills_prompt_uses_prepared_prompt_skills_at_request_level():
     context = SimpleNamespace(
         system_prompt="context base",

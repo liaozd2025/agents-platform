@@ -52,7 +52,8 @@ function getCSSVariable(variableName, element = document.documentElement) {
 }
 
 const props = defineProps({
-  loading: { type: Boolean, default: false }
+  loading: { type: Boolean, default: false },
+  departmentId: { type: Number, default: null }
 })
 
 // theme store
@@ -117,7 +118,11 @@ const maxRetry = 20
 const loadCallStats = async () => {
   callStatsLoading.value = true
   try {
-    const response = await dashboardApi.getCallTimeseries(callDataType.value, callTimeRange.value)
+    const response = await dashboardApi.getCallTimeseries(
+      callDataType.value,
+      callTimeRange.value,
+      props.departmentId
+    )
     callStatsData.value = response
     await nextTick()
     renderCallStatsChart()
@@ -316,6 +321,11 @@ watch(
       }
     }
   }
+)
+
+watch(
+  () => props.departmentId,
+  () => loadCallStats()
 )
 
 // 监听主题变化，重新渲染图表

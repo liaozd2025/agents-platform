@@ -1,4 +1,9 @@
-import { apiAdminGet } from './base'
+import { apiGet } from './base'
+
+const withDepartment = (path, departmentId) => {
+  if (departmentId == null) return path
+  return `${path}${path.includes('?') ? '&' : '?'}department_id=${departmentId}`
+}
 
 /**
  * Dashboard API模块
@@ -6,6 +11,11 @@ import { apiAdminGet } from './base'
  */
 
 export const dashboardApi = {
+  getCurrentOrganizationStats: (departmentId = null) => {
+    const query = departmentId == null ? '' : `?department_id=${departmentId}`
+    return apiGet(`/api/dashboard/stats/current-organization${query}`)
+  },
+
   /**
    * 获取所有对话记录
    * @param {Object} params - 查询参数
@@ -23,8 +33,9 @@ export const dashboardApi = {
     if (params.status) queryParams.append('status', params.status)
     if (params.limit) queryParams.append('limit', params.limit)
     if (params.offset) queryParams.append('offset', params.offset)
+    if (params.department_id != null) queryParams.append('department_id', params.department_id)
 
-    return apiAdminGet(`/api/dashboard/conversations?${queryParams.toString()}`)
+    return apiGet(`/api/dashboard/conversations?${queryParams.toString()}`)
   },
 
   /**
@@ -32,16 +43,16 @@ export const dashboardApi = {
    * @param {string} threadId - 对话线程ID
    * @returns {Promise<Object>} - 对话详情
    */
-  getConversationDetail: (threadId) => {
-    return apiAdminGet(`/api/dashboard/conversations/${threadId}`)
+  getConversationDetail: (threadId, departmentId = null) => {
+    return apiGet(withDepartment(`/api/dashboard/conversations/${threadId}`, departmentId))
   },
 
   /**
    * 获取Dashboard统计信息
    * @returns {Promise<Object>} - 统计信息
    */
-  getStats: () => {
-    return apiAdminGet('/api/dashboard/stats')
+  getStats: (departmentId = null) => {
+    return apiGet(withDepartment('/api/dashboard/stats', departmentId))
   },
 
   /**
@@ -55,8 +66,9 @@ export const dashboardApi = {
     const queryParams = new URLSearchParams()
     if (params.rating && params.rating !== 'all') queryParams.append('rating', params.rating)
     if (params.agent_id) queryParams.append('agent_id', params.agent_id)
+    if (params.department_id != null) queryParams.append('department_id', params.department_id)
 
-    return apiAdminGet(`/api/dashboard/feedbacks?${queryParams.toString()}`)
+    return apiGet(`/api/dashboard/feedbacks?${queryParams.toString()}`)
   },
 
   // ========== 新增并行API接口 ==========
@@ -65,54 +77,61 @@ export const dashboardApi = {
    * 获取用户活跃度统计
    * @returns {Promise<Object>} - 用户活跃度统计信息
    */
-  getUserStats: () => {
-    return apiAdminGet('/api/dashboard/stats/users')
+  getUserStats: (departmentId = null) => {
+    return apiGet(withDepartment('/api/dashboard/stats/users', departmentId))
   },
 
   /**
    * 获取工具调用统计
    * @returns {Promise<Object>} - 工具调用统计信息
    */
-  getToolStats: () => {
-    return apiAdminGet('/api/dashboard/stats/tools')
+  getToolStats: (departmentId = null) => {
+    return apiGet(withDepartment('/api/dashboard/stats/tools', departmentId))
   },
 
   /**
    * 获取知识库统计
    * @returns {Promise<Object>} - 知识库统计信息
    */
-  getKnowledgeStats: () => {
-    return apiAdminGet('/api/dashboard/stats/knowledge')
+  getKnowledgeStats: (departmentId = null) => {
+    return apiGet(withDepartment('/api/dashboard/stats/knowledge', departmentId))
+  },
+
+  getResourceStats: (departmentId = null) => {
+    return apiGet(withDepartment('/api/dashboard/stats/resources', departmentId))
   },
 
   /**
    * 获取AI智能体分析数据
    * @returns {Promise<Object>} - AI智能体分析信息
    */
-  getAgentStats: () => {
-    return apiAdminGet('/api/dashboard/stats/agents')
+  getAgentStats: (departmentId = null) => {
+    return apiGet(withDepartment('/api/dashboard/stats/agents', departmentId))
   },
 
   /**
    * 批量获取所有统计数据（并行请求）
    * @returns {Promise<Object>} - 所有统计数据
    */
-  getAllStats: async () => {
+  getAllStats: async (departmentId = null) => {
     try {
-      const [basicStats, userStats, toolStats, knowledgeStats, agentStats] = await Promise.all([
-        apiAdminGet('/api/dashboard/stats'),
-        apiAdminGet('/api/dashboard/stats/users'),
-        apiAdminGet('/api/dashboard/stats/tools'),
-        apiAdminGet('/api/dashboard/stats/knowledge'),
-        apiAdminGet('/api/dashboard/stats/agents')
-      ])
+      const [basicStats, userStats, toolStats, knowledgeStats, agentStats, resourceStats] =
+        await Promise.all([
+          apiGet(withDepartment('/api/dashboard/stats', departmentId)),
+          apiGet(withDepartment('/api/dashboard/stats/users', departmentId)),
+          apiGet(withDepartment('/api/dashboard/stats/tools', departmentId)),
+          apiGet(withDepartment('/api/dashboard/stats/knowledge', departmentId)),
+          apiGet(withDepartment('/api/dashboard/stats/agents', departmentId)),
+          apiGet(withDepartment('/api/dashboard/stats/resources', departmentId))
+        ])
 
       return {
         basic: basicStats,
         users: userStats,
         tools: toolStats,
         knowledge: knowledgeStats,
-        agents: agentStats
+        agents: agentStats,
+        resources: resourceStats
       }
     } catch (error) {
       console.error('批量获取统计数据失败:', error)
@@ -126,7 +145,12 @@ export const dashboardApi = {
    * @param {string} timeRange - 时间范围 (14hours/14days/14weeks)
    * @returns {Promise<Object>} - 时间序列统计数据
    */
-  getCallTimeseries: (type = 'models', timeRange = '14days') => {
-    return apiAdminGet(`/api/dashboard/stats/calls/timeseries?type=${type}&time_range=${timeRange}`)
+  getCallTimeseries: (type = 'models', timeRange = '14days', departmentId = null) => {
+    return apiGet(
+      withDepartment(
+        `/api/dashboard/stats/calls/timeseries?type=${type}&time_range=${timeRange}`,
+        departmentId
+      )
+    )
   }
 }

@@ -11,6 +11,7 @@ if sys.platform == "win32":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+import socket
 import time
 from collections import defaultdict, deque
 
@@ -21,9 +22,9 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from server.routers import router
-from server.utils.lifespan import lifespan
-from server.utils.common_utils import setup_logging
 from server.utils.access_log_middleware import AccessLogMiddleware
+from server.utils.common_utils import setup_logging
+from server.utils.lifespan import lifespan
 
 # 设置日志配置
 setup_logging()
@@ -86,13 +87,20 @@ app.add_middleware(
 )
 
 
+def is_trusted_web_proxy(peer_ip: str) -> bool:
+    """仅信任当前 Compose 中 web 服务解析出的代理地址。"""
+    try:
+        return peer_ip in {address[4][0] for address in socket.getaddrinfo("web", None)}
+    except socket.gaierror:
+        return False
+
+
 def _extract_client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return "unknown"
+    peer_ip = request.client.host if request.client else ""
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip and peer_ip and is_trusted_web_proxy(peer_ip):
+        return real_ip
+    return peer_ip or "unknown"
 
 
 class LoginRateLimitMiddleware(BaseHTTPMiddleware):

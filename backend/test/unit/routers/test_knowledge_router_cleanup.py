@@ -27,6 +27,10 @@ def _database_detail(**stats) -> KnowledgeBaseDetail:
     )
 
 
+async def _allow_knowledge_manage(_kb_id: str | None, _user) -> None:
+    """让非权限单测专注各自的文件主路径。"""
+
+
 class FakeTaskContext:
     def __init__(self):
         self.result = None
@@ -119,6 +123,7 @@ async def test_upload_file_rejects_jsonl_uploads():
 )
 async def test_rejects_oversized_file(monkeypatch, call_upload):
     monkeypatch.setattr(knowledge_router, "MAX_UPLOAD_SIZE_BYTES", 5)
+    monkeypatch.setattr(knowledge_router, "_require_manage_permission_if_kb_id", _allow_knowledge_manage)
 
     async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
         return None
@@ -147,6 +152,7 @@ async def test_rejects_oversized_file(monkeypatch, call_upload):
 )
 async def test_upload_file_fails_before_read_or_minio(monkeypatch, kb_id, status_code, error_detail):
     calls = {"read": 0, "upload": 0}
+    monkeypatch.setattr(knowledge_router, "_require_manage_permission_if_kb_id", _allow_knowledge_manage)
 
     async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
         raise HTTPException(status_code=status_code, detail=error_detail)
@@ -174,6 +180,49 @@ async def test_upload_file_fails_before_read_or_minio(monkeypatch, kb_id, status
 
     assert exc_info.value.status_code == status_code
     assert calls == {"read": 0, "upload": 0}
+
+
+async def test_upload_file_read_only_kb_fails_before_read_or_minio(monkeypatch):
+    calls = {"read": 0, "upload": 0}
+    monkeypatch.setattr(knowledge_router, "_require_manage_permission_if_kb_id", _allow_knowledge_manage)
+
+    async def fake_ensure_database_supports_documents(kb_id: str, operation: str) -> None:
+        raise HTTPException(status_code=400, detail="只支持检索，不支持文档上传")
+
+    async def fake_read_upload_with_limit(*_args, **_kwargs) -> bytes:
+        calls["read"] += 1
+        return b"demo"
+
+    async def fake_upload_to_minio(*_args, **_kwargs) -> str:
+        calls["upload"] += 1
+        return "minio://knowledgebases/kb_1/upload/demo.txt"
+
+    monkeypatch.setattr(
+        knowledge_router,
+        "_ensure_database_supports_documents",
+        fake_ensure_database_supports_documents,
+    )
+    monkeypatch.setattr(knowledge_router, "read_upload_with_limit", fake_read_upload_with_limit)
+    monkeypatch.setattr(knowledge_router, "aupload_file_to_minio", fake_upload_to_minio)
+
+    upload = UploadFile(filename="demo.txt", file=BytesIO(b"demo"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await knowledge_router.upload_file(upload, kb_id="readonly", current_user=SimpleNamespace(uid="user_1"))
+
+    assert exc_info.value.status_code == 400
+    assert calls == {"read": 0, "upload": 0}
+
+
+async def test_markdown_endpoint_rejects_oversized_file(monkeypatch):
+    monkeypatch.setattr(knowledge_router, "MAX_UPLOAD_SIZE_BYTES", 5)
+    upload = UploadFile(filename="demo.txt", file=BytesIO(b"123456"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await knowledge_router.mark_it_down(upload, current_user=SimpleNamespace(uid="user_1"))
+
+    assert exc_info.value.status_code == 400
+    assert "100 MB" in exc_info.value.detail
 
 
 async def test_index_documents_uses_uid_for_operator(monkeypatch):

@@ -6,14 +6,13 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from server.utils.auth_middleware import get_authorization_context, get_db
 
 agent_router_module = importlib.import_module("server.routers.agent_router")
 
 
-def _user(role: str = "admin"):
-    uid = "admin" if role in {"admin", "superadmin"} else "user"
-    return SimpleNamespace(uid=uid, role=role, department_id=1)
+def _user(uid: str = "admin"):
+    return SimpleNamespace(uid=uid, department_id=1)
 
 
 def _agent(slug: str, *, backend_id: str = "ChatbotAgent", is_subagent: bool = False):
@@ -26,7 +25,11 @@ def _agent(slug: str, *, backend_id: str = "ChatbotAgent", is_subagent: bool = F
         icon=None,
         pics=[],
         config_json={},
-        share_config={"access_level": "user", "user_uids": ["admin"]},
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "user", "user_uids": ["admin"]},
+            "manage_scope": {"access_level": "user", "user_uids": ["admin"]},
+        },
         is_default=False,
         is_subagent=is_subagent,
         can_manage=True,
@@ -87,7 +90,7 @@ class _RejectingCreateRepo(_ListRepo):
         raise ValueError("SubAgentBackend 与 is_subagent 必须保持一致")
 
 
-def _build_app(monkeypatch, repo_cls, *, role: str = "admin") -> TestClient:
+def _build_app(monkeypatch, repo_cls, *, uid: str = "admin") -> TestClient:
     monkeypatch.setattr(agent_router_module, "agent_manager", _FakeAgentManager())
     monkeypatch.setattr(agent_router_module, "AgentRepository", repo_cls)
 
@@ -97,12 +100,14 @@ def _build_app(monkeypatch, repo_cls, *, role: str = "admin") -> TestClient:
     async def fake_db():
         return None
 
-    async def fake_user():
-        return _user(role)
+    async def fake_authorization():
+        return SimpleNamespace(
+            user=_user(uid),
+            has_permission=lambda permission: permission in {"agent:use", "agent:manage"},
+        )
 
     app.dependency_overrides[get_db] = fake_db
-    app.dependency_overrides[get_required_user] = fake_user
-    app.dependency_overrides[get_admin_user] = fake_user
+    app.dependency_overrides[get_authorization_context] = fake_authorization
     return TestClient(app)
 
 
@@ -145,7 +150,7 @@ def test_agent_detail_can_load_subagent_definition(monkeypatch):
 
 def test_normal_user_can_create_agent(monkeypatch):
     _CreateRepo.created_payload = None
-    client = _build_app(monkeypatch, _CreateRepo, role="user")
+    client = _build_app(monkeypatch, _CreateRepo, uid="user")
 
     response = client.post(
         "/api/agent",

@@ -24,7 +24,6 @@ async def session():
             username="Config User",
             uid="config_user",
             password_hash="$argon2id$placeholder",
-            role="user",
             department=department,
         )
         db.add_all([department, user])

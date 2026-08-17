@@ -48,6 +48,10 @@
               </div>
 
               <div class="card-content">
+                <div v-if="key.user_id !== userStore.userId" class="info-item">
+                  <span class="info-label">归属用户 ID:</span>
+                  <span class="info-value">{{ key.user_id }}</span>
+                </div>
                 <div class="info-item">
                   <span class="info-label">过期时间:</span>
                   <span class="info-value">{{ key.expires_at || '永不过期' }}</span>
@@ -145,6 +149,9 @@ import { message } from 'ant-design-vue'
 import { Plus, RefreshCw, Trash2, Copy } from 'lucide-vue-next'
 import { Key as KeyIcon } from 'lucide-vue-next'
 import { apikeyApi } from '@/apis/apikey_api'
+import { useUserStore } from '@/stores/user'
+
+const userStore = useUserStore()
 
 const loading = ref(false)
 const refreshing = ref(false)

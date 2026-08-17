@@ -7,10 +7,9 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-from yuxi.repositories.conversation_repository import ConversationRepository, UNVIEWED_RUN_MARKER
+from yuxi.repositories.conversation_repository import UNVIEWED_RUN_MARKER, ConversationRepository
 from yuxi.services import conversation_service as svc
-from yuxi.storage.postgres.models_business import AgentRun, Base, Conversation
+from yuxi.storage.postgres.models_business import AgentRun, Base, Conversation, User
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -22,6 +21,8 @@ async def session():
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
+        db.add(User(username="user-1", uid="user-1", password_hash="x", is_deleted=0))
+        await db.flush()
         yield db
     await engine.dispose()
 

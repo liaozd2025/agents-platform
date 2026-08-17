@@ -36,9 +36,9 @@ import { storeToRefs } from 'pinia'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
 import DebugComponent from '@/components/DebugComponent.vue'
 import TaskCenterDrawer from '@/components/TaskCenterDrawer.vue'
-import SettingsModal from '@/components/SettingsModal.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import ConversationSearchModal from '@/components/ConversationSearchModal.vue'
+import { SETTINGS_ROUTES } from '@/utils/settingsNavigation'
 
 const configStore = useConfigStore()
 const agentStore = useAgentStore()
@@ -81,10 +81,6 @@ const embedModeOptions = [
 // Add state for debug modal
 const showDebugModal = ref(false)
 
-// Add state for settings modal
-const showSettingsModal = ref(false)
-const settingsInitialTab = ref('')
-
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
 const embedSidebarCollapsed = ref(false)
 const showSidebar = computed(() => shouldShowAppSidebar(isEmbedded.value, embedDisplayMode.value))
@@ -92,11 +88,25 @@ const layoutSidebarCollapsed = computed(() =>
   isEmbedded.value ? embedSidebarCollapsed.value : sidebarCollapsed.value
 )
 const conversationSearchOpen = ref(false)
+const canUseAgents = computed(() => userStore.hasPermission('agent:use'))
+const canAccessExtensions = computed(() =>
+  [
+    'knowledge_base:read',
+    'knowledge_base:manage',
+    'skill:use',
+    'skill:manage',
+    'tool:manage',
+    'mcp:manage'
+  ].some((permission) => userStore.hasPermission(permission))
+)
 
 // Provide settings modal methods to child components
 const openSettingsModal = (tab) => {
-  settingsInitialTab.value = tab || (userStore.isAdmin ? 'base' : 'account')
-  showSettingsModal.value = true
+  const tabId = tab || (userStore.hasPermission('system_config:manage') ? 'base' : 'account')
+  const target = SETTINGS_ROUTES.find((item) => item.id === tabId)
+  if (!target) return
+
+  router.push({ path: target.path, query: { returnTo: route.fullPath } })
 }
 
 // Handle debug modal close
@@ -127,11 +137,14 @@ const initializeLayout = () => {
 
   layoutInitialization = (async () => {
     // 加载信息配置与知识库数据无依赖，可并行
-    await Promise.all([infoStore.loadInfoConfig(), getRemoteDatabase()])
-    await initAgentNavigation()
-    await getRemoteConfig()
+    const databaseRequest = userStore.hasPermission('knowledge_base:read')
+      ? getRemoteDatabase()
+      : null
+    await Promise.all([infoStore.loadInfoConfig(), databaseRequest])
+    if (canUseAgents.value) await initAgentNavigation()
+    if (userStore.hasPermission('system_config:manage')) await getRemoteConfig()
     // 仅管理员加载任务中心数据
-    if (userStore.isAdmin) {
+    if (userStore.hasPermission('system_task:manage')) {
       taskerStore.loadTasks()
     }
   })()
@@ -186,23 +199,31 @@ const organizationName = computed(() => {
 
 // 下面是导航菜单部分，添加智能体项
 const mainList = computed(() => {
-  const items = [
-    {
+  const items = []
+
+  if (canUseAgents.value) {
+    items.push({
       name: '新建对话',
       path: resolveAppNavigationPath(isEmbedded.value, '/agent'),
       icon: MessageCirclePlus,
       activeIcon: MessageCirclePlus,
       action: true,
       exactActive: true
-    }
-  ]
+    })
+  }
 
-  items.push({
-    name: '智能体',
-    path: resolveAppNavigationPath(isEmbedded.value, '/agent-manage'),
-    icon: Box,
-    activeIcon: Box
-  })
+  if (
+    ['agent:use', 'agent:manage', 'model_provider:manage'].some((permission) =>
+      userStore.hasPermission(permission)
+    )
+  ) {
+    items.push({
+      name: '智能体',
+      path: resolveAppNavigationPath(isEmbedded.value, '/agent-manage'),
+      icon: Box,
+      activeIcon: Box
+    })
+  }
 
   items.push({
     name: '工作区',
@@ -211,15 +232,17 @@ const mainList = computed(() => {
     activeIcon: FolderKanban
   })
 
-  items.push({
-    name: '知识库 · 技能',
-    path: resolveAppNavigationPath(isEmbedded.value, '/extensions'),
-    activePaths: [resolveAppNavigationPath(isEmbedded.value, '/extensions')],
-    icon: LibraryBig,
-    activeIcon: LibraryBig
-  })
+  if (canAccessExtensions.value) {
+    items.push({
+      name: '知识库 · 技能',
+      path: resolveAppNavigationPath(isEmbedded.value, '/extensions'),
+      activePaths: [resolveAppNavigationPath(isEmbedded.value, '/extensions')],
+      icon: LibraryBig,
+      activeIcon: LibraryBig
+    })
+  }
 
-  if (userStore.isSuperAdmin) {
+  if (userStore.hasPermission('dashboard:view')) {
     items.push({
       name: '数据总览',
       path: resolveAppNavigationPath(isEmbedded.value, '/dashboard'),
@@ -423,6 +446,7 @@ provide('settingsModal', {
         </RouterLink>
 
         <button
+          v-if="canUseAgents"
           type="button"
           class="nav-item"
           :class="{ active: conversationSearchOpen }"
@@ -458,7 +482,7 @@ provide('settingsModal', {
       </div>
       <div class="fill">
         <ConversationNavSection
-          v-if="!layoutSidebarCollapsed"
+          v-if="canUseAgents && !layoutSidebarCollapsed"
           class="sidebar-conversations"
           :current-chat-id="activeConversationThreadId"
           :chats-list="threads"
@@ -484,7 +508,7 @@ provide('settingsModal', {
         <!-- 用户信息组件 -->
         <div class="nav-item user-info" @click.stop>
           <UserInfoComponent :show-role="!layoutSidebarCollapsed">
-            <template v-if="userStore.isAdmin" #actions>
+            <template v-if="userStore.hasPermission('system_task:manage')" #actions>
               <a-tooltip placement="top" title="任务中心">
                 <button
                   class="user-task-center"
@@ -554,6 +578,7 @@ provide('settingsModal', {
     </div>
 
     <ConversationSearchModal
+      v-if="canUseAgents"
       v-model:open="conversationSearchOpen"
       :recent-threads="threads"
       @select-thread="handleSearchSelectThread"
@@ -574,12 +599,7 @@ provide('settingsModal', {
     >
       <DebugComponent />
     </a-modal>
-    <TaskCenterDrawer v-if="userStore.isAdmin" />
-    <SettingsModal
-      v-model:visible="showSettingsModal"
-      :initial-tab="settingsInitialTab"
-      @close="() => (showSettingsModal = false)"
-    />
+    <TaskCenterDrawer v-if="userStore.hasPermission('system_task:manage')" />
   </div>
 </template>
 

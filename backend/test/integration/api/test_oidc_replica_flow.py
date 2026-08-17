@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -130,7 +131,7 @@ async def test_oidc_callback_and_exchange_work_across_api_replicas():
         assert oa_me_response.status_code == 200
         assert oa_me_response.json()["uid"] == "oa:TEST:oa-s0-user"
         assert exchange_response.status_code == 200
-        assert exchange_response.json()["department_name"] == "模拟研发部"
+        assert exchange_response.json()["department_id"] == ROOT_DEPARTMENT_ID
         assert replay_response.status_code == 400
     finally:
         _stop_apps(processes)
