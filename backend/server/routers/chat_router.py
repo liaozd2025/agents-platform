@@ -7,24 +7,26 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from yuxi import config as conf
+from yuxi.config.options import system_options
 from yuxi.agents.tool_approval import ToolApprovalMode
 from yuxi.models import select_model
-from yuxi.services.chat_service import get_agent_state_view
-from yuxi.services.conversation_service import (
+from yuxi.services.attachment_service import (
     confirm_tmp_thread_attachments_view,
-    create_thread_view,
     delete_thread_attachment_view,
-    delete_thread_view,
-    get_thread_history_view,
     list_thread_attachments_view,
-    list_threads_view,
-    mark_thread_viewed_view,
     parse_tmp_attachment_view,
-    search_threads_view,
-    update_thread_view,
     upload_thread_attachment_view,
     upload_tmp_attachment_view,
+)
+from yuxi.services.chat_service import get_agent_state_view
+from yuxi.services.conversation_service import (
+    create_thread_view,
+    delete_thread_view,
+    get_thread_history_view,
+    list_threads_view,
+    mark_thread_viewed_view,
+    search_threads_view,
+    update_thread_view,
 )
 from yuxi.services.feedback_service import get_message_feedback_view, submit_message_feedback_view
 from yuxi.services.file_preview import detect_media_type
@@ -66,6 +68,7 @@ async def call(
     query: str = Body(...),
     meta: dict = Body(None),
     current_user: User = Depends(require_agent_use_permission),
+    db: AsyncSession = Depends(get_db),
 ):
     """调用模型进行简单问答（需要登录）"""
     meta = meta or {}
@@ -74,7 +77,8 @@ async def call(
     if "request_id" not in meta or not meta.get("request_id"):
         meta["request_id"] = str(uuid.uuid4())
 
-    model = select_model(model_spec=meta.get("model_spec") or meta.get("model") or conf.default_model)
+    options = await system_options.get(db)
+    model = select_model(model_spec=meta.get("model_spec") or meta.get("model") or options["default_model"])
 
     response = await model.call(query)
     logger.debug({"query": query, "response": response.content})

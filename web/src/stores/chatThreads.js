@@ -2,8 +2,10 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { threadApi } from '@/apis'
 import { handleChatError } from '@/utils/errorHandler'
+import { createThreadDraftStore } from '@/utils/thread_draft'
 
 const PAGE_SIZE = 100
+const threadDraftStore = createThreadDraftStore()
 
 export const useChatThreadsStore = defineStore('chatThreads', () => {
   const threads = ref([])
@@ -138,6 +140,8 @@ export const useChatThreadsStore = defineStore('chatThreads', () => {
     try {
       await threadApi.deleteThread(threadId)
       threads.value = threads.value.filter((thread) => thread.id !== threadId)
+      // 线程已删除，同步清理其输入草稿
+      threadDraftStore.remove(threadId)
       if (currentThreadId.value === threadId) {
         currentThreadId.value = null
       }

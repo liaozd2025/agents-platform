@@ -63,11 +63,11 @@ class MinIOClient:
 
     PUBLIC_READ_BUCKETS = {"public"}
 
-    # 知识库相关的 bucket 名称
+    # 知识库相关的 bucket 名称；images 使用私有 bucket，图片统一经后端鉴权代理访问
     KB_BUCKETS = {
         "documents": "knowledgebases",
         "parsed": "knowledgebases",
-        "images": "public",
+        "images": "kb-images",
     }
 
     def __init__(self):
@@ -292,13 +292,10 @@ class MinIOClient:
             try:
                 objects = self.client.list_objects(bucket_name, prefix=prefix, recursive=True)
                 for obj in objects:
-                    try:
-                        self.client.remove_object(bucket_name, obj.object_name)
-                        deleted_count += 1
-                    except S3Error as e:
-                        logger.warning(f"Failed to delete {bucket_name}/{obj.object_name}: {e}")
+                    self.client.remove_object(bucket_name, obj.object_name)
+                    deleted_count += 1
             except S3Error as e:
-                logger.warning(f"Failed to list objects in {bucket_name}/{prefix}: {e}")
+                raise StorageError(f"删除对象前缀失败: {bucket_name}/{prefix}: {e}") from e
 
         await asyncio.to_thread(_delete_objects)
         return deleted_count

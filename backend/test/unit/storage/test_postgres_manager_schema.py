@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 import pytest
 from yuxi.storage.postgres.manager import PostgresManager
 
@@ -31,8 +33,8 @@ class _RecordingEngine:
         return _RecordingBegin(self.connection)
 
 
-@pytest.mark.asyncio
-async def test_ensure_business_schema_backfills_subagent_thread_columns_before_dropping_legacy_columns():
+@asynccontextmanager
+async def _recording_manager():
     manager = PostgresManager()
     original_initialized = manager._initialized
     original_engine = manager.async_engine
@@ -41,10 +43,16 @@ async def test_ensure_business_schema_backfills_subagent_thread_columns_before_d
     manager._initialized = True
     manager.async_engine = _RecordingEngine(connection)
     try:
-        await manager.ensure_business_schema()
+        yield manager, connection
     finally:
         manager._initialized = original_initialized
         manager.async_engine = original_engine
+
+
+@pytest.mark.asyncio
+async def test_ensure_business_schema_backfills_subagent_thread_columns_before_dropping_legacy_columns():
+    async with _recording_manager() as (manager, connection):
+        await manager.ensure_business_schema()
 
     statements = "\n".join(connection.statements)
 
@@ -69,18 +77,8 @@ async def test_ensure_business_schema_backfills_subagent_thread_columns_before_d
 
 @pytest.mark.asyncio
 async def test_ensure_business_schema_cleans_duplicate_active_agent_runs_before_unique_index():
-    manager = PostgresManager()
-    original_initialized = manager._initialized
-    original_engine = manager.async_engine
-    connection = _RecordingConnection()
-
-    manager._initialized = True
-    manager.async_engine = _RecordingEngine(connection)
-    try:
+    async with _recording_manager() as (manager, connection):
         await manager.ensure_business_schema()
-    finally:
-        manager._initialized = original_initialized
-        manager.async_engine = original_engine
 
     statements = "\n".join(connection.statements)
 
@@ -95,18 +93,8 @@ async def test_ensure_business_schema_cleans_duplicate_active_agent_runs_before_
 @pytest.mark.asyncio
 async def test_ensure_business_schema_backfills_unviewed_marker_for_no_run_threads():
     """没有 chat/resume Run 的历史会话要写入未读哨兵，确保回填探测条件收敛为 false。"""
-    manager = PostgresManager()
-    original_initialized = manager._initialized
-    original_engine = manager.async_engine
-    connection = _RecordingConnection()
-
-    manager._initialized = True
-    manager.async_engine = _RecordingEngine(connection)
-    try:
+    async with _recording_manager() as (manager, connection):
         await manager.ensure_business_schema()
-    finally:
-        manager._initialized = original_initialized
-        manager.async_engine = original_engine
 
     statements = "\n".join(connection.statements)
 
@@ -120,18 +108,8 @@ async def test_ensure_business_schema_backfills_unviewed_marker_for_no_run_threa
 
 @pytest.mark.asyncio
 async def test_ensure_business_schema_creates_user_config_table():
-    manager = PostgresManager()
-    original_initialized = manager._initialized
-    original_engine = manager.async_engine
-    connection = _RecordingConnection()
-
-    manager._initialized = True
-    manager.async_engine = _RecordingEngine(connection)
-    try:
+    async with _recording_manager() as (manager, connection):
         await manager.ensure_business_schema()
-    finally:
-        manager._initialized = original_initialized
-        manager.async_engine = original_engine
 
     statements = "\n".join(connection.statements)
 
@@ -141,18 +119,8 @@ async def test_ensure_business_schema_creates_user_config_table():
 
 @pytest.mark.asyncio
 async def test_ensure_business_schema_creates_generic_config_options_table():
-    manager = PostgresManager()
-    original_initialized = manager._initialized
-    original_engine = manager.async_engine
-    connection = _RecordingConnection()
-
-    manager._initialized = True
-    manager.async_engine = _RecordingEngine(connection)
-    try:
+    async with _recording_manager() as (manager, connection):
         await manager.ensure_business_schema()
-    finally:
-        manager._initialized = original_initialized
-        manager.async_engine = original_engine
 
     statements = "\n".join(connection.statements)
 
@@ -226,18 +194,8 @@ async def test_ensure_business_schema_fails_when_nonempty_organization_has_no_gr
 
 @pytest.mark.asyncio
 async def test_ensure_business_schema_adds_run_origin_snapshot_columns():
-    manager = PostgresManager()
-    original_initialized = manager._initialized
-    original_engine = manager.async_engine
-    connection = _RecordingConnection()
-
-    manager._initialized = True
-    manager.async_engine = _RecordingEngine(connection)
-    try:
+    async with _recording_manager() as (manager, connection):
         await manager.ensure_business_schema()
-    finally:
-        manager._initialized = original_initialized
-        manager.async_engine = original_engine
 
     statements = "\n".join(connection.statements)
     assert "agent_runs ADD COLUMN IF NOT EXISTS source VARCHAR(32)" in statements
@@ -312,18 +270,8 @@ async def test_ensure_business_schema_backfills_resource_creation_snapshots_idem
 
 @pytest.mark.asyncio
 async def test_ensure_business_schema_removes_unbound_api_keys_before_requiring_user_id():
-    manager = PostgresManager()
-    original_initialized = manager._initialized
-    original_engine = manager.async_engine
-    connection = _RecordingConnection()
-
-    manager._initialized = True
-    manager.async_engine = _RecordingEngine(connection)
-    try:
+    async with _recording_manager() as (manager, connection):
         await manager.ensure_business_schema()
-    finally:
-        manager._initialized = original_initialized
-        manager.async_engine = original_engine
 
     statements = "\n".join(connection.statements)
 
@@ -339,19 +287,9 @@ async def test_ensure_business_schema_removes_unbound_api_keys_before_requiring_
 @pytest.mark.asyncio
 async def test_share_config_migration_wraps_legacy_scopes_as_read_only():
     """Agent/skill 迁移只把旧 scope 写入 read_scope，manage_scope 置空，避免把历史只读/使用权限追溯升级为 MANAGE。"""
-    manager = PostgresManager()
-    original_initialized = manager._initialized
-    original_engine = manager.async_engine
-    connection = _RecordingConnection()
-
-    manager._initialized = True
-    manager.async_engine = _RecordingEngine(connection)
-    try:
+    async with _recording_manager() as (manager, connection):
         await manager.ensure_business_schema()
         await manager.ensure_knowledge_schema()
-    finally:
-        manager._initialized = original_initialized
-        manager.async_engine = original_engine
 
     statements = "\n".join(connection.statements)
     assert "UPDATE agents SET share_config = jsonb_build_object" in statements
@@ -373,18 +311,8 @@ async def test_share_config_migration_wraps_legacy_scopes_as_read_only():
 
 @pytest.mark.asyncio
 async def test_ensure_knowledge_schema_rebuilds_vectors_for_incomplete_legacy_chunks():
-    manager = PostgresManager()
-    original_initialized = manager._initialized
-    original_engine = manager.async_engine
-    connection = _RecordingConnection()
-
-    manager._initialized = True
-    manager.async_engine = _RecordingEngine(connection)
-    try:
+    async with _recording_manager() as (manager, connection):
         await manager.ensure_knowledge_schema()
-    finally:
-        manager._initialized = original_initialized
-        manager.async_engine = original_engine
 
     statements = "\n".join(connection.statements)
 

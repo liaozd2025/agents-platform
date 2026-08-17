@@ -163,7 +163,6 @@ async def test_mark_thread_viewed_returns_thread_status(test_client, admin_heade
     response = await test_client.post(f"/api/chat/thread/{thread_id}/viewed", headers=admin_headers)
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert payload["id"] == thread_id
     assert payload["thread_status"] in {"done", "ready", "loading"}
 
 

@@ -10,8 +10,94 @@ from yuxi.services import chat_service as svc
 from yuxi.services.input_message_service import build_chat_input_message
 
 
+@pytest.fixture
+def stub_system_options(monkeypatch: pytest.MonkeyPatch):
+    async def get_system_options(_option, _db=None):
+        return {
+            "enable_content_guard": False,
+            "enable_content_guard_llm": False,
+            "content_guard_llm_model": "",
+        }
+
+    monkeypatch.setattr(type(svc.system_options), "get", get_system_options)
+
+
+@pytest.fixture
+def stub_content_guard(monkeypatch: pytest.MonkeyPatch):
+    class FakeGuard:
+        async def check(self, _content):
+            return False
+
+        async def check_with_keywords(self, _content):
+            return False
+
+    monkeypatch.setattr(svc.content_guard, "configured", lambda *_args: FakeGuard())
+
+
 async def _fake_normalize_agent_context_config(context, **_kwargs):
     return dict(context or {})
+
+
+async def _fake_save_messages_from_langgraph_state(
+    *, agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id=None, request_id=None
+):
+    del agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id, request_id
+    return None
+
+
+async def _fake_guard_check(_content):
+    return False
+
+
+async def _fake_guard_check_with_keywords(_content):
+    return False
+
+
+async def _fake_interrupts(agent, langgraph_config, make_chunk, meta, thread_id, context):
+    if False:
+        yield None
+    return
+
+
+def _patch_stream_scaffolding(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    agent,
+    runtime_context: dict | None = None,
+    conversation: SimpleNamespace | None = None,
+    save_messages=None,
+    build_run_context=None,
+    get_trace_info=None,
+    flush_langfuse=None,
+    materialize=None,
+):
+    async def fake_resolve_agent_runtime(**_kwargs):
+        return (
+            SimpleNamespace(slug="test-agent", backend_id="ChatbotAgent"),
+            agent,
+            runtime_context or {},
+            conversation
+            or SimpleNamespace(id=1, uid="user-1", agent_id="test-agent", status="active", extra_metadata={}),
+        )
+
+    monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
+    monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
+    monkeypatch.setattr(svc, "ConversationRepository", _FakeConvRepo)
+    monkeypatch.setattr(
+        svc, "save_messages_from_langgraph_state", save_messages or _fake_save_messages_from_langgraph_state
+    )
+    monkeypatch.setattr(svc.content_guard, "check", _fake_guard_check)
+    monkeypatch.setattr(svc.content_guard, "check_with_keywords", _fake_guard_check_with_keywords)
+    monkeypatch.setattr(svc, "check_and_handle_interrupts", _fake_interrupts)
+    if materialize is not None:
+        monkeypatch.setattr(svc, "materialize_attachment_records", materialize)
+    monkeypatch.setattr(
+        svc,
+        "_build_langfuse_run_context",
+        build_run_context or (lambda **kwargs: SimpleNamespace(callbacks=[], metadata={}, tags=[], trace_id=None)),
+    )
+    monkeypatch.setattr(svc, "get_trace_info", get_trace_info or (lambda _run_context: {}))
+    monkeypatch.setattr(svc, "flush_langfuse", flush_langfuse or (lambda: None))
 
 
 class _FakeContext:
@@ -95,7 +181,7 @@ class _FakeConvRepo:
     async def get_attachments_by_request_id(self, conversation_id: int, request_id: str):
         return []
 
-    async def bind_attachments_to_request(self, conversation_id: int, request_id: str, file_ids: list[str]):
+    async def get_attachments(self, conversation_id: int):
         return []
 
 
@@ -139,6 +225,8 @@ def test_build_langfuse_run_context_reads_evaluation_from_invocation_meta(monkey
 
 @pytest.mark.asyncio
 async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_context(
+    stub_system_options,
+    stub_content_guard,
     monkeypatch: pytest.MonkeyPatch,
 ):
     calls: dict[str, object] = {}
@@ -161,8 +249,9 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
 
             return FakeGraph()
 
-    async def fake_resolve_agent_runtime(**_kwargs):
-        return SimpleNamespace(slug="test-agent", backend_id="ChatbotAgent"), FakeAgent(), {"temperature": 0.1}
+    async def fake_materialize(_thread_id, _uid, _attachments):
+        assert db.commit_count == 1
+        calls["materialized"] = _attachments
 
     async def fake_save_messages_from_langgraph_state(
         *, agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id=None, request_id=None
@@ -176,43 +265,36 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
             "request_id": request_id,
         }
 
-    async def fake_guard_check(_content):
-        return False
-
-    async def fake_guard_check_with_keywords(_content):
-        return False
-
-    async def fake_interrupts(agent, langgraph_config, make_chunk, meta, thread_id, context):
-        if False:
-            yield None
-        return
-
-    monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
-    monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
-    monkeypatch.setattr(svc, "ConversationRepository", _FakeConvRepo)
-    monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fake_save_messages_from_langgraph_state)
-    monkeypatch.setattr(svc.content_guard, "check", fake_guard_check)
-    monkeypatch.setattr(svc.content_guard, "check_with_keywords", fake_guard_check_with_keywords)
-    monkeypatch.setattr(svc, "check_and_handle_interrupts", fake_interrupts)
-    monkeypatch.setattr(
-        svc,
-        "_build_langfuse_run_context",
-        lambda **kwargs: SimpleNamespace(
+    _patch_stream_scaffolding(
+        monkeypatch,
+        agent=FakeAgent(),
+        runtime_context={"temperature": 0.1},
+        conversation=SimpleNamespace(
+            id=1,
+            uid="user-1",
+            agent_id="test-agent",
+            status="active",
+            extra_metadata={
+                "attachments": [
+                    {"file_id": "file-1", "file_name": "current.txt", "request_id": "req-1"},
+                    {"file_id": "file-2", "file_name": "history.txt", "request_id": "req-old"},
+                ]
+            },
+        ),
+        save_messages=fake_save_messages_from_langgraph_state,
+        build_run_context=lambda **kwargs: SimpleNamespace(
             callbacks=["handler-1"],
             metadata={"langfuse_user_id": kwargs["current_user"].uid, "langfuse_session_id": kwargs["thread_id"]},
             tags=["yuxi", "chat"],
             trace_id="trace-seeded",
         ),
-    )
-    monkeypatch.setattr(
-        svc,
-        "get_trace_info",
-        lambda _run_context: {
+        get_trace_info=lambda _run_context: {
             "langfuse_trace_id": "trace-runtime",
             "langfuse_session_id": "thread-1",
         },
+        flush_langfuse=lambda: calls.setdefault("flushed", True),
+        materialize=fake_materialize,
     )
-    monkeypatch.setattr(svc, "flush_langfuse", lambda: calls.setdefault("flushed", True))
 
     chunks = []
     async for chunk in svc.stream_agent_chat(
@@ -239,6 +321,36 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
         "callbacks": ["handler-1"],
         "metadata": {"langfuse_user_id": "user-1", "langfuse_session_id": "thread-1"},
         "tags": ["yuxi", "chat"],
+        "uploads": [
+            {
+                "file_id": "file-1",
+                "file_name": "current.txt",
+                "file_type": None,
+                "file_size": 0,
+                "status": "uploaded",
+                "uploaded_at": None,
+                "path": None,
+                "artifact_url": None,
+                "original_path": None,
+                "original_artifact_url": None,
+                "minio_url": None,
+                "request_id": "req-1",
+            },
+            {
+                "file_id": "file-2",
+                "file_name": "history.txt",
+                "file_type": None,
+                "file_size": 0,
+                "status": "uploaded",
+                "uploaded_at": None,
+                "path": None,
+                "artifact_url": None,
+                "original_path": None,
+                "original_artifact_url": None,
+                "minio_url": None,
+                "request_id": "req-old",
+            },
+        ],
     }
     assert calls["saved_state"]["trace_info"] == {
         "langfuse_trace_id": "trace-runtime",
@@ -248,12 +360,18 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
     assert calls["saved_state"]["context"].uid == "user-1"
     assert calls["saved_state"]["context"].temperature == 0.1
     assert chunks[-1]["status"] == "finished"
+    assert [attachment["file_id"] for attachment in calls["materialized"]] == ["file-1", "file-2"]
+    assert chunks[0]["msg"]["extra_metadata"]["attachments"] == [calls["stream_kwargs"]["uploads"][0]]
     assert calls["flushed"] is True
     assert isinstance(calls["stream_messages"][0], HumanMessage)
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_chat_maps_raw_protocol_events_to_yuxi_stream_events(monkeypatch: pytest.MonkeyPatch):
+async def test_stream_agent_chat_maps_raw_protocol_events_to_yuxi_stream_events(
+    stub_system_options,
+    stub_content_guard,
+    monkeypatch: pytest.MonkeyPatch,
+):
     class FakeGraph:
         async def aget_state(self, _config):
             return SimpleNamespace(values={"messages": [], "files": {}, "artifacts": []})
@@ -317,40 +435,7 @@ async def test_stream_agent_chat_maps_raw_protocol_events_to_yuxi_stream_events(
         async def get_graph(self, *, context=None):
             return FakeGraph()
 
-    async def fake_resolve_agent_runtime(**_kwargs):
-        return SimpleNamespace(slug="test-agent", backend_id="ChatbotAgent"), FakeAgent(), {}
-
-    async def fake_save_messages_from_langgraph_state(
-        *, agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id=None, request_id=None
-    ):
-        del agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id, request_id
-        return None
-
-    async def fake_guard_check(_content):
-        return False
-
-    async def fake_guard_check_with_keywords(_content):
-        return False
-
-    async def fake_interrupts(agent, langgraph_config, make_chunk, meta, thread_id, context):
-        if False:
-            yield None
-        return
-
-    monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
-    monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
-    monkeypatch.setattr(svc, "ConversationRepository", _FakeConvRepo)
-    monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fake_save_messages_from_langgraph_state)
-    monkeypatch.setattr(svc.content_guard, "check", fake_guard_check)
-    monkeypatch.setattr(svc.content_guard, "check_with_keywords", fake_guard_check_with_keywords)
-    monkeypatch.setattr(svc, "check_and_handle_interrupts", fake_interrupts)
-    monkeypatch.setattr(
-        svc,
-        "_build_langfuse_run_context",
-        lambda **kwargs: SimpleNamespace(callbacks=[], metadata={}, tags=[], trace_id=None),
-    )
-    monkeypatch.setattr(svc, "get_trace_info", lambda _run_context: {})
-    monkeypatch.setattr(svc, "flush_langfuse", lambda: None)
+    _patch_stream_scaffolding(monkeypatch, agent=FakeAgent())
 
     chunks = []
     async for chunk in svc.stream_agent_chat(
@@ -388,7 +473,11 @@ async def test_stream_agent_chat_maps_raw_protocol_events_to_yuxi_stream_events(
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_chat_emits_realtime_agent_state_from_values(monkeypatch: pytest.MonkeyPatch):
+async def test_stream_agent_chat_emits_realtime_agent_state_from_values(
+    stub_system_options,
+    stub_content_guard,
+    monkeypatch: pytest.MonkeyPatch,
+):
     class FakeGraph:
         async def aget_state(self, _config):
             return SimpleNamespace(values={"todos": [{"content": "done", "status": "completed"}]})
@@ -408,40 +497,7 @@ async def test_stream_agent_chat_emits_realtime_agent_state_from_values(monkeypa
         async def get_graph(self, *, context=None):
             return FakeGraph()
 
-    async def fake_resolve_agent_runtime(**_kwargs):
-        return SimpleNamespace(slug="test-agent", backend_id="ChatbotAgent"), FakeAgent(), {}
-
-    async def fake_save_messages_from_langgraph_state(
-        *, agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id=None, request_id=None
-    ):
-        del agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id, request_id
-        return None
-
-    async def fake_guard_check(_content):
-        return False
-
-    async def fake_guard_check_with_keywords(_content):
-        return False
-
-    async def fake_interrupts(agent, langgraph_config, make_chunk, meta, thread_id, context):
-        if False:
-            yield None
-        return
-
-    monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
-    monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
-    monkeypatch.setattr(svc, "ConversationRepository", _FakeConvRepo)
-    monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fake_save_messages_from_langgraph_state)
-    monkeypatch.setattr(svc.content_guard, "check", fake_guard_check)
-    monkeypatch.setattr(svc.content_guard, "check_with_keywords", fake_guard_check_with_keywords)
-    monkeypatch.setattr(svc, "check_and_handle_interrupts", fake_interrupts)
-    monkeypatch.setattr(
-        svc,
-        "_build_langfuse_run_context",
-        lambda **kwargs: SimpleNamespace(callbacks=[], metadata={}, tags=[], trace_id=None),
-    )
-    monkeypatch.setattr(svc, "get_trace_info", lambda _run_context: {})
-    monkeypatch.setattr(svc, "flush_langfuse", lambda: None)
+    _patch_stream_scaffolding(monkeypatch, agent=FakeAgent())
 
     chunks = []
     async for chunk in svc.stream_agent_chat(
@@ -465,6 +521,8 @@ async def test_stream_agent_chat_emits_realtime_agent_state_from_values(monkeypa
 
 @pytest.mark.asyncio
 async def test_stream_agent_chat_maps_custom_compression_event_to_context_compression_chunk(
+    stub_system_options,
+    stub_content_guard,
     monkeypatch: pytest.MonkeyPatch,
 ):
     class FakeGraph:
@@ -493,40 +551,7 @@ async def test_stream_agent_chat_maps_custom_compression_event_to_context_compre
         async def get_graph(self, *, context=None):
             return FakeGraph()
 
-    async def fake_resolve_agent_runtime(**_kwargs):
-        return SimpleNamespace(slug="test-agent", backend_id="ChatbotAgent"), FakeAgent(), {}
-
-    async def fake_save_messages_from_langgraph_state(
-        *, agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id=None, request_id=None
-    ):
-        del agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id, request_id
-        return None
-
-    async def fake_guard_check(_content):
-        return False
-
-    async def fake_guard_check_with_keywords(_content):
-        return False
-
-    async def fake_interrupts(agent, langgraph_config, make_chunk, meta, thread_id, context):
-        if False:
-            yield None
-        return
-
-    monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
-    monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
-    monkeypatch.setattr(svc, "ConversationRepository", _FakeConvRepo)
-    monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fake_save_messages_from_langgraph_state)
-    monkeypatch.setattr(svc.content_guard, "check", fake_guard_check)
-    monkeypatch.setattr(svc.content_guard, "check_with_keywords", fake_guard_check_with_keywords)
-    monkeypatch.setattr(svc, "check_and_handle_interrupts", fake_interrupts)
-    monkeypatch.setattr(
-        svc,
-        "_build_langfuse_run_context",
-        lambda **kwargs: SimpleNamespace(callbacks=[], metadata={}, tags=[], trace_id=None),
-    )
-    monkeypatch.setattr(svc, "get_trace_info", lambda _run_context: {})
-    monkeypatch.setattr(svc, "flush_langfuse", lambda: None)
+    _patch_stream_scaffolding(monkeypatch, agent=FakeAgent())
 
     chunks = []
     async for chunk in svc.stream_agent_chat(

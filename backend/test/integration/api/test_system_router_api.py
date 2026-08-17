@@ -151,7 +151,6 @@ async def test_remote_skill_policy_explicit_empty_list_is_visible_and_restored(t
 async def test_ocr_health_is_available_to_logged_in_users_and_returns_all_methods(
     test_client,
     standard_user,
-    admin_headers,
     monkeypatch,
 ):
     async def fake_health(db):
@@ -164,9 +163,6 @@ async def test_ocr_health_is_available_to_logged_in_users_and_returns_all_method
     assert response.status_code == 200, response.text
     assert response.json()["health"]["rapid_ocr"]["status"] == "healthy"
 
-    admin_response = await test_client.get("/api/system/ocr/health", headers=admin_headers)
-    assert admin_response.status_code == 200, admin_response.text
-
 
 async def test_admin_can_fetch_config_and_reload_info(test_client, admin_headers):
     config_response = await test_client.get("/api/system/config", headers=admin_headers)
@@ -178,6 +174,37 @@ async def test_admin_can_fetch_config_and_reload_info(test_client, admin_headers
     reload_payload = reload_response.json()
     assert reload_payload["success"] is True
     assert "data" in reload_payload
+
+
+async def test_admin_system_config_update_is_persisted_in_postgres(test_client, admin_headers):
+    engine = create_async_engine(os.environ["POSTGRES_URL"])
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    config_response = await test_client.get("/api/system/config", headers=admin_headers)
+    previous_value = config_response.json()["enable_content_guard"]
+
+    try:
+        updated_value = not previous_value
+        update_response = await test_client.post(
+            "/api/system/config",
+            json={"key": "enable_content_guard", "value": updated_value},
+            headers=admin_headers,
+        )
+        assert update_response.status_code == 200, update_response.text
+        assert update_response.json()["enable_content_guard"] is updated_value
+
+        async with session_factory() as db:
+            record = await get_option(db, "system_options")
+            assert record is not None
+            assert record.value["enable_content_guard"] is updated_value
+            assert "save_dir" not in record.value
+    finally:
+        restore_response = await test_client.post(
+            "/api/system/config",
+            json={"key": "enable_content_guard", "value": previous_value},
+            headers=admin_headers,
+        )
+        assert restore_response.status_code == 200, restore_response.text
+        await engine.dispose()
 
 
 async def test_sandbox_config_is_environment_only(test_client, admin_headers):

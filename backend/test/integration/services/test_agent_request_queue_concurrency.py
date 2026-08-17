@@ -6,7 +6,7 @@ import asyncio
 import os
 import uuid
 from contextlib import asynccontextmanager
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -42,7 +42,11 @@ async def test_concurrent_reject_requests_never_enter_queue(monkeypatch: pytest.
     engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    monkeypatch.setattr(agent_request_queue_service, "resolve_agent_run_config", lambda *args: ("model", "default"))
+    monkeypatch.setattr(
+        agent_request_queue_service,
+        "resolve_agent_run_config",
+        AsyncMock(return_value=("model", "default")),
+    )
 
     async with session_factory() as db:
         conversation = Conversation(thread_id=thread_id, uid=uid, agent_id="main", status="active")
@@ -113,7 +117,11 @@ async def test_concurrent_steer_requests_keep_one_pending(monkeypatch: pytest.Mo
     engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    monkeypatch.setattr(agent_request_queue_service, "resolve_agent_run_config", lambda *args: ("model", "default"))
+    monkeypatch.setattr(
+        agent_request_queue_service,
+        "resolve_agent_run_config",
+        AsyncMock(return_value=("model", "default")),
+    )
 
     async with session_factory() as db:
         conversation = Conversation(thread_id=thread_id, uid=uid, agent_id="main", status="active")
@@ -209,7 +217,11 @@ async def test_concurrent_enqueue_dispatches_fifo_head(monkeypatch: pytest.Monke
     engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    monkeypatch.setattr(agent_request_queue_service, "resolve_agent_run_config", lambda *args: ("model", "default"))
+    monkeypatch.setattr(
+        agent_request_queue_service,
+        "resolve_agent_run_config",
+        AsyncMock(return_value=("model", "default")),
+    )
 
     original_create = AgentRunRequestRepository.create
     first_request_created = asyncio.Event()
@@ -517,7 +529,11 @@ async def test_concurrent_request_id_reuse_across_threads_returns_scope_conflict
     engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    monkeypatch.setattr(agent_request_queue_service, "resolve_agent_run_config", lambda *args: ("model", "default"))
+    monkeypatch.setattr(
+        agent_request_queue_service,
+        "resolve_agent_run_config",
+        AsyncMock(return_value=("model", "default")),
+    )
 
     async with session_factory() as db:
         db.add_all(

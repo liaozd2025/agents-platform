@@ -75,19 +75,33 @@ async def _watch_run_until_end(
     headers: dict[str, str],
     run_id: str,
     tool_started: asyncio.Event,
-) -> list[str]:
-    """消费真实 Run SSE，并在 execute tool call 出现时通知测试主协程。"""
-    data_lines: list[str] = []
+) -> list[dict]:
+    """消费真实 Run SSE，并在 execute 工具真正开始后通知测试主协程。"""
+    events: list[dict] = []
     async with client.stream("GET", f"/api/agent/runs/{run_id}/events", headers=headers) as response:
         assert response.status_code == 200, await response.aread()
         async for line in response.aiter_lines():
             if not line.startswith("data: "):
                 continue
-            payload = line[6:]
-            data_lines.append(payload)
-            if "execute" in payload and "sleep 12" in payload:
+            envelope = json.loads(line[6:])
+            events.append(envelope)
+            if _is_execute_tool_started(envelope):
                 tool_started.set()
-    return data_lines
+    return events
+
+
+def _is_execute_tool_started(envelope: dict) -> bool:
+    payload = envelope.get("payload") or {}
+    chunk = payload.get("chunk") or {}
+    event = chunk.get("event") or {}
+    data = event.get("data") or {}
+    command = (data.get("input") or {}).get("command")
+    return (
+        event.get("method") == "tools"
+        and data.get("event") == "tool-started"
+        and data.get("tool_name") == "execute"
+        and command == "sleep 12 && echo TOOL_FINISHED"
+    )
 
 
 async def _wait_request_run_created(
@@ -197,15 +211,18 @@ async def test_real_tool_steer_runs_next_from_checkpoint(
 
         assert target_run["status"] == "completed"
         assert replacement_run["status"] == "completed"
-        assert "TOOL_FINISHED" in "\n".join(target_events)
-        assert "OLD_SHOULD_NOT_COMPLETE" not in "\n".join(target_events)
+        assert "TOOL_FINISHED" in json.dumps(target_events, ensure_ascii=False)
+        assert target_run["token_usage"]["model_call_count"] == 1
 
         history_response = await e2e_client.get(f"/api/chat/thread/{thread_id}/history", headers=e2e_headers)
         assert history_response.status_code == 200, history_response.text
-        history_text = json.dumps(history_response.json(), ensure_ascii=False)
-        assert "STEER_COMPLETE" in history_text
-        assert "TOOL_CONTEXT_OK" in history_text
-        assert "TOOL_CONTEXT_MISSING" not in history_text
-        assert "STEER：改为直接确认引导成功" in history_text
+        history = history_response.json()["history"]
+        replacement_message = next(
+            message
+            for message in history
+            if message.get("run_id") == request["dispatched_run_id"] and message.get("type") == "ai"
+        )
+        assert replacement_message["content"].rstrip().endswith("STEER_COMPLETE TOOL_CONTEXT_OK")
+        assert any(message.get("content") == "STEER：改为直接确认引导成功" for message in history)
     finally:
         await e2e_client.delete(f"/api/agent/{agent_slug}", headers=e2e_headers)

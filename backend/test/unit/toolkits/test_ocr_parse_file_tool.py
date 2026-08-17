@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yuxi import config
+from yuxi.services import ocr_service
 from yuxi.agents.backends.sandbox.paths import (
     ensure_thread_dirs,
     sandbox_outputs_dir,
@@ -13,7 +13,6 @@ from yuxi.agents.backends.sandbox.paths import (
     virtual_path_for_thread_file,
 )
 from yuxi.agents.toolkits.buildin.tools import ocr_parse_file
-from yuxi.services import ocr_service
 
 pytestmark = pytest.mark.unit
 
@@ -36,9 +35,11 @@ def _runtime(
 
 @pytest.mark.asyncio
 async def test_ocr_parse_file_writes_markdown_to_outputs(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
+    _mock_system_options(monkeypatch)
 
-    def resolve_engine(engine_id):
+    def resolve_engine(engine_id, default_engine):
+        del default_engine
         return engine_id
 
     monkeypatch.setattr(ocr_service, "resolve_ocr_engine_id", resolve_engine)
@@ -80,10 +81,12 @@ async def test_ocr_parse_file_writes_markdown_to_outputs(tmp_path, monkeypatch: 
 
 @pytest.mark.asyncio
 async def test_ocr_parse_file_uses_default_engine(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
+    _mock_system_options(monkeypatch)
 
-    def resolve_engine(engine_id):
+    def resolve_engine(engine_id, default_engine):
         assert engine_id is None
+        assert default_engine == "rapid_ocr"
         return "rapid_ocr"
 
     monkeypatch.setattr(ocr_service, "resolve_ocr_engine_id", resolve_engine)
@@ -113,7 +116,8 @@ async def test_ocr_parse_file_uses_default_engine(tmp_path, monkeypatch: pytest.
 
 @pytest.mark.asyncio
 async def test_ocr_parse_file_accepts_disable_for_pdf(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
+    _mock_system_options(monkeypatch)
     thread_id = "thread-1"
     uid = "user-1"
     ensure_thread_dirs(thread_id, uid)
@@ -140,16 +144,27 @@ async def test_ocr_parse_file_accepts_disable_for_pdf(tmp_path, monkeypatch: pyt
 
 
 @pytest.mark.asyncio
-async def test_ocr_parse_file_rejects_non_user_data_path(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "save_dir", str(tmp_path))
+@pytest.mark.parametrize(
+    "file_path",
+    [
+        "/etc/passwd",
+        "/home/gem/user-data/../secrets.png",
+    ],
+)
+async def test_ocr_parse_file_rejects_path_outside_user_data(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, file_path: str
+) -> None:
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
+    _mock_system_options(monkeypatch)
 
     with pytest.raises(ValueError, match="只允许解析"):
-        await ocr_parse_file.coroutine(file_path="/etc/passwd", runtime=_runtime())
+        await ocr_parse_file.coroutine(file_path=file_path, runtime=_runtime())
 
 
 @pytest.mark.asyncio
 async def test_ocr_parse_file_rejects_directory(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
+    _mock_system_options(monkeypatch)
     thread_id = "thread-1"
     uid = "user-1"
     ensure_thread_dirs(thread_id, uid)
@@ -159,12 +174,11 @@ async def test_ocr_parse_file_rejects_directory(tmp_path, monkeypatch: pytest.Mo
         await ocr_parse_file.coroutine(file_path=dir_virtual_path, runtime=_runtime(thread_id=thread_id, uid=uid))
 
 
-@pytest.mark.asyncio
-async def test_ocr_parse_file_rejects_path_traversal(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "save_dir", str(tmp_path))
+def _mock_system_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    from yuxi.config.options import Option, system_options
 
-    with pytest.raises(ValueError, match="只允许解析"):
-        await ocr_parse_file.coroutine(
-            file_path="/home/gem/user-data/../secrets.png",
-            runtime=_runtime(),
-        )
+    async def get_options(option, _db=None):
+        assert option is system_options
+        return {"default_ocr_engine": "rapid_ocr"}
+
+    monkeypatch.setattr(Option, "get", get_options)

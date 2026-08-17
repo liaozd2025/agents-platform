@@ -25,8 +25,11 @@ from yuxi.agents.skills.service import normalize_string_list
 from yuxi.services.agent_runtime_service import resolve_thread_agent_runtime_context
 from yuxi.services.file_preview import (
     MAX_BINARY_PREVIEW_SIZE_BYTES,
+    OfficePreviewConversionError,
+    convert_office_to_pdf,
     detect_media_type,
     is_binary_preview_type,
+    is_office_pdf_preview_file,
     render_preview_payload,
     render_preview_too_large_payload,
 )
@@ -154,9 +157,16 @@ def _preview_binary_response(path: str, raw_content: bytes, preview_type: str) -
     return StreamingResponse(io.BytesIO(raw_content), media_type=media_type, headers=headers)
 
 
-def _render_viewer_preview(path: str, raw_content: bytes) -> dict | StreamingResponse:
+async def _render_viewer_preview(path: str, raw_content: bytes) -> dict | StreamingResponse:
     if len(raw_content) > MAX_BINARY_PREVIEW_SIZE_BYTES:
         return _preview_too_large_payload()
+    # docx/pptx 是 ZIP 二进制，与工作区一致先转换为 PDF 再预览，避免被判定为二进制文件不可预览
+    if is_office_pdf_preview_file(path):
+        try:
+            pdf_content = await convert_office_to_pdf(path, raw_content)
+        except OfficePreviewConversionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _preview_binary_response(f"{PurePosixPath(path).stem or 'preview'}.pdf", pdf_content, "pdf")
     payload = render_preview_payload(path, raw_content)
     if is_binary_preview_type(payload["preview_type"]) and payload["supported"]:
         return _preview_binary_response(path, raw_content, payload["preview_type"])
@@ -366,7 +376,7 @@ async def read_viewer_file_content(
             if actual_path.stat().st_size > MAX_BINARY_PREVIEW_SIZE_BYTES:
                 return _preview_too_large_payload()
             raw_content = await asyncio.to_thread(actual_path.read_bytes)
-            return _render_viewer_preview(normalized_path, raw_content)
+            return await _render_viewer_preview(normalized_path, raw_content)
         elif _is_skills_path(normalized_path):
             responses = await asyncio.to_thread(skills_backend.download_files, [_strip_skills_prefix(normalized_path)])
         elif _is_in_home_gem(normalized_path):
@@ -391,7 +401,7 @@ async def read_viewer_file_content(
         raise HTTPException(status_code=400, detail=str(response.error))
 
     raw_content = response.content or b""
-    return _render_viewer_preview(normalized_path, raw_content)
+    return await _render_viewer_preview(normalized_path, raw_content)
 
 
 async def download_viewer_file(

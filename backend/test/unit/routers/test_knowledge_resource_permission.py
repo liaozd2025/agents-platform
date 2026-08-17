@@ -115,6 +115,8 @@ async def test_database_detail_only_exposes_credentials_with_function_and_resour
 
 @pytest.mark.asyncio
 async def test_readonly_admin_can_read_but_cannot_update_knowledge_base(monkeypatch):
+    admin = SimpleNamespace(uid="admin-1", department_id=2)
+
     database = {
         "created_by": "owner",
         "share_config": {
@@ -128,7 +130,6 @@ async def test_readonly_admin_can_read_but_cannot_update_knowledge_base(monkeypa
         return database
 
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_database_info", fake_get_database_info)
-    admin = SimpleNamespace(uid="admin-1", department_id=2)
 
     assert await knowledge_router.require_knowledge_base_read("kb-1", admin) is admin
 
