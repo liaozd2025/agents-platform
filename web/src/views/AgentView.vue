@@ -202,6 +202,7 @@ import AgentEditModal from '@/components/model-management/AgentEditModal.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import { isBuiltinAgent, useAgentStore } from '@/stores/agent'
 import { useChatThreadsStore } from '@/stores/chatThreads'
+import { useUserStore } from '@/stores/user'
 import { handleChatError } from '@/utils/errorHandler'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
@@ -215,6 +216,7 @@ const agentEditModalRef = ref(null)
 // Stores
 const agentStore = useAgentStore()
 const chatThreadsStore = useChatThreadsStore()
+const userStore = useUserStore()
 const route = useRoute()
 const router = useRouter()
 const {
