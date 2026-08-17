@@ -192,6 +192,13 @@ class AgentRunRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_worker_restart_candidates_for_update(self) -> list[AgentRun]:
+        """锁定并返回 Worker 重启后仍处于活跃状态的运行任务。"""
+        result = await self.db.execute(
+            select(AgentRun).where(AgentRun.status.in_({"running", "cancel_requested"})).with_for_update()
+        )
+        return list(result.scalars().all())
+
     async def create_run(
         self,
         *,

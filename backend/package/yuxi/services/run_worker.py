@@ -718,6 +718,43 @@ async def _load_input_message(message_id: int | None) -> Message | None:
         return result.scalar_one_or_none()
 
 
+async def reconcile_orphaned_runs() -> list[str]:
+    """将 Worker 重启遗留的活跃任务收敛到明确终态。"""
+    # ponytail: 当前 Compose 只有一个 Worker；扩容多 Worker 时改用 lease/heartbeat 判断任务归属。
+    async with pg_manager.get_async_session_context() as db:
+        repo = AgentRunRepository(db)
+        reconciled_ids = []
+        for run in await repo.list_worker_restart_candidates_for_update():
+            if run.status == "cancel_requested":
+                terminal_status = "cancelled"
+                error_type = "cancelled"
+                error_message = "Worker 重启后完成取消"
+            else:
+                terminal_status = "failed"
+                error_type = "worker_restarted"
+                error_message = "Worker 重启，运行任务已中断"
+
+            terminal_run, changed = await repo.set_terminal_status(
+                run.id,
+                status=terminal_status,
+                error_type=error_type,
+                error_message=error_message,
+            )
+            if not changed or not terminal_run:
+                continue
+
+            delivery_status = RUN_STATUS_TO_DELIVERY_STATUS[terminal_run.status]
+            if terminal_run.input_message_id:
+                await db.execute(
+                    update(Message)
+                    .where(Message.id == terminal_run.input_message_id)
+                    .values(delivery_status=delivery_status)
+                )
+            reconciled_ids.append(run.id)
+
+    return reconciled_ids
+
+
 async def _worker_startup(ctx):
     """初始化 worker 依赖。"""
 
@@ -741,6 +778,9 @@ async def _worker_startup(ctx):
     await ensure_builtin_mcp_servers_in_db()
     async with pg_manager.get_async_session_context() as session:
         await init_builtin_skills(session)
+    reconciled_ids = await reconcile_orphaned_runs()
+    if reconciled_ids:
+        logger.warning(f"Reconciled orphaned AgentRuns after Worker restart: count={len(reconciled_ids)}")
     await recover_pending_dispatches()
 
 

@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.repositories.agent_run_request_repository import AgentRunRequestRepository
@@ -519,6 +519,88 @@ async def test_terminal_status_loser_does_not_change_message_delivery_status(mon
                 await db.execute(delete(Message).where(Message.conversation_id == conversation_id))
             await db.execute(delete(Conversation).where(Conversation.thread_id == thread_id))
             await db.commit()
+        await engine.dispose()
+
+
+async def test_worker_restart_reconciles_run_and_message_states(monkeypatch: pytest.MonkeyPatch):
+    statuses = ["running", "cancel_requested", "pending", "interrupted"]
+    run_ids = [str(uuid.uuid4()) for _ in statuses]
+    engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
+
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text("CREATE TEMP TABLE agent_runs (LIKE public.agent_runs INCLUDING ALL) ON COMMIT PRESERVE ROWS")
+            )
+            await connection.execute(
+                text("CREATE TEMP TABLE messages (LIKE public.messages INCLUDING ALL) ON COMMIT PRESERVE ROWS")
+            )
+            await connection.commit()
+            session_factory = async_sessionmaker(connection, expire_on_commit=False)
+
+            @asynccontextmanager
+            async def session_context():
+                async with session_factory() as db:
+                    try:
+                        yield db
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        raise
+
+            monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", session_context)
+
+            async with session_factory() as db:
+                messages = [
+                    Message(
+                        id=index,
+                        conversation_id=index,
+                        role="user",
+                        content=status,
+                        request_id=f"restart-{uuid.uuid4()}",
+                        delivery_status="dispatched",
+                    )
+                    for index, status in enumerate(statuses, start=1)
+                ]
+                db.add_all(messages)
+                await db.flush()
+                db.add_all(
+                    [
+                        AgentRun(
+                            id=run_id,
+                            conversation_thread_id=f"pytest-restart-{run_id}",
+                            agent_slug="main",
+                            uid="pytest-user",
+                            request_id=message.request_id,
+                            conversation_id=message.conversation_id,
+                            input_message_id=message.id,
+                            input_payload={},
+                            status=status,
+                            run_type="chat",
+                        )
+                        for run_id, message, status in zip(run_ids, messages, statuses, strict=True)
+                    ]
+                )
+                await db.commit()
+
+            assert sorted(await run_worker.reconcile_orphaned_runs()) == sorted(run_ids[:2])
+
+            async with session_factory() as db:
+                rows = (
+                    await db.execute(
+                        select(AgentRun.id, AgentRun.status, AgentRun.error_type, Message.delivery_status).join(
+                            Message, Message.id == AgentRun.input_message_id
+                        )
+                    )
+                ).all()
+
+            assert {row.id: (row.status, row.error_type, row.delivery_status) for row in rows} == {
+                run_ids[0]: ("failed", "worker_restarted", "failed"),
+                run_ids[1]: ("cancelled", "cancelled", "cancelled"),
+                run_ids[2]: ("pending", None, "dispatched"),
+                run_ids[3]: ("interrupted", None, "dispatched"),
+            }
+    finally:
         await engine.dispose()
 
 
