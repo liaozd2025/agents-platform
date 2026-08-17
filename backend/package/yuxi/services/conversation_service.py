@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import INVOCATION_CONVERSATION_SOURCES, ConversationRepository
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.attachment_service import delete_thread_attachment_objects, serialize_attachment
-from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES, AgentRun, User
+from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES, AgentRun
 from yuxi.utils.datetime_utils import format_utc_datetime
 from yuxi.utils.logging_config import logger
 
