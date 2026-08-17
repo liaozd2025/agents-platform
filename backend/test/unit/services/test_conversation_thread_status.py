@@ -4,6 +4,8 @@ Conversation thread status mapping and viewed-marking unit tests.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -97,6 +99,25 @@ async def test_list_threads_view_maps_run_states(session):
     assert status_by_id["thread-ready"] == "ready"
     assert status_by_id["thread-done"] == "done"
     assert status_by_id["thread-no-run"] == "done"
+
+
+async def test_create_thread_view_loads_user_for_agent_visibility(session, monkeypatch):
+    async def get_visible_by_slug(_repo, *, slug, user):
+        assert user.uid == "user-1"
+        return SimpleNamespace(slug=slug, backend_id="ChatbotAgent")
+
+    monkeypatch.setattr(svc.AgentRepository, "get_visible_by_slug", get_visible_by_slug)
+
+    result = await svc.create_thread_view(
+        agent_slug="main",
+        title="new-thread",
+        metadata={},
+        db=session,
+        current_uid="user-1",
+    )
+
+    assert result["agent_id"] == "main"
+    assert result["metadata"]["backend_id"] == "ChatbotAgent"
 
 
 async def test_list_threads_view_ignores_subagent_and_other_users(session):
