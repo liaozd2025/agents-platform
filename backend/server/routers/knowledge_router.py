@@ -8,6 +8,7 @@ from urllib.parse import quote, unquote
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import StreamingResponse
 from yuxi.config.options import system_options
 from yuxi.knowledge.base import KBNameConflictError, KBNotFoundError
