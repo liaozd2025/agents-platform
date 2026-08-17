@@ -9,7 +9,7 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
-from yuxi import config
+from yuxi.config.options import system_options
 from yuxi.knowledge.base import KBNameConflictError, KBNotFoundError
 from yuxi.knowledge.chunking.ragflow_like.presets import get_chunk_preset_options
 from yuxi.knowledge.graphs.milvus_graph_service import GRAPH_TASK_TYPE, MilvusGraphService
@@ -43,7 +43,8 @@ from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 from yuxi.utils.upload_utils import MAX_UPLOAD_SIZE_BYTES, read_upload_with_limit, write_upload_to_path
 
-from server.utils.auth_middleware import get_admin_user, get_required_user
+from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from sqlalchemy.ext.asyncio import AsyncSession
 from server.utils.knowledge_response import serialize_knowledge_base, serialize_knowledge_base_list
 from server.utils.knowledge_permissions import (
     ensure_knowledge_base_permission as _ensure_database_permission,
@@ -1637,6 +1638,45 @@ async def download_document(kb_id: str, doc_id: str, current_user: User = Depend
         raise HTTPException(status_code=500, detail=f"下载失败: {e}")
 
 
+@knowledge.get("/databases/{kb_id}/images/{object_path:path}")
+async def get_kb_image(kb_id: str, object_path: str, current_user: User = Depends(require_knowledge_base_read)):
+    """经鉴权代理读取知识库图片（图片存放在私有 bucket，禁止匿名访问）"""
+    if not object_path.startswith("kb-images/"):
+        raise HTTPException(status_code=400, detail="非法的知识库图片路径")
+    if ".." in object_path or "\\" in object_path:
+        raise HTTPException(status_code=400, detail="非法的知识库图片路径")
+
+    object_name = f"{kb_id}/{object_path}"
+    minio_client = get_minio_client()
+    try:
+        minio_response = await minio_client.adownload_response(
+            bucket_name=MinIOClient.KB_BUCKETS["images"],
+            object_name=object_name,
+        )
+    except StorageError as error:
+        if "不存在" in str(error):
+            raise HTTPException(status_code=404, detail="图片不存在")
+        logger.error(f"读取知识库图片失败 {object_name}: {error}")
+        raise HTTPException(status_code=500, detail="读取图片失败")
+
+    content_type = minio_response.getheader("Content-Type") or "application/octet-stream"
+
+    async def image_stream():
+        try:
+            while True:
+                chunk = await asyncio.to_thread(minio_response.read, 8192)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            minio_response.close()
+            minio_response.release_conn()
+
+    return StreamingResponse(
+        image_stream(), media_type=content_type, headers={"Cache-Control": "private, max-age=3600"}
+    )
+
+
 # =============================================================================
 # === 知识库查询分组 ===
 # =============================================================================
@@ -2087,6 +2127,7 @@ async def generate_description(
     current_description: str = Body("", description="当前描述（可选，用于优化）"),
     file_list: list[str] | None = Body(None, description="文件列表"),
     current_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """使用 LLM 生成或优化知识库描述
 
@@ -2126,7 +2167,7 @@ async def generate_description(
     """).strip()
 
     try:
-        model = select_model(model_spec=config.default_model)
+        model = select_model(model_spec=(await system_options.get(db))["default_model"])
         response = await model.call(prompt)
         description = response.content.strip()
         logger.debug(f"Generated description: {description}")

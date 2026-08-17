@@ -18,7 +18,7 @@ def _user() -> SimpleNamespace:
 
 
 def test_workspace_root_creates_default_agent_context_files(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
 
     root = svc._workspace_root(_user())
 
@@ -30,20 +30,11 @@ def test_workspace_root_creates_default_agent_context_files(tmp_path: Path, monk
     assert (root / "agents" / "MEMORY.md").read_text(encoding="utf-8") == (
         "# MEMORY\n\n以下是 Agent 需要记住的一些信息\n"
     )
-
-
-def test_ensure_thread_dirs_creates_default_agent_context_files(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
-
-    workspace_paths.ensure_thread_dirs("thread-1", "user-1")
-
-    agents_dir = tmp_path / "threads" / "shared" / "user-1" / "workspace" / "agents"
-    assert {path.name for path in agents_dir.iterdir()} == {"AGENTS.md", "USER.md", "MEMORY.md"}
-    assert all(path.read_text(encoding="utf-8").strip() for path in agents_dir.iterdir())
+    assert {path.name for path in (root / "agents").iterdir()} == {"AGENTS.md", "USER.md", "MEMORY.md"}
 
 
 def test_external_uid_uses_stable_path_safe_workspace_directory(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     uid = "oidc:898f3d04-140e-433b-a06e-1e50a2bd01b6"
 
     workspace_paths.ensure_thread_dirs("thread-1", uid)
@@ -56,7 +47,7 @@ def test_external_uid_uses_stable_path_safe_workspace_directory(tmp_path: Path, 
 
 @pytest.mark.parametrize("uid", ["../outside", r"C:\\outside", "oidc:tenant/user"])
 def test_external_uid_cannot_escape_threads_root(tmp_path: Path, monkeypatch, uid: str) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path / "saves"))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path / "saves"))
 
     workspace = workspace_paths.sandbox_workspace_dir("thread-1", uid)
 
@@ -65,7 +56,7 @@ def test_external_uid_cannot_escape_threads_root(tmp_path: Path, monkeypatch, ui
 
 
 def test_workspace_root_keeps_existing_agents_prompt_file(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     agents_dir = tmp_path / "threads" / "shared" / "user-1" / "workspace" / "agents"
     agents_dir.mkdir(parents=True)
     agents_file = agents_dir / "AGENTS.md"
@@ -78,7 +69,7 @@ def test_workspace_root_keeps_existing_agents_prompt_file(tmp_path: Path, monkey
 
 
 def test_workspace_root_rejects_symlink_root(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user_root = tmp_path / "threads" / "shared" / "user-1"
     outside_root = tmp_path / "outside"
     user_root.mkdir(parents=True)
@@ -95,24 +86,33 @@ def test_ensure_workspace_default_files_rejects_path_outside_threads_root(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path / "saves"))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path / "saves"))
 
     with pytest.raises(ValueError):
         workspace_paths.ensure_workspace_default_files(tmp_path / "outside-workspace")
 
 
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("bad.txt", b"\xff\xfe\x00"),
+        ("sheet.xlsx", b"PK\x03\x04excel"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_read_workspace_file_content_returns_unsupported_for_non_utf8_text(
+async def test_read_workspace_file_content_returns_unsupported_for_unreadable_files(
     tmp_path: Path,
     monkeypatch,
+    filename: str,
+    content: bytes,
 ) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     root = svc._workspace_root(user)
-    target = root / "bad.txt"
-    target.write_bytes(b"\xff\xfe\x00")
+    target = root / filename
+    target.write_bytes(content)
 
-    result = await svc.read_workspace_file_content(path="/bad.txt", current_user=user)
+    result = await svc.read_workspace_file_content(path=f"/{filename}", current_user=user)
 
     assert result["content"] is None
     assert result["preview_type"] == "unsupported"
@@ -124,7 +124,7 @@ async def test_read_workspace_file_content_returns_pdf_preview_for_office_file(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     root = svc._workspace_root(user)
     target = root / "demo.docx"
@@ -152,7 +152,7 @@ async def test_read_workspace_file_content_rejects_xlsx_preview(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     root = svc._workspace_root(user)
     target = root / "sheet.xlsx"
@@ -165,55 +165,40 @@ async def test_read_workspace_file_content_rejects_xlsx_preview(
     assert result["supported"] is False
 
 
-@pytest.mark.asyncio
-async def test_preview_workspace_file_converts_office_file_to_pdf(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
-    user = _user()
-    root = svc._workspace_root(user)
-    target = root / "slides.pptx"
-    target.write_bytes(b"presentation")
-
-    async def fake_convert(filename: str, content: bytes) -> bytes:
-        assert filename == "slides.pptx"
-        assert content == b"presentation"
-        return b"%PDF-1.4\npreview"
-
-    monkeypatch.setattr(svc, "convert_office_to_pdf", fake_convert)
-
-    response = await svc.read_workspace_file_content(path="/slides.pptx", current_user=user)
-    body = b""
-    async for chunk in response.body_iterator:
-        body += chunk
-
-    assert response.media_type == "application/pdf"
-    assert body == b"%PDF-1.4\npreview"
-
-
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("demo.docx", b"office"),
+        ("slides.pptx", b"presentation"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_preview_workspace_file_caches_office_pdf_conversion(
     tmp_path: Path,
     monkeypatch,
+    filename: str,
+    content: bytes,
 ) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     root = svc._workspace_root(user)
-    target = root / "slides.pptx"
-    target.write_bytes(b"presentation")
+    target = root / filename
+    target.write_bytes(content)
 
     convert_calls = 0
 
-    async def fake_convert(filename: str, content: bytes) -> bytes:
+    async def fake_convert(name: str, _raw: bytes) -> bytes:
         nonlocal convert_calls
+        assert name == filename
         convert_calls += 1
         return b"%PDF-1.4\npreview"
 
     monkeypatch.setattr(svc, "convert_office_to_pdf", fake_convert)
 
     async def read_pdf() -> bytes:
-        response = await svc.read_workspace_file_content(path="/slides.pptx", current_user=user)
+        response = await svc.read_workspace_file_content(path=f"/{filename}", current_user=user)
+        assert response.media_type == "application/pdf"
+        assert response.headers["x-yuxi-preview-type"] == "pdf"
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
@@ -223,7 +208,7 @@ async def test_preview_workspace_file_caches_office_pdf_conversion(
     assert await read_pdf() == b"%PDF-1.4\npreview"
     assert convert_calls == 1
 
-    target.write_bytes(b"presentation-v2")
+    target.write_bytes(content + b"-v2")
     assert await read_pdf() == b"%PDF-1.4\npreview"
     assert convert_calls == 2
 
@@ -233,7 +218,7 @@ async def test_download_workspace_file_keeps_office_original_file(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     root = svc._workspace_root(user)
     target = root / "slides.pptx"
@@ -248,38 +233,40 @@ async def test_download_workspace_file_keeps_office_original_file(
     assert body == b"presentation"
 
 
+@pytest.mark.parametrize(
+    ("extension", "original", "content"),
+    [
+        ("md", "旧内容", "# 新内容"),
+        ("txt", "old", "new"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_write_workspace_file_content_updates_markdown_file(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+async def test_write_workspace_file_content_updates_file(
+    tmp_path: Path,
+    monkeypatch,
+    extension: str,
+    original: str,
+    content: str,
+) -> None:
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     root = svc._workspace_root(user)
-    target = root / "note.md"
-    target.write_text("旧内容", encoding="utf-8")
+    target = root / f"note.{extension}"
+    target.write_text(original, encoding="utf-8")
 
-    result = await svc.write_workspace_file_content(path="/note.md", content="# 新内容", current_user=user)
+    result = await svc.write_workspace_file_content(
+        path=f"/note.{extension}", content=content, current_user=user
+    )
 
     assert result["success"] is True
-    assert result["path"] == "/note.md"
-    assert result["entry"]["path"] == "/note.md"
-    assert target.read_text(encoding="utf-8") == "# 新内容"
-
-
-@pytest.mark.asyncio
-async def test_write_workspace_file_content_updates_txt_file(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
-    user = _user()
-    root = svc._workspace_root(user)
-    target = root / "note.txt"
-    target.write_text("old", encoding="utf-8")
-
-    await svc.write_workspace_file_content(path="/note.txt", content="new", current_user=user)
-
-    assert target.read_text(encoding="utf-8") == "new"
+    assert result["path"] == f"/note.{extension}"
+    assert result["entry"]["path"] == f"/note.{extension}"
+    assert target.read_text(encoding="utf-8") == content
 
 
 @pytest.mark.asyncio
 async def test_write_workspace_file_content_rejects_unsupported_suffix(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     root = svc._workspace_root(user)
     target = root / "script.py"
@@ -294,7 +281,7 @@ async def test_write_workspace_file_content_rejects_unsupported_suffix(tmp_path:
 
 @pytest.mark.asyncio
 async def test_write_workspace_file_content_rejects_directory_and_missing_file(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     workspace_paths.ensure_thread_dirs("current-thread", "user-1")
 
@@ -309,7 +296,7 @@ async def test_write_workspace_file_content_rejects_directory_and_missing_file(t
 
 @pytest.mark.asyncio
 async def test_write_workspace_file_content_blocks_path_traversal(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
 
     with pytest.raises(HTTPException) as exc_info:
         await svc.write_workspace_file_content(
@@ -323,7 +310,7 @@ async def test_write_workspace_file_content_blocks_path_traversal(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_upload_workspace_files_writes_files(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     root = svc._workspace_root(user)
     uploads = [
@@ -345,7 +332,7 @@ async def test_upload_workspace_files_rejects_oversized_file_and_cleans_partial_
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     monkeypatch.setattr(svc, "MAX_WORKSPACE_UPLOAD_SIZE_BYTES", 5)
     user = _user()
     root = svc._workspace_root(user)
@@ -365,7 +352,7 @@ async def test_upload_workspace_files_rejects_oversized_file_and_cleans_partial_
 
 @pytest.mark.asyncio
 async def test_upload_workspace_files_rejects_more_than_limit(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     uploads = [
         UploadFile(filename=f"demo-{index}.txt", file=BytesIO(b"hello"))
@@ -396,7 +383,7 @@ async def test_list_workspace_tree_exposes_virtual_chat_files_without_creating_l
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     thread_id = "thread-2026-08-09"
     _make_thread_files(tmp_path, thread_id)
@@ -423,7 +410,7 @@ async def test_list_workspace_tree_exposes_virtual_chat_files_without_creating_l
 
 @pytest.mark.asyncio
 async def test_list_workspace_tree_without_conversation_scope_hides_virtual_chats(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
 
     result = await svc.list_workspace_tree(path="/agents", current_user=_user())
 
@@ -432,7 +419,7 @@ async def test_list_workspace_tree_without_conversation_scope_hides_virtual_chat
 
 @pytest.mark.asyncio
 async def test_list_workspace_tree_rejects_existing_physical_chats_directory(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     chats_dir = tmp_path / "threads" / "shared" / "user-1" / "workspace" / "agents" / "chats"
     chats_dir.mkdir(parents=True)
 
@@ -445,7 +432,7 @@ async def test_list_workspace_tree_rejects_existing_physical_chats_directory(tmp
 
 @pytest.mark.asyncio
 async def test_list_workspace_tree_recursively_returns_chat_files(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     thread_id = "thread-recursive"
     _make_thread_files(tmp_path, thread_id)
 
@@ -524,7 +511,7 @@ async def test_build_owned_thread_titles_uses_all_active_conversations(monkeypat
 
 @pytest.mark.asyncio
 async def test_list_workspace_tree_sorts_chat_directories_by_dated_title(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     for thread_id in ("thread-old", "thread-new-b", "thread-new-a"):
         _make_thread_files(tmp_path, thread_id)
 
@@ -547,7 +534,7 @@ async def test_list_workspace_tree_sorts_chat_directories_by_dated_title(tmp_pat
 
 @pytest.mark.asyncio
 async def test_list_workspace_tree_hides_empty_chat_namespaces_and_threads(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     uploads_only = "thread-uploads-only"
     outputs_only = "thread-outputs-only"
     empty_thread = "thread-empty"
@@ -595,7 +582,7 @@ async def test_list_workspace_tree_hides_empty_chat_namespaces_and_threads(tmp_p
 
 @pytest.mark.asyncio
 async def test_list_workspace_tree_filters_intermediate_output_directories(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     thread_id = "thread-filtered-outputs"
     workspace_paths.ensure_thread_dirs(thread_id, "user-1")
     outputs = workspace_paths.sandbox_outputs_dir(thread_id)
@@ -627,7 +614,7 @@ async def test_list_workspace_tree_filters_intermediate_output_directories(tmp_p
 @pytest.mark.asyncio
 async def test_list_workspace_tree_lists_outputs_with_relative_save_dir(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", "saves")
+    monkeypatch.setenv("SAVE_DIR", "saves")
     thread_id = "thread-relative-save-dir"
     workspace_paths.ensure_thread_dirs(thread_id, "user-1")
     outputs = workspace_paths.sandbox_outputs_dir(thread_id)
@@ -644,7 +631,7 @@ async def test_list_workspace_tree_lists_outputs_with_relative_save_dir(tmp_path
 
 @pytest.mark.asyncio
 async def test_read_and_download_file_inside_thread_link(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     thread_id = "thread-read"
     _make_thread_files(tmp_path, thread_id)
@@ -667,7 +654,7 @@ async def test_read_and_download_file_inside_thread_link(tmp_path: Path, monkeyp
 )
 @pytest.mark.asyncio
 async def test_write_operations_inside_thread_link_rejected(tmp_path: Path, monkeypatch, operation: str) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     thread_id = "thread-readonly"
     _make_thread_files(tmp_path, thread_id)
@@ -704,7 +691,7 @@ async def test_write_operations_inside_thread_link_rejected(tmp_path: Path, monk
 
 @pytest.mark.asyncio
 async def test_virtual_chat_not_owned_by_user_rejected(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     thread_id = "thread-other-user"
     _make_thread_files(tmp_path, thread_id)
@@ -719,7 +706,7 @@ async def test_virtual_chat_not_owned_by_user_rejected(tmp_path: Path, monkeypat
 
 @pytest.mark.asyncio
 async def test_physical_symlink_under_virtual_chats_cannot_redirect_access(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     user = _user()
     thread_id = "thread-sneaky"
     thread_titles = {thread_id: "历史对话"}

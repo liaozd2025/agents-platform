@@ -3,6 +3,7 @@ x-api-worker-env: &api-worker-env
   LITE_MODE: ${LITE_MODE:-}
   RUNNING_IN_DOCKER: "true"
   YUXI_ENV: production
+  LANGGRAPH_CHECKPOINTER_BACKEND: ${LANGGRAPH_CHECKPOINTER_BACKEND:-postgres}
   PYTHONPATH: /app/package
   JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env.prod}
   YUXI_INSTANCE_ID: ${YUXI_INSTANCE_ID:?Set YUXI_INSTANCE_ID in .env.prod}
@@ -38,7 +39,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    image: yuxi-api:${YUXI_VERSION:-0.7.1}
+    image: yuxi-api:${YUXI_VERSION:-0.7.2.dev0}
     container_name: api-prod
     working_dir: /app
     networks:
@@ -76,7 +77,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    image: yuxi-api:${YUXI_VERSION:-0.7.1}
+    image: yuxi-api:${YUXI_VERSION:-0.7.2.dev0}
     container_name: worker-prod
     working_dir: /app
     networks:
@@ -156,7 +157,7 @@ services:
       target: production
       args:
         - VITE_YUXI_EMBED_ALLOWED_ORIGINS=${YUXI_EMBED_ALLOWED_ORIGINS:-}
-    image: yuxi-web:${YUXI_VERSION:-0.7.1}
+    image: yuxi-web:${YUXI_VERSION:-0.7.2.dev0}
     container_name: web-prod
     ports:
       - "80:80"

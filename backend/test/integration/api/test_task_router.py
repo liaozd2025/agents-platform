@@ -76,11 +76,31 @@ async def test_enqueue_document_creates_task(
     kb_id = create_response.json()["kb_id"]
 
     try:
+        upload_response = await test_client.post(
+            "/api/knowledge/files/upload",
+            params={"kb_id": kb_id},
+            files={
+                "file": (
+                    f"pytest_task_{uuid.uuid4().hex[:8]}.txt",
+                    b"task router integration test",
+                    "text/plain",
+                )
+            },
+            headers=admin_headers,
+        )
+        assert upload_response.status_code == 200, upload_response.text
+        upload_payload = upload_response.json()
+        file_path = upload_payload["file_path"]
+
         enqueue_response = await test_client.post(
             f"/api/knowledge/databases/{kb_id}/documents",
             json={
-                "items": [],
-                "params": {"content_type": "file"},
+                "items": [file_path],
+                "params": {
+                    "content_type": "file",
+                    "content_hashes": {file_path: upload_payload["content_hash"]},
+                    "file_sizes": {file_path: upload_payload["size"]},
+                },
             },
             headers=admin_headers,
         )

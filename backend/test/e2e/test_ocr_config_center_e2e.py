@@ -97,10 +97,12 @@ async def test_admin_ocr_config_drives_real_tmp_attachment_parse(
         )
         assert confirm_response.status_code == 200, confirm_response.text
         attachment = confirm_response.json()["attachments"][0]
+        assert attachment["status"] == "parsed"
+        assert attachment["path"].endswith(".md")
+        assert attachment["artifact_url"]
 
         file_response = await e2e_client.get(
-            "/api/viewer/filesystem/file",
-            params={"thread_id": thread_id, "path": attachment["path"]},
+            attachment["artifact_url"],
             headers=e2e_headers,
         )
         assert file_response.status_code == 200, file_response.text
@@ -155,12 +157,11 @@ async def _cleanup_created_resources(
         )
         assert response.status_code == 200, response.text
 
-    if uploaded:
+    if uploaded and attachment is None:
         minio_client = get_minio_client()
         object_names = [uploaded["object_name"]]
         if parsed:
             object_names.append(parsed["parsed_object_name"])
-        # 确认接口会复制 tmp 内容但不会删除源对象，测试必须显式回收两份临时数据。
         for object_name in object_names:
             assert await minio_client.adelete_file(uploaded["bucket_name"], object_name)
 

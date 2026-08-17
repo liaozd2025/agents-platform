@@ -71,6 +71,13 @@ async def _upload_attachment_file(
     return path
 
 
+def _create_workspace_file(thread_id: str, uid: str, file_name: str, content: bytes) -> tuple[str, bytes]:
+    ensure_thread_dirs(thread_id, uid)
+    actual_path = sandbox_workspace_dir(thread_id, uid) / file_name
+    actual_path.write_bytes(content)
+    return virtual_path_for_thread_file(thread_id, actual_path, uid=uid), content
+
+
 async def test_viewer_tree_requires_authentication(test_client):
     response = await test_client.get("/api/viewer/filesystem/tree", params={"thread_id": "x", "path": "/"})
     assert response.status_code == 401
@@ -220,8 +227,9 @@ async def test_workspace_is_shared_across_same_user_threads_but_uploads_remain_t
 
 async def test_viewer_file_returns_raw_content_without_line_numbers(test_client, standard_user):
     headers = standard_user["headers"]
+    uid = str(standard_user["user"]["uid"])
     thread_id = await _create_thread_for_user(test_client, headers)
-    file_path = await _upload_attachment_file(test_client, thread_id, headers, "viewer_demo.txt", "alpha\nbeta\n")
+    file_path, _content = _create_workspace_file(thread_id, uid, "viewer_demo.txt", b"alpha\nbeta\n")
 
     response = await test_client.get(
         "/api/viewer/filesystem/file",
@@ -229,10 +237,10 @@ async def test_viewer_file_returns_raw_content_without_line_numbers(test_client,
         headers=headers,
     )
     assert response.status_code == 200, response.text
-    assert "alpha" in response.json()["content"]
-    assert "beta" in response.json()["content"]
-    assert response.json()["preview_type"] == "markdown"
-    assert response.json()["supported"] is True
+    payload = response.json()
+    assert payload["content"] == "alpha\nbeta\n"
+    assert payload["preview_type"] == "text"
+    assert payload["supported"] is True
 
 
 async def test_viewer_file_returns_unsupported_for_binary_payload(test_client, standard_user):
@@ -258,17 +266,17 @@ async def test_viewer_file_returns_unsupported_for_binary_payload(test_client, s
     assert payload["supported"] is False
 
 
-async def test_viewer_file_returns_image_preview_metadata(test_client, standard_user):
+async def test_viewer_file_returns_inline_image_preview(test_client, standard_user):
     headers = standard_user["headers"]
     uid = str(standard_user["user"]["uid"])
     thread_id = await _create_thread_for_user(test_client, headers)
 
-    ensure_thread_dirs(thread_id, uid)
-    actual_path = sandbox_workspace_dir(thread_id, uid) / "demo.png"
-    actual_path.write_bytes(
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+    file_path, image_bytes = _create_workspace_file(
+        thread_id,
+        uid,
+        "demo.png",
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89",
     )
-    file_path = virtual_path_for_thread_file(thread_id, actual_path, uid=uid)
 
     response = await test_client.get(
         "/api/viewer/filesystem/file",
@@ -277,21 +285,23 @@ async def test_viewer_file_returns_image_preview_metadata(test_client, standard_
     )
 
     assert response.status_code == 200, response.text
-    payload = response.json()
-    assert payload["content"] is None
-    assert payload["preview_type"] == "image"
-    assert payload["supported"] is True
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.headers["x-yuxi-preview-type"] == "image"
+    assert response.headers["content-disposition"].startswith("inline;")
+    assert response.content == image_bytes
 
 
-async def test_viewer_file_returns_pdf_preview_metadata(test_client, standard_user):
+async def test_viewer_file_returns_inline_pdf_preview(test_client, standard_user):
     headers = standard_user["headers"]
     uid = str(standard_user["user"]["uid"])
     thread_id = await _create_thread_for_user(test_client, headers)
 
-    ensure_thread_dirs(thread_id, uid)
-    actual_path = sandbox_workspace_dir(thread_id, uid) / "demo.pdf"
-    actual_path.write_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF")
-    file_path = virtual_path_for_thread_file(thread_id, actual_path, uid=uid)
+    file_path, pdf_bytes = _create_workspace_file(
+        thread_id,
+        uid,
+        "demo.pdf",
+        b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF",
+    )
 
     response = await test_client.get(
         "/api/viewer/filesystem/file",
@@ -300,16 +310,17 @@ async def test_viewer_file_returns_pdf_preview_metadata(test_client, standard_us
     )
 
     assert response.status_code == 200, response.text
-    payload = response.json()
-    assert payload["content"] is None
-    assert payload["preview_type"] == "pdf"
-    assert payload["supported"] is True
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert response.headers["x-yuxi-preview-type"] == "pdf"
+    assert response.headers["content-disposition"].startswith("inline;")
+    assert response.content == pdf_bytes
 
 
 async def test_viewer_download_returns_attachment_response(test_client, standard_user):
     headers = standard_user["headers"]
+    uid = str(standard_user["user"]["uid"])
     thread_id = await _create_thread_for_user(test_client, headers)
-    file_path = await _upload_attachment_file(test_client, thread_id, headers, "download_demo.txt", "download-me\n")
+    file_path, content = _create_workspace_file(thread_id, uid, "download_demo.txt", b"download-me\n")
 
     response = await test_client.get(
         "/api/viewer/filesystem/download",
@@ -318,9 +329,9 @@ async def test_viewer_download_returns_attachment_response(test_client, standard
     )
     assert response.status_code == 200, response.text
     content_disposition = response.headers.get("content-disposition", "")
-    assert "attachment;" in content_disposition
+    assert content_disposition.startswith("attachment;")
     assert "download_demo" in content_disposition
-    assert "download-me" in response.text
+    assert response.content == content
 
 
 async def test_viewer_download_returns_full_file_for_large_user_data_content(test_client, standard_user):

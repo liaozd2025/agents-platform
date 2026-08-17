@@ -120,6 +120,9 @@
                   <div></div>
                 </div>
                 <span class="generating-text">{{ replyLoadingText }}</span>
+                <span v-if="replyElapsedLabel" class="generating-elapsed">{{
+                  replyElapsedLabel
+                }}</span>
               </div>
             </div>
           </div>
@@ -756,6 +759,11 @@ import AgentMessageComponent from '@/components/AgentMessageComponent.vue'
 import RefsComponent from '@/components/RefsComponent.vue'
 import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
 import { handleChatError, handleValidationError } from '@/utils/errorHandler'
+import {
+  DRAFT_THREAD_ID,
+  createThreadDraftStore,
+  createThreadDraftSession
+} from '@/utils/thread_draft'
 import { ScrollController } from '@/utils/scrollController'
 import { AgentValidator } from '@/utils/agentValidator'
 import { useAgentStore } from '@/stores/agent'
@@ -809,7 +817,11 @@ const { agents, selectedAgentId, agentConfig, configurableItems, availableKnowle
 const { threads, currentThreadId, currentThread } = storeToRefs(chatThreadsStore)
 
 // ==================== LOCAL CHAT & UI STATE ====================
-const userInput = ref('')
+// 输入草稿按线程保存：初始按当前线程还原，后续输入实时写入对应线程
+const threadDraftStore = createThreadDraftStore()
+const threadDraftSession = createThreadDraftSession(threadDraftStore, currentThreadId.value)
+const userInput = ref(threadDraftStore.read(currentThreadId.value || DRAFT_THREAD_ID))
+watch(userInput, (text) => threadDraftSession.saveInput(text))
 const agentInputAreaRef = ref(null)
 const sendCooldownActive = ref(false)
 const cancellingRequestIds = reactive(new Set())
@@ -2163,6 +2175,45 @@ const replyLoadingText = computed(() => {
   if (hasQueuedRequests.value) return `排队中（${queuedRequestCount.value} 条）...`
   return '正在生成回复...'
 })
+const replyElapsedSeconds = ref(0)
+let replyElapsedTimer = null
+let replyStartedAt = null
+const replyElapsedLabel = computed(() => {
+  const seconds = replyElapsedSeconds.value
+  if (!seconds) return ''
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes}分${seconds % 60}s`
+})
+const updateReplyElapsedSeconds = () => {
+  if (!replyStartedAt) return
+  replyElapsedSeconds.value = Math.floor((Date.now() - replyStartedAt) / 1000)
+}
+const startReplyElapsedTimer = ({ reset = false } = {}) => {
+  stopReplyElapsedTimer()
+  if (reset || !replyStartedAt) {
+    replyStartedAt = Date.now()
+  }
+  updateReplyElapsedSeconds()
+  replyElapsedTimer = window.setInterval(updateReplyElapsedSeconds, 1000)
+}
+const stopReplyElapsedTimer = ({ reset = false } = {}) => {
+  if (replyElapsedTimer) {
+    window.clearInterval(replyElapsedTimer)
+    replyElapsedTimer = null
+  }
+  if (reset) {
+    replyStartedAt = null
+    replyElapsedSeconds.value = 0
+  }
+}
+watch(isReplyLoading, (loading) => {
+  if (loading) {
+    startReplyElapsedTimer({ reset: true })
+  } else {
+    stopReplyElapsedTimer({ reset: true })
+  }
+}, { immediate: true })
 const isSendButtonDisabled = computed(() => {
   return (
     sendCooldownActive.value ||
@@ -2461,14 +2512,19 @@ onActivated(() => {
   nextTick(() => {
     startChatMainResizeObserver()
   })
+  if (isReplyLoading.value) {
+    startReplyElapsedTimer()
+  }
 })
 
 onDeactivated(() => {
   stopChatMainResizeObserver()
   stopStreamingStateRefresh()
+  stopReplyElapsedTimer()
 })
 
 onUnmounted(() => {
+  stopReplyElapsedTimer({ reset: true })
   if (typeof document !== 'undefined') {
     document.removeEventListener('visibilitychange', handlePageVisibilityChange)
   }
@@ -2676,7 +2732,14 @@ const handleAttachmentUpload = async (files = []) => {
 
 const ensureAttachmentThread = async () => {
   if (currentChatId.value) return currentChatId.value
-  return await ensureActiveThread('新的对话')
+  // 无线程状态上传附件会先创建线程：保留输入框已有文本并迁移到新线程草稿
+  const inputText = userInput.value
+  const threadId = await ensureActiveThread('新的对话')
+  if (threadId && inputText) {
+    userInput.value = inputText
+    threadDraftSession.clearDraftThread()
+  }
+  return threadId
 }
 
 const handleTmpAttachmentsAdded = async () => {
@@ -2979,6 +3042,8 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
     }
     // 新建线程：把草稿态的模型选择迁移到真实线程，避免选择丢失
     promoteDraftSelection(selectedModelByThread, threadId)
+    // 该线程由草稿发送创建，清理新建对话草稿，避免已发送文本再次还原
+    threadDraftSession.clearDraftThread()
   }
   // 仅当用户显式选择过模型才下发覆盖；否则传 null，由后端使用智能体配置的模型
   const modelSpec = selectedModelByThread[threadId] || null
@@ -3521,6 +3586,10 @@ watch(
 
 watch(currentChatId, (threadId, oldThreadId) => {
   if (threadId === oldThreadId) return
+  // 旧线程已被删除时丢弃输入草稿，避免写入无法再次访问的孤儿缓存
+  const keepInput = !oldThreadId || threads.value.some((thread) => thread.id === oldThreadId)
+  // 切换线程：保存旧线程的输入草稿，并还原新线程（或新建对话）的草稿
+  userInput.value = threadDraftSession.switchThread(threadId, keepInput ? userInput.value : '')
   if (!threadId || approvalState.threadId !== threadId) {
     hideApprovalState()
   }
@@ -4219,38 +4288,33 @@ watch(currentChatId, (threadId, oldThreadId) => {
 .generating-indicator {
   display: flex;
   align-items: center;
-  padding: 0.75rem 0rem;
+  gap: 8px;
 
+  // 轻微呼吸的文本，替代原先的高亮闪动
   .generating-text {
-    margin-left: 12px;
     font-size: 14px;
     font-weight: 500;
     letter-spacing: 0.025em;
-    /* 恢复灰色调：深灰 -> 亮灰(高光) -> 深灰 */
-    background: linear-gradient(
-      90deg,
-      var(--gray-700) 0%,
-      var(--gray-700) 40%,
-      var(--gray-300) 45%,
-      var(--gray-200) 50%,
-      var(--gray-300) 55%,
-      var(--gray-700) 60%,
-      var(--gray-700) 100%
-    );
-    background-size: 200% auto;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    animation: waveFlash 2s linear infinite;
+    color: var(--gray-600);
+    animation: textBreath 1.8s ease-in-out infinite;
+  }
+
+  .generating-elapsed {
+    color: var(--gray-400);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.5;
+    white-space: nowrap;
   }
 }
 
-@keyframes waveFlash {
-  0% {
-    background-position: 200% center;
-  }
+@keyframes textBreath {
+  0%,
   100% {
-    background-position: -200% center;
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
   }
 }
 

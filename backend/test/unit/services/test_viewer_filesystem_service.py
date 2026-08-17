@@ -11,11 +11,16 @@ from yuxi.services import viewer_filesystem_service as svc
 from yuxi.services import workspace_service
 
 
-def test_resolve_local_user_data_path_blocks_upload_symlink_escape(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(sandbox_paths.conf, "save_dir", str(tmp_path))
+def _prepare_symlink_escape(tmp_path: Path, monkeypatch) -> tuple[str, str]:
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     thread_id = "thread-1"
     uid = "user-1"
     sandbox_paths.ensure_thread_dirs(thread_id, uid)
+    return thread_id, uid
+
+
+def test_resolve_local_user_data_path_blocks_upload_symlink_escape(tmp_path: Path, monkeypatch) -> None:
+    thread_id, uid = _prepare_symlink_escape(tmp_path, monkeypatch)
 
     outside_file = tmp_path / "outside.txt"
     outside_file.write_text("outside", encoding="utf-8")
@@ -29,10 +34,7 @@ def test_resolve_local_user_data_path_blocks_upload_symlink_escape(tmp_path: Pat
 
 
 def test_list_local_entries_skips_symlink_escape(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(sandbox_paths.conf, "save_dir", str(tmp_path))
-    thread_id = "thread-1"
-    uid = "user-1"
-    sandbox_paths.ensure_thread_dirs(thread_id, uid)
+    thread_id, uid = _prepare_symlink_escape(tmp_path, monkeypatch)
 
     uploads_dir = sandbox_paths.sandbox_uploads_dir(thread_id)
     (uploads_dir / "safe.txt").write_text("safe", encoding="utf-8")
@@ -50,7 +52,7 @@ async def test_read_viewer_workspace_office_file_returns_pdf_preview(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(sandbox_paths.conf, "save_dir", str(tmp_path))
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     thread_id = "thread-1"
     uid = "user-1"
     user = SimpleNamespace(uid=uid)
@@ -82,3 +84,77 @@ async def test_read_viewer_workspace_office_file_returns_pdf_preview(
     assert response.media_type == "application/pdf"
     assert response.headers["x-yuxi-preview-type"] == "pdf"
     assert body == b"%PDF-1.4\npreview"
+
+
+@pytest.mark.asyncio
+async def test_read_viewer_outputs_office_file_returns_pdf_preview(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
+    thread_id = "thread-1"
+    uid = "user-1"
+    user = SimpleNamespace(uid=uid)
+    sandbox_paths.ensure_thread_dirs(thread_id, uid)
+    target = sandbox_paths.sandbox_outputs_dir(thread_id) / "report.docx"
+    target.write_bytes(b"document")
+
+    async def fake_resolve_viewer_state(**kwargs):
+        return None, None, []
+
+    async def fake_convert(filename: str, content: bytes) -> bytes:
+        assert filename.endswith("report.docx")
+        assert content == b"document"
+        return b"%PDF-1.4\npreview"
+
+    monkeypatch.setattr(svc, "_resolve_viewer_state", fake_resolve_viewer_state)
+    monkeypatch.setattr(svc, "convert_office_to_pdf", fake_convert)
+
+    response = await svc.read_viewer_file_content(
+        thread_id=thread_id,
+        path="/home/gem/user-data/outputs/report.docx",
+        current_user=user,
+        db=None,
+    )
+    body = b""
+    async for chunk in response.body_iterator:
+        body += chunk
+
+    assert response.media_type == "application/pdf"
+    assert response.headers["x-yuxi-preview-type"] == "pdf"
+    assert response.headers["x-yuxi-preview-filename"].endswith("report.pdf")
+    assert body == b"%PDF-1.4\npreview"
+
+
+@pytest.mark.asyncio
+async def test_read_viewer_outputs_office_conversion_failure_returns_400(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
+    thread_id = "thread-1"
+    uid = "user-1"
+    user = SimpleNamespace(uid=uid)
+    sandbox_paths.ensure_thread_dirs(thread_id, uid)
+    target = sandbox_paths.sandbox_outputs_dir(thread_id) / "broken.docx"
+    target.write_bytes(b"broken")
+
+    async def fake_resolve_viewer_state(**kwargs):
+        return None, None, []
+
+    async def fake_convert(filename: str, content: bytes) -> bytes:
+        raise svc.OfficePreviewConversionError("Office 文件转换 PDF 失败: 损坏的文件")
+
+    monkeypatch.setattr(svc, "_resolve_viewer_state", fake_resolve_viewer_state)
+    monkeypatch.setattr(svc, "convert_office_to_pdf", fake_convert)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await svc.read_viewer_file_content(
+            thread_id=thread_id,
+            path="/home/gem/user-data/outputs/broken.docx",
+            current_user=user,
+            db=None,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "转换 PDF 失败" in exc_info.value.detail
