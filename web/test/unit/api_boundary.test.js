@@ -1,0 +1,240 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { createPinia, setActivePinia } from 'pinia'
+import { createServer } from 'vite'
+
+const storageValues = new Map()
+globalThis.localStorage = {
+  getItem: (key) => storageValues.get(key) ?? null,
+  setItem: (key, value) => storageValues.set(key, String(value)),
+  removeItem: (key) => storageValues.delete(key),
+  clear: () => storageValues.clear()
+}
+
+async function withServer(run) {
+  const server = await createServer({
+    server: { middlewareMode: true },
+    appType: 'custom',
+    ssr: { noExternal: ['ant-design-vue'] },
+    plugins: [
+      {
+        name: 'test-message-api',
+        enforce: 'pre',
+        resolveId(id) {
+          return id === 'ant-design-vue' ? '\0test-message-api' : null
+        },
+        load(id) {
+          if (id !== '\0test-message-api') return null
+          return `export const message = {
+            error(value) { globalThis.__apiBoundaryMessages.push(value) }
+          }`
+        }
+      }
+    ]
+  })
+
+  try {
+    await run(server)
+  } finally {
+    await server.close()
+  }
+}
+
+test('公开登录 401 保留服务端错误且不清理当前会话', async () => {
+  await withServer(async (server) => {
+    storageValues.set('user_token', 'existing-token')
+    globalThis.__apiBoundaryMessages = []
+    globalThis.window = { location: { href: '/current' } }
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ detail: '用户名或密码错误' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' }
+      })
+
+    const { authApi } = await server.ssrLoadModule('/src/apis/auth_api.js')
+
+    await assert.rejects(
+      authApi.login({ loginId: 'someone', password: 'wrong' }),
+      (error) => error.message === '用户名或密码错误' && error.status === 401
+    )
+    assert.equal(storageValues.get('user_token'), 'existing-token')
+    assert.equal(window.location.href, '/current')
+    assert.deepEqual(globalThis.__apiBoundaryMessages, [])
+  })
+})
+
+test('登录 423 保留锁定状态、文案和剩余时间响应头', async () => {
+  await withServer(async (server) => {
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ detail: '账户已锁定 60 秒' }), {
+        status: 423,
+        headers: {
+          'content-type': 'application/json',
+          'X-Lock-Remaining': '60'
+        }
+      })
+
+    const { authApi } = await server.ssrLoadModule('/src/apis/auth_api.js')
+
+    await assert.rejects(authApi.login({ loginId: 'someone', password: 'wrong' }), (error) => {
+      assert.equal(error.message, '账户已锁定 60 秒')
+      assert.equal(error.status, 423)
+      assert.equal(error.headers.get('X-Lock-Remaining'), '60')
+      return true
+    })
+  })
+})
+
+test('受保护请求的 401 才清理会话并跳转登录页', async () => {
+  await withServer(async (server) => {
+    storageValues.set('user_token', 'expired-token')
+    globalThis.__apiBoundaryMessages = []
+    globalThis.window = { location: { href: '/agent' } }
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ detail: '令牌已过期' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' }
+      })
+
+    const originalSetTimeout = globalThis.setTimeout
+    try {
+      setActivePinia(createPinia())
+      const { apiGet } = await server.ssrLoadModule('/src/apis/base.js')
+      const { useUserStore } = await server.ssrLoadModule('/src/stores/user.js')
+      const userStore = useUserStore()
+      globalThis.setTimeout = (callback) => {
+        callback()
+        return 0
+      }
+
+      await assert.rejects(apiGet('/api/protected'), (error) => error.status === 401)
+      assert.equal(userStore.isLoggedIn, false)
+      assert.equal(storageValues.has('user_token'), false)
+      assert.equal(window.location.href, '/login')
+      assert.deepEqual(globalThis.__apiBoundaryMessages, ['登录已过期，请重新登录'])
+    } finally {
+      globalThis.setTimeout = originalSetTimeout
+    }
+  })
+})
+
+test('用户 Store 的 422 传播链不泄露认证头、密码或 Pydantic input', async () => {
+  await withServer(async (server) => {
+    storageValues.clear()
+    const secretToken = 'secret-bearer-token'
+    const secretPassword = 'secret-password'
+    const secretResponse = 'secret-response-context'
+    const logged = []
+    const originalConsoleError = console.error
+
+    try {
+      console.error = (...values) => logged.push(values)
+      globalThis.fetch = async () =>
+        new Response(
+          JSON.stringify({
+            detail: [
+              {
+                loc: ['body', 'password'],
+                msg: 'Value error',
+                type: 'value_error',
+                input: secretPassword,
+                ctx: { secret: secretResponse }
+              }
+            ]
+          }),
+          {
+          status: 422,
+          statusText: 'Unprocessable Entity',
+          headers: { 'content-type': 'application/json' }
+          }
+        )
+
+      setActivePinia(createPinia())
+      const { useUserStore } = await server.ssrLoadModule('/src/stores/user.js')
+      const userStore = useUserStore()
+      userStore.token = secretToken
+      userStore.userId = 1
+
+      await assert.rejects(
+        userStore.createUser({ username: 'new-user', password: secretPassword }),
+        (error) => error.status === 422
+      )
+
+      const serializedLogs = JSON.stringify(logged)
+      assert.equal(serializedLogs.includes(secretToken), false)
+      assert.equal(serializedLogs.includes(secretPassword), false)
+      assert.equal(serializedLogs.includes(secretResponse), false)
+      assert.equal(serializedLogs.includes('/api/auth/users'), true)
+      assert.equal(serializedLogs.includes('422'), true)
+    } finally {
+      console.error = originalConsoleError
+    }
+  })
+})
+
+test('用户 Store 的普通错误传播链不附着或记录服务端任意响应上下文', async () => {
+  await withServer(async (server) => {
+    storageValues.clear()
+    const secretToken = 'secret-bearer-token'
+    const secretPassword = 'secret-password'
+    const secretResponse = 'secret-response-context'
+    const logged = []
+    const originalConsoleError = console.error
+
+    try {
+      console.error = (...values) => logged.push(values)
+      globalThis.fetch = async () =>
+        new Response(
+          JSON.stringify({
+            detail: {
+              message: secretResponse,
+              context: { note: secretPassword }
+            }
+          }),
+          {
+            status: 400,
+            statusText: secretResponse,
+            headers: { 'content-type': 'application/json' }
+          }
+        )
+
+      setActivePinia(createPinia())
+      const { useUserStore } = await server.ssrLoadModule('/src/stores/user.js')
+      const userStore = useUserStore()
+      userStore.token = secretToken
+      userStore.userId = 1
+
+      await assert.rejects(
+        userStore.createUser({ username: 'new-user', password: secretPassword }),
+        (error) => {
+          assert.equal(error.status, 400)
+          assert.equal(error.message, '请求参数错误')
+          assert.deepEqual(error.response.data, { detail: '请求参数错误' })
+          return true
+        }
+      )
+
+      const serializedLogs = JSON.stringify(logged)
+      assert.equal(serializedLogs.includes(secretToken), false)
+      assert.equal(serializedLogs.includes(secretPassword), false)
+      assert.equal(serializedLogs.includes(secretResponse), false)
+      assert.equal(serializedLogs.includes('/api/auth/users'), true)
+      assert.equal(serializedLogs.includes('400'), true)
+    } finally {
+      console.error = originalConsoleError
+    }
+  })
+})
+
+test('知识库 API 单一构造并编码文件上传端点', async () => {
+  await withServer(async (server) => {
+    const { fileApi } = await server.ssrLoadModule('/src/apis/knowledge_api.js')
+
+    assert.equal(fileApi.getUploadUrl(), '/api/knowledge/files/upload')
+    assert.equal(
+      fileApi.getUploadUrl('kb/with space'),
+      '/api/knowledge/files/upload?kb_id=kb%2Fwith%20space'
+    )
+  })
+})

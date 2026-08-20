@@ -11,7 +11,10 @@
     />
 
     <div v-if="!isDetailPage" class="extensions-content">
-      <div v-if="canAccessKnowledge && activeTab === 'knowledge'" class="tab-panel">
+      <div
+        v-if="knowledgeEnabled && canAccessKnowledge && activeTab === 'knowledge'"
+        class="tab-panel"
+      >
         <DataBaseView ref="knowledgeRef" embedded />
       </div>
       <div v-if="userStore.hasPermission('tool:manage') && activeTab === 'tools'" class="tab-panel">
@@ -30,18 +33,22 @@
 </template>
 
 <script setup>
-import { ref, watch, computed } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import ToolsCardList from '@/components/extensions/ToolsCardList.vue'
 import McpCardList from '@/components/extensions/McpCardList.vue'
 import SkillCardList from '@/components/extensions/SkillCardList.vue'
 import PageHeader from '@/components/shared/PageHeader.vue'
 import DataBaseView from '@/views/DataBaseView.vue'
+import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
+const { knowledgeEnabled } = storeToRefs(runtimeCapabilitiesStore)
 const activeTab = ref(null)
 const knowledgeRef = ref(null)
 const skillsRef = ref(null)
@@ -58,7 +65,7 @@ const canAccessSkills = computed(() =>
 
 const extensionTabs = computed(() => {
   const tabs = []
-  if (canAccessKnowledge.value) {
+  if (knowledgeEnabled.value && canAccessKnowledge.value) {
     tabs.push({ key: 'knowledge', label: '知识库' })
   }
   if (canAccessSkills.value) tabs.push({ key: 'skills', label: '技能' })
@@ -68,6 +75,8 @@ const extensionTabs = computed(() => {
 })
 const allowedTabKeys = computed(() => extensionTabs.value.map((tab) => tab.key))
 const defaultTabKey = computed(() => extensionTabs.value[0]?.key || '')
+
+onMounted(() => runtimeCapabilitiesStore.ensureLoaded())
 
 const normalizeTab = (tab) => {
   if (allowedTabKeys.value.includes(tab)) return tab
@@ -105,7 +114,7 @@ const activeChildLoading = computed(() => {
 })
 
 watch(
-  () => [route.query.tab, userStore.effectivePermissions],
+  () => [route.query.tab, userStore.effectivePermissions, knowledgeEnabled.value],
   ([tab]) => {
     const nextTab = normalizeTab(tab)
     if (activeTab.value !== nextTab) activeTab.value = nextTab

@@ -184,6 +184,17 @@ def _agent_state_signature(agent_state: AgentStatePayload | dict | None) -> str:
         return str(agent_state)
 
 
+def _current_run_token_usage(agent_state: AgentStatePayload | dict | None, run_id: str | None) -> dict:
+    """提取只属于当前 Run 的用量；缺失时保留明确的不可用事实。"""
+
+    token_usage = agent_state.get("token_usage") if isinstance(agent_state, dict) else None
+    if isinstance(token_usage, dict) and run_id and token_usage.get("current_run_id") == run_id:
+        run_usage = token_usage.get("run")
+        if isinstance(run_usage, dict):
+            return dict(run_usage)
+    return {"available": False}
+
+
 def _metadata_namespace(metadata: dict | None) -> list[str]:
     if not isinstance(metadata, dict):
         return []
@@ -402,6 +413,7 @@ async def _save_ai_message(
     trace_info: dict[str, Any] | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
+    commit: bool = True,
 ):
     content = msg_dict.get("content", "")
     tool_calls_data = msg_dict.get("tool_calls") or []
@@ -429,6 +441,7 @@ async def _save_ai_message(
         extra_metadata=extra_metadata,
         run_id=run_id,
         request_id=request_id,
+        commit=commit,
     )
 
     if ai_msg and tool_calls_data:
@@ -439,12 +452,13 @@ async def _save_ai_message(
                 tool_input=tc.get("args", {}),
                 status="pending",
                 langgraph_tool_call_id=tc.get("id"),
+                commit=commit,
             )
 
     return ai_msg
 
 
-async def _save_tool_message(conv_repo: ConversationRepository, msg_dict: dict) -> None:
+async def _save_tool_message(conv_repo: ConversationRepository, msg_dict: dict, *, commit: bool = True) -> None:
     tool_call_id = msg_dict.get("tool_call_id")
     content = msg_dict.get("content", "")
 
@@ -460,6 +474,7 @@ async def _save_tool_message(conv_repo: ConversationRepository, msg_dict: dict) 
         langgraph_tool_call_id=tool_call_id,
         tool_output=tool_output,
         status="success",
+        commit=commit,
     )
 
 
@@ -472,6 +487,7 @@ async def save_partial_message(
     trace_info: dict[str, Any] | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
+    worker_id: str | None = None,
 ):
     try:
         extra_metadata = {
@@ -489,7 +505,20 @@ async def save_partial_message(
         if trace_info:
             extra_metadata.update(trace_info)
 
-        return await conv_repo.add_message_by_thread_id(
+        run_repo = AgentRunRepository(conv_repo.db) if run_id else None
+        if run_id:
+            if not worker_id or not request_id:
+                raise ValueError("持久化 AgentRun 部分输出需要当前 worker 和 request")
+            locked_run = await run_repo.lock_output_persistence(
+                run_id,
+                worker_id=worker_id,
+                conversation_thread_id=thread_id,
+                request_id=request_id,
+            )
+            if locked_run is None:
+                raise ValueError(f"AgentRun 不存在: {run_id}")
+
+        message = await conv_repo.add_message_by_thread_id(
             thread_id=thread_id,
             role="assistant",
             content=content,
@@ -497,9 +526,16 @@ async def save_partial_message(
             extra_metadata=extra_metadata,
             run_id=run_id,
             request_id=request_id,
+            commit=run_id is None,
         )
+        if run_id and message is not None:
+            await run_repo.set_output_message(run_id, message.id, worker_id=worker_id)
+            await conv_repo.db.commit()
+        return message
 
     except Exception as e:
+        if run_id:
+            await conv_repo.db.rollback()
         logger.exception(f"Error saving message: {e}")
         return None
 
@@ -513,52 +549,92 @@ async def save_messages_from_langgraph_state(
     trace_info: dict[str, Any] | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
-) -> None:
-    messages = await _get_langgraph_messages(agent_instance, config_dict, context=context)
-    if messages is None:
-        return
+    worker_id: str | None = None,
+    complete_run: bool = False,
+    token_usage: dict[str, Any] | None = None,
+) -> bool:
+    """在有效 lease 锁内原子写入输出、绑定指针，并可同时提交 completed 终态。"""
 
-    existing_ids = await _get_existing_message_ids(conv_repo, thread_id)
-
-    last_ai_message = None
-    for msg in messages:
-        if hasattr(msg, "model_dump"):
-            msg_dict = msg.model_dump()
-        elif isinstance(msg, dict):
-            msg_dict = dict(msg)
-        else:
-            continue
-
-        msg_type = msg_dict.get("type", "unknown")
-        if msg_type == "unknown":
-            role = msg_dict.get("role")
-            if role in {"assistant", "ai"}:
-                msg_type = "ai"
-            elif role in {"user", "human"}:
-                msg_type = "human"
-            elif role == "tool":
-                msg_type = "tool"
-
-        msg_id = getattr(msg, "id", None) or msg_dict.get("id")
-        if msg_type == "human" or msg_id in existing_ids:
-            continue
-
-        if msg_type == "ai":
-            last_ai_message = await _save_ai_message(
-                conv_repo,
-                thread_id,
-                msg_dict,
-                trace_info=trace_info,
-                run_id=run_id,
+    run_repo = AgentRunRepository(conv_repo.db) if run_id else None
+    staged_run = None
+    try:
+        if run_id:
+            if not worker_id or not request_id:
+                raise ValueError("持久化 AgentRun 输出需要 worker、thread 和 request 因果归属")
+            staged_run = await run_repo.lock_output_persistence(
+                run_id,
+                worker_id=worker_id,
+                conversation_thread_id=thread_id,
                 request_id=request_id,
             )
-        elif msg_type == "tool":
-            await _save_tool_message(conv_repo, msg_dict)
+            if staged_run is None:
+                raise ValueError(f"AgentRun 不存在: {run_id}")
 
-    if run_id and last_ai_message:
-        run_repo = AgentRunRepository(conv_repo.db)
-        await run_repo.set_output_message(run_id, last_ai_message.id)
-        await conv_repo.db.commit()
+        messages = await _get_langgraph_messages(agent_instance, config_dict, context=context)
+        existing_ids = await _get_existing_message_ids(conv_repo, thread_id)
+        last_ai_message = None
+        for msg in messages or []:
+            if hasattr(msg, "model_dump"):
+                msg_dict = msg.model_dump()
+            elif isinstance(msg, dict):
+                msg_dict = dict(msg)
+            else:
+                continue
+
+            msg_type = msg_dict.get("type", "unknown")
+            if msg_type == "unknown":
+                role = msg_dict.get("role")
+                if role in {"assistant", "ai"}:
+                    msg_type = "ai"
+                elif role in {"user", "human"}:
+                    msg_type = "human"
+                elif role == "tool":
+                    msg_type = "tool"
+
+            msg_id = getattr(msg, "id", None) or msg_dict.get("id")
+            if msg_type == "human" or msg_id in existing_ids:
+                continue
+
+            if msg_type == "ai":
+                last_ai_message = await _save_ai_message(
+                    conv_repo,
+                    thread_id,
+                    msg_dict,
+                    trace_info=trace_info,
+                    run_id=run_id,
+                    request_id=request_id,
+                    commit=run_id is None,
+                )
+            elif msg_type == "tool":
+                await _save_tool_message(conv_repo, msg_dict, commit=run_id is None)
+
+        if run_id:
+            if last_ai_message is not None:
+                await run_repo.set_output_message(
+                    run_id,
+                    last_ai_message.id,
+                    worker_id=worker_id,
+                )
+            if complete_run:
+                completed_run, changed = await run_repo.set_terminal_status(
+                    run_id,
+                    status="completed",
+                    token_usage=token_usage or {"available": False},
+                    worker_id=worker_id,
+                )
+                if completed_run is None or not changed:
+                    raise ValueError("AgentRun 输出已写入但 completed 终态未能在同一事务提交")
+            await conv_repo.db.commit()
+            return complete_run
+        return False
+    except asyncio.CancelledError:
+        if run_id:
+            await conv_repo.db.rollback()
+        raise
+    except Exception:
+        if run_id:
+            await conv_repo.db.rollback()
+        raise
 
 
 def _extract_interrupt_info(state) -> Any | None:
@@ -981,6 +1057,7 @@ async def stream_agent_chat(
                             trace_info=trace_info,
                             run_id=meta.get("run_id"),
                             request_id=meta.get("request_id"),
+                            worker_id=meta.get("worker_id"),
                         )
                         meta["time_cost"] = asyncio.get_event_loop().time() - start_time
                         yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
@@ -1010,6 +1087,7 @@ async def stream_agent_chat(
                 trace_info=trace_info,
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
+                worker_id=meta.get("worker_id"),
             )
             meta["time_cost"] = asyncio.get_event_loop().time() - start_time
             yield make_chunk(status="interrupted", message="检测到敏感内容，已中断输出", meta=meta)
@@ -1035,7 +1113,7 @@ async def stream_agent_chat(
 
         # 先存储数据库，再返回 finished，避免前端查询时数据未落库
         try:
-            await save_messages_from_langgraph_state(
+            terminal_committed = await save_messages_from_langgraph_state(
                 agent_instance=agent,
                 thread_id=thread_id,
                 conv_repo=conv_repo,
@@ -1044,44 +1122,27 @@ async def stream_agent_chat(
                 trace_info=trace_info,
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
+                worker_id=meta.get("worker_id"),
+                complete_run=not interrupted,
+                token_usage=_current_run_token_usage(agent_state, meta.get("run_id")),
             )
         except Exception as e:
             logger.exception(f"Error saving messages from LangGraph state: {e}")
-            yield make_chunk(status="warning", message=f"消息保存失败: {e}", meta=meta)
+            yield make_chunk(
+                status="error",
+                error_type="output_persistence_error",
+                error_message="最终输出持久化或绑定失败",
+                meta=meta,
+            )
+            return
 
         if interrupted:
             return
 
-        yield make_chunk(status="finished", meta=meta)
+        yield make_chunk(status="finished", meta=meta, terminal_committed=terminal_committed)
 
     except (asyncio.CancelledError, ConnectionError) as e:
         logger.warning(f"Client disconnected, cancelling stream: {e}")
-
-        async def save_cleanup():
-            nonlocal full_msg
-            full_msg = _ensure_full_msg(full_msg, accumulated_content)
-
-            async with pg_manager.get_async_session_context() as new_db:
-                new_conv_repo = ConversationRepository(new_db)
-                await save_partial_message(
-                    new_conv_repo,
-                    thread_id,
-                    full_msg=full_msg,
-                    error_message="对话已中断" if not full_msg else None,
-                    error_type="interrupted",
-                    trace_info=trace_info,
-                    run_id=meta.get("run_id"),
-                    request_id=meta.get("request_id"),
-                )
-
-        cleanup_task = asyncio.create_task(save_cleanup())
-        try:
-            await asyncio.shield(cleanup_task)
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            logger.error(f"Error during cleanup save: {exc}")
-
         yield make_chunk(status="interrupted", message="对话已中断", meta=meta)
 
     except Exception as e:
@@ -1103,6 +1164,7 @@ async def stream_agent_chat(
                 trace_info=trace_info,
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
+                worker_id=meta.get("worker_id"),
             )
 
         yield make_chunk(status="error", error_type=error_type, error_message=error_msg, meta=meta)
@@ -1274,7 +1336,7 @@ async def stream_agent_resume(
         # 先存储数据库，再返回 finished，避免前端查询时数据未落库
         conv_repo = ConversationRepository(db)
         try:
-            await save_messages_from_langgraph_state(
+            terminal_committed = await save_messages_from_langgraph_state(
                 agent_instance=agent,
                 thread_id=thread_id,
                 conv_repo=conv_repo,
@@ -1283,31 +1345,27 @@ async def stream_agent_resume(
                 trace_info=trace_info,
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
+                worker_id=meta.get("worker_id"),
+                complete_run=not interrupted,
+                token_usage=_current_run_token_usage(agent_state, meta.get("run_id")),
             )
         except Exception as e:
             logger.exception(f"Error saving messages from LangGraph state: {e}")
-            yield make_resume_chunk(status="warning", message=f"消息保存失败: {e}", meta=meta)
+            yield make_resume_chunk(
+                status="error",
+                error_type="output_persistence_error",
+                error_message="最终输出持久化或绑定失败",
+                meta=meta,
+            )
+            return
 
         if interrupted:
             return
 
-        yield make_resume_chunk(status="finished", meta=meta)
+        yield make_resume_chunk(status="finished", meta=meta, terminal_committed=terminal_committed)
 
     except (asyncio.CancelledError, ConnectionError) as e:
         logger.warning(f"Client disconnected during resume: {e}")
-
-        async with pg_manager.get_async_session_context() as new_db:
-            new_conv_repo = ConversationRepository(new_db)
-            await save_partial_message(
-                new_conv_repo,
-                thread_id,
-                error_message="对话恢复已中断",
-                error_type="resume_interrupted",
-                trace_info=trace_info,
-                run_id=meta.get("run_id"),
-                request_id=meta.get("request_id"),
-            )
-
         yield make_resume_chunk(status="interrupted", message="对话恢复已中断", meta=meta)
 
     except Exception as e:
@@ -1323,6 +1381,7 @@ async def stream_agent_resume(
                 trace_info=trace_info,
                 run_id=meta.get("run_id"),
                 request_id=meta.get("request_id"),
+                worker_id=meta.get("worker_id"),
             )
 
         yield make_resume_chunk(message=f"Error during resume: {e}", status="error")

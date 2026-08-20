@@ -186,6 +186,35 @@ async def test_skill_options_require_function_permission(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_lite_resource_options_exclude_persisted_knowledge_skill(monkeypatch):
+    """LITE 切换后旧库残留的内置知识 Skill 也不能进入 Agent 默认能力。"""
+
+    async def fake_list_skills(_db, _user):
+        return [
+            types.SimpleNamespace(slug="knowledge-base", name="Knowledge Base", description=""),
+            types.SimpleNamespace(slug="skill-a", name="Skill A", description=""),
+        ]
+
+    monkeypatch.setenv("LITE_MODE", "true")
+    monkeypatch.setitem(
+        sys.modules,
+        "yuxi.agents.skills.service",
+        types.SimpleNamespace(list_accessible_skills=fake_list_skills),
+    )
+
+    options = await context_module.resolve_agent_resource_options(
+        {"knowledges", "skills"},
+        db=object(),
+        user=_user_with_permissions("skill:use"),
+    )
+
+    assert options == {
+        "knowledges": [],
+        "skills": [{"key": "skill-a", "name": "Skill A", "description": ""}],
+    }
+
+
+@pytest.mark.asyncio
 async def test_normalize_agent_context_config_expands_null_and_filters_explicit_lists(monkeypatch):
     async def fake_get_databases_by_user(_user):
         return [_knowledge_summary("kb-a"), _knowledge_summary("kb-b")]

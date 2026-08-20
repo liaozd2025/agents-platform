@@ -10,6 +10,7 @@ from fastapi import HTTPException
 import pytest
 from yuxi.agents.backends.sandbox import (
     ensure_thread_dirs,
+    sandbox_outputs_dir,
     sandbox_user_data_dir,
     sandbox_workspace_dir,
     virtual_path_for_thread_file,
@@ -699,3 +700,32 @@ async def test_viewer_rejects_kbs_namespace(test_client, standard_user):
         headers=headers,
     )
     assert download_response.status_code == 400, download_response.text
+
+
+async def test_viewer_search_requires_authentication(test_client):
+    response = await test_client.get(
+        "/api/viewer/filesystem/search",
+        params={"thread_id": "x", "query": "demo"},
+    )
+    assert response.status_code == 401
+
+
+async def test_viewer_search_matches_files_in_user_data(test_client, standard_user):
+    headers = standard_user["headers"]
+    uid = str(standard_user["user"]["uid"])
+    thread_id = await _create_thread_for_user(test_client, headers)
+
+    ensure_thread_dirs(thread_id, uid)
+    outputs_dir = sandbox_outputs_dir(thread_id)
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    (outputs_dir / "report-2026.md").write_text("report", encoding="utf-8")
+
+    response = await test_client.get(
+        "/api/viewer/filesystem/search",
+        params={"thread_id": thread_id, "query": "report"},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    entries = response.json().get("entries", [])
+    names = [entry.get("name") for entry in entries]
+    assert "report-2026.md" in names

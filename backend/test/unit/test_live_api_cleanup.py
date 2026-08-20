@@ -11,6 +11,18 @@ from test.live_api_cleanup import remove_e2e_thread_storage
 pytestmark = pytest.mark.asyncio
 
 
+async def _patch_run_row_deletion(monkeypatch: pytest.MonkeyPatch) -> list[set[str]]:
+    """打桩数据库 run 行删除，记录收集到的线程 id，保持单测不接触真实 PostgreSQL。"""
+
+    collected: list[set[str]] = []
+
+    async def fake_delete_e2e_run_rows(thread_ids: set[str]) -> None:
+        collected.append(set(thread_ids))
+
+    monkeypatch.setattr("test.live_api_cleanup._delete_e2e_run_rows", fake_delete_e2e_run_rows)
+    return collected
+
+
 async def test_cleanup_deletes_pytest_evaluation_resources_and_knowledge_databases():
     """只删除 pytest 前缀资源，并使用知识库真实返回的 kb_id。"""
 
@@ -73,6 +85,7 @@ async def test_cleanup_deletes_e2e_threads_before_temporary_agents(tmp_path, mon
     """只删除 E2E 标记的对话和智能体，并允许资源已经不存在。"""
 
     deleted_paths: list[str] = []
+    run_deletion_threads = await _patch_run_row_deletion(monkeypatch)
     monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     (tmp_path / "threads" / "thread-viewer").mkdir(parents=True)
     (tmp_path / "threads" / "thread-marked").mkdir(parents=True)
@@ -127,6 +140,7 @@ async def test_cleanup_deletes_e2e_threads_before_temporary_agents(tmp_path, mon
         "/api/chat/thread/thread-marked",
         "/api/agent/e2e-main-deadbeef",
     ]
+    assert run_deletion_threads == [{"thread-viewer", "thread-marked"}]
     assert not (tmp_path / "threads" / "thread-viewer").exists()
     assert not (tmp_path / "threads" / "thread-marked").exists()
 
@@ -135,6 +149,7 @@ async def test_cleanup_paginates_active_threads(tmp_path, monkeypatch):
     """活动线程超过单页上限时仍需清理后续页面的 E2E 对话。"""
 
     deleted_paths: list[str] = []
+    run_deletion_threads = await _patch_run_row_deletion(monkeypatch)
     offsets: list[str] = []
     monkeypatch.setenv("SAVE_DIR", str(tmp_path))
 
@@ -176,12 +191,14 @@ async def test_cleanup_paginates_active_threads(tmp_path, monkeypatch):
 
     assert offsets == ["0", "500"]
     assert deleted_paths == ["/api/chat/thread/thread-page-2"]
+    assert run_deletion_threads == [{"thread-page-2"}]
 
 
 async def test_cleanup_removes_deleted_and_subagent_thread_storage(tmp_path, monkeypatch):
     """已软删除和 subagent 状态的线程也必须回收本地沙盒目录。"""
 
     deleted_paths: list[str] = []
+    run_deletion_threads = await _patch_run_row_deletion(monkeypatch)
     monkeypatch.setenv("SAVE_DIR", str(tmp_path))
     for thread_id in ("thread-deleted", "thread-child"):
         (tmp_path / "threads" / thread_id).mkdir(parents=True)
@@ -207,6 +224,7 @@ async def test_cleanup_removes_deleted_and_subagent_thread_storage(tmp_path, mon
         )
 
     assert deleted_paths == ["/api/chat/thread/thread-child"]
+    assert run_deletion_threads == [{"thread-child", "thread-deleted"}]
     assert not (tmp_path / "threads" / "thread-deleted").exists()
     assert not (tmp_path / "threads" / "thread-child").exists()
 
@@ -225,3 +243,16 @@ async def test_remove_e2e_thread_storage_rejects_symlink(tmp_path, monkeypatch):
         remove_e2e_thread_storage("thread-e2e")
 
     assert user_dir.exists()
+
+
+async def test_is_e2e_thread_recognizes_marker_or_e2e_agent_prefix():
+    from test.live_api_cleanup import _is_e2e_thread
+
+    marked = {"id": "t1", "agent_id": "default-chatbot", "metadata": {"_yuxi_e2e": True, "test": "viewer-fs-e2e"}}
+    agent_prefix = {"id": "invocation_x", "agent_id": "e2e-agent-call-deadbeef"}
+    plain = {"id": "t2", "agent_id": "default-chatbot"}
+
+    assert _is_e2e_thread(marked)
+    assert _is_e2e_thread(agent_prefix)
+    assert not _is_e2e_thread(plain)
+    assert not _is_e2e_thread("not-a-dict")

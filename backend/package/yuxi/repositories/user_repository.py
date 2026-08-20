@@ -1,5 +1,7 @@
 """用户数据访问层 - Repository"""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime as dt
 from typing import Annotated, Any
@@ -54,10 +56,47 @@ async def _get_user_with_department_ancestors(db: AsyncSession, criterion: Any) 
 class UserRepository:
     """用户数据访问层"""
 
+    def __init__(self, db_session: AsyncSession | None = None):
+        self.db_session = db_session
+
+    @asynccontextmanager
+    async def _session(self) -> AsyncIterator[AsyncSession]:
+        """复用请求会话，未注入时创建独立事务会话。"""
+        if self.db_session is not None:
+            yield self.db_session
+            return
+        async with pg_manager.get_async_session_context() as session:
+            yield session
+
     async def get_by_id(self, id: int) -> User | None:
         """根据 ID 获取用户"""
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             return await self.get_by_id_with_db(session, id)
+
+    async def is_first_run(self) -> bool:
+        """检查系统是否尚未创建用户。"""
+        async with self._session() as session:
+            result = await session.execute(select(func.count(User.id)))
+            return (result.scalar() or 0) == 0
+
+    async def get_active_by_id(self, id: int, *, for_update: bool = False) -> User | None:
+        """根据 ID 获取未删除用户。"""
+        async with self._session() as session:
+            query = select(User).where(User.id == id, User.is_deleted == 0)
+            if for_update:
+                query = query.with_for_update()
+            result = await session.execute(query)
+            return result.scalar_one_or_none()
+
+    @staticmethod
+    async def _revoke_api_keys(session: AsyncSession, user_id: int, revoked_at: dt) -> None:
+        """撤销用户的全部 API Key，并保留已有撤销时间。"""
+
+        api_key_result = await session.execute(select(APIKey).where(APIKey.user_id == user_id))
+        for api_key in api_key_result.scalars().all():
+            api_key.is_enabled = False
+            if api_key.revoked_at is None:
+                api_key.revoked_at = revoked_at
 
     async def get_by_id_with_db(self, db: AsyncSession, id: int) -> User | None:
         """使用指定的 db 根据 ID 获取用户"""
@@ -65,7 +104,7 @@ class UserRepository:
 
     async def get_by_uid(self, uid: str) -> User | None:
         """根据 uid 获取用户"""
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             return await self.get_by_uid_with_db(session, uid)
 
     async def get_by_uid_with_db(self, db: AsyncSession, uid: str) -> User | None:
@@ -78,22 +117,51 @@ class UserRepository:
         if not normalized_uids:
             return []
 
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             result = await session.execute(select(User).where(User.uid.in_(normalized_uids)))
             return list(result.scalars().all())
 
     async def get_by_phone(self, phone: str) -> User | None:
         """根据手机号获取用户"""
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             result = await session.execute(select(User).where(User.phone_number == phone))
             return result.scalar_one_or_none()
 
-    async def list_users(self, skip: int = 0, limit: int = 100, department_id: int | None = None) -> list[User]:
+    async def get_by_login_identifier(self, identifier: str) -> User | None:
+        """按 uid 优先、手机号兜底查找登录用户。"""
+        async with self._session() as session:
+            result = await session.execute(select(User).where(User.uid == identifier))
+            user = result.scalar_one_or_none()
+            if user is not None:
+                return user
+            result = await session.execute(select(User).where(User.phone_number == identifier))
+            return result.scalar_one_or_none()
+
+    async def get_by_username(self, username: str, exclude_user_id: int | None = None) -> User | None:
+        """按用户名查找用户，可排除指定用户。"""
+        async with self._session() as session:
+            query = select(User).where(User.username == username)
+            if exclude_user_id is not None:
+                query = query.where(User.id != exclude_user_id)
+            result = await session.execute(query)
+            return result.scalar_one_or_none()
+
+    async def get_by_phone_excluding(self, phone: str, exclude_user_id: int) -> User | None:
+        """按手机号查找除指定用户外的用户。"""
+        async with self._session() as session:
+            result = await session.execute(select(User).where(User.phone_number == phone, User.id != exclude_user_id))
+            return result.scalar_one_or_none()
+
+    async def list_users(
+        self, skip: int = 0, limit: int = 100, department_id: int | None = None, role: str | None = None
+    ) -> list[User]:
         """获取用户列表"""
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             query = select(User).where(User.is_deleted == 0)
             if department_id is not None:
                 query = query.where(User.department_id == department_id)
+            if role is not None:
+                query = query.join(UserRoleAssignment).join(Role).where(Role.code == role)
             query = query.order_by(User.id.asc()).offset(skip).limit(limit)
             result = await session.execute(query)
             return list(result.scalars().all())
@@ -103,6 +171,7 @@ class UserRepository:
         skip: int = 0,
         limit: int | None = 100,
         department_id: int | None = None,
+        role: str | None = None,
         *,
         session: AsyncSession | None = None,
     ) -> Annotated[list[tuple[User, str | None]], "用户列表，包含组织名称并挂载祖先路径"]:
@@ -125,6 +194,8 @@ class UserRepository:
         )
         if department_id is not None:
             query = query.where(User.department_id == department_id)
+        if role is not None:
+            query = query.join(UserRoleAssignment).join(Role).where(Role.code == role)
         query = query.order_by(User.id.asc()).offset(skip)
         if limit is not None:
             query = query.limit(limit)
@@ -133,15 +204,14 @@ class UserRepository:
             result = await session.execute(query)
             return [(_attach_department_ancestors(user, path), name) for user, name, path in result.all()]
 
-        async with pg_manager.get_async_session_context() as managed_session:
+        async with self._session() as managed_session:
             result = await managed_session.execute(query)
             return [(_attach_department_ancestors(user, path), name) for user, name, path in result.all()]
 
     async def create(self, data: dict[str, Any], *, default_role_code: str = "user") -> User:
         """创建用户"""
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             user = await self.create_with_db(session, data, default_role_code=default_role_code)
-            await session.commit()
             await session.refresh(user)
         return user
 
@@ -168,9 +238,17 @@ class UserRepository:
         await db.flush()
         return user
 
+    async def save(self, user: User, *, refresh: bool = False) -> User:
+        """flush 用户实体的当前变更，事务提交由用例 owner 负责。"""
+        async with self._session() as session:
+            await session.flush()
+            if refresh:
+                await session.refresh(user)
+            return user
+
     async def update(self, id: int, data: dict[str, Any]) -> User | None:
         """更新用户"""
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             result = await session.execute(select(User).where(User.id == id, User.is_deleted == 0))
             user = result.scalar_one_or_none()
             if user is None:
@@ -178,12 +256,13 @@ class UserRepository:
             for key, value in data.items():
                 if key != "id":
                     setattr(user, key, value)
+            await session.flush()
         return user
 
     async def soft_delete(self, id: int, username: str | None = None, phone_number: str | None = None) -> bool:
         """软删除用户"""
-        async with pg_manager.get_async_session_context() as session:
-            result = await session.execute(select(User).where(User.id == id, User.is_deleted == 0))
+        async with self._session() as session:
+            result = await session.execute(select(User).where(User.id == id, User.is_deleted == 0).with_for_update())
             user = result.scalar_one_or_none()
             if user is None:
                 return False
@@ -197,26 +276,37 @@ class UserRepository:
                 user.username = f"已注销用户-{hash_suffix}"
             if phone_number:
                 user.phone_number = None
-            api_key_result = await session.execute(select(APIKey).where(APIKey.user_id == user.id))
-            for api_key in api_key_result.scalars().all():
-                api_key.is_enabled = False
+            await self._revoke_api_keys(session, user.id, user.deleted_at)
+            await session.flush()
         return True
+
+    async def delete_for_admin(self, user: User) -> None:
+        """软删除用户并在同一事务中不可恢复地撤销其 API Key。"""
+        async with self._session() as session:
+            user.is_deleted = 1
+            user.deleted_at = _utc_now()
+            user.username = f"已注销用户-{user.id}"
+            user.phone_number = None
+            user.password_hash = "DELETED"
+            user.avatar = None
+            await self._revoke_api_keys(session, user.id, user.deleted_at)
+            await session.flush()
 
     async def exists_by_uid(self, uid: str) -> bool:
         """检查 uid 是否存在"""
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             result = await session.execute(select(User.id).where(User.uid == uid))
             return result.scalar_one_or_none() is not None
 
     async def exists_by_phone(self, phone: str) -> bool:
         """检查手机号是否存在"""
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             result = await session.execute(select(User.id).where(User.phone_number == phone))
             return result.scalar_one_or_none() is not None
 
     async def count(self, department_id: int | None = None) -> int:
         """统计用户数量"""
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             query = select(func.count(User.id)).where(User.is_deleted == 0)
             if department_id is not None:
                 query = query.where(User.department_id == department_id)
@@ -225,6 +315,20 @@ class UserRepository:
 
     async def get_all_uids(self) -> list[str]:
         """获取所有 uid"""
-        async with pg_manager.get_async_session_context() as session:
+        async with self._session() as session:
             result = await session.execute(select(User.uid))
             return [uid for (uid,) in result.all()]
+
+    async def get_admin_count_in_department(self, department_id: int, exclude_user_id: int | None = None) -> int:
+        """统计部门中管理员数量"""
+        async with self._session() as session:
+            query = (
+                select(func.count(func.distinct(User.id)))
+                .join(UserRoleAssignment)
+                .join(Role)
+                .where(User.department_id == department_id, Role.code == "admin", User.is_deleted == 0)
+            )
+            if exclude_user_id is not None:
+                query = query.where(User.id != exclude_user_id)
+            result = await session.execute(query)
+            return result.scalar() or 0

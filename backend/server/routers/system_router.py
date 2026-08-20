@@ -3,12 +3,15 @@ from pathlib import Path
 
 import aiofiles
 import yaml
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi import get_version
 from yuxi.config.options import invalidate_option_cache, system_options, update_option_value
+from yuxi.config.runtime import knowledge_capability_enabled
 from yuxi.permissions.authorization import AuthorizationContext
+from yuxi.services.readiness_service import get_readiness
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.logging_config import logger
 
@@ -37,7 +40,6 @@ def _require_config_permissions(authorization: AuthorizationContext, keys: set[s
         if not authorization.has_permission(permission_key):
             raise HTTPException(status_code=403, detail=f"缺少功能权限: {permission_key}")
 
-
 # =============================================================================
 # === 健康检查分组 ===
 # =============================================================================
@@ -45,33 +47,48 @@ def _require_config_permissions(authorization: AuthorizationContext, keys: set[s
 
 @system.get("/health")
 async def health_check():
-    """系统健康检查接口（公开接口）"""
-    return {"status": "ok", "message": "服务正常运行", "version": get_version()}
+    """返回 API 进程 liveness，不代表依赖或业务链路就绪。"""
+    return {"status": "ok", "message": "进程正常运行", "version": get_version()}
+
+
+@system.get("/ready")
+async def readiness_check(request: Request):
+    """验证 API 接流量所需的启动状态与核心依赖。"""
+
+    result = await get_readiness(
+        startup_complete=bool(getattr(request.app.state, "startup_complete", False)),
+        startup_components=getattr(request.app.state, "startup_components", None),
+    )
+    result["version"] = get_version()
+    return JSONResponse(status_code=200 if result["status"] == "ready" else 503, content=result)
 
 
 @system.get("/discovery")
 async def discovery():
     """系统能力发现接口（公开接口）"""
+    knowledge_enabled = knowledge_capability_enabled()
     return {
         "name": "Yuxi",
         "version": get_version(),
         "api_prefix": "/api",
         "capabilities": {
+            "features": {"knowledge": knowledge_enabled},
             "cli": {
                 "min_cli_version": "0.1.0",
                 "browser_login": True,
                 "api_key_auth": True,
                 "remote_config": True,
-                "kb_upload": True,
-                "kb_list": True,
-                "kb_files": True,
-                "kb_query": True,
-                "kb_open": True,
-                "kb_find": True,
-            }
+                "kb_upload": knowledge_enabled,
+                "kb_list": knowledge_enabled,
+                "kb_files": knowledge_enabled,
+                "kb_query": knowledge_enabled,
+                "kb_open": knowledge_enabled,
+                "kb_find": knowledge_enabled,
+            },
         },
         "endpoints": {
             "health": "/api/system/health",
+            "readiness": "/api/system/ready",
             "auth_me": "/api/auth/me",
             "cli_auth_sessions": "/api/auth/cli/sessions",
             "cli_auth_authorize": "/auth/cli/authorize",

@@ -12,6 +12,7 @@ from yuxi.agents.backends.sandbox.paths import (
     virtual_path_for_thread_file,
 )
 from yuxi.agents.toolkits.registry import tool
+from yuxi.config.runtime import knowledge_capability_enabled
 from yuxi.knowledge.schemas import (
     FindInputSchema,
     OpenInputSchema,
@@ -389,6 +390,8 @@ async def download_kb_file(
 
 
 def _get_knowledge_base():
+    if not knowledge_capability_enabled():
+        raise RuntimeError("LITE 模式未启用知识库能力")
     from yuxi.knowledge.runtime import knowledge_base
 
     return knowledge_base

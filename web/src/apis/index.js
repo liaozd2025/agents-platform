@@ -17,6 +17,7 @@ export * from './mention_api' // 提及搜索 API
 export * from './user_api' // 用户资源 API
 export * from './user_config_api' // 用户配置 API
 export * from './role_api' // 角色与权限 API
+export * from './auth_api' // 认证与用户管理 API
 
 // 导出基础工具函数
 export { apiGet, apiPost, apiPut, apiDelete } from './base'

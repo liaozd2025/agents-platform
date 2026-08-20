@@ -72,16 +72,19 @@ class KnowledgeBaseManager:
         rows = await kb_repo.get_all()
 
         kb_types_in_use = set()
+        unsupported_types = set()
         for row in rows:
             kb_type = row.kb_type or "milvus"
             if KnowledgeBaseFactory.is_type_supported(kb_type):
                 kb_types_in_use.add(kb_type)
             else:
                 logger.warning(f"Skip unsupported knowledge base type during initialization: {kb_type}")
+                unsupported_types.add(kb_type)
 
         logger.info(f"[InitializeKB] 发现 {len(kb_types_in_use)} 种知识库类型: {kb_types_in_use}")
 
         # 为每种使用中的知识库类型创建共享执行器。
+        failures = [f"{kb_type}:unsupported" for kb_type in unsupported_types]
         for kb_type in kb_types_in_use:
             if not KnowledgeBaseFactory.is_type_supported(kb_type):
                 logger.warning(f"[InitializeKB] Skip initialization for unsupported knowledge base type: {kb_type}")
@@ -94,6 +97,9 @@ class KnowledgeBaseManager:
                 import traceback
 
                 logger.error(traceback.format_exc())
+                failures.append(f"{kb_type}:{type(e).__name__}")
+        if failures:
+            raise RuntimeError(f"Used knowledge backends failed to initialize: {', '.join(sorted(failures))}")
 
     def _get_or_create_kb_instance(self, kb_type: str) -> KnowledgeBase:
         """

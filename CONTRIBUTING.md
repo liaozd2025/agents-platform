@@ -33,9 +33,9 @@ docker logs api-dev --tail 100
 示例：
 
 ```bash
-git checkout -b feature/your-change
-git commit -m "feat: add knowledge graph import flow"
-git push origin feature/your-change
+git checkout -b feat/your-change
+git commit -m "feat: 新增知识图谱导入流程"
+git push origin feat/your-change
 ```
 
 ## 代码要求
@@ -56,10 +56,10 @@ git push origin feature/your-change
 ```bash
 make format
 make lint
-docker compose exec api uv run pytest
+docker compose exec api uv run --group test pytest test/unit -m "not slow"
 ```
 
-- 测试脚本建议放在 `backend/test`
+- 测试按 unit / integration / e2e 分层放入 `backend/test` 对应目录，完整命令见 [测试规范](docs/develop-guides/testing-guidelines.md)
 
 ### 前端
 

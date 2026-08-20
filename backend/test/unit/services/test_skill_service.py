@@ -1194,6 +1194,27 @@ def test_owner_only_skill_can_depend_on_visible_skill():
     assert svc.can_skill_depend_on(parent, dependency) is True
 
 
+def test_list_builtin_skill_specs_rejects_missing_required_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    missing_dir = tmp_path / "buildin" / "deep-research"
+    monkeypatch.setattr(
+        svc,
+        "get_builtin_skill_specs",
+        lambda: [
+            SimpleNamespace(
+                slug="deep-research",
+                source_dir=missing_dir,
+                description="required builtin skill",
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="内置 skill 目录不存在"):
+        svc.list_builtin_skill_specs()
+
+
 @pytest.mark.asyncio
 async def test_init_builtin_skills_create_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SAVE_DIR", str(tmp_path))

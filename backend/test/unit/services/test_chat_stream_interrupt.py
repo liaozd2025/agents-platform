@@ -299,3 +299,26 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
     assert finished["status"] == "finished"
     assert finished["meta"]["agent_slug"] == "main-agent"
     assert "agent_id" not in finished["meta"]
+
+    async def fail_output_persistence(**_kwargs):
+        raise ValueError("output binding rejected")
+
+    db.commit_count = 0
+    monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fail_output_persistence)
+    failing_chunks = []
+    async for raw in stream_agent_resume(
+        thread_id="parent-thread",
+        resume_input={"ok": True},
+        meta={
+            "run_id": "resume-output-error",
+            "request_id": "resume-request-error",
+            "worker_id": "resume-worker:attempt-1",
+        },
+        current_user=SimpleNamespace(uid="user-1"),
+        db=db,
+    ):
+        failing_chunks.append(json.loads(raw.decode("utf-8")))
+
+    assert failing_chunks[-1]["status"] == "error"
+    assert failing_chunks[-1]["error_type"] == "output_persistence_error"
+    assert all(chunk.get("status") not in {"finished", "warning"} for chunk in failing_chunks)

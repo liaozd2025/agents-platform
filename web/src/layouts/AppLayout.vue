@@ -24,6 +24,7 @@ import { useChatThreadsStore } from '@/stores/chatThreads'
 import { useChatUIStore } from '@/stores/chatUI'
 import { useDatabaseStore } from '@/stores/database'
 import { useInfoStore } from '@/stores/info'
+import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
 import { useTaskerStore } from '@/stores/tasker'
 import { useUserStore } from '@/stores/user'
 import {
@@ -37,7 +38,8 @@ import UserInfoComponent from '@/components/UserInfoComponent.vue'
 import DebugComponent from '@/components/DebugComponent.vue'
 import TaskCenterDrawer from '@/components/TaskCenterDrawer.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
-import ConversationSearchModal from '@/components/ConversationSearchModal.vue'
+import GlobalSearchModal from '@/components/GlobalSearchModal.vue'
+import { searchWorkspaceFiles } from '@/apis/workspace_api'
 import { SETTINGS_ROUTES } from '@/utils/settingsNavigation'
 
 const configStore = useConfigStore()
@@ -46,6 +48,7 @@ const chatThreadsStore = useChatThreadsStore()
 const chatUIStore = useChatUIStore()
 const databaseStore = useDatabaseStore()
 const infoStore = useInfoStore()
+const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
 const taskerStore = useTaskerStore()
 const userStore = useUserStore()
 const route = useRoute()
@@ -64,6 +67,7 @@ const {
 } = oaEmbedBridge
 provide('oaEmbedBridge', oaEmbedBridge)
 const { activeCount: activeCountRef, isDrawerOpen } = storeToRefs(taskerStore)
+const { knowledgeEnabled } = storeToRefs(runtimeCapabilitiesStore)
 const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
   storeToRefs(chatThreadsStore)
 const conversationRouteNames = new Set([
@@ -89,6 +93,7 @@ const layoutSidebarCollapsed = computed(() =>
 )
 const conversationSearchOpen = ref(false)
 const canUseAgents = computed(() => userStore.hasPermission('agent:use'))
+const searchModes = computed(() => (canUseAgents.value ? ['conversation', 'file'] : ['file']))
 const canAccessExtensions = computed(() =>
   [
     'knowledge_base:read',
@@ -123,6 +128,8 @@ const getRemoteConfig = async () => {
 }
 
 const getRemoteDatabase = async () => {
+  await runtimeCapabilitiesStore.ensureLoaded()
+  if (!knowledgeEnabled.value) return
   try {
     await databaseStore.loadDatabases()
   } catch (error) {
@@ -171,6 +178,7 @@ const startThreadStatusSync = () => {
   if (threadStatusSyncTimer) return
   threadStatusSyncTimer = setInterval(() => {
     if (
+      !canUseAgents.value ||
       layoutSidebarCollapsed.value ||
       (typeof document !== 'undefined' && document.visibilityState !== 'visible')
     ) {
@@ -234,7 +242,7 @@ const mainList = computed(() => {
 
   if (canAccessExtensions.value) {
     items.push({
-      name: '知识库 · 技能',
+      name: knowledgeEnabled.value ? '知识库 · 技能' : '技能',
       path: resolveAppNavigationPath(isEmbedded.value, '/extensions'),
       activePaths: [resolveAppNavigationPath(isEmbedded.value, '/extensions')],
       icon: LibraryBig,
@@ -335,6 +343,17 @@ const handleCreateConversationFromSearch = () => {
   router.push({ name: getAgentRouteName() })
 }
 
+const searchWorkspace = (query) => searchWorkspaceFiles(query)
+
+// 侧边栏搜索到工作区文件后跳转到工作区并打开对应文件
+const handleSearchSelectFile = (entry) => {
+  if (!entry?.path) return
+  router.push({
+    path: resolveAppNavigationPath(isEmbedded.value, '/workspace'),
+    query: { open: entry.path }
+  })
+}
+
 const handleDeleteChat = async (threadId) => {
   if (!threadId) return
   try {
@@ -413,15 +432,29 @@ provide('settingsModal', {
           <img :src="infoStore.organization.avatar" class="brand-avatar brand-avatar-image" />
           <PanelLeftOpen class="brand-expand-icon" size="20" />
         </button>
-        <button
+        <div
           v-if="!layoutSidebarCollapsed"
-          type="button"
-          class="sidebar-toggle"
-          aria-label="折叠侧边栏"
-          @click="toggleSidebar"
+          class="sidebar-header-actions"
+          aria-label="侧边栏操作"
         >
-          <PanelLeft size="18" />
-        </button>
+          <button
+            type="button"
+            class="sidebar-header-action"
+            :class="{ active: conversationSearchOpen }"
+            aria-label="搜索"
+            @click="openConversationSearch"
+          >
+            <Search size="17" />
+          </button>
+          <button
+            type="button"
+            class="sidebar-header-action"
+            aria-label="折叠侧边栏"
+            @click="toggleSidebar"
+          >
+            <PanelLeft size="17" />
+          </button>
+        </div>
       </div>
       <div class="nav">
         <RouterLink
@@ -446,17 +479,16 @@ provide('settingsModal', {
         </RouterLink>
 
         <button
-          v-if="canUseAgents"
+          v-if="layoutSidebarCollapsed"
           type="button"
           class="nav-item"
           :class="{ active: conversationSearchOpen }"
+          aria-label="搜索"
           @click.stop="openConversationSearch"
         >
-          <a-tooltip placement="right" :open="layoutSidebarCollapsed ? undefined : false">
-            <template #title>搜索</template>
+          <a-tooltip placement="right" title="搜索">
             <Search class="icon" size="18" />
           </a-tooltip>
-          <span class="nav-text">搜索</span>
         </button>
 
         <RouterLink
@@ -577,13 +609,17 @@ provide('settingsModal', {
       </button>
     </div>
 
-    <ConversationSearchModal
-      v-if="canUseAgents"
+    <GlobalSearchModal
       v-model:open="conversationSearchOpen"
+      :modes="searchModes"
+      :default-mode="canUseAgents ? 'conversation' : 'file'"
       :recent-threads="threads"
+      :file-search="searchWorkspace"
+      file-placeholder="搜索工作区文件..."
       @select-thread="handleSearchSelectThread"
       @create-thread="handleCreateConversationFromSearch"
       @thread-found="handleSearchThreadFound"
+      @select-file="handleSearchSelectFile"
     />
 
     <!-- Debug Modal -->
@@ -790,15 +826,22 @@ div.header,
     white-space: nowrap;
   }
 
-  .sidebar-toggle {
+  .sidebar-header-actions {
     display: inline-flex;
-    flex: 0 0 32px;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .sidebar-header-action {
+    display: inline-flex;
+    flex: 0 0 30px;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
-    border: 1px solid transparent;
-    border-radius: 8px;
+    width: 30px;
+    height: 30px;
+    border: 0;
+    border-radius: 7px;
     background: transparent;
     color: var(--gray-600);
     cursor: pointer;
@@ -809,10 +852,13 @@ div.header,
 
     &:hover,
     &:focus-visible {
-      border-color: var(--main-50);
       background: var(--main-20);
       color: var(--main-color);
       outline: none;
+    }
+    &.active {
+      background: var(--main-20);
+      color: var(--main-color);
     }
   }
 

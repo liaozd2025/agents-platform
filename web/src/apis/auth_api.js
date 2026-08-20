@@ -2,7 +2,7 @@
  * 认证相关 API
  */
 
-import { apiGet, apiPost } from './base'
+import { apiDelete, apiGet, apiPost, apiPut } from './base'
 
 async function parseErrorDetail(response, fallbackMessage) {
   const contentType = response.headers.get('content-type') || ''
@@ -35,11 +35,7 @@ async function exchangeLoginCredential(url, payload, fallbackMessage) {
  * @returns {Promise<{enabled: boolean, provider_name?: string}>}
  */
 async function getOIDCConfig() {
-  const response = await fetch('/api/auth/oidc/config')
-  if (!response.ok) {
-    throw new Error('获取 OIDC 配置失败')
-  }
-  return response.json()
+  return apiGet('/api/auth/oidc/config', {}, false)
 }
 
 /**
@@ -49,12 +45,7 @@ async function getOIDCConfig() {
  */
 async function getOIDCLoginUrl(redirectPath = '/') {
   const params = new URLSearchParams({ redirect_path: redirectPath })
-  const response = await fetch(`/api/auth/oidc/login-url?${params}`)
-  if (!response.ok) {
-    const detail = await parseErrorDetail(response, '获取 OIDC 登录地址失败')
-    throw new Error(detail)
-  }
-  return response.json()
+  return apiGet(`/api/auth/oidc/login-url?${params}`, {}, false)
 }
 
 /**
@@ -91,6 +82,60 @@ async function exchangeOAToken(token) {
   return exchangeLoginCredential('/api/auth/oa/exchange-token', { token }, 'OA 免登录失败')
 }
 
+async function login(credentials) {
+  const formData = new FormData()
+  formData.append('username', credentials.loginId)
+  formData.append('password', credentials.password)
+  return apiPost('/api/auth/token', formData, {}, false)
+}
+
+async function initialize(admin) {
+  return apiPost('/api/auth/initialize', admin, {}, false)
+}
+
+async function checkFirstRun() {
+  return apiGet('/api/auth/check-first-run', {}, false)
+}
+
+async function getUsers({ skip = 0, limit = 100 } = {}) {
+  const params = new URLSearchParams({ skip: String(skip), limit: String(limit) })
+  return apiGet(`/api/auth/users?${params}`)
+}
+
+async function createUser(userData) {
+  return apiPost('/api/auth/users', userData)
+}
+
+async function updateUser(userId, userData) {
+  return apiPut(`/api/auth/users/${encodeURIComponent(userId)}`, userData)
+}
+
+async function deleteUser(userId) {
+  return apiDelete(`/api/auth/users/${encodeURIComponent(userId)}`)
+}
+
+async function validateUsername(username) {
+  return apiPost('/api/auth/validate-username', { username })
+}
+
+async function uploadAvatar(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return apiPost('/api/auth/upload-avatar', formData)
+}
+
+async function getCurrentUser(signal) {
+  return apiGet('/api/auth/me', signal ? { signal } : {})
+}
+
+async function updateProfile(profileData) {
+  return apiPut('/api/auth/profile', profileData)
+}
+
+async function impersonateUser(userId) {
+  return apiPost(`/api/auth/impersonate/${encodeURIComponent(userId)}`, {})
+}
+
 async function getCLIAuthSession(userCode) {
   const encoded = encodeURIComponent(userCode)
   return apiGet(`/api/auth/cli/sessions/${encoded}`)
@@ -102,6 +147,18 @@ async function approveCLIAuthSession(userCode) {
 }
 
 export const authApi = {
+  login,
+  initialize,
+  checkFirstRun,
+  getUsers,
+  createUser,
+  updateUser,
+  deleteUser,
+  validateUsername,
+  uploadAvatar,
+  getCurrentUser,
+  updateProfile,
+  impersonateUser,
   getOIDCConfig,
   getOIDCLoginUrl,
   getUserAccessOptions,

@@ -58,7 +58,7 @@ Yuxi 的 agent 跑在 `worker-dev` 进程里，`execute` 是走 HTTP 打到独�
 `agents/middlewares/summary.py`（777 行）做两级：L1 把超限 ToolMessage 卸载到 `outputs/large_tool_results/` 只留路径+预览，L2 才真正摘要，且发 `context_compression` 流式事件给前端。阈值、保留条数、摘要 prompt、L2 触发比例都在 `BaseContext` 里可调。
 
 **7. 子智能体比 deepagents 原生更进一步**
-不是进程内子图，而是**出进程、ARQ 队列驱动的独立 run**（`services/subagent_run_service.py:102`），有自己的 `agent_runs` 行和 SSE 事件流，提供 `task` / `subagent_start` / `status` / `cancel` / `await` 完整异步生命周期，并且每次都用 `_get_verified_subagent_run(run_id, uid, created_by_run_id)` 校验归属。子智能体拿子 checkpoint 线程 + 父级 uploads/outputs + 自己的 skills 作用域。
+子智能体是**出进程、ARQ 队列驱动的独立 run**（`services/subagent_run_service.py:102`），有自己的 `agent_runs` 行和 SSE 事件流，提供 `task` / `subagent_start` / `status` / `cancel` / `await` 完整异步生命周期，并且每次都用 `_get_verified_subagent_run(run_id, uid, created_by_run_id)` 校验归属。子智能体拿子 checkpoint 线程 + 父级 uploads/outputs + 自己的 skills 作用域。
 
 **8. 评估已接 Langfuse**：`docs/agents/agent-evaluation.md` —— dataset/experiment/score 交给 Langfuse，Yuxi 只负责按真实 run 链路执行样例。这个边界划得对。
 
@@ -313,7 +313,7 @@ OA 侧三种摆法：**侧边栏 / 全屏 / 右侧浮动**。侧边栏与浮动�
 | 产物预览 | **卡片 + 点击跳全屏（带会话）** | 停靠面板 |
 | 知识库/图谱/仪表盘/扩展/评估 | 砍 | 保留 |
 
-注意：窄档保留了全部对话能力，所以它**不是"精简版"，而是响应式重排** —— 工作量在布局而不在功能裁剪。
+注意：窄档保留全部对话能力并采用**响应式重排**，工作量集中在布局。
 
 ### 好消息：这套机制现有代码已经做了一半
 

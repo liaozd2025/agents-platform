@@ -48,6 +48,8 @@ cd Yuxi
 脚本会引导你完成以下配置：
 - 创建 `.env` 配置文件
 - 设置 `SILICONFLOW_API_KEY`（必需，用于调用大模型）
+- 独立生成并持久保存 `JWT_SECRET_KEY`、`API_KEY_DERIVATION_SECRET` 和 `SANDBOX_PROVISIONER_TOKEN`
+- 拒绝短于 32 字符或彼此复用的安全密钥，并将 Linux/macOS `.env` 权限收紧为 `600`
 - 设置 `TAVILY_API_KEY`（可选，用于搜索服务）
 - 自动拉取必需的 Docker 镜像
 
@@ -64,8 +66,13 @@ cd Yuxi
 # 复制环境变量模板
 cp .env.template .env
 
-# 编辑 .env 文件，填入你的 API Key
+# 编辑 .env 文件，填入模型 API Key，并为下列三项分别生成不同的随机值
+# JWT_SECRET_KEY=$(openssl rand -hex 32)
+# API_KEY_DERIVATION_SECRET=$(openssl rand -hex 32)
+# SANDBOX_PROVISIONER_TOKEN=$(openssl rand -hex 32)
 ```
+
+也可以在复制模板后运行初始化脚本；脚本会检测已有 `.env`，只补齐缺失的 required 配置。三个安全密钥不能复用，后续重建与升级必须保留原值。
 
 ### 步骤三：启动服务
 
@@ -176,3 +183,4 @@ docker restart api-dev
 - 探索知识库功能：阅读 [知识库与知识图谱](./knowledge-base.md)
 - 学习智能体开发：阅读 [智能体开发](../agents/agents-config.md)
 - 深入了解配置系统：阅读 [配置系统详解](../advanced/configuration.md)
+- 理解运行时状态与边界：按顺序阅读 [机制详解](../mechanisms/index.md)

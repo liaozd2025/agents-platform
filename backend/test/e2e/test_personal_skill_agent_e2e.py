@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
-from e2e_helpers import cancel_run, consume_events, wait_for_run
+from e2e_helpers import cancel_run, consume_events, skip_if_external_quota, wait_for_run
 from test.live_api_cleanup import remove_e2e_thread_storage
 from yuxi.agents.skills.service import get_personal_skills_root_dir, get_thread_skills_root_dir
 from yuxi.utils.paths import VIRTUAL_PATH_WORKSPACE_SKILLS
@@ -112,6 +112,8 @@ async def test_main_agent_reads_personal_skill_from_workspace(
         event_counts = await consume_events(e2e_client, e2e_headers, run_id)
         assert event_counts.get("messages", 0) > 0, event_counts
         run_payload = await wait_for_run(e2e_client, e2e_headers, run_id)
+        if run_payload.get("status") != "completed":
+            skip_if_external_quota(run_payload.get("error_message"))
         assert run_payload.get("status") == "completed", run_payload
 
         result_response = await e2e_client.get(f"/api/agent/runs/{run_id}/result", headers=e2e_headers)

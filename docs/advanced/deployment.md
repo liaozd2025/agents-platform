@@ -32,12 +32,13 @@ NEO4J_PASSWORD=
 MINIO_ACCESS_KEY=
 MINIO_SECRET_KEY=
 JWT_SECRET_KEY=
+API_KEY_DERIVATION_SECRET=
 YUXI_INSTANCE_ID=
 SANDBOX_PROVISIONER_TOKEN=
 SILICONFLOW_API_KEY=
 ```
 
-生产 Compose 会在前七项配置缺失或为空时拒绝启动，并提示具体变量名。`JWT_SECRET_KEY` 和 `SANDBOX_PROVISIONER_TOKEN` 均应至少使用 32 字节随机值并持久保存，可分别使用 `openssl rand -hex 32` 生成；两者不能复用。`YUXI_INSTANCE_ID` 应是每套部署稳定且唯一的实例标识。模型 API 密钥按实际使用的供应商配置。
+生产 Compose 会在前八项配置缺失或为空时拒绝启动，并提示具体变量名。`JWT_SECRET_KEY`、`API_KEY_DERIVATION_SECRET` 和 `SANDBOX_PROVISIONER_TOKEN` 均应至少使用 32 字节随机值并持久保存，可分别使用 `openssl rand -hex 32` 生成；三者不能复用，API/worker startup 也会执行该独立性检查。初始化脚本会拒绝短值和复用值，Linux/macOS 下把 `.env` 权限收紧为 `600`。`API_KEY_DERIVATION_SECRET` 决定幂等 API Key 的安全重放，升级时必须在重建 API/worker 前生成，之后轮换会使既有创建请求无法重放原 secret。`YUXI_INSTANCE_ID` 应是每套部署稳定且唯一的实例标识。模型 API 密钥按实际使用的供应商配置。
 
 ### 2. 启动服务
 
@@ -54,7 +55,10 @@ docker compose -f docker-compose.prod.yml --profile all up -d --build
 ### 3. 验证部署
 
 - Web 访问：http://localhost（直接通过 80 端口）
-- API 健康检查：`curl http://localhost/api/system/health`
+- API 进程存活：`curl http://localhost/api/system/health`
+- API 接流量就绪（启动完成、PostgreSQL/Redis 可用且兼容 worker 正在续租）：`curl http://localhost/api/system/ready`
+
+`/api/system/ready` 只证明核心运行依赖满足接流量条件，不替代登录、对话、知识库或 Agent Run 的真实业务链路验收。
 
 公开头像和 Agent 图片通过前端同源路径 `/minio/public/...` 读取，由 Nginx 只读代理到 MinIO 的 `public` bucket。无需也不应向公网开放 MinIO 的 `9000` 对象 API 或 `9001` 管理控制台；知识库等私有 bucket 不经过这个代理。需要使用独立静态资源域名时，可在 `.env.prod` 中设置 `MINIO_PUBLIC_URL=https://assets.example.com`，并在该域名侧保持同等的只读 bucket 限制。
 
@@ -85,7 +89,7 @@ PostgreSQL 可以在数据库容器内使用交互式命令修改，避免新密
 docker compose -f docker-compose.prod.yml exec postgres psql -U postgres -d yuxi -c '\password postgres'
 ```
 
-Neo4j 应使用 `cypher-shell` 的当前用户密码修改流程；MinIO 应使用 `mc admin` 或部署所采用的密钥管理流程。不要把真实密码写入文档、测试脚本或命令历史。完成凭据轮换并配置 `SANDBOX_PROVISIONER_TOKEN` 后，再执行下面的重建命令。
+Neo4j 应使用 `cypher-shell` 的当前用户密码修改流程；MinIO 应使用 `mc admin` 或部署所采用的密钥管理流程。不要把真实密码写入文档、测试脚本或命令历史。完成凭据轮换并分别配置 `API_KEY_DERIVATION_SECRET`、`SANDBOX_PROVISIONER_TOKEN` 后，再执行下面的重建命令。
 
 ### 更新代码
 
@@ -95,6 +99,15 @@ git pull
 
 # 重新构建并启动
 docker compose -f docker-compose.prod.yml up -d --build
+```
+
+### 重建 Redis 后重启 worker
+
+arq worker 在 Redis 断连后不会自动重连。重建或升级 Redis 容器后，需重启 worker 才能恢复 `/api/system/ready`：
+
+```bash
+docker compose -f docker-compose.prod.yml up -d redis
+docker compose -f docker-compose.prod.yml restart worker
 ```
 
 生产 Compose 不再向宿主机发布 PostgreSQL 和文档解析服务端口。确需从宿主机维护时，优先使用 `docker compose exec`；不要为了临时调试把这些端口重新暴露到公网。
@@ -108,3 +121,35 @@ docker logs -f api-prod
 # Nginx 访问日志
 docker logs -f web-prod
 ```
+
+## 第三方组件与许可证
+
+Yuxi 本体采用 MIT 许可证，但 Compose 引入的第三方组件保留各自原始许可证。当前拓扑下，Yuxi 后端与这些组件均为独立进程，分别通过 bolt（Neo4j）、S3 API（MinIO）与原生协议（PostgreSQL、Redis、Milvus）通信，属于进程间聚合（mere aggregation），Yuxi 的 MIT 代码不构成 GPL/AGPL 意义下的衍生作品。
+
+| 组件 | 镜像 | 许可证 | 在 Yuxi 中的角色 |
+|------|------------------|--------|------------------|
+| Neo4j Community | `neo4j:5.26.29` | GPL-3.0-only | 知识图谱存储（`graph` 服务） |
+| MinIO | `minio/minio:RELEASE.2023-03-20T20-16-18Z` | AGPL-3.0 | Yuxi 对象存储（头像、Agent 图片、知识库文件）与 Milvus 存储依赖 |
+| Milvus | `milvusdb/milvus:v2.5.6` | Apache-2.0 | 向量检索 |
+| etcd | `quay.io/coreos/etcd:v3.5.5` | Apache-2.0 | Milvus 元数据 |
+| PostgreSQL | `postgres:16` | PostgreSQL License | 业务主库 |
+| Redis | `redis:7.4.10-alpine` | RSALv2/SSPLv1（非 OSI；7.2 及更早为 BSD-3-Clause） | 投递、短期事件与缓存 |
+
+其中 Neo4j、MinIO、Milvus、etcd 与 Redis 已锁定精确版本；PostgreSQL 仍为浮动 tag，可按部署需要自行固定。上表只说明主要应用组件本体的许可证，不代表完整容器镜像内的基础系统与依赖包均为宽松许可证；离线再分发前需按实际镜像核对软件物料清单、许可证声明与对应源码义务。
+
+Redis 7.4 起采用 RSALv2/SSPLv1 双许可（均非 OSI）：自托管使用、修改与再分发（无论是否修改）均被允许。两条路径的差异在于托管服务——RSALv2 不得把 Redis 本身作为托管服务对外提供；SSPLv1 允许托管，条件是开源整个服务管理栈。自托管 Compose 部署通常按 RSALv2 路径理解即可。
+
+### 再分发与托管义务
+
+以下情形会触发相应组件许可证的额外义务：
+
+1. **再分发镜像**：`docker/save_docker_images.sh` / `save_docker_images.ps1` 把镜像导出为 tar 交付给第三方时，构成对 GPL/AGPL 软件的再分发。除保留 tag/digest、许可证文本和原始声明外，还需按 GPLv3/AGPLv3 第 6 节选择与交付方式匹配的源码路径：通过物理介质交付时随附机器可读的完整对应源码，或附带对任何持有目标代码者有效的书面源码要约；要约至少有效三年，并在仍为该产品型号提供备件或客户支持期间持续有效，承诺按不高于合理物理交付成本提供源码介质或免费网络下载。通过指定网络位置提供镜像时，以同等方式且不额外收费地提供精确对应源码。源码可由不同的第三方服务器托管，但再分发者仍须在镜像下载位置旁提供清晰指引，并确保源码在所需期限内持续可用。
+2. **修改 AGPL 组件**：修改 MinIO 并对外提供网络服务时，需按 AGPL-3.0 向用户提供修改后的对应源码；未修改的上游版本仅在网络中运行时不触发第 13 节的修改源码提供义务，但再分发其镜像仍须遵守上一项的第 6 节要求。仓库内 `docker/mineru.Dockerfile` 构建的 MinerU 自 3.1.0 起采用以 Apache-2.0 为基础的 MinerU 开源许可（含规模化商用门槛与归属标注条款），以其 Dockerfile 内锁定版本的注释为准。
+3. **进程内集成**：把 GPL/AGPL 组件以进程内链接方式并入自有代码会触发传染条款。Yuxi 架构不做进程内集成，二次开发也不要引入。
+
+### 商业部署
+
+- **Neo4j**：需要企业版功能或商业支持时，可改用 `neo4j:5.26-enterprise` 镜像并设置 `NEO4J_ACCEPT_LICENSE_AGREEMENT=yes`，许可条款以 Neo4j 官方订阅协议为准。
+- **MinIO**：同时承载 Yuxi 自身对象存储（头像、Agent 图片、知识库文件）与 Milvus 依赖；商业场景可评估 MinIO 商业订阅，或由运维侧替换为其他 S3 兼容对象存储并同步迁移这两部分的数据与配置。
+
+本节为工程侧整理的边界说明，不构成法律意见；对外商业交付前请由法务确认最终方案。

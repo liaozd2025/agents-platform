@@ -111,27 +111,35 @@ export const dashboardApi = {
 
   /**
    * 批量获取所有统计数据（并行请求）
+   * @param {Object} options - 当前运行时能力与组织范围
+   * @param {boolean} options.includeKnowledge - 是否请求知识库统计
+   * @param {boolean} options.includeResources - 是否请求资源统计
+   * @param {number|null} options.departmentId - 部门范围
    * @returns {Promise<Object>} - 所有统计数据
    */
-  getAllStats: async (departmentId = null) => {
+  getAllStats: async (
+    { includeKnowledge = false, includeResources = false, departmentId = null } = {}
+  ) => {
     try {
-      const [basicStats, userStats, toolStats, knowledgeStats, agentStats, resourceStats] =
-        await Promise.all([
-          apiGet(withDepartment('/api/dashboard/stats', departmentId)),
-          apiGet(withDepartment('/api/dashboard/stats/users', departmentId)),
-          apiGet(withDepartment('/api/dashboard/stats/tools', departmentId)),
-          apiGet(withDepartment('/api/dashboard/stats/knowledge', departmentId)),
-          apiGet(withDepartment('/api/dashboard/stats/agents', departmentId)),
-          apiGet(withDepartment('/api/dashboard/stats/resources', departmentId))
-        ])
+      const requests = {
+        basic: apiGet(withDepartment('/api/dashboard/stats', departmentId)),
+        users: apiGet(withDepartment('/api/dashboard/stats/users', departmentId)),
+        tools: apiGet(withDepartment('/api/dashboard/stats/tools', departmentId)),
+        agents: apiGet(withDepartment('/api/dashboard/stats/agents', departmentId))
+      }
+      if (includeKnowledge) {
+        requests.knowledge = apiGet(withDepartment('/api/dashboard/stats/knowledge', departmentId))
+      }
+      if (includeResources) {
+        requests.resources = apiGet(withDepartment('/api/dashboard/stats/resources', departmentId))
+      }
 
+      const entries = Object.entries(requests)
+      const values = await Promise.all(entries.map(([, request]) => request))
       return {
-        basic: basicStats,
-        users: userStats,
-        tools: toolStats,
-        knowledge: knowledgeStats,
-        agents: agentStats,
-        resources: resourceStats
+        knowledge: null,
+        resources: null,
+        ...Object.fromEntries(entries.map(([name], index) => [name, values[index]]))
       }
     } catch (error) {
       console.error('批量获取统计数据失败:', error)

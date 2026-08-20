@@ -1,34 +1,101 @@
 <template>
   <Teleport to="body">
-    <div v-if="open" class="conversation-search-overlay" @mousedown.self="close">
+    <div v-if="open" class="global-search-overlay" @mousedown.self="close">
       <section
-        class="conversation-search-modal"
+        class="global-search-modal"
         role="dialog"
         aria-modal="true"
-        aria-label="搜索对话"
+        :aria-label="activeMode === 'file' ? '搜索文件' : '搜索对话'"
         @keydown.down.prevent="moveSelection(1)"
         @keydown.up.prevent="moveSelection(-1)"
         @keydown.enter.prevent="confirmSelection"
         @keydown.esc.prevent="close"
       >
-        <div class="conversation-search-input-row">
+        <div class="global-search-input-row">
           <input
             ref="searchInputRef"
             v-model="searchText"
-            class="conversation-search-input"
+            class="global-search-input"
             type="text"
-            placeholder="搜索对话..."
+            :placeholder="inputPlaceholder"
             autocomplete="off"
-            aria-label="搜索对话"
+            :aria-label="activeMode === 'file' ? '搜索文件' : '搜索对话'"
           />
-          <button type="button" class="conversation-search-close" aria-label="关闭" @click="close">
+          <button type="button" class="global-search-close" aria-label="关闭" @click="close">
             <X :size="20" />
           </button>
         </div>
 
-        <div ref="resultListRef" class="conversation-search-body" @scroll="handleResultScroll">
+        <div v-if="modes.length > 1" class="global-search-mode-bar" role="tablist">
+          <button
+            v-for="mode in modes"
+            :key="mode"
+            type="button"
+            class="global-search-mode-option"
+            :class="{ active: activeMode === mode }"
+            role="tab"
+            :aria-selected="activeMode === mode"
+            @click="switchMode(mode)"
+          >
+            <MessageCircle v-if="mode === 'conversation'" :size="14" class="mode-icon" />
+            <File v-else :size="14" class="mode-icon" />
+            <span>{{ mode === 'file' ? '文件' : '对话' }}</span>
+          </button>
+        </div>
+
+        <div
+          v-if="activeMode === 'file'"
+          ref="resultListRef"
+          class="global-search-body"
+          @scroll="handleFileResultScroll"
+        >
+          <div v-if="isSearching && fileResults.length === 0" class="global-search-skeleton">
+            <div v-for="index in 5" :key="index" class="skeleton-row">
+              <span class="skeleton-dot"></span>
+              <span class="skeleton-lines">
+                <i></i>
+                <i></i>
+              </span>
+            </div>
+          </div>
+
+          <div v-else-if="fileResults.length > 0" class="global-search-results">
+            <button
+              v-for="(item, index) in fileResults"
+              :key="item.path"
+              type="button"
+              class="global-search-result"
+              :class="{ selected: selectedIndex === index }"
+              @mouseenter="selectedIndex = index"
+              @click="selectFileResult(item)"
+            >
+              <FileTypeIcon :name="item.name" :size="18" class="result-icon" />
+              <span class="result-main">
+                <span class="result-title">
+                  <template v-for="(part, partIndex) in splitName(item)" :key="partIndex">
+                    <mark v-if="part.match">{{ part.text }}</mark>
+                    <span v-else>{{ part.text }}</span>
+                  </template>
+                </span>
+                <span class="result-path">{{ item.path }}</span>
+              </span>
+              <span class="result-date">{{ formatResultDate(item.modified_at) }}</span>
+            </button>
+          </div>
+
+          <div v-else-if="fileSearchError" class="global-search-error">{{ fileSearchError }}</div>
+
+          <div v-else-if="!isSearching" class="global-search-empty">未找到相关文件</div>
+        </div>
+
+        <div
+          v-else
+          ref="resultListRef"
+          class="global-search-body"
+          @scroll="handleConversationScroll"
+        >
           <template v-if="isSearchMode">
-            <div v-if="isSearching && results.length === 0" class="conversation-search-skeleton">
+            <div v-if="isSearching && conversationResults.length === 0" class="global-search-skeleton">
               <div v-for="index in 5" :key="index" class="skeleton-row">
                 <span class="skeleton-dot"></span>
                 <span class="skeleton-lines">
@@ -38,15 +105,15 @@
               </div>
             </div>
 
-            <div v-else-if="results.length > 0" class="conversation-search-results">
+            <div v-else-if="conversationResults.length > 0" class="global-search-results">
               <button
-                v-for="(item, index) in results"
+                v-for="(item, index) in conversationResults"
                 :key="item.id"
                 type="button"
-                class="conversation-search-result"
+                class="global-search-result"
                 :class="{ selected: selectedIndex === index }"
                 @mouseenter="selectedIndex = index"
-                @click="selectSearchResult(item)"
+                @click="selectConversationResult(item)"
               >
                 <MessageCircle :size="18" class="result-icon" />
                 <span class="result-main">
@@ -62,16 +129,16 @@
                   formatResultDate(item.latest_match_at || item.updated_at)
                 }}</span>
               </button>
-              <div v-if="isLoadingMore" class="conversation-search-loading-more">加载中...</div>
+              <div v-if="isLoadingMore" class="global-search-loading-more">加载中...</div>
             </div>
 
-            <div v-else class="conversation-search-empty">未找到相关对话</div>
+            <div v-else class="global-search-empty">未找到相关对话</div>
           </template>
 
           <template v-else>
             <button
               type="button"
-              class="conversation-search-default-item"
+              class="global-search-default-item"
               :class="{ selected: selectedIndex === 0 }"
               @mouseenter="selectedIndex = 0"
               @click="createThread"
@@ -81,13 +148,13 @@
             </button>
 
             <template v-for="row in recentRows" :key="row.key">
-              <div v-if="row.type === 'label'" class="conversation-search-group-label">
+              <div v-if="row.type === 'label'" class="global-search-group-label">
                 {{ row.label }}
               </div>
               <button
                 v-else
                 type="button"
-                class="conversation-search-default-item"
+                class="global-search-default-item"
                 :class="{ selected: selectedIndex === row.actionIndex }"
                 @mouseenter="selectedIndex = row.actionIndex"
                 @click="selectRecentThread(row.thread)"
@@ -97,7 +164,7 @@
               </button>
             </template>
 
-            <div v-if="recentRows.length === 0" class="conversation-search-empty default-empty">
+            <div v-if="recentRows.length === 0" class="global-search-empty default-empty">
               暂无对话历史
             </div>
           </template>
@@ -109,11 +176,12 @@
 
 <script setup>
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import { MessageCircle, MessageCirclePlus, X } from 'lucide-vue-next'
+import { File, MessageCircle, MessageCirclePlus, X } from 'lucide-vue-next'
 import { threadApi } from '@/apis'
 import dayjs, { parseToShanghai } from '@/utils/time'
+import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 
-const SEARCH_LIMIT = 20
+const CONVERSATION_SEARCH_LIMIT = 20
 const RECENT_LIMIT = 30
 
 const props = defineProps({
@@ -121,27 +189,63 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
+  modes: {
+    type: Array,
+    default: () => ['conversation', 'file']
+  },
+  defaultMode: {
+    type: String,
+    default: 'conversation'
+  },
   recentThreads: {
     type: Array,
     default: () => []
+  },
+  fileSearch: {
+    type: Function,
+    default: null
+  },
+  filePlaceholder: {
+    type: String,
+    default: '搜索文件...'
   }
 })
 
-const emit = defineEmits(['update:open', 'select-thread', 'create-thread', 'thread-found'])
+const emit = defineEmits([
+  'update:open',
+  'select-thread',
+  'create-thread',
+  'thread-found',
+  'select-file'
+])
 
 const searchInputRef = ref(null)
 const resultListRef = ref(null)
 const searchText = ref('')
-const results = ref([])
 const selectedIndex = ref(0)
+
+const activeMode = ref(props.defaultMode)
+
+// 对话搜索状态
+const conversationResults = ref([])
 const hasMore = ref(false)
 const isSearching = ref(false)
 const isLoadingMore = ref(false)
 let searchTimer = null
 let searchRequestId = 0
 
+// 文件搜索状态
+const fileResults = ref([])
+const fileSearchError = ref('')
+let fileSearchTimer = null
+let fileSearchRequestId = 0
+
 const trimmedSearchText = computed(() => searchText.value.trim())
 const isSearchMode = computed(() => Boolean(trimmedSearchText.value))
+
+const inputPlaceholder = computed(() =>
+  activeMode.value === 'file' ? props.filePlaceholder : '搜索对话...'
+)
 
 const sortedRecentThreads = computed(() => {
   return [...props.recentThreads]
@@ -178,13 +282,20 @@ const recentRows = computed(() => {
 })
 
 const actionCount = computed(() => {
-  if (isSearchMode.value) return results.value.length
+  if (activeMode.value === 'file') return fileResults.value.length
+  if (isSearchMode.value) return conversationResults.value.length
   return 1 + sortedRecentThreads.value.length
 })
 
 const resetState = () => {
+  searchRequestId += 1
+  fileSearchRequestId += 1
+  clearTimeout(searchTimer)
+  clearTimeout(fileSearchTimer)
   searchText.value = ''
-  results.value = []
+  conversationResults.value = []
+  fileResults.value = []
+  fileSearchError.value = ''
   hasMore.value = false
   isSearching.value = false
   isLoadingMore.value = false
@@ -193,6 +304,15 @@ const resetState = () => {
 
 const close = () => {
   emit('update:open', false)
+}
+
+const switchMode = (mode) => {
+  if (!props.modes.includes(mode) || mode === activeMode.value) return
+  activeMode.value = mode
+  resetState()
+  nextTick(() => {
+    searchInputRef.value?.focus()
+  })
 }
 
 const createThread = () => {
@@ -206,10 +326,16 @@ const selectRecentThread = (thread) => {
   close()
 }
 
-const selectSearchResult = (item) => {
+const selectConversationResult = (item) => {
   if (!item?.id) return
   emit('thread-found', normalizeSearchThread(item))
   emit('select-thread', normalizeSearchThread(item))
+  close()
+}
+
+const selectFileResult = (item) => {
+  if (!item?.path) return
+  emit('select-file', item)
   close()
 }
 
@@ -231,12 +357,16 @@ const moveSelection = (delta) => {
 }
 
 const confirmSelection = () => {
-  if (isSearchMode.value) {
-    const item = results.value[selectedIndex.value]
-    if (item) selectSearchResult(item)
+  if (activeMode.value === 'file') {
+    const item = fileResults.value[selectedIndex.value]
+    if (item) selectFileResult(item)
     return
   }
-
+  if (isSearchMode.value) {
+    const item = conversationResults.value[selectedIndex.value]
+    if (item) selectConversationResult(item)
+    return
+  }
   if (selectedIndex.value === 0) {
     createThread()
     return
@@ -252,17 +382,17 @@ const scrollSelectedIntoView = () => {
   })
 }
 
-const searchThreads = async ({ reset = false } = {}) => {
+const searchConversations = async ({ reset = false } = {}) => {
   const query = trimmedSearchText.value
   if (!query) {
-    results.value = []
+    conversationResults.value = []
     hasMore.value = false
     selectedIndex.value = 0
     return
   }
 
   const requestId = ++searchRequestId
-  const offset = reset ? 0 : results.value.length
+  const offset = reset ? 0 : conversationResults.value.length
   if (reset) {
     isSearching.value = true
     hasMore.value = false
@@ -272,19 +402,21 @@ const searchThreads = async ({ reset = false } = {}) => {
 
   try {
     const response = await threadApi.searchThreads(query, {
-      limit: SEARCH_LIMIT,
+      limit: CONVERSATION_SEARCH_LIMIT,
       offset
     })
     if (requestId !== searchRequestId) return
     const items = response?.items || []
-    results.value = reset ? items : [...results.value, ...items]
+    conversationResults.value = reset ? items : [...conversationResults.value, ...items]
     hasMore.value = Boolean(response?.has_more)
     selectedIndex.value =
-      results.value.length > 0 ? Math.min(selectedIndex.value, results.value.length - 1) : 0
+      conversationResults.value.length > 0
+        ? Math.min(selectedIndex.value, conversationResults.value.length - 1)
+        : 0
   } catch (error) {
     if (requestId === searchRequestId) {
       console.warn('搜索对话失败:', error)
-      results.value = reset ? [] : results.value
+      conversationResults.value = reset ? [] : conversationResults.value
       hasMore.value = false
     }
   } finally {
@@ -295,14 +427,37 @@ const searchThreads = async ({ reset = false } = {}) => {
   }
 }
 
-const handleResultScroll = () => {
+const handleConversationScroll = () => {
   if (!isSearchMode.value || !hasMore.value || isSearching.value || isLoadingMore.value) return
   const el = resultListRef.value
   if (!el) return
   if (el.scrollTop + el.clientHeight >= el.scrollHeight - 80) {
-    searchThreads({ reset: false })
+    searchConversations({ reset: false })
   }
 }
+
+const searchFiles = async (query) => {
+  if (!props.fileSearch) return
+  const requestId = ++fileSearchRequestId
+  isSearching.value = true
+  fileSearchError.value = ''
+  try {
+    const response = await props.fileSearch(query)
+    if (requestId !== fileSearchRequestId) return
+    fileResults.value = response?.entries || []
+    selectedIndex.value = 0
+  } catch (error) {
+    if (requestId === fileSearchRequestId) {
+      console.warn('搜索文件失败:', error)
+      fileResults.value = []
+      fileSearchError.value = error?.message || '搜索失败，请重试'
+    }
+  } finally {
+    if (requestId === fileSearchRequestId) isSearching.value = false
+  }
+}
+
+const handleFileResultScroll = () => {}
 
 const getRecentGroupLabel = (thread) => {
   const parsed = parseToShanghai(thread.updated_at || thread.created_at)
@@ -345,10 +500,32 @@ const splitSnippet = (item) => {
   return parts
 }
 
+// 名称中命中关键词的部分高亮展示
+const splitName = (item) => {
+  const name = item?.name || ''
+  const query = trimmedSearchText.value
+  if (!query) return [{ text: name, match: false }]
+
+  const lowerName = name.toLowerCase()
+  const lowerQuery = query.toLowerCase()
+  const parts = []
+  let cursor = 0
+  let matchIndex = lowerName.indexOf(lowerQuery)
+  while (matchIndex >= 0) {
+    if (matchIndex > cursor) parts.push({ text: name.slice(cursor, matchIndex), match: false })
+    parts.push({ text: name.slice(matchIndex, matchIndex + query.length), match: true })
+    cursor = matchIndex + query.length
+    matchIndex = lowerName.indexOf(lowerQuery, cursor)
+  }
+  if (cursor < name.length) parts.push({ text: name.slice(cursor), match: false })
+  return parts
+}
+
 watch(
   () => props.open,
   (nextOpen) => {
     if (!nextOpen) return
+    activeMode.value = props.defaultMode
     resetState()
     nextTick(() => {
       searchInputRef.value?.focus()
@@ -357,12 +534,22 @@ watch(
 )
 
 watch(trimmedSearchText, (query) => {
-  if (searchTimer) {
-    clearTimeout(searchTimer)
-    searchTimer = null
-  }
   selectedIndex.value = 0
-  results.value = []
+  if (activeMode.value === 'file') {
+    clearTimeout(fileSearchTimer)
+    fileResults.value = []
+    fileSearchError.value = ''
+    if (!query) {
+      fileSearchRequestId += 1
+      isSearching.value = false
+      return
+    }
+    fileSearchTimer = setTimeout(() => searchFiles(query), 250)
+    return
+  }
+
+  clearTimeout(searchTimer)
+  conversationResults.value = []
   hasMore.value = false
   if (!query) {
     searchRequestId += 1
@@ -371,21 +558,20 @@ watch(trimmedSearchText, (query) => {
   }
   isSearching.value = true
   searchTimer = setTimeout(() => {
-    searchThreads({ reset: true })
+    searchConversations({ reset: true })
   }, 240)
 })
 
 onUnmounted(() => {
-  if (searchTimer) {
-    clearTimeout(searchTimer)
-    searchTimer = null
-  }
+  clearTimeout(searchTimer)
+  clearTimeout(fileSearchTimer)
   searchRequestId += 1
+  fileSearchRequestId += 1
 })
 </script>
 
 <style lang="less" scoped>
-.conversation-search-overlay {
+.global-search-overlay {
   position: fixed;
   inset: 0;
   z-index: 1200;
@@ -397,7 +583,7 @@ onUnmounted(() => {
   backdrop-filter: blur(2px);
 }
 
-.conversation-search-modal {
+.global-search-modal {
   width: min(680px, calc(100vw - 32px));
   max-height: min(620px, 72vh);
   display: flex;
@@ -411,14 +597,49 @@ onUnmounted(() => {
     0 2px 12px var(--shadow-0);
 }
 
-.conversation-search-input-row {
+.global-search-mode-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 14px 0;
+  border-bottom: 1px solid var(--gray-100);
+}
+
+.global-search-mode-tab {
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--gray-500);
+  font-size: 14px;
+  line-height: 20px;
+  cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--gray-50);
+    color: var(--gray-900);
+    outline: none;
+  }
+
+  &.active {
+    background: color-mix(in srgb, var(--main-color) 10%, transparent);
+    color: var(--main-700);
+    font-weight: 600;
+  }
+}
+
+.global-search-input-row {
   display: flex;
   align-items: center;
   min-height: 62px;
   border-bottom: 1px solid var(--gray-100);
 }
 
-.conversation-search-input {
+.global-search-input {
   flex: 1 1 auto;
   min-width: 0;
   height: 62px;
@@ -435,7 +656,7 @@ onUnmounted(() => {
   }
 }
 
-.conversation-search-close {
+.global-search-close {
   flex: 0 0 40px;
   width: 40px;
   height: 40px;
@@ -460,7 +681,7 @@ onUnmounted(() => {
   }
 }
 
-.conversation-search-body {
+.global-search-body {
   min-height: 280px;
   max-height: calc(72vh - 63px);
   overflow-y: auto;
@@ -468,8 +689,8 @@ onUnmounted(() => {
   scrollbar-width: thin;
 }
 
-.conversation-search-default-item,
-.conversation-search-result {
+.global-search-default-item,
+.global-search-result {
   width: 100%;
   min-height: 44px;
   display: flex;
@@ -493,7 +714,7 @@ onUnmounted(() => {
   }
 }
 
-.conversation-search-default-item {
+.global-search-default-item {
   height: 44px;
   padding: 0 14px;
   font-size: 15px;
@@ -505,14 +726,14 @@ onUnmounted(() => {
   color: var(--gray-700);
 }
 
-.conversation-search-group-label {
+.global-search-group-label {
   padding: 14px 14px 8px;
   color: var(--gray-500);
   font-size: 13px;
   line-height: 18px;
 }
 
-.conversation-search-result {
+.global-search-result {
   min-height: 60px;
   padding: 9px 12px;
 }
@@ -550,6 +771,15 @@ onUnmounted(() => {
   }
 }
 
+.result-path {
+  overflow: hidden;
+  color: var(--gray-600);
+  font-size: 13px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .result-date {
   flex: 0 0 auto;
   align-self: center;
@@ -558,7 +788,7 @@ onUnmounted(() => {
   line-height: 18px;
 }
 
-.conversation-search-skeleton {
+.global-search-skeleton {
   padding: 8px 14px;
 }
 
@@ -598,9 +828,16 @@ onUnmounted(() => {
   }
 }
 
-.conversation-search-empty {
+.global-search-empty {
   padding: 48px 16px;
   color: var(--gray-500);
+  font-size: 14px;
+  text-align: center;
+}
+
+.global-search-error {
+  padding: 48px 16px;
+  color: var(--color-error-500, #ff4d4f);
   font-size: 14px;
   text-align: center;
 }
@@ -609,7 +846,7 @@ onUnmounted(() => {
   padding-top: 32px;
 }
 
-.conversation-search-loading-more {
+.global-search-loading-more {
   padding: 10px 0 6px;
   color: var(--gray-500);
   font-size: 13px;
@@ -617,12 +854,68 @@ onUnmounted(() => {
 }
 
 @media (max-width: 640px) {
-  .conversation-search-overlay {
+  .global-search-overlay {
     padding-top: 12vh;
   }
 
-  .conversation-search-input {
+  .global-search-input {
     font-size: 16px;
   }
+}
+
+.global-search-mode-bar {
+  display: flex;
+  gap: 14px;
+  padding: 4px 18px 10px;
+}
+
+.global-search-mode-option {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--gray-500);
+  font-size: 13px;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: color 160ms ease;
+
+  &:hover {
+    color: var(--gray-900);
+  }
+
+  &:focus-visible {
+    outline: none;
+    color: var(--gray-900);
+  }
+
+  &.active {
+    color: var(--gray-1000);
+    font-weight: 600;
+
+    &::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -6px;
+      height: 2px;
+      border-radius: 2px;
+      background: var(--gray-1000);
+    }
+  }
+}
+
+.mode-icon {
+  flex: 0 0 auto;
+  opacity: 0.75;
+}
+
+.global-search-mode-option.active .mode-icon {
+  opacity: 1;
 }
 </style>

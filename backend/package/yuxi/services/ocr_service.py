@@ -16,7 +16,6 @@ from yuxi.config.options import (
 )
 from yuxi.knowledge.parser.factory import DocumentProcessorFactory
 from yuxi.knowledge.parser.registry import PROCESSOR_TYPES, get_parser_metadata
-from yuxi.knowledge.parser.unified import OCR_FILE_EXTENSIONS, parse_resolved_document
 from yuxi.models.providers.service import get_model_provider_by_id, resolve_api_key
 
 
@@ -97,6 +96,8 @@ async def parse_document(
         DocumentProcessorException: OCR 或文档解析器执行失败。
         StorageError: MinIO 文件读取失败。
     """
+
+    from yuxi.knowledge.parser.unified import OCR_FILE_EXTENSIONS, parse_resolved_document
 
     resolved_params = params
     suffix = Path(source.split("?", 1)[0]).suffix.lower()

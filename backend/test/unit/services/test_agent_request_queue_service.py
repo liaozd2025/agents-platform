@@ -609,7 +609,34 @@ async def test_dispatches_multiple_queued_requests_one_at_a_time(session):
     assert (await request_repo.get_by_request_id("request-b")).dispatched_run_id == run_b
     assert await request_repo.get_queue_position("request-c") == 1
 
-    await AgentRunRepository(session).set_terminal_status(run_b, status="completed")
+    run_repository = AgentRunRepository(session)
+    worker_id = "queue-test-worker"
+    _run, acquired = await run_repository.mark_running(
+        run_b,
+        worker_id=worker_id,
+        lease_seconds=60,
+    )
+    assert acquired is True
+    output_message = Message(
+        conversation_id=10,
+        run_id=run_b,
+        request_id="request-b",
+        role="assistant",
+        content="B complete",
+    )
+    session.add(output_message)
+    await session.flush()
+    await run_repository.set_output_message(
+        run_b,
+        output_message.id,
+        worker_id=worker_id,
+    )
+    _run, completed = await run_repository.set_terminal_status(
+        run_b,
+        status="completed",
+        worker_id=worker_id,
+    )
+    assert completed is True
     await session.commit()
     dispatched_c = await _dispatch_ready_head(
         db=session,

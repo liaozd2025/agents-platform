@@ -30,6 +30,7 @@ from yuxi.agents.tool_approval import DEFAULT_TOOL_APPROVAL_MODE, normalize_tool
 from yuxi.config.options import system_options
 from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.agent_repository import AgentRepository
+from yuxi.repositories.agent_run_output_repository import AgentRunOutputRepository
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.user_repository import UserRepository
@@ -811,19 +812,6 @@ async def get_agent_run_view(*, run_id: str, current_uid: str, db: AsyncSession)
     return {"run": run.to_dict()}
 
 
-def _select_output_message(messages: list[Message], *, output_message_id: int | None) -> Message | None:
-    """优先选用运行记录的输出消息，否则回退到最后一条 assistant 消息。"""
-    if output_message_id:
-        for message in messages:
-            if message.id == output_message_id and message.role == "assistant":
-                return message
-
-    for message in reversed(messages):
-        if message.role == "assistant":
-            return message
-    return None
-
-
 async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSession) -> dict:
     """加载某个 run 的最终结果（状态/输出/Langfuse trace/错误），供 chat/eval/cron 等统一复用。"""
     run = await AgentRunRepository(db).get_run_for_user(run_id, str(current_uid))
@@ -835,16 +823,14 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
             "error": {"type": "run_not_found", "message": "运行任务不存在"},
         }
 
-    messages: list[Message] = []
-    if run.conversation_id:
-        result = await db.execute(
-            select(Message)
-            .where(Message.conversation_id == run.conversation_id)
-            .order_by(Message.created_at.asc(), Message.id.asc())
+    output_message = None
+    if run.conversation_id is not None:
+        output_message = await AgentRunOutputRepository(db).get_output_message(
+            run_id=run.id,
+            conversation_id=run.conversation_id,
+            output_message_id=run.output_message_id,
+            allow_legacy_fallback=run.status == "completed",
         )
-        messages = list(result.scalars().unique().all())
-
-    output_message = _select_output_message(messages, output_message_id=run.output_message_id)
     output_metadata = (
         output_message.extra_metadata if output_message and isinstance(output_message.extra_metadata, dict) else {}
     )

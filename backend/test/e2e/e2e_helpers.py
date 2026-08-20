@@ -15,6 +15,17 @@ import pytest
 
 POLL_INTERVAL_SECONDS = float(os.getenv("E2E_RUN_POLL_INTERVAL_SECONDS", "2"))
 RUN_TIMEOUT_SECONDS = int(os.getenv("E2E_RUN_TIMEOUT_SECONDS", "240"))
+QUOTA_EXHAUSTED_MARKERS = ("Error code: 429", "Token Plan 用量上限")
+
+
+def skip_if_external_quota(payload: object) -> None:
+    """真实模型外部配额/限流（HTTP 429）时显式跳过，避免把外部额度当代码回归。
+
+    只匹配明确的 429 措辞；其余失败仍按断言失败处理，不用 skip 掩盖回归。
+    """
+    text = str(payload or "")
+    if any(marker in text for marker in QUOTA_EXHAUSTED_MARKERS):
+        pytest.skip(f"外部模型配额/限流（HTTP 429），跳过真实模型断言：{text[:120]}")
 
 
 def postgres_dsn() -> str:

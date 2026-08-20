@@ -435,6 +435,18 @@ export const queryApi = {
 
 export const fileApi = {
   /**
+   * 构造知识库文件上传端点，供需要原生上传进度的调用方复用。
+   * @param {string|null} kbId - 知识库 ID
+   * @returns {string} - 上传端点
+   */
+  getUploadUrl: (kbId = null) => {
+    if (kbId === null || kbId === undefined || kbId === '') {
+      return '/api/knowledge/files/upload'
+    }
+    return `/api/knowledge/files/upload?kb_id=${encodeURIComponent(kbId)}`
+  },
+
+  /**
    * 抓取 URL 内容
    * @param {string} url - 目标 URL
    * @param {string} kbId - 知识库 ID
@@ -470,13 +482,7 @@ export const fileApi = {
     const formData = new FormData()
     formData.append('file', file)
 
-    const url = kbId ? `/api/knowledge/files/upload?kb_id=${kbId}` : '/api/knowledge/files/upload'
-
-    return apiPost(url, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    })
+    return apiPost(fileApi.getUploadUrl(kbId), formData)
   },
 
   /**

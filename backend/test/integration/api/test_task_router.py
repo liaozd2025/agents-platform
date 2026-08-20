@@ -5,14 +5,12 @@ Integration tests for the task management router.
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 
 import pytest
+from yuxi.config.runtime import lite_mode_enabled
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
-
-_LITE_MODE = os.getenv("LITE_MODE", "").lower() in {"true", "1"}
 
 
 async def test_task_routes_require_admin(test_client, standard_user):
@@ -52,7 +50,7 @@ async def test_enqueue_document_creates_task(
     admin_headers,
 ):
     """Trigger knowledge ingestion to ensure a task record is materialised."""
-    if _LITE_MODE:
+    if lite_mode_enabled():
         enqueue_response = await test_client.post(
             "/api/knowledge/databases/lite-mode-disabled/documents",
             json={"items": [], "params": {"content_type": "file"}},

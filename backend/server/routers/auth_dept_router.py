@@ -3,22 +3,21 @@
 import re
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete as sqlalchemy_delete, select, func, update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, APIKey, Department, User
+from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.role_repository import RoleRepository
 from yuxi.repositories.user_repository import UserRepository
-from server.utils.auth_middleware import get_authorization_context, get_db, require_permission
-from yuxi.permissions.authorization import AuthorizationContext
-from yuxi.services.user_management_service import department_is_accessible, list_authorized_departments
-from yuxi.services.user_role_service import UserRoleAuthorizationError, replace_user_role_assignments
-from yuxi.utils.auth_utils import AuthUtils
 from yuxi.services.operation_log_service import log_operation
 from yuxi.services.user_identity_service import is_valid_phone_number
+from yuxi.services.user_management_service import department_is_accessible, list_authorized_departments
+from yuxi.services.user_role_service import UserRoleAuthorizationError, replace_user_role_assignments
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID
+from yuxi.utils.auth_utils import AuthUtils
+
+from server.utils.auth_middleware import get_authorization_context, get_db, require_permission
 
 # 创建路由器
 department = APIRouter(prefix="/departments", tags=["department"])
@@ -106,19 +105,10 @@ async def get_department(
     if not authorization.has_permission(permission_key):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="缺少功能权限: department:read")
     await _ensure_department_access(db, authorization, permission_key, department_id)
-    result = await db.execute(select(Department).filter(Department.id == department_id))
-    department = result.scalar_one_or_none()
-
-    if not department:
+    department = await DepartmentRepository(db).get_with_user_count(department_id)
+    if department is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
-
-    # 获取部门下用户数量
-    user_count_result = await db.execute(
-        select(func.count(User.id)).filter(User.department_id == department_id, User.is_deleted == 0)
-    )
-    user_count = user_count_result.scalar()
-
-    return {**department.to_dict(), "user_count": user_count}
+    return department
 
 
 @department.post("", response_model=DepartmentResponse, status_code=status.HTTP_201_CREATED)
@@ -129,8 +119,8 @@ async def create_department(
     db: AsyncSession = Depends(get_db),
 ):
     """在指定父节点下创建组织节点，可选地同时创建一个管理员账号"""
-    dept_repo = DepartmentRepository()
-    user_repo = UserRepository()
+    dept_repo = DepartmentRepository(db)
+    user_repo = UserRepository(db)
     current_user = authorization.user
 
     parent_id = department_data.parent_id if department_data.parent_id is not None else ROOT_DEPARTMENT_ID
@@ -241,11 +231,10 @@ async def update_department(
     db: AsyncSession = Depends(get_db),
 ):
     """更新组织节点信息，并在父节点变化时移动整棵子树"""
-    dept_repo = DepartmentRepository()
+    dept_repo = DepartmentRepository(db)
     current_user = authorization.user
     await _ensure_department_access(db, authorization, "department:update", department_id)
-    result = await db.execute(select(Department).filter(Department.id == department_id))
-    department = result.scalar_one_or_none()
+    department = await dept_repo.get_by_id(department_id)
 
     if not department:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
@@ -283,17 +272,12 @@ async def update_department(
     if target_parent is not None and target_parent.id != department.parent_id:
         await dept_repo.move_subtree(db, department, target_parent)
 
-    await db.commit()
-    await db.refresh(department)
-
-    # 记录操作
+    await dept_repo.save(department)
     await log_operation(db, current_user.id, "更新部门", f"更新部门: {department.name}", request)
+    await db.commit()
+    await dept_repo.save(department, refresh=True)
 
-    # 获取部门下用户数量
-    user_count_result = await db.execute(
-        select(func.count(User.id)).filter(User.department_id == department_id, User.is_deleted == 0)
-    )
-    user_count = user_count_result.scalar()
+    user_count = await dept_repo.count_users(department_id)
 
     return {**department.to_dict(), "user_count": user_count}
 
@@ -306,10 +290,10 @@ async def delete_department(
     db: AsyncSession = Depends(get_db),
 ):
     """删除组织节点"""
+    dept_repo = DepartmentRepository(db)
     current_user = authorization.user
     await _ensure_department_access(db, authorization, "department:delete", department_id)
-    result = await db.execute(select(Department).filter(Department.id == department_id))
-    department = result.scalar_one_or_none()
+    department = await dept_repo.get_by_id(department_id)
 
     if not department:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
@@ -318,30 +302,18 @@ async def delete_department(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="集团根不允许删除")
 
     # 不做级联删除，也不把子节点自动上提：静默重排组织结构比报错更危险
-    child_count_result = await db.execute(
-        select(func.count(Department.id)).filter(Department.parent_id == department_id)
-    )
-    if child_count_result.scalar():
+    if await dept_repo.count_children(department_id):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该组织节点下还有子节点，请先处理子节点")
 
-    user_count_result = await db.execute(
-        select(func.count(User.id)).filter(User.department_id == department_id, User.is_deleted == 0)
-    )
-    if user_count_result.scalar():
+    if await dept_repo.count_users(department_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="该组织节点下还有直属用户，请先调整用户的组织归属",
         )
 
     department_name = department.name
-    # 软删除用户不参与业务判断，但需要迁移其外键后才能删除组织节点。
-    await db.execute(
-        sqlalchemy_update(User).where(User.department_id == department_id).values(department_id=ROOT_DEPARTMENT_ID)
-    )
-    await db.execute(sqlalchemy_delete(APIKey).where(APIKey.department_id == department_id))
-    await db.delete(department)
-    await db.commit()
-
+    await dept_repo.delete_empty_node(department)
     await log_operation(db, current_user.id, "删除组织节点", f"删除组织节点: {department_name}", request)
+    await db.commit()
 
     return {"success": True, "message": "组织节点已删除"}

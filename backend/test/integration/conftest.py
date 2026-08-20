@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from test.live_api_cleanup import cleanup_pytest_knowledge_resources  # noqa: E402
+from yuxi.config.runtime import lite_mode_enabled  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 load_dotenv(PROJECT_ROOT / "test/.env.test", override=False)
@@ -30,7 +31,7 @@ load_dotenv(PROJECT_ROOT / "test/.env.test", override=False)
 API_BASE_URL = os.getenv("TEST_BASE_URL", "http://localhost:5050").rstrip("/")
 ADMIN_LOGIN = os.getenv("TEST_USERNAME")
 ADMIN_PASSWORD = os.getenv("TEST_PASSWORD")
-LITE_MODE = os.getenv("LITE_MODE", "").lower() in {"true", "1"}
+LITE_MODE = lite_mode_enabled()
 
 _ADMIN_TOKEN_CACHE: str | None = None
 HTTP_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
@@ -46,9 +47,13 @@ def ensure_live_api_schema():
         from yuxi.storage.postgres.manager import pg_manager
 
         pg_manager.initialize()
-        await pg_manager.create_tables()
+        if LITE_MODE:
+            await pg_manager.create_business_tables()
+        else:
+            await pg_manager.create_tables()
         await pg_manager.ensure_business_schema()
-        await pg_manager.ensure_knowledge_schema()
+        if not LITE_MODE:
+            await pg_manager.ensure_knowledge_schema()
 
     anyio.run(run_schema_setup)
 
