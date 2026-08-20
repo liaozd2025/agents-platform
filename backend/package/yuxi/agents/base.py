@@ -7,12 +7,12 @@ from contextlib import suppress
 from typing import Any
 
 from langchain_core.messages import ToolMessage
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver, aiosqlite
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.stream.transformers import CustomTransformer
 from langgraph.types import Command
 
+from yuxi.agents.checkpointer_config import resolve_checkpointer_backend
 from yuxi.agents.context import DEFAULT_MAX_EXECUTION_STEPS, BaseContext, resolve_agent_resource_options
 from yuxi.config import get_save_dir
 from yuxi.storage.postgres.manager import pg_manager
@@ -359,16 +359,12 @@ class BaseAgent:
         if self.checkpointer is not None:
             return self.checkpointer
 
-        backend = os.getenv("LANGGRAPH_CHECKPOINTER_BACKEND", "postgres").strip().lower()
+        backend = resolve_checkpointer_backend()
 
         if backend == "postgres":
             checkpointer = await self._create_postgres_checkpointer()
         elif backend == "sqlite":
-            try:
-                checkpointer = AsyncSqliteSaver(await self.get_async_conn())
-            except Exception as e:
-                logger.error(f"构建 sqlite checkpointer 失败: {e}, 尝试使用内存存储")
-                checkpointer = InMemorySaver()
+            checkpointer = AsyncSqliteSaver(await self.get_async_conn())
         else:
             raise ValueError(f"不支持的 LangGraph checkpointer backend: {backend}")
 
@@ -386,14 +382,20 @@ class BaseAgent:
             return self._async_conn
 
         conn = await aiosqlite.connect(os.path.join(self.workdir, "aio_history.db"))
-        # WAL + busy_timeout：api 与 worker 多进程会并发写同一 checkpoint 库，
-        # 默认回滚日志模式下写写/读写互斥，超时后抛 SQLITE_BUSY。WAL 让写不阻塞读、崩溃可恢复。
-        for pragma in ("PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000", "PRAGMA synchronous=NORMAL"):
-            cursor = await conn.execute(pragma)
-            await cursor.fetchall()
-        # Patch: langgraph's AsyncSqliteSaver expects is_alive() method which aiosqlite may not have
-        if not hasattr(conn, "is_alive"):
-            conn.is_alive = lambda: True
+        try:
+            # WAL + busy_timeout：api 与 worker 多进程会并发写同一 checkpoint 库，
+            # 默认回滚日志模式下写写/读写互斥，超时后抛 SQLITE_BUSY。WAL 让写不阻塞读、崩溃可恢复。
+            for pragma in ("PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000", "PRAGMA synchronous=NORMAL"):
+                cursor = await conn.execute(pragma)
+                await cursor.fetchall()
+            # Patch: langgraph's AsyncSqliteSaver expects is_alive() method which aiosqlite may not have
+            if not hasattr(conn, "is_alive"):
+                conn.is_alive = lambda: True
+        except BaseException:
+            with suppress(Exception):
+                await conn.close()
+            raise
+
         self._async_conn = conn
         return self._async_conn
 

@@ -10,7 +10,7 @@ import asyncpg
 import httpx
 import pytest
 
-from e2e_helpers import cancel_run, delete_agent, postgres_dsn
+from e2e_helpers import cancel_run, delete_agent, postgres_dsn, skip_if_external_quota
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.e2e, pytest.mark.slow]
 
@@ -159,6 +159,8 @@ async def test_agent_eval_and_agent_call_entrypoints_share_run_invocation_flow(
         )
         assert eval_response.status_code == 200, eval_response.text
         eval_payload = eval_response.json()
+        if eval_payload.get("status") != "completed":
+            skip_if_external_quota(eval_payload)
         assert eval_payload.get("status") == "completed", eval_payload
         assert eval_payload.get("request_id") == eval_request_id
         assert EVAL_EXPECTED_OUTPUT in str(eval_payload.get("output") or ""), eval_payload
@@ -198,6 +200,8 @@ async def test_agent_eval_and_agent_call_entrypoints_share_run_invocation_flow(
             run_id=str(agent_call_run_id),
             agent_slug=agent_slug,
         )
+        if call_payload.get("status") != "completed":
+            skip_if_external_quota(call_payload)
         assert call_payload.get("status") == "completed", call_payload
         assert call_payload.get("request_id") == agent_call_request_id
         assert CALL_EXPECTED_OUTPUT in str(call_payload.get("output") or ""), call_payload

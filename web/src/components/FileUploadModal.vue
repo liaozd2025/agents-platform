@@ -116,7 +116,7 @@
           :accept="acceptedFileTypes"
           :before-upload="beforeUpload"
           :customRequest="customRequest"
-          :action="'/api/knowledge/files/upload?kb_id=' + kbId"
+          :action="uploadUrl"
           :headers="getAuthHeaders()"
           @change="handleFileUpload"
           @drop="handleDrop"
@@ -509,6 +509,7 @@ const visible = computed({
 })
 
 const kbId = computed(() => store.kbId)
+const uploadUrl = computed(() => fileApi.getUploadUrl(kbId.value))
 const chunkLoading = computed(() => store.state.chunkLoading)
 
 // 上传模式
@@ -1103,7 +1104,7 @@ const runUploadTask = (task) => {
 
     const xhr = new XMLHttpRequest()
     task.xhr = xhr
-    xhr.open('POST', `/api/knowledge/files/upload?kb_id=${currentKbId}`)
+    xhr.open('POST', fileApi.getUploadUrl(currentKbId))
 
     const headers = getAuthHeaders()
     for (const [key, value] of Object.entries(headers)) {

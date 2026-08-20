@@ -912,6 +912,8 @@ class APIKey(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     key_hash = Column(String(64), nullable=False, unique=True, index=True)
     key_prefix = Column(String(16), nullable=False)
+    request_id = Column(String(64), nullable=True, unique=True, index=True)
+    intent_hash = Column(String(64), nullable=True)
     name = Column(String(100), nullable=False)
 
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
@@ -919,6 +921,7 @@ class APIKey(Base):
 
     expires_at = Column(DateTime, nullable=True)
     is_enabled = Column(Boolean, nullable=False, default=True)
+    revoked_at = Column(DateTime, nullable=True, index=True)
     last_used_at = Column(DateTime, nullable=True)
 
     created_by = Column(String(64), nullable=False)
@@ -945,6 +948,8 @@ class APIKey(Base):
     def is_valid(self) -> bool:
         """检查 Key 是否有效"""
         if not self.is_enabled:
+            return False
+        if self.revoked_at is not None:
             return False
         if self.expires_at and utc_now_naive() > self.expires_at:
             return False
@@ -1033,6 +1038,16 @@ class AgentRun(Base):
     token_usage = Column(JSON_VALUE, nullable=False, default=dict, comment="Run token usage grouped by model")
     error_type = Column(String(64), nullable=True, comment="Error type")
     error_message = Column(Text, nullable=True, comment="Error message")
+    worker_id = Column(String(128), nullable=True, comment="稳定 worker identity 与 attempt UUID 组成的 owner token")
+    heartbeat_at = Column(DateTime, nullable=True, comment="当前 owner 最近一次成功续租时间")
+    lease_expires_at = Column(DateTime, nullable=True, comment="当前执行 ownership 的到期时间")
+    manifest = Column(
+        JSON_VALUE,
+        nullable=True,
+        comment="首次执行前固化的运行清单（脱敏）；NULL 表示历史 Run 未知，不从当前配置反推",
+    )
+    manifest_fingerprint = Column(String(64), nullable=True, comment="运行清单规范化 JSON 的 SHA-256 指纹")
+    manifest_recorded_at = Column(DateTime, nullable=True, comment="运行清单固化时间")
     started_at = Column(DateTime, nullable=True, comment="Start time")
     finished_at = Column(DateTime, nullable=True, comment="Finish time")
     created_at = Column(DateTime, default=utc_now_naive, comment="Creation time")
@@ -1061,6 +1076,8 @@ class AgentRun(Base):
             "token_usage": self.token_usage or {},
             "error_type": self.error_type,
             "error_message": self.error_message,
+            "manifest": self.manifest,
+            "manifest_fingerprint": self.manifest_fingerprint,
             "started_at": format_utc_datetime(self.started_at),
             "finished_at": format_utc_datetime(self.finished_at),
             "created_at": format_utc_datetime(self.created_at),
@@ -1077,6 +1094,63 @@ Index(
     postgresql_where=AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
     sqlite_where=AgentRun.status.notin_(AGENT_RUN_TERMINAL_STATUSES),
 )
+Index("ix_agent_runs_status_lease_expires", AgentRun.status, AgentRun.lease_expires_at)
+
+
+class AgentRunAttempt(Base):
+    """AgentRunAttempt table - 单次执行占有的不可变事实记录。
+
+    每当 worker 取得 Run 执行所有权时创建一条记录，(run_id, attempt_no) 唯一约束
+    保证同一 Run 内序号唯一。终止事实（outcome/error/finished_at）写入后不得改写；
+    AgentRun 保存面向业务查询的聚合状态，本表是执行历史与失败事实的 Owner。
+    """
+
+    __tablename__ = "agent_run_attempts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="Primary key")
+    run_id = Column(
+        String(64),
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="Owning run ID（组合索引以 run_id 开头，无需独立索引）",
+    )
+    attempt_no = Column(Integer, nullable=False, comment="Run 内递增的执行序号")
+    worker_id = Column(String(128), nullable=False, comment="取得执行所有权的 owner token")
+    started_at = Column(DateTime, nullable=False, comment="取得执行所有权时间")
+    heartbeat_at = Column(DateTime, nullable=True, comment="本 attempt 最近一次续租时间")
+    lease_expires_at = Column(DateTime, nullable=True, comment="本 attempt 最近一次租约到期时间")
+    finished_at = Column(DateTime, nullable=True, comment="执行占有结束时间；NULL 表示仍开放")
+    outcome = Column(
+        String(32),
+        nullable=True,
+        comment="终止事实: completed/failed/cancelled/interrupted/retry_released/lease_expired",
+    )
+    error_type = Column(String(64), nullable=True, comment="失败时的结构化错误分类")
+    error_message = Column(Text, nullable=True, comment="失败时的错误摘要")
+    created_at = Column(DateTime, default=utc_now_naive, comment="Creation time")
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, comment="Update time")
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "attempt_no", name="uq_agent_run_attempts_run_attempt_no"),
+        Index("ix_agent_run_attempts_open", "run_id", "finished_at"),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "run_id": self.run_id,
+            "attempt_no": self.attempt_no,
+            "worker_id": self.worker_id,
+            "started_at": format_utc_datetime(self.started_at),
+            "heartbeat_at": format_utc_datetime(self.heartbeat_at),
+            "lease_expires_at": format_utc_datetime(self.lease_expires_at),
+            "finished_at": format_utc_datetime(self.finished_at),
+            "outcome": self.outcome,
+            "error_type": self.error_type,
+            "error_message": self.error_message,
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at),
+        }
 
 
 class AgentRunRequest(Base):

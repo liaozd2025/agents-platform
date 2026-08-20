@@ -19,6 +19,8 @@
 
 修改不熟悉的模块前，请先阅读 [ARCHITECTURE.md](https://github.com/xerrors/Yuxi/blob/main/ARCHITECTURE.md)，了解前后端边界、主要运行链路和架构不变量，再通过代码搜索定位具体实现。
 
+开始实现前，先定位受影响行为的语义 Owner：实际写入代码、repository、数据约束或当前契约。高风险主张必须在 Owner 周围闭合到独立 oracle、负向案例和实际 gate；审计报告只是从这些材料派生，不建立中央主张清单或 claim ID。改变持久状态、权限、运行生命周期、模型可见输入、兼容承诺或既有重要主张的非平凡变更，需要在同一 PR 新增或更新 [工程决策记录](./decisions/README.md)。
+
 ## 贡献流程概览
 
 一次完整贡献通常包括：
@@ -147,7 +149,7 @@ Compose 服务 `api` 和 `web` 对应的容器名分别为 `api-dev` 和 `web-de
 
 后端代码位于 `backend/`，请遵循以下约束：
 
-- 使用 Python 3.12+ 支持的现代、Pythonic 写法。
+- 使用 Python 3.12+ 支持的语法，并保持实现简洁、可读。
 - 保持路由、服务、仓储和领域逻辑的现有边界。
 - 新增测试应放入 `backend/test/unit`、`backend/test/integration` 或 `backend/test/e2e` 对应目录。
 - 不在测试或文档中写入 `.env` 中的账号、密码、Token 或其他敏感值。
@@ -189,6 +191,13 @@ backend/test/run_tests.sh all
 
 ### 格式化与静态检查
 
+先运行不会修改工作树的契约检查：
+
+```bash
+python3 scripts/verify_engineering_contracts.py
+python3 -m unittest scripts.test_verify_engineering_contracts
+```
+
 应用项目格式化规则：
 
 ```bash
@@ -205,10 +214,12 @@ docker compose exec api uv run ruff format package --check
 前端改动还应运行：
 
 ```bash
-docker compose exec web pnpm run lint
+docker compose exec web pnpm run lint:check
 docker compose exec web pnpm run test:unit
 docker compose exec web pnpm run build
 ```
+
+`pnpm run lint:check` 是 CI 使用的只读验收命令；`pnpm run lint` 会自动修改文件，只用于开发者明确执行修复，不作为自证式 gate。
 
 最后检查补丁是否包含空白错误：
 
@@ -226,7 +237,7 @@ git diff --check
 
 - 不继承当前开发会话的对话历史、推理过程或实现结论。
 - 不使用继承当前上下文的 SubAgent 代替独立 Review。
-- Reviewer 应根据需求、完整 diff、相关代码、测试和项目规范独立判断，而不是只检查开发者指定的局部代码。
+- Reviewer 应根据需求、完整 diff、相关代码、测试和项目规范独立判断；开发者指定的局部代码不能限定审查范围。
 
 Review 重点检查以下内容：
 
@@ -234,7 +245,7 @@ Review 重点检查以下内容：
 2. **实现简单且低认知负担**：优先复用现有能力，减少重复开发和重复代码；避免过度设计、过度防御、不必要抽象、细碎 helper、冗余 fallback 和过长调用链；主流程应直接、清晰、易读。
 3. **风格一致且位置合理**：新代码与相邻实现保持一致，Python 代码符合 Python 3.12+ 和 Pythonic 风格；路由、服务、仓储、前端 API、测试等内容位于正确边界，并符合 `AGENTS.md`、[ARCHITECTURE.md](https://github.com/xerrors/Yuxi/blob/main/ARCHITECTURE.md)、[测试规范](./testing-guidelines.md) 和相关开发文档。
 
-发现影响功能、代码边界或明显增加冗余和认知负担的问题时，应在提交前修正。这个阶段用于提升代码质量，不要求在 PR 中记录 Review 过程或问题清单。
+发现影响功能、代码边界或明显增加冗余和认知负担的问题时，应在提交前修正。PR 只记录 Reviewer 覆盖的需求、完整 diff 与验证范围、结论以及未解决项，不记录推理流水账或冗长对话。独立 Review 是语义裁决记录，不能替代 oracle、负向案例或实际 gate。
 
 独立 Agent Review 用于提升代码质量，不改变代码作者的责任；作者仍需对最终实现、测试结果和维护成本负责。
 
@@ -291,7 +302,14 @@ compare branch:  当前任务分支
 
 由 Agent（Codex、Claude Code 等）创建的 PR，在调用创建命令前先向用户展示拟提交的标题和完整正文，等待明确确认后再创建。确认针对的是标题和正文，不代表跳过测试、敏感信息检查、Fork/远程目标检查和 CI 结果记录等提交前必做项。
 
-PR 标题直接表达变更目标。正文按照 [PR 模板](https://github.com/xerrors/Yuxi/blob/main/.github/PULL_REQUEST_TEMPLATE.md) 填写，并按实际改动补充对应章节：
+PR 标题直接表达变更目标。正文按创建方式选择模板：
+
+- Agent 创建的 PR 使用默认的 [Agent PR 模板](https://github.com/xerrors/Yuxi/blob/main/.github/PULL_REQUEST_TEMPLATE.md)，保留工程主张、逐条验收分组、独立 Review 和未验证范围。
+- 人工或其他非 Agent 方式创建的 PR 可使用 [简化模板](https://github.com/xerrors/Yuxi/blob/main/.github/PULL_REQUEST_TEMPLATE/non-agent.md)。使用 GitHub compare 页面时增加 `template=non-agent.md` 查询参数，使用 GitHub CLI 时传入 `--template .github/PULL_REQUEST_TEMPLATE/non-agent.md`。
+
+模板复杂度不同，不改变下述非 trivial / 高风险变更的工程证据要求：
+
+所有非 trivial PR 都要用自然语言逐条列出受影响的工程主张、事实 Owner / commit point / 观察边界、决策记录、实际执行的 oracle 与负向案例，以及未执行检查和剩余风险。不要创建或引用中央 claim ID；提交者自述、测试数量或一次演示不能替代这些证据。
 
 **Fix（Bug 修复）**，至少包含：
 
@@ -364,13 +382,14 @@ git branch -d docs/update-contributing-guide
 
 ## 文档维护
 
-代码改动后，请检查是否需要同步更新文档：
+代码、配置、API、状态、权限或命令变化时，应在同一 PR 更新事实 Owner。完整分层、教程/参考分类、机制页契约、写作流程和检查清单见[文档编写与维护规范](./documentation-guidelines.md)；进入 `docs/` 工作时同时遵循 [`docs/AGENTS.md`](../AGENTS.md)。
 
-- 正式文档位于 `docs/`。
-- 文档导航定义在 `docs/.vitepress/config.mts`；新增正式页面时需要同步加入导航。
-- 已完成的用户可见变更或发布说明更新到 [changelog.md](./changelog.md)。
-- 未来规划和未完成事项更新到 [roadmap.md](./roadmap.md)，不要将已完成变更继续保留为路线图事项。
-- 仅开发者可见且确有必要的临时设计记录放在 `docs/vibe/`。
+- `intro/` 用于从零得到结果的教程，`advanced/` 用于配置和运维参考，`agents/` 用于 Agent 配置与扩展方法，`mechanisms/` 用于运行机制、状态、权限、失败和源码定位。
+- 一个事实只在 owning page 完整解释；其他页面保留必要上下文并使用相对链接。实质性的教程与参考、配置与机制不能长期混在同一页。
+- 新增正式页面时更新 `docs/.vitepress/config.mts` 的正确父级与阅读顺序；移动或拆分页面同时修复全部入站链接。
+- 已完成的用户可见变更更新到 [changelog.md](./changelog.md)，未完成方向更新到 [roadmap.md](./roadmap.md)，不能同时声明同一状态。
+- 非平凡文档信息架构或长期约束变化同样需要 [decision record](./decisions/README.md)；`docs/vibe/` 只保存被忽略的本地临时计划。
+- 文档至少运行工程契约检查、文档构建与 `git diff --check`；构建通过不替代对源码、配置和测试的语义核对。
 
 ## AI 辅助贡献
 

@@ -194,6 +194,7 @@ import {
   SwapOutlined
 } from '@ant-design/icons-vue'
 import dayjs from '@/utils/time'
+import { authApi } from '@/apis/auth_api'
 import { configApi } from '@/apis/system_api'
 
 const configStore = useConfigStore()
@@ -534,13 +535,7 @@ const printAgentConfig = async () => {
 // 获取用户列表
 const fetchUsers = async () => {
   try {
-    const response = await fetch('/api/auth/users', {
-      headers: userStore.getAuthHeaders()
-    })
-    if (!response.ok) {
-      throw new Error('获取用户列表失败')
-    }
-    state.users = await response.json()
+    state.users = await userStore.getUsers()
   } catch (err) {
     message.error(`获取用户列表失败: ${err.message}`)
   }
@@ -567,15 +562,7 @@ const switchToUser = async (user) => {
     onOk: async () => {
       state.switchingUser = true
       try {
-        const response = await fetch(`/api/auth/impersonate/${user.id}`, {
-          method: 'POST',
-          headers: userStore.getAuthHeaders()
-        })
-        if (!response.ok) {
-          const error = await response.json()
-          throw new Error(error.detail || '切换用户失败')
-        }
-        const data = await response.json()
+        const data = await authApi.impersonateUser(user.id)
         // 设置新 token
         localStorage.setItem('user_token', data.access_token)
         message.success(`已切换用户: ${user.username}`)

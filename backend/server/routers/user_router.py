@@ -5,16 +5,21 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_authorization_context, get_current_user, get_db, get_required_user
 from yuxi.config import UserConfig, UserConfigSchema
 from yuxi.permissions.authorization import AuthorizationContext
+from yuxi.repositories.agent_env_repository import AgentEnvRepository
+from yuxi.repositories.api_key_repository import (
+    APIKeyDepartmentConflict,
+    APIKeyIdempotencyConflict,
+    APIKeyRepository,
+    APIKeySubjectUnavailable,
+)
 from yuxi.services.user_management_service import get_authorized_user, list_authorized_users
 from yuxi.storage.minio import upload_image_to_minio
-from yuxi.storage.postgres.models_business import APIKey, AgentEnv, User
+from yuxi.storage.postgres.models_business import APIKey, User
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import coerce_any_to_utc_datetime, format_utc_datetime, utc_now_naive
 
@@ -28,6 +33,7 @@ MAX_USER_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
 
 
 class APIKeyCreate(BaseModel):
+    request_id: str = Field(min_length=8, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$")
     name: str
     user_id: int | None = None
     department_id: int | None = None
@@ -143,10 +149,14 @@ async def get_accessible_api_key(
 ) -> APIKey:
     """返回本人或跨用户管理域内的 API Key。"""
 
-    result = await db.execute(select(APIKey).filter(APIKey.id == api_key_id))
-    api_key = result.scalar_one_or_none()
-    if not api_key:
+    access = await APIKeyRepository(db).get_accessible(
+        api_key_id=api_key_id,
+        requester_user_id=authorization.user.id,
+        is_superadmin=True,
+    )
+    if access.api_key is None:
         raise HTTPException(status_code=404, detail="API Key 不存在")
+    api_key = access.api_key
     if api_key.user_id != authorization.user.id:
         if not authorization.has_permission("api_key:manage_all"):
             raise HTTPException(status_code=403, detail="无权操作此 API Key")
@@ -166,17 +176,17 @@ async def list_api_keys(
     if authorization.has_permission("api_key:manage_all"):
         visible_user_ids.update(user.id for user, _ in await list_authorized_users(authorization, "api_key:manage_all"))
 
-    visibility_filter = APIKey.user_id.in_(visible_user_ids)
-    query = select(APIKey).where(visibility_filter).order_by(APIKey.created_at.desc()).offset(skip).limit(limit)
-    count_query = select(func.count(APIKey.id)).where(visibility_filter)
-
-    result = await db.execute(query)
-    api_keys = result.scalars().all()
-    total_result = await db.execute(count_query)
+    api_keys, total = await APIKeyRepository(db).list_visible(
+        requester_user_id=authorization.user.id,
+        is_superadmin=False,
+        skip=skip,
+        limit=limit,
+        visible_user_ids=visible_user_ids,
+    )
 
     return {
         "api_keys": [key.to_dict() for key in api_keys],
-        "total": total_result.scalar(),
+        "total": total,
     }
 
 
@@ -196,30 +206,39 @@ async def create_api_key(
         if user is None:
             raise HTTPException(status_code=404, detail="关联的用户不存在")
         target_user = user
+    target_user_id = target_user.id
 
-    if data.department_id is not None and data.department_id != target_user.department_id:
-        raise HTTPException(status_code=403, detail="API Key 部门必须与关联用户部门一致")
-
-    full_key, key_hash, key_prefix = AuthUtils.generate_api_key()
+    full_key, key_hash, key_prefix = AuthUtils.derive_api_key(
+        f"user-request:{data.request_id}",
+        target_user_id,
+    )
     expires_at = None
     if data.expires_at:
         aware_dt = coerce_any_to_utc_datetime(data.expires_at)
         if aware_dt:
             expires_at = aware_dt.replace(tzinfo=None)
 
-    api_key = APIKey(
-        key_hash=key_hash,
-        key_prefix=key_prefix,
-        name=data.name,
-        user_id=target_user.id,
-        department_id=data.department_id,
-        expires_at=expires_at,
-        created_by=str(current_user.id),
-    )
-
-    db.add(api_key)
-    await db.commit()
-    await db.refresh(api_key)
+    try:
+        api_key = await APIKeyRepository(db).create(
+            key_hash=key_hash,
+            key_prefix=key_prefix,
+            request_id=data.request_id,
+            name=data.name,
+            user_id=target_user_id,
+            department_id=data.department_id,
+            expires_at=expires_at,
+            created_by=str(current_user.id),
+        )
+        await db.commit()
+    except APIKeyIdempotencyConflict as exc:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except APIKeySubjectUnavailable as exc:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except APIKeyDepartmentConflict as exc:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
     return APIKeyCreateResponse(
         api_key=APIKeyResponse(**api_key.to_dict()),
@@ -244,18 +263,19 @@ async def update_api_key(
     authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
+    repository = APIKeyRepository(db)
     api_key = await get_accessible_api_key(db, api_key_id, authorization)
 
+    updates = {}
     if data.name is not None:
-        api_key.name = data.name
+        updates["name"] = data.name
     if data.expires_at is not None:
         aware_dt = coerce_any_to_utc_datetime(data.expires_at)
-        api_key.expires_at = aware_dt.replace(tzinfo=None) if aware_dt else None
+        updates["expires_at"] = aware_dt.replace(tzinfo=None) if aware_dt else None
     if data.is_enabled is not None:
-        api_key.is_enabled = data.is_enabled
+        updates["is_enabled"] = data.is_enabled
 
-    await db.commit()
-    await db.refresh(api_key)
+    api_key = await repository.update(api_key, updates)
     return {"api_key": api_key.to_dict()}
 
 
@@ -265,10 +285,10 @@ async def delete_api_key(
     authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
+    repository = APIKeyRepository(db)
     api_key = await get_accessible_api_key(db, api_key_id, authorization)
 
-    await db.delete(api_key)
-    await db.commit()
+    await repository.delete(api_key)
     return {"success": True}
 
 
@@ -277,8 +297,7 @@ async def get_agent_env(
     current_user: User = Depends(get_required_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(AgentEnv).filter(AgentEnv.uid == current_user.uid))
-    agent_env = result.scalar_one_or_none()
+    agent_env = await AgentEnvRepository(db).get_by_uid(current_user.uid)
     if agent_env is None:
         return AgentEnvResponse(env={})
     return AgentEnvResponse(env=agent_env.env or {}, updated_at=format_utc_datetime(agent_env.updated_at))
@@ -291,25 +310,6 @@ async def update_agent_env(
     db: AsyncSession = Depends(get_db),
 ):
     env = validate_agent_env(data.env)
-    result = await db.execute(select(AgentEnv).filter(AgentEnv.uid == current_user.uid))
-    current_agent_env = result.scalar_one_or_none()
-    if current_agent_env is not None and (current_agent_env.env or {}) == env:
-        return AgentEnvResponse(
-            env=current_agent_env.env or {},
-            updated_at=format_utc_datetime(current_agent_env.updated_at),
-        )
-
     now = utc_now_naive()
-    stmt = (
-        pg_insert(AgentEnv)
-        .values(uid=current_user.uid, env=env, updated_at=now)
-        .on_conflict_do_update(
-            index_elements=[AgentEnv.uid],
-            set_={"env": env, "updated_at": now},
-        )
-        .returning(AgentEnv)
-    )
-    await db.execute(stmt)
-    await db.commit()
-    # 直接返回刚写入的 env/now，避免身份映射中的旧实例属性导致返回陈旧值
-    return AgentEnvResponse(env=env, updated_at=format_utc_datetime(now))
+    result = await AgentEnvRepository(db).upsert(uid=current_user.uid, env=env, updated_at=now)
+    return AgentEnvResponse(env=result.env, updated_at=format_utc_datetime(result.updated_at))

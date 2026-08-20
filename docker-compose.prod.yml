@@ -6,11 +6,14 @@ x-api-worker-env: &api-worker-env
   LANGGRAPH_CHECKPOINTER_BACKEND: ${LANGGRAPH_CHECKPOINTER_BACKEND:-postgres}
   PYTHONPATH: /app/package
   JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env.prod}
+  API_KEY_DERIVATION_SECRET: ${API_KEY_DERIVATION_SECRET:?Set API_KEY_DERIVATION_SECRET in .env.prod}
   YUXI_INSTANCE_ID: ${YUXI_INSTANCE_ID:?Set YUXI_INSTANCE_ID in .env.prod}
   POSTGRES_URL: ${POSTGRES_URL:-postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}@postgres:5432/${POSTGRES_DB:-yuxi}}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
   RUN_CANCEL_KEY_TTL_SECONDS: ${RUN_CANCEL_KEY_TTL_SECONDS:-1800}
   RUN_EVENTS_STREAM_TTL_SECONDS: ${RUN_EVENTS_STREAM_TTL_SECONDS:-7200}
+  READINESS_PROBE_TIMEOUT_SECONDS: ${READINESS_PROBE_TIMEOUT_SECONDS:-2}
+  READINESS_CACHE_TTL_SECONDS: ${READINESS_CACHE_TTL_SECONDS:-1}
   YUXI_CORS_ORIGINS: ${YUXI_CORS_ORIGINS:-}
   YUXI_EMBED_ALLOWED_ORIGINS: ${YUXI_EMBED_ALLOWED_ORIGINS:-}
   OA_SSO_ENABLED: ${OA_SSO_ENABLED:-false}
@@ -58,7 +61,7 @@ services:
     command: uv run --no-sync --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:5050/api/system/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:5050/api/system/ready || exit 1"]
       interval: 30s
       timeout: 15s
       retries: 8
@@ -93,6 +96,12 @@ services:
       <<: *api-worker-env
     command: uv run --no-sync --no-dev arq server.worker_main.WorkerSettings
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "uv run --no-sync --no-dev arq --check server.worker_main.WorkerSettings"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 180s
     depends_on:
       postgres:
         condition: service_healthy
@@ -167,12 +176,11 @@ services:
       - app-network
     environment:
       - NODE_ENV=production
-      - VITE_LITE_MODE=${LITE_MODE:-}
     command: nginx -g "daemon off;"
     restart: unless-stopped
 
   graph:
-    image: neo4j:5.26
+    image: neo4j:5.26.29
     container_name: graph
     volumes:
       - ./docker/volumes/neo4j/data:/data
@@ -281,7 +289,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.10-alpine
     container_name: redis
     command: redis-server --appendonly yes
     healthcheck:

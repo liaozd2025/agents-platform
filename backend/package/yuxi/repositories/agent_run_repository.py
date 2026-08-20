@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
-from sqlalchemy import and_, func, select
+from datetime import datetime, timedelta
+
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES, AgentRun, SubagentThread
+from yuxi.storage.postgres.models_business import (
+    AGENT_RUN_TERMINAL_STATUSES,
+    AgentRun,
+    AgentRunAttempt,
+    Message,
+    SubagentThread,
+)
 from yuxi.utils.datetime_utils import utc_now_naive
 
 TERMINAL_RUN_STATUSES = set(AGENT_RUN_TERMINAL_STATUSES)
+LEASED_RUN_STATUSES = {"running", "cancel_requested"}
+RUN_STATUS_TO_DELIVERY_STATUS = {
+    "completed": "complete",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
 
 TOP_LEVEL_RUN_TYPES = ("chat", "resume")
 
@@ -234,36 +248,263 @@ class AgentRunRepository:
         await self.db.flush()
         return run
 
-    async def set_output_message(self, run_id: str, message_id: int) -> AgentRun | None:
-        run = await self.get_run(run_id)
-        if not run:
-            return None
-        run.output_message_id = message_id
-        run.updated_at = utc_now_naive()
-        await self.db.flush()
-        return run
+    async def set_output_message(
+        self,
+        run_id: str,
+        message_id: int,
+        *,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> AgentRun | None:
+        """仅允许当前 attempt 绑定属于本 Run 的 assistant 输出。"""
 
-    async def mark_running(self, run_id: str) -> AgentRun | None:
+        if not worker_id.strip():
+            raise ValueError("worker_id 不能为空")
+
         run = await self._lock_run(run_id)
         if not run:
             return None
-        if run.status in TERMINAL_RUN_STATUSES:
-            return run
-        now = utc_now_naive()
-        run.status = "running"
-        run.started_at = run.started_at or now
-        run.updated_at = now
+
+        current_time = now or utc_now_naive()
+        self._require_lease_owner(run, worker_id=worker_id, now=current_time, action="持久化输出消息")
+
+        message = await self._get_matching_output_message(run, message_id)
+        if message is None:
+            raise ValueError("输出消息必须属于同一 conversation、Run 和 request，且角色为 assistant")
+
+        run.output_message_id = message_id
+        run.updated_at = current_time
         await self.db.flush()
         return run
+
+    async def lock_output_persistence(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        conversation_thread_id: str,
+        request_id: str,
+        now: datetime | None = None,
+    ) -> AgentRun | None:
+        """在任何输出写入前锁定并验证当前 attempt 的完整因果边界。"""
+
+        if not worker_id.strip():
+            raise ValueError("worker_id 不能为空")
+        run = await self._lock_run(run_id)
+        if run is None:
+            return None
+
+        self._require_lease_owner(run, worker_id=worker_id, now=now or utc_now_naive(), action="持久化输出消息")
+        if run.conversation_thread_id != conversation_thread_id or run.request_id != request_id:
+            raise ValueError("AgentRun 输出必须属于同一 thread 和 request")
+        if run.conversation_id is None:
+            raise ValueError("AgentRun 输出缺少 conversation 归属")
+        return run
+
+    async def mark_running(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float,
+        now: datetime | None = None,
+    ) -> tuple[AgentRun | None, bool]:
+        """由一个 worker 原子取得或续接尚未过期的 Run ownership。"""
+        if not worker_id.strip():
+            raise ValueError("worker_id 不能为空")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds 必须大于 0")
+
+        run = await self._lock_run(run_id)
+        if not run:
+            return None, False
+        if run.status in TERMINAL_RUN_STATUSES:
+            return run, False
+
+        current_time = now or utc_now_naive()
+        initial_claim = run.status == "pending" or (run.status == "cancel_requested" and run.worker_id is None)
+        same_live_owner = (
+            run.status in LEASED_RUN_STATUSES
+            and run.worker_id == worker_id
+            and run.lease_expires_at is not None
+            and run.lease_expires_at > current_time
+        )
+        if not initial_claim and not same_live_owner:
+            return run, False
+
+        if run.status == "pending":
+            run.status = "running"
+        run.worker_id = worker_id
+        run.heartbeat_at = current_time
+        run.lease_expires_at = current_time + timedelta(seconds=lease_seconds)
+        run.started_at = run.started_at or current_time
+        run.updated_at = current_time
+        if initial_claim:
+            await self._close_open_attempts(
+                run.id,
+                outcome="lease_expired",
+                error_type="worker_lease_expired",
+                error_message="执行占有人在取得新所有权前已失联。",
+                now=current_time,
+            )
+            max_attempt_no = await self.db.scalar(
+                select(func.coalesce(func.max(AgentRunAttempt.attempt_no), 0)).where(AgentRunAttempt.run_id == run.id)
+            )
+            self.db.add(
+                AgentRunAttempt(
+                    run_id=run.id,
+                    attempt_no=int(max_attempt_no or 0) + 1,
+                    worker_id=worker_id,
+                    started_at=current_time,
+                    heartbeat_at=current_time,
+                    lease_expires_at=run.lease_expires_at,
+                )
+            )
+        else:
+            attempt = await self._get_open_attempt(run_id, worker_id=worker_id)
+            if attempt is not None:
+                attempt.heartbeat_at = current_time
+                attempt.lease_expires_at = run.lease_expires_at
+                attempt.updated_at = current_time
+        await self.db.flush()
+        return run, True
+
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        lease_seconds: float,
+        now: datetime | None = None,
+    ) -> bool:
+        """仅允许当前且尚未过期的 owner 续租。"""
+        if not worker_id.strip():
+            raise ValueError("worker_id 不能为空")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds 必须大于 0")
+
+        run = await self._lock_run(run_id)
+        current_time = now or utc_now_naive()
+        if (
+            not run
+            or run.status not in LEASED_RUN_STATUSES
+            or run.worker_id != worker_id
+            or run.lease_expires_at is None
+            or run.lease_expires_at <= current_time
+        ):
+            return False
+
+        run.heartbeat_at = current_time
+        run.lease_expires_at = current_time + timedelta(seconds=lease_seconds)
+        run.updated_at = current_time
+        attempt = await self._get_open_attempt(run_id, worker_id=worker_id)
+        if attempt is not None:
+            attempt.heartbeat_at = current_time
+            attempt.lease_expires_at = run.lease_expires_at
+            attempt.updated_at = current_time
+        await self.db.flush()
+        return True
+
+    async def release_lease_for_retry(
+        self,
+        run_id: str,
+        *,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """仅由 lease 尚有效的当前 attempt 释放 retry ownership。"""
+        run = await self._lock_run(run_id)
+        current_time = now or utc_now_naive()
+        if (
+            not run
+            or run.status != "running"
+            or run.worker_id != worker_id
+            or run.lease_expires_at is None
+            or run.lease_expires_at <= current_time
+        ):
+            return False
+
+        run.status = "pending"
+        run.worker_id = None
+        run.heartbeat_at = None
+        run.lease_expires_at = None
+        run.updated_at = current_time
+        await self._finish_open_attempt(
+            run_id,
+            worker_id=worker_id,
+            outcome="retry_released",
+            now=current_time,
+        )
+        await self.db.flush()
+        return True
+
+    async def reconcile_expired_leases(self, *, now: datetime | None = None) -> list[AgentRun]:
+        """把失去 owner 的活跃 Run 原子收敛为失败事实。"""
+        current_time = now or utc_now_naive()
+        lease_missing_or_expired = or_(
+            AgentRun.lease_expires_at.is_(None),
+            AgentRun.lease_expires_at <= current_time,
+        )
+        result = await self.db.execute(
+            select(AgentRun)
+            .where(
+                or_(
+                    and_(AgentRun.status == "running", lease_missing_or_expired),
+                    and_(
+                        AgentRun.status == "cancel_requested",
+                        AgentRun.worker_id.is_not(None),
+                        lease_missing_or_expired,
+                    ),
+                    and_(
+                        AgentRun.status == "cancel_requested",
+                        AgentRun.worker_id.is_(None),
+                        AgentRun.started_at.is_not(None),
+                    ),
+                )
+            )
+            .with_for_update(skip_locked=True)
+        )
+        runs = list(result.scalars().all())
+        for run in runs:
+            run.status = "failed"
+            run.error_type = "worker_lease_expired"
+            run.error_message = "执行 worker 的 lease 已过期；本次运行结果未知，需按 at-least-once 语义检查副作用。"
+            run.finished_at = current_time
+            run.updated_at = current_time
+            run.worker_id = None
+            run.heartbeat_at = None
+            run.lease_expires_at = None
+            await self._project_input_delivery_status(run)
+            await self._close_open_attempts(
+                run.id,
+                outcome="lease_expired",
+                error_type="worker_lease_expired",
+                error_message="执行 worker 的 lease 已过期；本次运行结果未知。",
+                now=current_time,
+            )
+        if runs:
+            await self.db.flush()
+        return runs
 
     async def request_cancel(self, run_id: str) -> AgentRun | None:
+        """持久化用户取消；未开始的 Run 直接形成 cancelled 终态。"""
         run = await self._lock_run(run_id)
         if not run:
             return None
         if run.status in TERMINAL_RUN_STATUSES:
             return run
+        current_time = utc_now_naive()
+        if run.status == "pending" and run.worker_id is None and run.started_at is None:
+            run.status = "cancelled"
+            run.error_type = "cancelled"
+            run.error_message = "对话已在执行前取消"
+            run.finished_at = current_time
+            run.updated_at = current_time
+            await self._project_input_delivery_status(run)
+            await self.db.flush()
+            return run
         run.status = "cancel_requested"
-        run.updated_at = utc_now_naive()
+        run.updated_at = current_time
         await self.db.flush()
         return run
 
@@ -275,20 +516,192 @@ class AgentRunRepository:
         error_type: str | None = None,
         error_message: str | None = None,
         token_usage: dict | None = None,
+        worker_id: str | None = None,
+        now: datetime | None = None,
     ) -> tuple[AgentRun | None, bool]:
+        if status not in TERMINAL_RUN_STATUSES:
+            raise ValueError(f"不支持的 AgentRun 终态：{status}")
+
         run = await self._lock_run(run_id)
         if not run:
             return None, False
         if run.status in TERMINAL_RUN_STATUSES:
+            if run.worker_id is not None or run.heartbeat_at is not None or run.lease_expires_at is not None:
+                run.worker_id = None
+                run.heartbeat_at = None
+                run.lease_expires_at = None
+                await self.db.flush()
             return run, False
+
+        current_time = now or utc_now_naive()
+        if run.status == "pending":
+            if worker_id is not None or status not in {"failed", "cancelled"}:
+                return run, False
+        elif run.status in LEASED_RUN_STATUSES:
+            if run.worker_id != worker_id or run.lease_expires_at is None or run.lease_expires_at <= current_time:
+                return run, False
+            if run.status == "cancel_requested" and status != "cancelled":
+                return run, False
+            if run.status == "running" and status == "cancelled":
+                return run, False
+        else:
+            return run, False
+
+        if status == "completed":
+            if run.output_message_id is None or not await self._get_matching_output_message(
+                run,
+                run.output_message_id,
+            ):
+                raise ValueError("AgentRun 完成前必须绑定同一 Run 的有效 assistant 输出消息")
+
         run.status = status
         run.error_type = error_type
         run.error_message = error_message
         run.token_usage = token_usage or {}
-        run.finished_at = utc_now_naive()
+        run.finished_at = current_time
         run.updated_at = run.finished_at
+        run.worker_id = None
+        run.heartbeat_at = None
+        run.lease_expires_at = None
+        await self._project_input_delivery_status(run)
+        await self._finish_open_attempt(
+            run.id,
+            worker_id=worker_id,
+            # 调用点已校验 status 属于终态集合，attempt outcome 与 Run 终态同词表。
+            outcome=status,
+            error_type=error_type,
+            error_message=error_message,
+            now=current_time,
+        )
         await self.db.flush()
         return run, True
+
+    async def _project_input_delivery_status(self, run: AgentRun) -> None:
+        """在 owning transaction 内同步输入消息的终态投影。"""
+        delivery_status = RUN_STATUS_TO_DELIVERY_STATUS.get(run.status)
+        if run.input_message_id is None or delivery_status is None:
+            return
+        await self.db.execute(
+            update(Message).where(Message.id == run.input_message_id).values(delivery_status=delivery_status)
+        )
+
+    async def record_run_manifest(
+        self,
+        run_id: str,
+        *,
+        manifest: dict,
+        fingerprint: str,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> tuple[AgentRun | None, bool]:
+        """由当前 lease owner 在首次执行前 write-once 固化运行清单。
+
+        已固化的 manifest 不可改写：重复投递幂等跳过，保证配置后续变化
+        不会改写历史 Run 的事实。写入者必须是仍持有有效 lease 的 owner。
+        """
+        if not worker_id.strip():
+            raise ValueError("worker_id 不能为空")
+        if not fingerprint.strip():
+            raise ValueError("fingerprint 不能为空")
+
+        run = await self._lock_run(run_id)
+        if not run:
+            return None, False
+        current_time = now or utc_now_naive()
+        self._require_lease_owner(run, worker_id=worker_id, now=current_time, action="固化运行清单")
+
+        if run.manifest_fingerprint is not None:
+            return run, False
+
+        run.manifest = manifest
+        run.manifest_fingerprint = fingerprint
+        run.manifest_recorded_at = current_time
+        run.updated_at = current_time
+        await self.db.flush()
+        return run, True
+
+    async def list_run_attempts(self, run_id: str) -> list[AgentRunAttempt]:
+        """按执行序号读取一个 Run 的完整 attempt 历史。"""
+        result = await self.db.execute(
+            select(AgentRunAttempt)
+            .where(AgentRunAttempt.run_id == run_id)
+            .order_by(AgentRunAttempt.attempt_no.asc(), AgentRunAttempt.id.asc())
+        )
+        return list(result.scalars().all())
+
+    async def _get_open_attempt(self, run_id: str, *, worker_id: str | None = None) -> AgentRunAttempt | None:
+        """读取该 Run 仍开放（未终结）的 attempt；指定 worker 时限定为当前 owner。"""
+        conditions = [AgentRunAttempt.run_id == run_id, AgentRunAttempt.finished_at.is_(None)]
+        if worker_id is not None:
+            conditions.append(AgentRunAttempt.worker_id == worker_id)
+        result = await self.db.execute(
+            select(AgentRunAttempt).where(and_(*conditions)).order_by(AgentRunAttempt.attempt_no.desc()).limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def _finish_open_attempt(
+        self,
+        run_id: str,
+        *,
+        worker_id: str | None,
+        outcome: str,
+        now: datetime,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """终结当前开放 attempt；已终结的 attempt 事实不会被改写。"""
+        attempt = await self._get_open_attempt(run_id, worker_id=worker_id)
+        if attempt is None:
+            return
+        attempt.outcome = outcome
+        attempt.error_type = error_type
+        attempt.error_message = error_message
+        attempt.finished_at = now
+        attempt.updated_at = now
+
+    async def _close_open_attempts(
+        self,
+        run_id: str,
+        *,
+        outcome: str,
+        now: datetime,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """收敛该 Run 全部仍开放的 attempt；用于失联 Run 被接管或收敛时。"""
+        result = await self.db.execute(
+            select(AgentRunAttempt).where(and_(AgentRunAttempt.run_id == run_id, AgentRunAttempt.finished_at.is_(None)))
+        )
+        for attempt in result.scalars().all():
+            attempt.outcome = outcome
+            attempt.error_type = error_type
+            attempt.error_message = error_message
+            attempt.finished_at = now
+            attempt.updated_at = now
+
+    async def _get_matching_output_message(self, run: AgentRun, message_id: int) -> Message | None:
+        """读取满足 AgentRun 因果归属后置条件的输出消息。"""
+
+        result = await self.db.execute(
+            select(Message).where(
+                Message.id == message_id,
+                Message.conversation_id == run.conversation_id,
+                Message.run_id == run.id,
+                Message.request_id == run.request_id,
+                Message.role == "assistant",
+            )
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def _require_lease_owner(run: AgentRun, *, worker_id: str, now: datetime, action: str) -> None:
+        if (
+            run.status != "running"
+            or run.worker_id != worker_id
+            or run.lease_expires_at is None
+            or run.lease_expires_at <= now
+        ):
+            raise ValueError(f"只有当前有效 AgentRun lease owner 可以{action}")
 
     async def _lock_run(self, run_id: str) -> AgentRun | None:
         result = await self.db.execute(select(AgentRun).where(AgentRun.id == run_id).with_for_update())

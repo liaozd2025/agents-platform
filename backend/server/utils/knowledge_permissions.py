@@ -1,25 +1,30 @@
 """将知识库领域权限校验适配为 FastAPI 依赖。"""
 
+from typing import TYPE_CHECKING
+
 from fastapi import Depends, HTTPException, status
 
 from server.utils.auth_middleware import get_authorization_context, require_permission
-from yuxi.permissions.authorization import AuthorizationContext
-from yuxi.knowledge.read_models import KnowledgeBaseDetail
-from yuxi.knowledge.runtime import knowledge_base
 from yuxi.permissions import (
     ResourcePermission,
     ResourcePermissionDenied,
     require_knowledge_base_permission,
 )
+from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.storage.postgres.models_business import User
+
+if TYPE_CHECKING:
+    from yuxi.knowledge.read_models import KnowledgeBaseDetail
 
 
 async def ensure_knowledge_base_permission(
     kb_id: str,
     current_user: User,
     required: ResourcePermission,
-) -> KnowledgeBaseDetail:
+) -> "KnowledgeBaseDetail":
     """加载知识库并校验当前用户的有效资源权限。"""
+
+    from yuxi.knowledge.runtime import knowledge_base
 
     db_info = await knowledge_base.get_database_info(kb_id)
     if not db_info:

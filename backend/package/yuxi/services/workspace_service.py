@@ -61,6 +61,27 @@ _CHAT_INTERMEDIATE_DIR_NAMES = frozenset(
     }
 )
 
+# 搜索返回条数上限，避免超大工作区一次性返回过多结果
+WORKSPACE_SEARCH_MAX_RESULTS = 100
+
+
+async def search_workspace_files(*, query: str, current_user: User) -> dict:
+    """按文件名在个人工作区内递归搜索，仅返回文件条目。"""
+    normalized_query = (query or "").strip().lower()
+    if not normalized_query:
+        return {"entries": []}
+
+    response = await list_workspace_tree(
+        path="/",
+        recursive=True,
+        files_only=True,
+        current_user=current_user,
+    )
+    entries = [
+        entry for entry in response.get("entries", []) if normalized_query in str(entry.get("name") or "").lower()
+    ]
+    return {"entries": entries[:WORKSPACE_SEARCH_MAX_RESULTS]}
+
 
 async def list_workspace_tree(
     *,

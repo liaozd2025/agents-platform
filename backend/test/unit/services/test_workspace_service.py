@@ -724,3 +724,21 @@ async def test_physical_symlink_under_virtual_chats_cannot_redirect_access(tmp_p
         )
 
     assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_search_workspace_files_matches_filenames(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
+    root = svc._workspace_root(_user())
+    (root / "notes").mkdir(parents=True, exist_ok=True)
+    (root / "notes" / "meeting-record.md").write_text("记录", encoding="utf-8")
+    (root / "agents" / "MEMORY.md").write_text("记忆", encoding="utf-8")  # 已有默认文件
+
+    response = await svc.search_workspace_files(query="memory", current_user=_user())
+
+    names = [entry["name"] for entry in response["entries"]]
+    assert names == ["MEMORY.md"]
+    assert response["entries"][0]["path"] == "/agents/MEMORY.md"
+
+    empty = await svc.search_workspace_files(query="   ", current_user=_user())
+    assert empty["entries"] == []

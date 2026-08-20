@@ -109,6 +109,14 @@ Steer 意图采用持久化请求作为唯一事实来源，按以下生命周�
 
 请求派发后，执行结果由 Agent 运行状态表达，例如完成、失败、取消或中断。前端在排队阶段订阅请求状态，在收到运行创建信息后切换到运行事件流。
 
+| 运行状态 | 执行 ownership 与结局 |
+| --- | --- |
+| `pending` | 数据库已提交的投递意图，尚未由 worker attempt 取得 lease |
+| `running` | 当前 attempt 持有 lease 并周期 heartbeat；其他 attempt 不得并行执行 |
+| `cancel_requested` | 取消意图已记录，当前 owner 在安全边界停止；lease 仍用于识别失联 worker |
+| `completed` / `failed` / `cancelled` | 终态写入只接受当前 owner，并同时清除 lease |
+| `interrupted` | 等待用户回答或审批，可由显式 resume 请求恢复 |
+
 ## 取消处理
 
 取消排队请求和停止 Agent 运行是两个独立操作。
@@ -118,6 +126,8 @@ Steer 意图采用持久化请求作为唯一事实来源，按以下生命周�
 - 已派发请求已经进入运行阶段，需要通过运行取消能力停止，不再通过队列取消接口处理。
 
 这种区分可以避免取消一个排队项时误停当前运行，也可以保持请求状态与实际执行状态一致。
+
+运行取消先在 PostgreSQL 提交 `cancel_requested`，Redis key/pubsub 只负责降低 worker 感知延迟。Worker 也会低频读取数据库，因此 Redis 丢信号时仍能停止；只有再次确认 durable 取消事实才写 `cancelled`。Worker shutdown、ARQ timeout 等基础设施 `CancelledError` 会释放当前 lease 并继续向上传播，不能冒充用户取消；临时执行故障释放 lease 后必须抛出 ARQ 原生 `RetryJob`，不能用普通异常把数据库中的 `pending` 留成无投递事实。实时事件写入失败可以造成 SSE 缺口，但不得阻断 PostgreSQL retry/终态，客户端仍以终态补偿。
 
 ## 失败、中断与后续请求
 
@@ -134,6 +144,8 @@ Agent 运行成功完成后自动派发下一条请求。运行失败、被取�
 请求、输入消息和派发关系保存在数据库中。浏览器刷新后，前端可以重新读取当前线程的排队请求和位置。
 
 Agent 运行由后台任务系统执行。`pending` AgentRun 同时表达已经提交、仍需投递或等待 worker 接收的执行意图。为处理“数据库已经记录派发，但任务尚未成功投递”这一故障窗口，completed hook 重试和服务启动恢复都会优先重新投递已有 pending run；没有 pending run 时才会派发 ready 队头。恢复过程复用已有请求和运行记录，不创建重复运行。
+
+Worker 取得 Run 时写入带进程 identity 的唯一 attempt token、heartbeat 和 lease 到期时间。Heartbeat 只允许当前 token 续租；正常终态和 ARQ retry publication 都先在数据库中关闭或释放 ownership。Worker 启动与周期扫描会把无 lease 或已过期的 `running` / `cancel_requested` 幂等收敛为 `failed`，并记录 `worker_lease_expired`。`interrupted` 只表示等待用户回答或审批，不能被 worker 崩溃复用。Lease 失败表示进程死亡窗口中的外部工具副作用可能已经发生，系统不会把它伪装成可安全自动重试或 exactly-once。
 
 同一对话线程的 intake、resume、continue 和自动接力会锁定线程对应的 Conversation 记录，再读取和修改 request/run 事实。线程级共同锁负责保证并发请求的严格 FIFO，active-run 唯一索引继续作为最终数据库保护。
 

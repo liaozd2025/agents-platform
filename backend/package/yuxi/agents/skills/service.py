@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.agents.mcp.service import get_enabled_mcp_server_slugs
@@ -1798,8 +1798,7 @@ def list_builtin_skill_specs() -> list[dict[str, Any]]:
         if not is_valid_skill_slug(slug):
             raise ValueError(f"内置 skill slug 非法: {slug}")
         if not source_dir.exists() or not source_dir.is_dir():
-            logger.warning(f"跳过不存在的内置 skill 目录: {source_dir}")
-            continue
+            raise ValueError(f"内置 skill 目录不存在: {source_dir}")
 
         skill_md = source_dir / "SKILL.md"
         if not skill_md.exists():
@@ -1828,7 +1827,11 @@ def list_builtin_skill_specs() -> list[dict[str, Any]]:
 
 
 async def init_builtin_skills(db: AsyncSession, *, created_by: str = "system") -> list[Skill]:
+    if db is not None and db.get_bind().dialect.name == "postgresql":
+        await db.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": 0x5958534B})
+
     repo = SkillRepository(db)
+    repo.autocommit = False
     synced_items: list[Skill] = []
 
     for spec in list_builtin_skill_specs():
@@ -1892,4 +1895,6 @@ async def init_builtin_skills(db: AsyncSession, *, created_by: str = "system") -
             )
         )
 
+    if db is not None:
+        await db.commit()
     return synced_items

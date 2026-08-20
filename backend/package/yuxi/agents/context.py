@@ -8,6 +8,7 @@ from typing import Any, get_origin
 from yuxi.agents.backends.sandbox.paths import sandbox_workspace_agent_context_file
 from yuxi.agents.tool_approval import DEFAULT_TOOL_APPROVAL_MODE
 from yuxi.config.options import system_options
+from yuxi.config.runtime import lite_mode_enabled
 from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import WORKSPACE_AGENT_CONTEXT_FILES
 
@@ -114,6 +115,15 @@ def filter_agent_config_for_management(
     if isinstance(context, dict):
         filtered["context"] = {key: value for key, value in context.items() if key not in restricted_fields}
     return filtered
+
+
+def _lite_mode_enabled() -> bool:
+    """返回当前进程是否禁止知识库重运行时。"""
+
+    return lite_mode_enabled()
+
+
+_LITE_DISABLED_SKILL_SLUGS = frozenset({"knowledge-base"})
 
 
 @dataclass(kw_only=True)
@@ -436,17 +446,20 @@ async def resolve_agent_resource_options(
             if tool.get("slug")
         ]
     if "knowledges" in fields_to_load:
-        from yuxi.knowledge.runtime import knowledge_base
-        from yuxi.permissions.authorization import build_authorization_context
+        if _lite_mode_enabled():
+            options["knowledges"] = []
+        else:
+            from yuxi.knowledge.runtime import knowledge_base
+            from yuxi.permissions.authorization import build_authorization_context
 
-        databases = (
-            await knowledge_base.get_databases_by_user(user)
-            if build_authorization_context(user).has_permission("knowledge_base:read")
-            else []
-        )
-        options["knowledges"] = [
-            _resource_option(item.kb_id, item.name, item.description) for item in databases if item.kb_id
-        ]
+            databases = (
+                await knowledge_base.get_databases_by_user(user)
+                if build_authorization_context(user).has_permission("knowledge_base:read")
+                else []
+            )
+            options["knowledges"] = [
+                _resource_option(item.kb_id, item.name, item.description) for item in databases if item.kb_id
+            ]
     if "mcps" in fields_to_load:
         from yuxi.agents.mcp.service import get_all_mcp_servers, get_enabled_mcp_server_slugs
 
@@ -467,7 +480,9 @@ async def resolve_agent_resource_options(
             else []
         )
         options["skills"] = [
-            _resource_option(skill.slug, skill.name, skill.description) for skill in skills if skill.slug
+            _resource_option(skill.slug, skill.name, skill.description)
+            for skill in skills
+            if skill.slug and not (_lite_mode_enabled() and skill.slug in _LITE_DISABLED_SKILL_SLUGS)
         ]
     if "subagents" in fields_to_load:
         from yuxi.repositories.agent_repository import AgentRepository
@@ -526,7 +541,6 @@ async def prepare_agent_runtime_context(
     if not uid:
         return context
 
-    from yuxi.agents.backends.knowledge_base_backend import resolve_visible_knowledge_bases_for_context
     from yuxi.agents.middlewares.skills import resolve_runtime_skills_for_context
     from yuxi.repositories.user_repository import UserRepository
     from yuxi.storage.postgres.manager import pg_manager
@@ -563,7 +577,13 @@ async def prepare_agent_runtime_context(
             if hasattr(context, field_name):
                 setattr(context, field_name, normalized.get(field_name, []))
 
-        await resolve_visible_knowledge_bases_for_context(context)
+        if _lite_mode_enabled():
+            context.knowledges = []
+            setattr(context, "_visible_knowledge_bases", [])
+        else:
+            from yuxi.agents.backends.knowledge_base_backend import resolve_visible_knowledge_bases_for_context
+
+            await resolve_visible_knowledge_bases_for_context(context)
         skill_scope = await resolve_runtime_skills_for_context(context, db=db, user=user)
         context.skills = skill_scope["context_skills"]
         setattr(context, "_prompt_skills", skill_scope["prompt_skills"])

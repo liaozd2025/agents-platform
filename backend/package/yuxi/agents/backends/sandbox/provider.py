@@ -15,8 +15,8 @@ from .provisioner_client import ProvisionerClient, SandboxRecord
 
 
 def sandbox_provisioner_token() -> str:
-    token = (os.getenv("SANDBOX_PROVISIONER_TOKEN") or "").strip()
-    if len(token) < 32:
+    token = os.getenv("SANDBOX_PROVISIONER_TOKEN") or ""
+    if token != token.strip() or len(token) < 32:
         raise ValueError("SANDBOX_PROVISIONER_TOKEN must contain at least 32 characters")
     return token
 

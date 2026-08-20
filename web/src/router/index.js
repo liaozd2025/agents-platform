@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import AppLayout from '@/layouts/AppLayout.vue'
 import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
+import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
 import { canAccessRoute, getAuthenticatedHomePath } from '@/utils/authNavigation'
 import { resolveAppNavigationPath, resolveAppSurface } from '@/composables/useEmbedMode'
 import { sanitizeRedirect } from '@/utils/oidcAutoStart'
@@ -128,7 +129,8 @@ const router = createRouter({
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
-                requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage']
+                requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage'],
+                requiresKnowledge: true
               }
             },
             {
@@ -220,7 +222,8 @@ const router = createRouter({
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
-                requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage']
+                requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage'],
+                requiresKnowledge: true
               }
             },
             {
@@ -270,8 +273,13 @@ router.beforeEach(async (to, from) => {
   // 检查路由是否需要认证
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true)
   const isEmbedRoute = to.matched.some((record) => record.meta.embed === true)
+  const requiresKnowledge = to.matched.some((record) => record.meta.requiresKnowledge)
 
   const userStore = useUserStore()
+  const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
+  if (requiresAuth || requiresKnowledge) {
+    await runtimeCapabilitiesStore.ensureLoaded()
+  }
 
   // 如果有 token 但用户信息未加载，先获取用户信息
   if (!isEmbedRoute && userStore.token && !userStore.userId) {
@@ -303,6 +311,10 @@ router.beforeEach(async (to, from) => {
 
   if (!canAccessRoute(to.matched, userStore.hasPermission)) {
     return authenticatedHomePath
+  }
+
+  if (requiresKnowledge && !runtimeCapabilitiesStore.knowledgeEnabled) {
+    return { path: '/extensions', query: { tab: 'skills' } }
   }
 
   // 如果用户已登录但访问登录页，按 redirect 参数跳转

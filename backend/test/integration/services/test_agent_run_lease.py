@@ -1,0 +1,473 @@
+"""真实 PostgreSQL 上的 AgentRun lease ownership 与过期收敛测试。"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import uuid
+from contextlib import asynccontextmanager
+from datetime import timedelta
+from types import SimpleNamespace
+
+import pytest
+import pytest_asyncio
+from langchain.messages import AIMessage
+from sqlalchemy import delete, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from yuxi.repositories.agent_run_repository import AgentRunRepository
+from yuxi.repositories.conversation_repository import ConversationRepository
+from yuxi.services import chat_service, run_worker
+from yuxi.storage.postgres.manager import AGENT_RUN_LEASE_SCHEMA_STATEMENTS
+from yuxi.storage.postgres.models_business import AgentRun, Conversation, Message
+from yuxi.utils.datetime_utils import utc_now_naive
+
+pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
+
+
+@pytest_asyncio.fixture()
+async def lease_database():
+    engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
+    async with engine.begin() as connection:
+        for _ in range(2):
+            for statement in AGENT_RUN_LEASE_SCHEMA_STATEMENTS:
+                await connection.execute(text(statement))
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        yield engine, session_factory
+    finally:
+        await engine.dispose()
+
+
+@asynccontextmanager
+async def _session_context(session_factory):
+    async with session_factory() as db:
+        try:
+            yield db
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+
+
+async def _create_run(
+    session_factory,
+    *,
+    status: str = "pending",
+    worker_id: str | None = None,
+    lease_expires_at=None,
+) -> tuple[str, str, int]:
+    run_id = str(uuid.uuid4())
+    request_id = f"lease-{uuid.uuid4()}"
+    thread_id = f"pytest-lease-{uuid.uuid4()}"
+    uid = f"pytest-user-{uuid.uuid4()}"
+    async with session_factory() as db:
+        conversation = Conversation(thread_id=thread_id, uid=uid, agent_id="main", status="active")
+        db.add(conversation)
+        await db.flush()
+        message = Message(
+            conversation_id=conversation.id,
+            role="user",
+            content="lease input",
+            request_id=request_id,
+            delivery_status="dispatched",
+        )
+        db.add(message)
+        await db.flush()
+        db.add(
+            AgentRun(
+                id=run_id,
+                conversation_thread_id=thread_id,
+                agent_slug="main",
+                uid=uid,
+                request_id=request_id,
+                conversation_id=conversation.id,
+                input_message_id=message.id,
+                input_payload={},
+                status=status,
+                run_type="chat",
+                worker_id=worker_id,
+                heartbeat_at=utc_now_naive() if worker_id else None,
+                lease_expires_at=lease_expires_at,
+            )
+        )
+        await db.commit()
+        return run_id, thread_id, message.id
+
+
+async def _cleanup_runs(session_factory, thread_ids: list[str]) -> None:
+    async with session_factory() as db:
+        conversation_ids = list(
+            (await db.scalars(select(Conversation.id).where(Conversation.thread_id.in_(thread_ids)))).all()
+        )
+        if conversation_ids:
+            await db.execute(delete(Message).where(Message.conversation_id.in_(conversation_ids)))
+        await db.execute(delete(AgentRun).where(AgentRun.conversation_thread_id.in_(thread_ids)))
+        await db.execute(delete(Conversation).where(Conversation.thread_id.in_(thread_ids)))
+        await db.commit()
+
+
+async def test_agent_run_lease_schema_evolution_is_idempotent(lease_database):
+    engine, _ = lease_database
+    async with engine.connect() as connection:
+        columns = set(
+            (
+                await connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'agent_runs' "
+                        "AND column_name IN ('worker_id', 'heartbeat_at', 'lease_expires_at')"
+                    )
+                )
+            ).scalars()
+        )
+        index_exists = await connection.scalar(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pg_indexes "
+                "WHERE tablename = 'agent_runs' AND indexname = 'ix_agent_runs_status_lease_expires')"
+            )
+        )
+
+    assert columns == {"worker_id", "heartbeat_at", "lease_expires_at"}
+    assert index_exists is True
+
+
+async def test_heartbeat_and_terminal_transition_require_exact_attempt_owner(
+    lease_database,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, session_factory = lease_database
+    now = utc_now_naive()
+    owner = "worker-stable:attempt-owner"
+    other_owner = "worker-stable:attempt-other"
+    run_id, thread_id, message_id = await _create_run(session_factory)
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", lambda: _session_context(session_factory))
+
+    try:
+        async with session_factory() as db:
+            run, acquired = await AgentRunRepository(db).mark_running(
+                run_id,
+                worker_id=owner,
+                lease_seconds=60,
+                now=now,
+            )
+            await db.commit()
+        assert acquired is True
+        assert run.worker_id == owner
+
+        async with session_factory() as db:
+            other_renewed = await AgentRunRepository(db).renew_lease(
+                run_id,
+                worker_id=other_owner,
+                lease_seconds=60,
+                now=now + timedelta(seconds=10),
+            )
+            await db.commit()
+        async with session_factory() as db:
+            owner_renewed = await AgentRunRepository(db).renew_lease(
+                run_id,
+                worker_id=owner,
+                lease_seconds=60,
+                now=now + timedelta(seconds=10),
+            )
+            await db.commit()
+
+        async with session_factory() as db:
+            persisted_before_completion = await db.get(AgentRun, run_id)
+            wrong_output = Message(
+                conversation_id=persisted_before_completion.conversation_id,
+                run_id=run_id,
+                request_id=f"wrong-{persisted_before_completion.request_id}",
+                role="assistant",
+                content="wrong request output",
+            )
+            exact_output = Message(
+                conversation_id=persisted_before_completion.conversation_id,
+                run_id=run_id,
+                request_id=persisted_before_completion.request_id,
+                role="assistant",
+                content="exact run output",
+            )
+            db.add_all([wrong_output, exact_output])
+            await db.flush()
+            repository = AgentRunRepository(db)
+            with pytest.raises(ValueError, match="同一 conversation"):
+                await repository.set_output_message(
+                    run_id,
+                    wrong_output.id,
+                    worker_id=owner,
+                    now=now + timedelta(seconds=11),
+                )
+            assert persisted_before_completion.output_message_id is None
+            await repository.set_output_message(
+                run_id,
+                exact_output.id,
+                worker_id=owner,
+                now=now + timedelta(seconds=11),
+            )
+            exact_output_id = exact_output.id
+            await db.commit()
+
+        missing_owner = await run_worker.mark_run_terminal(run_id, "failed")
+        other_owner_result = await run_worker.mark_run_terminal(run_id, "failed", worker_id=other_owner)
+        owner_result = await run_worker.mark_run_terminal(run_id, "completed", worker_id=owner)
+
+        async with session_factory() as db:
+            persisted_run = await db.get(AgentRun, run_id)
+            persisted_message = await db.get(Message, message_id)
+
+        assert other_renewed is False
+        assert owner_renewed is True
+        assert missing_owner.changed is False
+        assert other_owner_result.changed is False
+        assert owner_result.changed is True
+        assert persisted_run.status == "completed"
+        assert persisted_run.output_message_id == exact_output_id
+        assert persisted_run.worker_id is None
+        assert persisted_run.heartbeat_at is None
+        assert persisted_run.lease_expires_at is None
+        assert persisted_message.delivery_status == "complete"
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])
+
+
+@pytest.mark.parametrize(
+    ("run_status", "lease_offset"),
+    [("running", -1), ("cancel_requested", 60)],
+)
+async def test_invalid_attempt_cannot_leave_assistant_message(
+    lease_database,
+    run_status: str,
+    lease_offset: int,
+):
+    """过期或已取消 attempt 必须在任何 assistant Message 写入前被拒绝。"""
+
+    _, session_factory = lease_database
+    now = utc_now_naive()
+    owner = f"worker-invalid:{run_status}"
+    run_id, thread_id, _ = await _create_run(
+        session_factory,
+        status=run_status,
+        worker_id=owner,
+        lease_expires_at=now + timedelta(seconds=lease_offset),
+    )
+
+    class FakeGraph:
+        async def aget_state(self, _config):
+            return SimpleNamespace(values={"messages": [AIMessage(id=f"output-{run_id}", content="must rollback")]})
+
+    class FakeAgent:
+        async def get_graph(self, *, context):
+            assert context is fake_context
+            return FakeGraph()
+
+    fake_context = object()
+    try:
+        async with session_factory() as db:
+            run = await db.get(AgentRun, run_id)
+            with pytest.raises(ValueError, match="有效 AgentRun lease owner"):
+                await chat_service.save_messages_from_langgraph_state(
+                    agent_instance=FakeAgent(),
+                    thread_id=thread_id,
+                    conv_repo=ConversationRepository(db),
+                    config_dict={"configurable": {"thread_id": thread_id, "uid": run.uid}},
+                    context=fake_context,
+                    run_id=run_id,
+                    request_id=run.request_id,
+                    worker_id=owner,
+                    complete_run=True,
+                )
+
+        async with session_factory() as db:
+            persisted_run = await db.get(AgentRun, run_id)
+            assistant_messages = list(
+                (await db.scalars(select(Message).where(Message.run_id == run_id, Message.role == "assistant"))).all()
+            )
+
+        assert persisted_run.output_message_id is None
+        assert persisted_run.status == run_status
+        assert assistant_messages == []
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])
+
+
+async def test_expired_owner_cannot_finish_or_publish_retry_before_reconciliation(lease_database):
+    """真实行锁下，过期 attempt 不能抢在 reconciler 前改写结局。"""
+    _, session_factory = lease_database
+    now = utc_now_naive()
+    owner = "worker-expired:attempt-owner"
+    run_id, thread_id, message_id = await _create_run(session_factory)
+
+    try:
+        async with session_factory() as db:
+            _, acquired = await AgentRunRepository(db).mark_running(
+                run_id,
+                worker_id=owner,
+                lease_seconds=10,
+                now=now,
+            )
+            await db.commit()
+
+        async with session_factory() as db:
+            released = await AgentRunRepository(db).release_lease_for_retry(
+                run_id,
+                worker_id=owner,
+                now=now + timedelta(seconds=11),
+            )
+            await db.commit()
+        async with session_factory() as db:
+            _, completed = await AgentRunRepository(db).set_terminal_status(
+                run_id,
+                status="completed",
+                worker_id=owner,
+                now=now + timedelta(seconds=11),
+            )
+            await db.commit()
+        async with session_factory() as db:
+            reconciled = await AgentRunRepository(db).reconcile_expired_leases(now=now + timedelta(seconds=11))
+            await db.commit()
+
+        async with session_factory() as db:
+            persisted_run = await db.get(AgentRun, run_id)
+            persisted_message = await db.get(Message, message_id)
+
+        assert acquired is True
+        assert released is False
+        assert completed is False
+        assert [run.id for run in reconciled] == [run_id]
+        assert persisted_run.status == "failed"
+        assert persisted_run.error_type == "worker_lease_expired"
+        assert persisted_message.delivery_status == "failed"
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])
+
+
+async def test_pending_cancel_is_terminal_and_durable_cancel_wins_completion_race(lease_database):
+    """未执行取消直接完成；已执行取消在终态行锁竞争中优先于 completed。"""
+    _, session_factory = lease_database
+    now = utc_now_naive()
+    pending_run_id, pending_thread_id, pending_message_id = await _create_run(session_factory)
+    running_run_id, running_thread_id, running_message_id = await _create_run(session_factory)
+    owner = "worker-cancel:attempt-owner"
+
+    try:
+        async with session_factory() as db:
+            pending = await AgentRunRepository(db).request_cancel(pending_run_id)
+            await db.commit()
+        async with session_factory() as db:
+            pending_reconciled = await AgentRunRepository(db).reconcile_expired_leases(now=now + timedelta(minutes=5))
+            await db.commit()
+
+        async with session_factory() as db:
+            _, acquired = await AgentRunRepository(db).mark_running(
+                running_run_id,
+                worker_id=owner,
+                lease_seconds=60,
+                now=now,
+            )
+            await db.commit()
+        async with session_factory() as db:
+            requested = await AgentRunRepository(db).request_cancel(running_run_id)
+            await db.commit()
+        async with session_factory() as db:
+            _, completed = await AgentRunRepository(db).set_terminal_status(
+                running_run_id,
+                status="completed",
+                worker_id=owner,
+                now=now + timedelta(seconds=1),
+            )
+            await db.commit()
+        async with session_factory() as db:
+            _, cancelled = await AgentRunRepository(db).set_terminal_status(
+                running_run_id,
+                status="cancelled",
+                error_type="cancelled",
+                worker_id=owner,
+                now=now + timedelta(seconds=1),
+            )
+            await db.commit()
+
+        async with session_factory() as db:
+            pending_persisted = await db.get(AgentRun, pending_run_id)
+            pending_message = await db.get(Message, pending_message_id)
+            running_persisted = await db.get(AgentRun, running_run_id)
+            running_message = await db.get(Message, running_message_id)
+
+        assert pending.status == "cancelled"
+        assert pending_reconciled == []
+        assert pending_persisted.status == "cancelled"
+        assert pending_message.delivery_status == "cancelled"
+        assert acquired is True
+        assert requested.status == "cancel_requested"
+        assert completed is False
+        assert cancelled is True
+        assert running_persisted.status == "cancelled"
+        assert running_message.delivery_status == "cancelled"
+    finally:
+        await _cleanup_runs(session_factory, [pending_thread_id, running_thread_id])
+
+
+async def test_concurrent_reconciliation_fails_each_expired_lease_once_and_projects_message_failure(
+    lease_database,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, session_factory = lease_database
+    now = utc_now_naive()
+    live = await _create_run(
+        session_factory,
+        status="running",
+        worker_id="worker-live:attempt",
+        lease_expires_at=now + timedelta(minutes=5),
+    )
+    expired_running = await _create_run(
+        session_factory,
+        status="running",
+        worker_id="worker-dead:running",
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+    expired_cancel = await _create_run(
+        session_factory,
+        status="cancel_requested",
+        worker_id="worker-dead:cancel",
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+    all_runs = [live, expired_running, expired_cancel]
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", lambda: _session_context(session_factory))
+
+    try:
+        results = await asyncio.gather(
+            run_worker.reconcile_expired_run_leases(now=now),
+            run_worker.reconcile_expired_run_leases(now=now),
+        )
+        repeated = await run_worker.reconcile_expired_run_leases(now=now)
+        reconciled_ids = [run_id for result in results for run_id in result]
+
+        async with session_factory() as db:
+            persisted_runs = {
+                run.id: run
+                for run in (
+                    await db.scalars(select(AgentRun).where(AgentRun.id.in_([item[0] for item in all_runs])))
+                ).all()
+            }
+            persisted_messages = {
+                message.id: message
+                for message in (
+                    await db.scalars(select(Message).where(Message.id.in_([item[2] for item in all_runs])))
+                ).all()
+            }
+
+        assert sorted(reconciled_ids) == sorted([expired_running[0], expired_cancel[0]])
+        assert repeated == []
+        assert persisted_runs[live[0]].status == "running"
+        assert persisted_runs[live[0]].worker_id == "worker-live:attempt"
+        for run_id, _, message_id in (expired_running, expired_cancel):
+            run = persisted_runs[run_id]
+            assert run.status == "failed"
+            assert run.error_type == "worker_lease_expired"
+            assert "at-least-once" in run.error_message
+            assert run.worker_id is None
+            assert run.heartbeat_at is None
+            assert run.lease_expires_at is None
+            assert persisted_messages[message_id].delivery_status == "failed"
+    finally:
+        await _cleanup_runs(session_factory, [item[1] for item in all_runs])

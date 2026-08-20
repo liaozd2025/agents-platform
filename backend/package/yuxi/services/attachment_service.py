@@ -14,7 +14,6 @@ from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.agent_run_request_repository import AgentRunRequestRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.services.mention_search_service import invalidate_mention_cache
-from yuxi.services.ocr_service import parse_document
 from yuxi.storage.minio import StorageError, get_minio_client
 from yuxi.utils.datetime_utils import utc_isoformat
 from yuxi.utils.logging_config import logger
@@ -42,6 +41,14 @@ class ConversionResult:
     file_size: int
     markdown: str
     truncated: bool
+
+
+async def parse_document(source: str, params: dict | None = None, db: AsyncSession | None = None) -> str:
+    """仅在附件确实需要解析时加载文档/OCR 重运行时。"""
+
+    from yuxi.services.ocr_service import parse_document as parse_runtime_document
+
+    return await parse_runtime_document(source, params=params, db=db)
 
 
 async def _require_user_conversation(conv_repo: ConversationRepository, thread_id: str, uid: str):

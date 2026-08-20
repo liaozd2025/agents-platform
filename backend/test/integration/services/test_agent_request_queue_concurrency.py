@@ -6,6 +6,7 @@ import asyncio
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,6 +15,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.repositories.agent_run_request_repository import AgentRunRequestRepository
+from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.services import agent_request_queue_service
 from yuxi.services import run_worker
 from yuxi.services.input_message_service import build_chat_input_message
@@ -448,6 +450,8 @@ async def test_terminal_status_loser_does_not_change_message_delivery_status(mon
     uid = f"pytest-user-{uuid.uuid4()}"
     request_id = f"terminal-{uuid.uuid4()}"
     run_id = str(uuid.uuid4())
+    worker_id = f"worker-terminal:{uuid.uuid4()}"
+    lease_now = utc_now_naive()
     engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -488,22 +492,45 @@ async def test_terminal_status_loser_does_not_change_message_delivery_status(mon
                 input_payload={},
                 status="running",
                 run_type="chat",
+                worker_id=worker_id,
+                heartbeat_at=lease_now,
+                lease_expires_at=lease_now + timedelta(minutes=5),
             )
         )
         await db.commit()
 
     try:
-        completed = await run_worker.mark_run_terminal(run_id, "completed")
+        async with session_factory() as db:
+            run = await db.scalar(select(AgentRun).where(AgentRun.id == run_id))
+            output_message = Message(
+                conversation_id=run.conversation_id,
+                role="assistant",
+                content="completed output",
+                run_id=run.id,
+                request_id=run.request_id,
+            )
+            db.add(output_message)
+            await db.flush()
+            await AgentRunRepository(db).set_output_message(
+                run.id,
+                output_message.id,
+                worker_id=worker_id,
+                now=lease_now + timedelta(seconds=1),
+            )
+            await db.commit()
+
+        completed = await run_worker.mark_run_terminal(run_id, "completed", worker_id=worker_id)
         cancelled = await run_worker.mark_run_terminal(
             run_id,
             "cancelled",
             error_type="cancelled",
             error_message="late cancel",
+            worker_id=worker_id,
         )
 
         async with session_factory() as db:
             run = await db.scalar(select(AgentRun).where(AgentRun.id == run_id))
-            message = await db.scalar(select(Message).where(Message.request_id == request_id))
+            message = await db.scalar(select(Message).where(Message.request_id == request_id, Message.role == "user"))
 
         assert completed.changed is True
         assert completed.status == "completed"
@@ -514,9 +541,9 @@ async def test_terminal_status_loser_does_not_change_message_delivery_status(mon
     finally:
         async with session_factory() as db:
             conversation_id = await db.scalar(select(Conversation.id).where(Conversation.thread_id == thread_id))
-            await db.execute(delete(AgentRun).where(AgentRun.id == run_id))
             if conversation_id is not None:
                 await db.execute(delete(Message).where(Message.conversation_id == conversation_id))
+            await db.execute(delete(AgentRun).where(AgentRun.id == run_id))
             await db.execute(delete(Conversation).where(Conversation.thread_id == thread_id))
             await db.commit()
         await engine.dispose()

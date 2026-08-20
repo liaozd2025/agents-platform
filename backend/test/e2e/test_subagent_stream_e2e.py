@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
-from e2e_helpers import cancel_run, delete_agent
+from e2e_helpers import cancel_run, delete_agent, skip_if_external_quota
 from test.live_api_cleanup import remove_e2e_thread_storage
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.e2e, pytest.mark.slow]
@@ -132,7 +132,9 @@ async def _consume_run_stream(
                 agent_state = payload.get("agent_state")
                 if isinstance(agent_state, dict):
                     latest_agent_state = agent_state
-            assert event != "error", payload
+            if event == "error":
+                skip_if_external_quota(payload)
+                assert event != "error", payload
             if event == "end":
                 event_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
                 terminal_status = str(event_payload.get("status") or "")

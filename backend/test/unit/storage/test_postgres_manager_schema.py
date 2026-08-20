@@ -3,7 +3,20 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import pytest
-from yuxi.storage.postgres.manager import PostgresManager
+
+from yuxi.storage.postgres.manager import BusinessBase, KnowledgeBase, PostgresManager
+
+
+def test_business_and_knowledge_metadata_are_disjoint():
+    """LITE create_all 的业务 metadata 不得携带知识与评估表。"""
+
+    assert BusinessBase is not KnowledgeBase
+    assert "users" in BusinessBase.metadata.tables
+    assert "knowledge_bases" not in BusinessBase.metadata.tables
+    assert "evaluation_runs" not in BusinessBase.metadata.tables
+    assert "knowledge_bases" in KnowledgeBase.metadata.tables
+    assert "evaluation_runs" in KnowledgeBase.metadata.tables
+    assert "users" not in KnowledgeBase.metadata.tables
 
 
 class _RecordingConnection:
@@ -269,6 +282,18 @@ async def test_ensure_business_schema_backfills_resource_creation_snapshots_idem
 
 
 @pytest.mark.asyncio
+async def test_ensure_business_schema_adds_idempotent_agent_run_lease_columns_and_index():
+    async with _recording_manager() as (manager, connection):
+        await manager.ensure_business_schema()
+
+    statements = "\n".join(connection.statements)
+    assert "agent_runs ADD COLUMN IF NOT EXISTS worker_id VARCHAR(128)" in statements
+    assert "agent_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP WITHOUT TIME ZONE" in statements
+    assert "agent_runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMP WITHOUT TIME ZONE" in statements
+    assert "CREATE INDEX IF NOT EXISTS ix_agent_runs_status_lease_expires" in statements
+
+
+@pytest.mark.asyncio
 async def test_ensure_business_schema_removes_unbound_api_keys_before_requiring_user_id():
     async with _recording_manager() as (manager, connection):
         await manager.ensure_business_schema()
@@ -282,6 +307,19 @@ async def test_ensure_business_schema_removes_unbound_api_keys_before_requiring_
     assert statements.index("DELETE FROM api_keys WHERE user_id IS NULL") < statements.index(
         "ALTER TABLE IF EXISTS api_keys ALTER COLUMN user_id SET NOT NULL"
     )
+    assert "ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS request_id VARCHAR(64)" in statements
+    assert "ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS intent_hash VARCHAR(64)" in statements
+    assert (
+        "ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMP WITHOUT TIME ZONE" in statements
+    )
+    assert "users.is_deleted <> 0" in statements
+    assert "COALESCE(api_key.revoked_at, users.deleted_at, CURRENT_TIMESTAMP)" in statements
+    assert statements.index("ADD COLUMN IF NOT EXISTS revoked_at") < statements.index("users.is_deleted <> 0")
+    assert statements.index("users.is_deleted <> 0") < statements.index(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_api_keys_request_id"
+    )
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS ix_api_keys_request_id" in statements
+    assert "CREATE INDEX IF NOT EXISTS ix_api_keys_revoked_at" in statements
 
 
 @pytest.mark.asyncio

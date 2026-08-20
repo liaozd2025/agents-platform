@@ -19,6 +19,7 @@ from test.live_api_cleanup import (  # noqa: E402
     cleanup_e2e_chat_resources,
     cleanup_pytest_knowledge_resources,
 )
+from yuxi.config.runtime import lite_mode_enabled  # noqa: E402
 
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 load_dotenv(PROJECT_ROOT / "test/.env.test", override=False)
@@ -29,7 +30,7 @@ E2E_PASSWORD = os.getenv("E2E_PASSWORD") or os.getenv("TEST_PASSWORD")
 CLEANUP_USERNAME = E2E_USERNAME or os.getenv("TEST_USERNAME")
 CLEANUP_PASSWORD = E2E_PASSWORD or os.getenv("TEST_PASSWORD")
 E2E_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
-LITE_MODE = os.getenv("LITE_MODE", "").lower() in {"true", "1"}
+LITE_MODE = lite_mode_enabled()
 
 
 def _require_e2e_credentials() -> tuple[str, str]:

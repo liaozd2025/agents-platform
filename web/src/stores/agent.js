@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { agentApi, databaseApi, mcpApi, skillApi, toolApi } from '@/apis'
 import { useUserStore } from './user'
+import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
 import { isDefaultAllAgentResourceKind } from '@/utils/agentConfigUtils'
 import { handleChatError } from '@/utils/errorHandler'
 
@@ -88,7 +89,10 @@ export const useAgentStore = defineStore(
     async function fetchMentionResources() {
       try {
         const userStore = useUserStore()
+        const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
+        await runtimeCapabilitiesStore.ensureLoaded()
         const [dbsRes, mcpsRes, skillsRes] = await Promise.all([
+          runtimeCapabilitiesStore.knowledgeEnabled &&
           userStore.hasPermission('knowledge_base:read')
             ? databaseApi.getAccessibleDatabases().catch(() => ({ databases: [] }))
             : { databases: [] },

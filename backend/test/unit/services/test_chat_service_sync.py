@@ -108,6 +108,7 @@ class _FakeConvRepo:
         image_content: str | None = None,
         run_id: str | None = None,
         request_id: str | None = None,
+        commit: bool = True,
     ):
         self.saved_messages.append(
             {
@@ -119,6 +120,7 @@ class _FakeConvRepo:
                 "image_content": image_content,
                 "run_id": run_id,
                 "request_id": request_id,
+                "commit": commit,
             }
         )
         return SimpleNamespace(id=1)
@@ -137,6 +139,7 @@ class _FakeConvRepo:
         tool_input: dict | None = None,
         status: str = "pending",
         langgraph_tool_call_id: str | None = None,
+        commit: bool = True,
     ):
         self.tool_calls.append(
             {
@@ -145,6 +148,7 @@ class _FakeConvRepo:
                 "tool_input": tool_input,
                 "status": status,
                 "langgraph_tool_call_id": langgraph_tool_call_id,
+                "commit": commit,
             }
         )
         return SimpleNamespace(id=len(self.tool_calls))
@@ -210,6 +214,7 @@ async def test_save_messages_from_langgraph_state_handles_dict_tool_call_blocks(
 
     assert conv_repo.saved_messages[0]["content"] == ""
     assert conv_repo.saved_messages[0]["extra_metadata"]["content"][0]["id"] == "call-task-1"
+    assert conv_repo.saved_messages[0]["commit"] is True
     assert conv_repo.tool_calls == [
         {
             "message_id": 1,
@@ -217,6 +222,7 @@ async def test_save_messages_from_langgraph_state_handles_dict_tool_call_blocks(
             "tool_input": {"description": "write file", "subagent_slug": "worker"},
             "status": "pending",
             "langgraph_tool_call_id": "call-task-1",
+            "commit": True,
         }
     ]
 
@@ -229,6 +235,9 @@ async def test_save_messages_from_langgraph_state_backfills_run_output_message(m
 
         async def commit(self):
             self.commit_count += 1
+
+        async def rollback(self):
+            pass
 
     class FakeGraph:
         async def aget_state(self, _config):
@@ -248,9 +257,22 @@ async def test_save_messages_from_langgraph_state_backfills_run_output_message(m
         def __init__(self, db):
             assert db is fake_db
 
-        async def set_output_message(self, run_id: str, message_id: int):
+        async def lock_output_persistence(
+            self,
+            run_id: str,
+            *,
+            worker_id: str,
+            conversation_thread_id: str,
+            request_id: str,
+        ):
+            captured["locked"] = (run_id, worker_id, conversation_thread_id, request_id)
+            return object()
+
+        async def set_output_message(self, run_id: str, message_id: int, *, worker_id: str):
             captured["run_id"] = run_id
             captured["message_id"] = message_id
+            captured["worker_id"] = worker_id
+            return object()
 
     monkeypatch.setattr(svc, "AgentRunRepository", FakeRunRepo)
 
@@ -263,13 +285,20 @@ async def test_save_messages_from_langgraph_state_backfills_run_output_message(m
         trace_info={"langfuse_trace_id": "trace-1"},
         run_id="run-1",
         request_id="req-1",
+        worker_id="worker-1",
     )
 
     assert conv_repo.saved_messages[0]["content"] == "answer"
     assert conv_repo.saved_messages[0]["run_id"] == "run-1"
     assert conv_repo.saved_messages[0]["request_id"] == "req-1"
+    assert conv_repo.saved_messages[0]["commit"] is False
     assert conv_repo.saved_messages[0]["extra_metadata"]["langfuse_trace_id"] == "trace-1"
-    assert captured == {"run_id": "run-1", "message_id": 1}
+    assert captured == {
+        "locked": ("run-1", "worker-1", "thread-1", "req-1"),
+        "run_id": "run-1",
+        "message_id": 1,
+        "worker_id": "worker-1",
+    }
     assert fake_db.commit_count == 1
 
 

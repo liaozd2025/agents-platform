@@ -1,0 +1,192 @@
+"""AgentRun 结果接口的消息因果归属集成测试。"""
+
+from __future__ import annotations
+
+import os
+import uuid
+from datetime import datetime, timedelta
+
+import pytest
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from yuxi.repositories.department_repository import DepartmentRepository
+from yuxi.repositories.user_repository import UserRepository
+from yuxi.storage.postgres.models_business import (
+    ROOT_DEPARTMENT_ID,
+    APIKey,
+    AgentRun,
+    Conversation,
+    Department,
+    Message,
+    User,
+)
+from yuxi.utils.auth_utils import AuthUtils
+
+pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
+
+
+async def test_result_api_never_reads_another_runs_assistant_message(test_client):
+    """精确绑定和历史兼容都只能读取当前 Run 的 assistant 消息。"""
+    unique = uuid.uuid4().hex
+    uid = f"pytest_output_{unique[:16]}"
+    thread_id = f"pytest-output-{unique}"
+    exact_run_id = f"exact-{unique}"
+    wrong_run_id = f"wrong-{unique}"
+    legacy_run_id = f"legacy-{unique}"
+    run_ids = [exact_run_id, wrong_run_id, legacy_run_id]
+
+    engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    conversation_id: int | None = None
+    department_id: int | None = None
+    user_id: int | None = None
+    api_key_id: int | None = None
+
+    try:
+        async with session_factory() as db:
+            root_department = await DepartmentRepository(db).get_by_id(ROOT_DEPARTMENT_ID)
+            assert root_department is not None
+            department = await DepartmentRepository(db).create_child(
+                db,
+                name=f"pytest-output-{unique[:16]}",
+                description=None,
+                parent=root_department,
+            )
+            department_id = department.id
+
+            user = await UserRepository(db).create(
+                {
+                    "username": uid,
+                    "uid": uid,
+                    "password_hash": "integration-api-key-only",
+                    "department_id": department.id,
+                }
+            )
+            user_id = user.id
+
+            api_key_secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+            api_key = APIKey(
+                key_hash=key_hash,
+                key_prefix=key_prefix,
+                name="pytest output causality",
+                user_id=user.id,
+                department_id=department.id,
+                created_by=uid,
+            )
+            db.add(api_key)
+            await db.flush()
+            api_key_id = api_key.id
+
+            conversation = Conversation(
+                thread_id=thread_id,
+                uid=uid,
+                agent_id="pytest-output-causality",
+                status="active",
+            )
+            runs = [
+                AgentRun(
+                    id=run_id,
+                    conversation_thread_id=thread_id,
+                    agent_slug="pytest-output-causality",
+                    uid=uid,
+                    status="completed",
+                    request_id=f"request-{run_id}",
+                    conversation_id=None,
+                    run_type="chat",
+                    input_payload={},
+                )
+                for run_id in run_ids
+            ]
+            db.add(conversation)
+            await db.flush()
+            conversation_id = conversation.id
+            for run in runs:
+                run.conversation_id = conversation.id
+            db.add_all(runs)
+            await db.flush()
+
+            created_at = datetime(2026, 8, 15, 12, 0, 0)
+            exact_message = Message(
+                conversation_id=conversation.id,
+                run_id=exact_run_id,
+                role="assistant",
+                content="exact run output",
+                created_at=created_at + timedelta(seconds=3),
+            )
+            wrong_runs_own_message = Message(
+                conversation_id=conversation.id,
+                run_id=wrong_run_id,
+                role="assistant",
+                content="wrong run own compatibility candidate",
+                created_at=created_at + timedelta(seconds=4),
+            )
+            legacy_old_message = Message(
+                conversation_id=conversation.id,
+                run_id=legacy_run_id,
+                role="assistant",
+                content="legacy old output",
+                created_at=created_at,
+            )
+            legacy_latest_message = Message(
+                conversation_id=conversation.id,
+                run_id=legacy_run_id,
+                role="assistant",
+                content="legacy latest output",
+                created_at=created_at + timedelta(seconds=1),
+            )
+            db.add_all([exact_message, wrong_runs_own_message, legacy_old_message, legacy_latest_message])
+            await db.flush()
+
+            runs[0].output_message_id = exact_message.id
+            # 故意把 wrong Run 指向另一个 Run 的消息；即使自己有兼容候选，也不能 fallback。
+            runs[1].output_message_id = exact_message.id
+            runs[2].output_message_id = None
+            exact_message_id = exact_message.id
+            legacy_latest_message_id = legacy_latest_message.id
+            await db.commit()
+
+        headers = {"Authorization": f"Bearer {api_key_secret}"}
+        profile_response = await test_client.get("/api/auth/me", headers=headers)
+        assert profile_response.status_code == 200, profile_response.text
+        assert profile_response.json()["uid"] == uid
+
+        exact_response = await test_client.get(
+            f"/api/agent/runs/{exact_run_id}/result",
+            headers=headers,
+        )
+        wrong_response = await test_client.get(
+            f"/api/agent/runs/{wrong_run_id}/result",
+            headers=headers,
+        )
+        legacy_response = await test_client.get(
+            f"/api/agent/runs/{legacy_run_id}/result",
+            headers=headers,
+        )
+
+        assert exact_response.status_code == 200, exact_response.text
+        assert exact_response.json()["output"] == "exact run output"
+        assert exact_response.json()["final_message_id"] == exact_message_id
+
+        assert wrong_response.status_code == 200, wrong_response.text
+        assert wrong_response.json()["output"] == ""
+        assert wrong_response.json()["final_message_id"] is None
+
+        assert legacy_response.status_code == 200, legacy_response.text
+        assert legacy_response.json()["output"] == "legacy latest output"
+        assert legacy_response.json()["final_message_id"] == legacy_latest_message_id
+    finally:
+        async with session_factory() as db:
+            if conversation_id is not None:
+                await db.execute(delete(Message).where(Message.conversation_id == conversation_id))
+            await db.execute(delete(AgentRun).where(AgentRun.id.in_(run_ids)))
+            if conversation_id is not None:
+                await db.execute(delete(Conversation).where(Conversation.id == conversation_id))
+            if api_key_id is not None:
+                await db.execute(delete(APIKey).where(APIKey.id == api_key_id))
+            if user_id is not None:
+                await db.execute(delete(User).where(User.id == user_id))
+            if department_id is not None:
+                await db.execute(delete(Department).where(Department.id == department_id))
+            await db.commit()
+        await engine.dispose()

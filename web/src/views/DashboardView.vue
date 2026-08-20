@@ -33,7 +33,12 @@
       message="当前结果包含迁移前数据，组织归属按创建者或用户当前关系推算。"
     />
 
-    <a-card title="资源归属与共享可见" class="resource-scope-card" :loading="loading">
+    <a-card
+      v-if="knowledgeEnabled"
+      title="资源归属与共享可见"
+      class="resource-scope-card"
+      :loading="loading"
+    >
       <div class="resource-scope-hint">
         创建归属按创建时组织；共享可见按当前共享范围，均包含所选组织的下级组织。
       </div>
@@ -56,7 +61,7 @@
     </div>
 
     <!-- Grid布局的主要内容区域 -->
-    <div class="dashboard-grid">
+    <div class="dashboard-grid" :class="{ 'without-knowledge': !knowledgeEnabled }">
       <!-- 调用统计模块 - 占据2x1网格 -->
       <CallStatsComponent
         :loading="loading"
@@ -92,7 +97,7 @@
       </div>
 
       <!-- 知识库使用情况 - 占据1x1网格 -->
-      <div class="grid-item knowledge-stats">
+      <div v-if="knowledgeEnabled" class="grid-item knowledge-stats">
         <KnowledgeStatsComponent
           :knowledge-stats="allStatsData?.knowledge"
           :loading="loading"
@@ -108,8 +113,10 @@
 
 <script setup>
 import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { storeToRefs } from 'pinia'
 import { message } from 'ant-design-vue'
 import { dashboardApi } from '@/apis/dashboard_api'
+import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
 import { buildDepartmentTree } from '@/utils/departmentTree'
 
 // 导入子组件
@@ -124,6 +131,8 @@ import FeedbackModalComponent from '@/components/dashboard/FeedbackModalComponen
 
 // 组件引用
 const feedbackModal = ref(null)
+const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
+const { knowledgeEnabled } = storeToRefs(runtimeCapabilitiesStore)
 const selectedDepartmentId = ref()
 const currentStats = ref({
   selected_department_name: '全部授权组织',
@@ -192,7 +201,11 @@ const loadAllStats = async () => {
   loading.value = true
   try {
     // 使用并行API调用获取所有统计数据
-    const response = await dashboardApi.getAllStats(selectedDepartmentId.value)
+    const response = await dashboardApi.getAllStats({
+      includeKnowledge: knowledgeEnabled.value,
+      includeResources: knowledgeEnabled.value,
+      departmentId: selectedDepartmentId.value
+    })
 
     // 更新基础统计数据
     basicStats.value = response.basic
@@ -241,9 +254,9 @@ const cleanupCharts = () => {
 }
 
 // 初始化
-onMounted(() => {
-  loadCurrentStats()
-  loadAllStats()
+onMounted(async () => {
+  await runtimeCapabilitiesStore.ensureLoaded()
+  await Promise.all([loadCurrentStats(), loadAllStats()])
 })
 
 // 组件卸载时清理图表
@@ -393,6 +406,10 @@ onUnmounted(() => {
       grid-row: 2 / 3;
       min-height: 350px;
     }
+  }
+
+  &.without-knowledge .grid-item.tool-stats {
+    grid-column: 2 / 4;
   }
 }
 
@@ -561,6 +578,10 @@ onUnmounted(() => {
         min-height: 300px;
       }
     }
+
+    &.without-knowledge .grid-item.tool-stats {
+      grid-column: 1 / 3;
+    }
   }
 }
 
@@ -583,6 +604,10 @@ onUnmounted(() => {
         grid-row: auto;
         min-height: 300px;
       }
+    }
+
+    &.without-knowledge .grid-item.tool-stats {
+      grid-column: 1 / 2;
     }
   }
 

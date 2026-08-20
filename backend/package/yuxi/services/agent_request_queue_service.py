@@ -52,18 +52,7 @@ REQUEST_TERMINAL_STATUSES = frozenset({REQUEST_STATUS_CANCELLED, REQUEST_STATUS_
 # Message delivery states aligned with messages.delivery_status.
 DELIVERY_STATUS_QUEUED = "queued"
 DELIVERY_STATUS_DISPATCHED = "dispatched"
-DELIVERY_STATUS_COMPLETE = "complete"
 DELIVERY_STATUS_REJECTED = "rejected"
-DELIVERY_STATUS_FAILED = "failed"
-DELIVERY_STATUS_CANCELLED = "cancelled"
-
-# AgentRun terminal status → Message.delivery_status. ``interrupted`` 不在内：
-# 被中断的请求未真正完成，保留原 delivery_status 以便 UI 区分完成 / 中断。
-RUN_STATUS_TO_DELIVERY_STATUS: dict[str, str] = {
-    "completed": DELIVERY_STATUS_COMPLETE,
-    "failed": DELIVERY_STATUS_FAILED,
-    "cancelled": DELIVERY_STATUS_CANCELLED,
-}
 
 
 @dataclass(frozen=True)

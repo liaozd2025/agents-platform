@@ -1169,26 +1169,25 @@ async def test_get_agent_run_result_uses_output_message_id(monkeypatch: pytest.M
         error_type=None,
         error_message=None,
     )
-    messages = [
-        SimpleNamespace(id=1, role="user", content="question", extra_metadata={}),
-        SimpleNamespace(id=2, role="assistant", content="older", extra_metadata={"langfuse_trace_id": "trace-old"}),
-        SimpleNamespace(id=3, role="assistant", content="final", extra_metadata={"langfuse_trace_id": "trace-final"}),
-    ]
+    output_message = SimpleNamespace(
+        id=2,
+        role="assistant",
+        content="older",
+        extra_metadata={"langfuse_trace_id": "trace-old"},
+    )
 
-    class FakeScalars:
-        def unique(self):
-            return self
+    class RunOutputRepo:
+        def __init__(self, db):
+            assert db is fake_db
 
-        def all(self):
-            return messages
-
-    class FakeResult:
-        def scalars(self):
-            return FakeScalars()
-
-    class FakeDB:
-        async def execute(self, _stmt):
-            return FakeResult()
+        async def get_output_message(self, **kwargs):
+            assert kwargs == {
+                "run_id": "run-1",
+                "conversation_id": 10,
+                "output_message_id": 2,
+                "allow_legacy_fallback": True,
+            }
+            return output_message
 
     class RunRepo:
         def __init__(self, db):
@@ -1200,14 +1199,67 @@ async def test_get_agent_run_result_uses_output_message_id(monkeypatch: pytest.M
             return run
 
     monkeypatch.setattr(agent_run_service, "AgentRunRepository", RunRepo)
+    monkeypatch.setattr(agent_run_service, "AgentRunOutputRepository", RunOutputRepo)
+    fake_db = object()
 
-    payload = await agent_run_service.get_agent_run_result(run_id="run-1", current_uid="user-1", db=FakeDB())
+    payload = await agent_run_service.get_agent_run_result(run_id="run-1", current_uid="user-1", db=fake_db)
 
     assert payload["status"] == "completed"
     assert payload["output"] == "older"
     assert payload["final_message_id"] == 2
     assert payload["langfuse_trace_id"] == "trace-old"
     assert "debug" not in payload
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_result_does_not_fallback_when_explicit_binding_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    run = SimpleNamespace(
+        id="run-1",
+        status="completed",
+        agent_slug="default-chatbot",
+        conversation_thread_id="thread-1",
+        conversation_id=10,
+        request_id="req-1",
+        output_message_id=99,
+        error_type=None,
+        error_message=None,
+    )
+    output_queries: list[dict] = []
+
+    class RunRepo:
+        def __init__(self, db):
+            del db
+
+        async def get_run_for_user(self, run_id: str, uid: str):
+            assert (run_id, uid) == ("run-1", "user-1")
+            return run
+
+    class RunOutputRepo:
+        def __init__(self, db):
+            del db
+
+        async def get_output_message(self, **kwargs):
+            output_queries.append(kwargs)
+            return None
+
+    monkeypatch.setattr(agent_run_service, "AgentRunRepository", RunRepo)
+    monkeypatch.setattr(agent_run_service, "AgentRunOutputRepository", RunOutputRepo)
+
+    payload = await agent_run_service.get_agent_run_result(run_id="run-1", current_uid="user-1", db=object())
+
+    assert output_queries == [
+        {
+            "run_id": "run-1",
+            "conversation_id": 10,
+            "output_message_id": 99,
+            "allow_legacy_fallback": True,
+        }
+    ]
+    assert payload["output"] == ""
+    assert payload["final_message_id"] is None
+    assert payload["langfuse_trace_id"] is None
 
 
 @pytest.mark.asyncio

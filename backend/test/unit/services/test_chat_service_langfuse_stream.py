@@ -39,10 +39,22 @@ async def _fake_normalize_agent_context_config(context, **_kwargs):
 
 
 async def _fake_save_messages_from_langgraph_state(
-    *, agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id=None, request_id=None
+    *,
+    agent_instance,
+    thread_id,
+    conv_repo,
+    config_dict,
+    context,
+    trace_info,
+    run_id=None,
+    request_id=None,
+    worker_id=None,
+    complete_run=False,
+    token_usage=None,
 ):
-    del agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id, request_id
-    return None
+    del agent_instance, thread_id, conv_repo, config_dict, context, trace_info
+    del run_id, request_id, worker_id, token_usage
+    return complete_run
 
 
 async def _fake_guard_check(_content):
@@ -254,7 +266,18 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
         calls["materialized"] = _attachments
 
     async def fake_save_messages_from_langgraph_state(
-        *, agent_instance, thread_id, conv_repo, config_dict, context, trace_info, run_id=None, request_id=None
+        *,
+        agent_instance,
+        thread_id,
+        conv_repo,
+        config_dict,
+        context,
+        trace_info,
+        run_id=None,
+        request_id=None,
+        worker_id=None,
+        complete_run=False,
+        token_usage=None,
     ):
         calls["saved_state"] = {
             "thread_id": thread_id,
@@ -263,7 +286,11 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
             "trace_info": trace_info,
             "run_id": run_id,
             "request_id": request_id,
+            "worker_id": worker_id,
+            "complete_run": complete_run,
+            "token_usage": token_usage,
         }
+        return complete_run
 
     _patch_stream_scaffolding(
         monkeypatch,
@@ -359,11 +386,63 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
     assert calls["saved_state"]["context"].thread_id == "thread-1"
     assert calls["saved_state"]["context"].uid == "user-1"
     assert calls["saved_state"]["context"].temperature == 0.1
+    assert calls["saved_state"]["complete_run"] is True
     assert chunks[-1]["status"] == "finished"
     assert [attachment["file_id"] for attachment in calls["materialized"]] == ["file-1", "file-2"]
     assert chunks[0]["msg"]["extra_metadata"]["attachments"] == [calls["stream_kwargs"]["uploads"][0]]
     assert calls["flushed"] is True
     assert isinstance(calls["stream_messages"][0], HumanMessage)
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_chat_output_persistence_failure_is_terminal_error(
+    stub_system_options,
+    stub_content_guard,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeAgent:
+        context_schema = _FakeContext
+
+        async def stream_messages_with_state(self, messages, input_context=None, **kwargs):
+            del messages, input_context, kwargs
+            yield "messages", (AIMessageChunk(content="answer"), {"node": "llm"})
+
+        async def get_graph(self, *, context=None):
+            del context
+
+            class FakeGraph:
+                async def aget_state(self, _config):
+                    return SimpleNamespace(values={"messages": []})
+
+            return FakeGraph()
+
+    async def fail_output_persistence(**_kwargs):
+        raise ValueError("output binding rejected")
+
+    _patch_stream_scaffolding(
+        monkeypatch,
+        agent=FakeAgent(),
+        save_messages=fail_output_persistence,
+    )
+
+    chunks = []
+    async for chunk in svc.stream_agent_chat(
+        agent_slug="test-agent",
+        thread_id="thread-output-error",
+        meta={
+            "run_id": "run-output-error",
+            "request_id": "request-output-error",
+            "worker_id": "worker-output-error:attempt-1",
+        },
+        input_message=build_chat_input_message("hello"),
+        current_user=SimpleNamespace(id=1, uid="user-1", role="user", department_id="dept-1"),
+        db=_FakeSession(),
+    ):
+        chunks.append(json.loads(chunk.decode("utf-8")))
+
+    assert chunks[-1]["status"] == "error"
+    assert chunks[-1]["error_type"] == "output_persistence_error"
+    assert all(chunk.get("status") not in {"finished", "warning"} for chunk in chunks)
 
 
 @pytest.mark.asyncio

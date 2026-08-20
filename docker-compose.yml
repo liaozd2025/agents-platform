@@ -4,6 +4,7 @@ x-api-worker-env: &api-worker-env
   RUNNING_IN_DOCKER: "true"
   YUXI_ENV: development
   LANGGRAPH_CHECKPOINTER_BACKEND: ${LANGGRAPH_CHECKPOINTER_BACKEND:-postgres}
+  API_KEY_DERIVATION_SECRET: ${API_KEY_DERIVATION_SECRET:?Set API_KEY_DERIVATION_SECRET in .env [v0.7.2+], or rerun `bash scripts/init.sh`.}
   # DBs and other services
   POSTGRES_URL: ${POSTGRES_URL:-postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yuxi}}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -32,6 +33,8 @@ x-api-worker-env: &api-worker-env
   # Agent run
   RUN_CANCEL_KEY_TTL_SECONDS: ${RUN_CANCEL_KEY_TTL_SECONDS:-1800}
   RUN_EVENTS_STREAM_TTL_SECONDS: ${RUN_EVENTS_STREAM_TTL_SECONDS:-7200}
+  READINESS_PROBE_TIMEOUT_SECONDS: ${READINESS_PROBE_TIMEOUT_SECONDS:-2}
+  READINESS_CACHE_TTL_SECONDS: ${READINESS_CACHE_TTL_SECONDS:-1}
   YUXI_CORS_ORIGINS: ${YUXI_CORS_ORIGINS:-}
   YUXI_EMBED_ALLOWED_ORIGINS: ${YUXI_EMBED_ALLOWED_ORIGINS:-}
   OA_SSO_ENABLED: ${OA_SSO_ENABLED:-false}
@@ -76,7 +79,7 @@ services:
     command: uv run --no-sync --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050 --reload --reload-dir /app/server --reload-dir /app/package --timeout-graceful-shutdown 5
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:5050/api/system/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:5050/api/system/ready || exit 1"]
       interval: 30s
       timeout: 15s
       retries: 8
@@ -120,6 +123,12 @@ services:
       <<: *api-worker-env
     command: watchfiles --filter python "arq server.worker_main.WorkerSettings" /app/server /app/package
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "uv run --no-sync --no-dev arq --check server.worker_main.WorkerSettings"]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 180s
     depends_on:
       postgres:
         condition: service_healthy
@@ -213,7 +222,7 @@ services:
 
   # region neo4j
   graph:
-    image: neo4j:5.26
+    image: neo4j:5.26.29
     container_name: graph
     ports:
       - "127.0.0.1:7474:7474"
@@ -334,7 +343,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.10-alpine
     container_name: redis
     ports:
       - "127.0.0.1:6379:6379"
