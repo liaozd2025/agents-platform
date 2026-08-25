@@ -3023,7 +3023,8 @@ const selectThreadFromRoute = async (threadId) => {
     return true
   }
 
-  if (chatState.currentThreadId === threadId) {
+  // 路由可能先于消息加载完成就同步了当前 ID；本地没有消息时必须继续请求历史。
+  if (chatState.currentThreadId === threadId && (threadMessages.value[threadId] || []).length > 0) {
     return true
   }
 

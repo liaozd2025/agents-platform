@@ -6,6 +6,8 @@
 
 ## v0.7.2 (current)
 
+- 新增 H5“九典 AI 助手”历史会话一次性迁移工具：按固定截止时间读取指定应用的会话、消息和附件元数据，映射 OA UID 与 `default-chatbot` Agent，默认仅预检，显式执行时按会话事务写入并支持幂等跳过与失败清单。
+
 ::: warning 升级提醒
 1. 升级到 v0.7.2 后，管理员此前创建的 stdio MCP 会被禁用，也无法重新启用。请在详情页迁移为 SSE 或 Streamable HTTP，或直接删除；代码内置的系统 stdio MCP 不受影响。
 2. 重建或升级 Redis 容器后需重启 worker，并等待 `/api/system/ready` 恢复后再接入流量。
