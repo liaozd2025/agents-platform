@@ -415,7 +415,7 @@ def sync_thread_readable_skills(
     normalized_sources = {
         slug: Path(path).resolve()
         for slug, path in (source_dirs or {}).items()
-        if slug in normalized_slugs and isinstance(path, (str, Path))
+        if slug in normalized_slugs and isinstance(path, str | Path)
     }
     readable_slugs = set(normalized_slugs)
     with _get_thread_skills_lock(thread_id):
@@ -480,10 +480,11 @@ def _dirs_equal(dir1: Path, dir2: Path) -> bool:
     """检查两个目录的文件路径与内容是否完全一致。"""
     if not dir1.exists() or not dir2.exists():
         return False
-    return _compute_dir_hash(dir1) == _compute_dir_hash(dir2)
+    return compute_skill_dir_hash(dir1) == compute_skill_dir_hash(dir2)
 
 
-def _compute_dir_hash(source_dir: Path) -> str:
+def compute_skill_dir_hash(source_dir: Path) -> str:
+    """按相对路径与文件内容计算 Skill 目录的稳定 SHA-256。"""
     hasher = hashlib.sha256()
     file_paths = sorted(path for path in source_dir.rglob("*") if path.is_file())
     for file_path in file_paths:
@@ -1818,7 +1819,7 @@ def list_builtin_skill_specs() -> list[dict[str, Any]]:
                 "tool_dependencies": configured_tools or normalize_string_list(meta.get("tool_dependencies")),
                 "mcp_dependencies": configured_mcps or normalize_string_list(meta.get("mcp_dependencies")),
                 "skill_dependencies": configured_skills or normalize_string_list(meta.get("skill_dependencies")),
-                "content_hash": _compute_dir_hash(source_dir),
+                "content_hash": compute_skill_dir_hash(source_dir),
                 "source_dir": source_dir,
             }
         )

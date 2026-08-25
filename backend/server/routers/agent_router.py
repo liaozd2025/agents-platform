@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -85,6 +85,7 @@ class AgentRunCreate(BaseModel):
     image_content: str | None = Field(None, description="可选，base64 图片内容")
     model_spec: str | None = Field(None, description="可选，对话级模型覆盖，优先级高于智能体配置")
     tool_approval_mode: str | None = Field(None, description="可选，本次运行的工具审批模式覆盖")
+    executor: Literal["langgraph", "pi"] = Field("langgraph", description="执行引擎；PI 首期仅支持 Local golden Task")
     resume: Any | None = Field(None, description="可选，恢复时传给 LangGraph 的输入载荷，非布尔值")
     created_by_run_id: str | None = Field(None, description="可选，创建本 run 的父 run ID；resume 时为被恢复的 run ID")
     queue_policy: str = Field(
@@ -320,6 +321,8 @@ async def create_agent_run(
 ):
     # resume 路径：恢复已有 LangGraph 状态，跳过 request 入队与派发，直接新建 run。
     if payload.resume is not None:
+        if payload.executor != "langgraph":
+            raise HTTPException(status_code=422, detail="resume 暂不支持 PI executor")
         if payload.queue_policy != "enqueue":
             raise HTTPException(status_code=422, detail="queue_policy 仅支持普通 Chat 请求")
         input_message = None
@@ -355,6 +358,7 @@ async def create_agent_run(
             request_metadata={**meta, "tool_approval_mode": payload.tool_approval_mode},
             model_spec=payload.model_spec,
             tool_approval_mode=payload.tool_approval_mode,
+            executor=payload.executor,
             queue_policy=payload.queue_policy,
         ),
         current_user=current_user,

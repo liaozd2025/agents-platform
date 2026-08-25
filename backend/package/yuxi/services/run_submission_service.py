@@ -45,6 +45,7 @@ class RunSubmissionCommand:
     request_metadata: dict[str, Any] = field(default_factory=dict)
     model_spec: str | None = None
     tool_approval_mode: str | None = None
+    executor: str = "langgraph"
     queue_policy: str = "enqueue"
     create_conversation: bool = False
     conversation_title: str | None = None
@@ -64,6 +65,8 @@ async def submit_run_command(
     """
 
     origin = command.origin
+    if command.executor not in {"langgraph", "pi"}:
+        raise HTTPException(status_code=422, detail=f"不支持的 executor: {command.executor}")
     if not origin.source.strip() or not origin.channel.strip():
         raise HTTPException(status_code=422, detail="Run origin source/channel 不能为空")
     if len(origin.source) > 32:
@@ -162,6 +165,7 @@ async def submit_run_command(
         agent_backend=agent_backend,
         model_spec=command.model_spec,
         tool_approval_mode=command.tool_approval_mode,
+        executor=command.executor,
         meta=request_metadata,
     )
     await finalize_intake(db=db, intake=intake)

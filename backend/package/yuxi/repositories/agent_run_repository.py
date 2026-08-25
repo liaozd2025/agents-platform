@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from yuxi.storage.postgres.models_business import (
     AGENT_RUN_TERMINAL_STATUSES,
@@ -25,6 +28,14 @@ RUN_STATUS_TO_DELIVERY_STATUS = {
 }
 
 TOP_LEVEL_RUN_TYPES = ("chat", "resume")
+
+
+def _canonical_json(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _payload_digest(payload: dict) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
 
 
 class AgentRunRepository:
@@ -308,6 +319,7 @@ class AgentRunRepository:
         worker_id: str,
         lease_seconds: float,
         now: datetime | None = None,
+        attempt_metadata: dict | None = None,
     ) -> tuple[AgentRun | None, bool]:
         """由一个 worker 原子取得或续接尚未过期的 Run ownership。"""
         if not worker_id.strip():
@@ -350,6 +362,18 @@ class AgentRunRepository:
             max_attempt_no = await self.db.scalar(
                 select(func.coalesce(func.max(AgentRunAttempt.attempt_no), 0)).where(AgentRunAttempt.run_id == run.id)
             )
+            fields = dict(attempt_metadata or {})
+            allowed_fields = {
+                "adapter",
+                "route_reason",
+                "route_snapshot",
+                "runtime_manifest",
+                "runtime_manifest_digest",
+            }
+            if fields.keys() - allowed_fields:
+                raise ValueError("attempt_metadata 包含不支持的字段")
+            if fields and set(fields) != allowed_fields:
+                raise ValueError("PI attempt_metadata 必须同时冻结 adapter、route 与 Runtime Manifest")
             self.db.add(
                 AgentRunAttempt(
                     run_id=run.id,
@@ -358,6 +382,7 @@ class AgentRunRepository:
                     started_at=current_time,
                     heartbeat_at=current_time,
                     lease_expires_at=run.lease_expires_at,
+                    **fields,
                 )
             )
         else:
@@ -628,6 +653,179 @@ class AgentRunRepository:
             .order_by(AgentRunAttempt.attempt_no.asc(), AgentRunAttempt.id.asc())
         )
         return list(result.scalars().all())
+
+    async def get_current_run_attempt(self, run_id: str, *, worker_id: str) -> AgentRunAttempt | None:
+        """读取当前 lease owner 的开放 attempt。"""
+
+        return await self._get_open_attempt(run_id, worker_id=worker_id)
+
+    async def bind_pi_instance(
+        self,
+        run_id: str,
+        *,
+        attempt_id: int,
+        instance_id: str,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """由当前 owner write-once 绑定 adapter 创建的实例。"""
+
+        if not instance_id.strip():
+            raise ValueError("PI instance_id 不能为空")
+        run = await self._lock_run(run_id)
+        current_time = now or utc_now_naive()
+        if run is None:
+            raise ValueError(f"AgentRun 不存在: {run_id}")
+        self._require_lease_owner(run, worker_id=worker_id, now=current_time, action="绑定 PI instance")
+        attempt = await self.db.scalar(
+            select(AgentRunAttempt)
+            .where(AgentRunAttempt.id == attempt_id, AgentRunAttempt.run_id == run_id)
+            .with_for_update()
+        )
+        if attempt is None or attempt.finished_at is not None or attempt.worker_id != worker_id:
+            raise ValueError("只有当前 PI attempt 可以绑定 instance")
+        if attempt.instance_id is not None:
+            if attempt.instance_id != instance_id:
+                raise ValueError("PI attempt 已绑定其他 instance")
+            return False
+        attempt.instance_id = instance_id
+        attempt.updated_at = current_time
+        await self.db.flush()
+        return True
+
+    async def record_pi_envelope(
+        self,
+        run_id: str,
+        *,
+        attempt_id: int,
+        envelope: dict,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> dict[str, bool]:
+        """幂等持久化 PI envelope；final 与 Message、Run 终态在同一事务。"""
+
+        run = await self._lock_run(run_id)
+        if run is None:
+            raise ValueError(f"AgentRun 不存在: {run_id}")
+        attempt = await self.db.scalar(
+            select(AgentRunAttempt)
+            .where(AgentRunAttempt.id == attempt_id, AgentRunAttempt.run_id == run_id)
+            .with_for_update()
+        )
+        if attempt is None:
+            raise ValueError("PI attempt 不存在")
+        self._validate_pi_envelope(run, attempt, envelope)
+
+        events = list(attempt.result_events or [])
+        existing = next((item for item in events if item.get("event_id") == envelope["event_id"]), None)
+        if existing is not None:
+            if _canonical_json(existing) != _canonical_json(envelope):
+                raise ValueError("同一 PI event_id 的 envelope 内容冲突")
+            return {"ack": True, "duplicate": True}
+
+        current_time = now or utc_now_naive()
+        if attempt.finished_at is not None or attempt.worker_id != worker_id:
+            raise ValueError("只有当前 PI attempt 可以持久化新结果")
+        self._require_lease_owner(run, worker_id=worker_id, now=current_time, action="持久化 PI 结果")
+        if any(item.get("sequence") == envelope["sequence"] for item in events):
+            raise ValueError("同一 PI attempt 的 sequence 不可重复")
+
+        # ponytail: T2 事件量很小，先随 attempt 保存；出现大流量日志时再拆事件表。
+        events.append(dict(envelope))
+        attempt.result_events = events
+        flag_modified(attempt, "result_events")
+        attempt.updated_at = current_time
+        if envelope["type"] != "final":
+            await self.db.flush()
+            return {"ack": True, "duplicate": False}
+
+        payload = envelope["payload"]
+        text = payload.get("text")
+        if not isinstance(text, str) or not text:
+            raise ValueError("PI final payload 缺少文本结果")
+        message = Message(
+            conversation_id=run.conversation_id,
+            role="assistant",
+            content=text,
+            message_type="text",
+            extra_metadata={
+                "pi": {
+                    "artifact": payload.get("artifact"),
+                    "session": payload.get("session"),
+                    "runtime_manifest_digest": envelope["runtime_manifest_digest"],
+                }
+            },
+            run_id=run.id,
+            request_id=run.request_id,
+            delivery_status="complete",
+        )
+        self.db.add(message)
+        await self.db.flush()
+        run.output_message_id = message.id
+        attempt.final_acked_at = current_time
+        _, changed = await self.set_terminal_status(
+            run_id,
+            status="completed",
+            token_usage={"available": False},
+            worker_id=worker_id,
+            now=current_time,
+        )
+        if not changed:
+            raise ValueError("PI final 未能提交当前 Run 终态")
+        return {"ack": True, "duplicate": False}
+
+    async def record_pi_cleanup_failure(
+        self,
+        run_id: str,
+        *,
+        attempt_id: int,
+        worker_id: str,
+        error_message: str,
+        now: datetime | None = None,
+    ) -> None:
+        """在 attempt 事实上记录无法确认的实例清理，供 orphan 收敛读取。"""
+
+        attempt = await self.db.scalar(
+            select(AgentRunAttempt)
+            .where(AgentRunAttempt.id == attempt_id, AgentRunAttempt.run_id == run_id)
+            .with_for_update()
+        )
+        if attempt is None or attempt.worker_id != worker_id or attempt.adapter != "local":
+            raise ValueError("PI cleanup failure 与 attempt 归属不一致")
+        current_time = now or utc_now_naive()
+        attempt.cleanup_error = error_message
+        attempt.cleanup_failed_at = current_time
+        attempt.updated_at = current_time
+        await self.db.flush()
+
+    @staticmethod
+    def _validate_pi_envelope(run: AgentRun, attempt: AgentRunAttempt, envelope: dict) -> None:
+        """校验 envelope 的 attempt 归属及 payload/ref 摘要。"""
+
+        required = {
+            "job_id",
+            "attempt_id",
+            "adapter",
+            "event_id",
+            "sequence",
+            "type",
+            "runtime_manifest_digest",
+        }
+        if not isinstance(envelope, dict) or not required.issubset(envelope):
+            raise ValueError("PI envelope 缺少必填字段")
+        if (
+            envelope["job_id"] != run.id
+            or str(envelope["attempt_id"]) != str(attempt.id)
+            or envelope["adapter"] != attempt.adapter
+            or envelope["runtime_manifest_digest"] != attempt.runtime_manifest_digest
+        ):
+            raise ValueError("PI envelope 与 attempt 归属不一致")
+        value_key = "payload" if "payload" in envelope else "ref" if "ref" in envelope else None
+        if value_key is None or not isinstance(envelope[value_key], dict):
+            raise ValueError("PI envelope 必须包含对象 payload 或 ref")
+        digest_key = f"{value_key}_digest"
+        if envelope.get(digest_key) != _payload_digest(envelope[value_key]):
+            raise ValueError(f"PI envelope {digest_key} 不匹配")
 
     async def _get_open_attempt(self, run_id: str, *, worker_id: str | None = None) -> AgentRunAttempt | None:
         """读取该 Run 仍开放（未终结）的 attempt；指定 worker 时限定为当前 owner。"""
