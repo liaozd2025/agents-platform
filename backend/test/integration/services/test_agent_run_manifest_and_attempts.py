@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.repositories.agent_run_repository import AgentRunRepository
+from yuxi.services.agent_run_manifest_service import compute_manifest_fingerprint
 from yuxi.storage.postgres.manager import AGENT_RUN_FACT_SCHEMA_STATEMENTS
 from yuxi.storage.postgres.models_business import AgentRun, AgentRunAttempt, Conversation, Message
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -105,6 +106,19 @@ async def test_run_fact_schema_evolution_is_idempotent(fact_database):
         attempt_table_exists = await connection.scalar(
             text("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'agent_run_attempts')")
         )
+        attempt_columns = set(
+            (
+                await connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'agent_run_attempts' "
+                        "AND column_name IN ('adapter', 'instance_id', 'route_reason', 'route_snapshot', "
+                        "'runtime_manifest', 'runtime_manifest_digest', 'result_events', 'final_acked_at', "
+                        "'cleanup_error', 'cleanup_failed_at')"
+                    )
+                )
+            ).scalars()
+        )
         unique_index_exists = await connection.scalar(
             text(
                 "SELECT EXISTS (SELECT 1 FROM pg_indexes "
@@ -115,6 +129,18 @@ async def test_run_fact_schema_evolution_is_idempotent(fact_database):
 
     assert columns == {"manifest", "manifest_fingerprint", "manifest_recorded_at"}
     assert attempt_table_exists is True
+    assert attempt_columns == {
+        "adapter",
+        "instance_id",
+        "route_reason",
+        "route_snapshot",
+        "runtime_manifest",
+        "runtime_manifest_digest",
+        "result_events",
+        "final_acked_at",
+        "cleanup_error",
+        "cleanup_failed_at",
+    }
     assert unique_index_exists is True
 
 
@@ -343,3 +369,266 @@ async def test_manifest_rejects_stale_owner_and_expired_lease(fact_database):
         assert await _persisted_attempts(session_factory, legacy_run_id) == []
     finally:
         await _cleanup_runs(session_factory, [thread_id, legacy_thread_id])
+
+
+async def test_pi_attempt_freezes_route_and_runtime_manifest_at_claim(fact_database):
+    """PI adapter 与 Runtime Manifest 只在初次 claim 写入，不被续租改写。"""
+    _, session_factory = fact_database
+    now = utc_now_naive()
+    owner = "worker-pi:token-1"
+    run_id, thread_id = await _create_run(session_factory)
+    manifest = {"manifest_version": 1, "runner": {"protocol": "yuxi.pi-jsonl.v1"}}
+    metadata = {
+        "adapter": "local",
+        "route_reason": "t2_local_only",
+        "route_snapshot": {"rule_version": "t2"},
+        "runtime_manifest": manifest,
+        "runtime_manifest_digest": "a" * 64,
+    }
+
+    try:
+        async with session_factory() as db:
+            repository = AgentRunRepository(db)
+            _, acquired = await repository.mark_running(
+                run_id,
+                worker_id=owner,
+                lease_seconds=60,
+                now=now,
+                attempt_metadata=metadata,
+            )
+            await db.commit()
+        assert acquired is True
+
+        async with session_factory() as db:
+            repository = AgentRunRepository(db)
+            _, renewed = await repository.mark_running(
+                run_id,
+                worker_id=owner,
+                lease_seconds=60,
+                now=now + timedelta(seconds=1),
+                attempt_metadata={**metadata, "adapter": "forged"},
+            )
+            await db.commit()
+        assert renewed is True
+
+        attempt = (await _persisted_attempts(session_factory, run_id))[0]
+        async with session_factory() as db:
+            repository = AgentRunRepository(db)
+            assert (
+                await repository.bind_pi_instance(
+                    run_id,
+                    attempt_id=attempt.id,
+                    instance_id="sandbox-1",
+                    worker_id=owner,
+                    now=now + timedelta(seconds=2),
+                )
+                is True
+            )
+            assert (
+                await repository.bind_pi_instance(
+                    run_id,
+                    attempt_id=attempt.id,
+                    instance_id="sandbox-1",
+                    worker_id=owner,
+                    now=now + timedelta(seconds=3),
+                )
+                is False
+            )
+            with pytest.raises(ValueError, match="instance"):
+                await repository.bind_pi_instance(
+                    run_id,
+                    attempt_id=attempt.id,
+                    instance_id="forged",
+                    worker_id=owner,
+                    now=now + timedelta(seconds=4),
+                )
+            await db.commit()
+        attempt = (await _persisted_attempts(session_factory, run_id))[0]
+        assert attempt.adapter == "local"
+        assert attempt.instance_id == "sandbox-1"
+        assert attempt.route_reason == "t2_local_only"
+        assert attempt.route_snapshot == {"rule_version": "t2"}
+        assert attempt.runtime_manifest == manifest
+        assert attempt.runtime_manifest_digest == "a" * 64
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])
+
+
+async def test_pi_envelope_replay_is_idempotent_and_final_ack_is_durable(fact_database):
+    """final 重放只生成一个 Message，ACK 后 PostgreSQL 结果仍可回读。"""
+    _, session_factory = fact_database
+    now = utc_now_naive()
+    owner = "worker-pi:token-1"
+    run_id, thread_id = await _create_run(session_factory)
+    manifest_digest = "a" * 64
+    metadata = {
+        "adapter": "local",
+        "route_reason": "t2_local_only",
+        "route_snapshot": {"rule_version": "t2"},
+        "runtime_manifest": {"manifest_version": 1},
+        "runtime_manifest_digest": manifest_digest,
+    }
+    final = {
+        "job_id": run_id,
+        "attempt_id": "pending",
+        "adapter": "local",
+        "event_id": "final-1",
+        "sequence": 3,
+        "type": "final",
+        "runtime_manifest_digest": manifest_digest,
+        "payload": {
+            "text": "YUXI_PI_GOLDEN_V1",
+            "artifact": {"path": "pi-golden.txt", "sha256": "b" * 64},
+            "session": {"id": "session-1"},
+        },
+        "payload_digest": "pending",
+    }
+    final["payload_digest"] = compute_manifest_fingerprint(final["payload"])
+
+    try:
+        async with session_factory() as db:
+            repository = AgentRunRepository(db)
+            await repository.mark_running(
+                run_id,
+                worker_id=owner,
+                lease_seconds=60,
+                now=now,
+                attempt_metadata=metadata,
+            )
+            await db.commit()
+        attempt = (await _persisted_attempts(session_factory, run_id))[0]
+        final["attempt_id"] = str(attempt.id)
+        log = {
+            "job_id": run_id,
+            "attempt_id": str(attempt.id),
+            "adapter": "local",
+            "event_id": "log-1",
+            "sequence": 0,
+            "type": "log",
+            "runtime_manifest_digest": manifest_digest,
+            "payload": {"message": "pi_started"},
+            "payload_digest": compute_manifest_fingerprint({"message": "pi_started"}),
+        }
+
+        async with session_factory() as db:
+            log_ack = await AgentRunRepository(db).record_pi_envelope(
+                run_id,
+                attempt_id=attempt.id,
+                envelope=log,
+                worker_id=owner,
+                now=now + timedelta(milliseconds=500),
+            )
+            await db.commit()
+        assert log_ack == {"ack": True, "duplicate": False}
+
+        async with session_factory() as db:
+            ack = await AgentRunRepository(db).record_pi_envelope(
+                run_id,
+                attempt_id=attempt.id,
+                envelope=final,
+                worker_id=owner,
+                now=now + timedelta(seconds=1),
+            )
+            await db.commit()
+        assert ack == {"ack": True, "duplicate": False}
+
+        async with session_factory() as db:
+            replay_ack = await AgentRunRepository(db).record_pi_envelope(
+                run_id,
+                attempt_id=attempt.id,
+                envelope=final,
+                worker_id=owner,
+                now=now + timedelta(seconds=2),
+            )
+            await db.commit()
+            persisted_run = await db.get(AgentRun, run_id)
+            messages = list((await db.scalars(select(Message).where(Message.run_id == run_id))).all())
+            persisted_attempt = await db.get(AgentRunAttempt, attempt.id)
+
+        assert replay_ack == {"ack": True, "duplicate": True}
+        assert persisted_run.status == "completed"
+        assert persisted_run.output_message_id == messages[0].id
+        assert [message.content for message in messages] == ["YUXI_PI_GOLDEN_V1"]
+        assert messages[0].extra_metadata["pi"]["artifact"]["path"] == "pi-golden.txt"
+        assert persisted_attempt.result_events == [log, final]
+        assert persisted_attempt.final_acked_at == now + timedelta(seconds=1)
+
+        async with session_factory() as db:
+            await AgentRunRepository(db).record_pi_cleanup_failure(
+                run_id,
+                attempt_id=attempt.id,
+                worker_id=owner,
+                error_message="provisioner unavailable",
+                now=now + timedelta(seconds=3),
+            )
+            await db.commit()
+            persisted_attempt = await db.get(AgentRunAttempt, attempt.id)
+
+        assert persisted_attempt.error_type is None
+        assert persisted_attempt.cleanup_error == "provisioner unavailable"
+        assert persisted_attempt.cleanup_failed_at == now + timedelta(seconds=3)
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])
+
+
+async def test_stale_pi_attempt_cannot_write_event(fact_database):
+    """已释放的旧 attempt 不能向当前 Run 增加结果。"""
+    _, session_factory = fact_database
+    now = utc_now_naive()
+    run_id, thread_id = await _create_run(session_factory)
+    metadata = {
+        "adapter": "local",
+        "route_reason": "t2_local_only",
+        "route_snapshot": {"rule_version": "t2"},
+        "runtime_manifest": {"manifest_version": 1},
+        "runtime_manifest_digest": "a" * 64,
+    }
+
+    try:
+        async with session_factory() as db:
+            repository = AgentRunRepository(db)
+            await repository.mark_running(
+                run_id,
+                worker_id="worker-old:token-1",
+                lease_seconds=60,
+                now=now,
+                attempt_metadata=metadata,
+            )
+            await repository.release_lease_for_retry(
+                run_id,
+                worker_id="worker-old:token-1",
+                now=now + timedelta(seconds=1),
+            )
+            await repository.mark_running(
+                run_id,
+                worker_id="worker-new:token-2",
+                lease_seconds=60,
+                now=now + timedelta(seconds=2),
+                attempt_metadata=metadata,
+            )
+            await db.commit()
+        old_attempt = (await _persisted_attempts(session_factory, run_id))[0]
+        envelope = {
+            "job_id": run_id,
+            "attempt_id": str(old_attempt.id),
+            "adapter": "local",
+            "event_id": "stale-log",
+            "sequence": 0,
+            "type": "log",
+            "runtime_manifest_digest": "a" * 64,
+            "payload": {"message": "late"},
+            "payload_digest": compute_manifest_fingerprint({"message": "late"}),
+        }
+
+        async with session_factory() as db:
+            with pytest.raises(ValueError, match="当前 PI attempt"):
+                await AgentRunRepository(db).record_pi_envelope(
+                    run_id,
+                    attempt_id=old_attempt.id,
+                    envelope=envelope,
+                    worker_id="worker-old:token-1",
+                    now=now + timedelta(seconds=3),
+                )
+            await db.rollback()
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])

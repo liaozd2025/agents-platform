@@ -106,6 +106,7 @@ async def intake_request(
     agent_backend: Any,
     model_spec: str | None = None,
     tool_approval_mode: str | None = None,
+    executor: str = "langgraph",
     meta: dict | None = None,
 ) -> IntakeResult:
     """创建 request + Message，尝试立即派发。
@@ -192,6 +193,8 @@ async def intake_request(
             "model_spec": resolved_model_spec,
             "tool_approval_mode": resolved_tool_approval_mode,
         }
+        if executor == "pi":
+            input_payload["runtime"] = {"executor": "pi"}
 
     run_input_message = input_message.with_metadata(
         _build_message_metadata(request_id=request_id, source=source, input_message=input_message, meta=meta)

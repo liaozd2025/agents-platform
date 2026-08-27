@@ -70,6 +70,7 @@ verify-trust:
 audit-dependencies:
 	cd backend && uv audit --locked --no-dev --ignore GHSA-h35f-9h28-mq5c --ignore GHSA-rrmf-rvhw-rf47
 	cd packages/yuxi-cli && uv audit --locked --no-dev
+	cd backend/package/yuxi/pi_runner && npm audit --audit-level=high --omit=dev
 	cd web && pnpm audit --audit-level=high --prod
 	cd docs && pnpm audit --audit-level=high --prod
 	@if uv audit --script scripts/dependency-audit-fixtures/vulnerable.py > /tmp/yuxi-python-audit-negative.log 2>&1; then echo "Expected the vulnerable Python fixture to fail"; exit 1; fi

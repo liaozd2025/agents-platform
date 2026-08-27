@@ -1125,6 +1125,16 @@ class AgentRunAttempt(Base):
     )
     attempt_no = Column(Integer, nullable=False, comment="Run 内递增的执行序号")
     worker_id = Column(String(128), nullable=False, comment="取得执行所有权的 owner token")
+    adapter = Column(String(32), nullable=True, comment="本 attempt 冻结的执行 adapter")
+    instance_id = Column(String(128), nullable=True, comment="adapter 创建的实例 ID")
+    route_reason = Column(Text, nullable=True, comment="选择 adapter 的稳定理由")
+    route_snapshot = Column(JSON_VALUE, nullable=True, comment="claim 时冻结的选路输入")
+    runtime_manifest = Column(JSON_VALUE, nullable=True, comment="PI Runner/Node/Skill 锁定清单")
+    runtime_manifest_digest = Column(String(64), nullable=True, comment="PI Runtime Manifest SHA-256")
+    result_events = Column(JSON_VALUE, nullable=False, default=list, comment="PI 幂等 envelope ledger")
+    final_acked_at = Column(DateTime, nullable=True, comment="final 结果完成持久化并可 ACK 的时间")
+    cleanup_error = Column(Text, nullable=True, comment="实例删除无法确认时的独立 orphan 事实")
+    cleanup_failed_at = Column(DateTime, nullable=True, comment="实例删除最后失败时间")
     started_at = Column(DateTime, nullable=False, comment="取得执行所有权时间")
     heartbeat_at = Column(DateTime, nullable=True, comment="本 attempt 最近一次续租时间")
     lease_expires_at = Column(DateTime, nullable=True, comment="本 attempt 最近一次租约到期时间")
@@ -1150,6 +1160,16 @@ class AgentRunAttempt(Base):
             "run_id": self.run_id,
             "attempt_no": self.attempt_no,
             "worker_id": self.worker_id,
+            "adapter": self.adapter,
+            "instance_id": self.instance_id,
+            "route_reason": self.route_reason,
+            "route_snapshot": self.route_snapshot,
+            "runtime_manifest": self.runtime_manifest,
+            "runtime_manifest_digest": self.runtime_manifest_digest,
+            "result_events": self.result_events or [],
+            "final_acked_at": format_utc_datetime(self.final_acked_at),
+            "cleanup_error": self.cleanup_error,
+            "cleanup_failed_at": format_utc_datetime(self.cleanup_failed_at),
             "started_at": format_utc_datetime(self.started_at),
             "heartbeat_at": format_utc_datetime(self.heartbeat_at),
             "lease_expires_at": format_utc_datetime(self.lease_expires_at),

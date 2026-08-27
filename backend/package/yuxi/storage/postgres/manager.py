@@ -40,6 +40,16 @@ AGENT_RUN_FACT_SCHEMA_STATEMENTS = (
         run_id VARCHAR(64) NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
         attempt_no INTEGER NOT NULL,
         worker_id VARCHAR(128) NOT NULL,
+        adapter VARCHAR(32),
+        instance_id VARCHAR(128),
+        route_reason TEXT,
+        route_snapshot JSONB,
+        runtime_manifest JSONB,
+        runtime_manifest_digest VARCHAR(64),
+        result_events JSONB NOT NULL DEFAULT '[]'::jsonb,
+        final_acked_at TIMESTAMP WITHOUT TIME ZONE,
+        cleanup_error TEXT,
+        cleanup_failed_at TIMESTAMP WITHOUT TIME ZONE,
         started_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
         heartbeat_at TIMESTAMP WITHOUT TIME ZONE,
         lease_expires_at TIMESTAMP WITHOUT TIME ZONE,
@@ -56,6 +66,19 @@ AGENT_RUN_FACT_SCHEMA_STATEMENTS = (
         "ON agent_run_attempts(run_id, attempt_no)"
     ),
     "CREATE INDEX IF NOT EXISTS ix_agent_run_attempts_open ON agent_run_attempts(run_id, finished_at)",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS adapter VARCHAR(32)",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS instance_id VARCHAR(128)",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS route_reason TEXT",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS route_snapshot JSONB",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS runtime_manifest JSONB",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS runtime_manifest_digest VARCHAR(64)",
+    (
+        "ALTER TABLE IF EXISTS agent_run_attempts "
+        "ADD COLUMN IF NOT EXISTS result_events JSONB NOT NULL DEFAULT '[]'::jsonb"
+    ),
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS final_acked_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS cleanup_error TEXT",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS cleanup_failed_at TIMESTAMP WITHOUT TIME ZONE",
 )
 
 

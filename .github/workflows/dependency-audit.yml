@@ -8,6 +8,8 @@ on:
       - "backend/pyproject.toml"
       - "backend/package/pyproject.toml"
       - "backend/uv.lock"
+      - "backend/package/yuxi/pi_runner/package.json"
+      - "backend/package/yuxi/pi_runner/package-lock.json"
       - "packages/yuxi-cli/pyproject.toml"
       - "packages/yuxi-cli/uv.lock"
       - "web/package.json"
@@ -23,6 +25,8 @@ on:
       - "backend/pyproject.toml"
       - "backend/package/pyproject.toml"
       - "backend/uv.lock"
+      - "backend/package/yuxi/pi_runner/package.json"
+      - "backend/package/yuxi/pi_runner/package-lock.json"
       - "packages/yuxi-cli/pyproject.toml"
       - "packages/yuxi-cli/uv.lock"
       - "web/package.json"
@@ -81,7 +85,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        project: [web, docs]
+        include:
+          - project: web
+            audit_command: pnpm audit --audit-level=high --prod
+          - project: docs
+            audit_command: pnpm audit --audit-level=high --prod
+          - project: backend/package/yuxi/pi_runner
+            audit_command: npm audit --audit-level=high --omit=dev
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -92,7 +102,7 @@ jobs:
           node-version: 22
       - name: Audit locked Node.js production dependencies
         working-directory: ${{ matrix.project }}
-        run: pnpm audit --audit-level=high --prod
+        run: ${{ matrix.audit_command }}
       - name: Exercise Node.js audit negative control
         working-directory: scripts/dependency-audit-fixtures/node
         run: |
