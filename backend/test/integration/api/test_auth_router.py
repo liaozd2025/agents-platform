@@ -54,6 +54,7 @@ async def user_management_test_users(test_client):
         users = [
             User(
                 username=f"pytest-user-admin-{suffix}",
+                display_name="用户列表管理员",
                 uid=f"pytest_user_admin_{suffix}",
                 password_hash=AuthUtils.hash_password(password),
                 department_id=root.id,
@@ -82,7 +83,14 @@ async def user_management_test_users(test_client):
         headers.append({"Authorization": f"Bearer {response.json()['access_token']}"})
 
     try:
-        yield {"admin_headers": headers[0], "standard_headers": headers[1]}
+        yield {
+            "admin_headers": headers[0],
+            "standard_headers": headers[1],
+            "admin_username": users[0].username,
+            "password": password,
+            # 用主键定位本用例创建的管理员，避免列表中同名账号干扰断言。
+            "admin_id": users[0].id,
+        }
     finally:
         async with pg_manager.get_async_session_context() as session:
             await session.execute(delete(SecurityAudit).where(SecurityAudit.actor_user_id.in_(user_ids)))
@@ -305,6 +313,19 @@ async def test_login_with_invalid_credentials(test_client):
     assert "detail" in response.json()
 
 
+async def test_login_with_username_identifier(test_client, user_management_test_users):
+    """旧 OA 同步账号保存在 username 后，必须可用于独立账号密码登录。"""
+
+    response = await test_client.post(
+        "/api/auth/token",
+        data={
+            "username": user_management_test_users["admin_username"],
+            "password": user_management_test_users["password"],
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
 async def test_user_is_locked_after_repeated_failed_logins(test_client, standard_user):
     uid = standard_user["user"]["uid"]
 
@@ -409,6 +430,48 @@ async def test_admin_can_create_and_delete_user(test_client, admin_headers):
     delete_payload = delete_response.json()
     assert delete_payload["success"] is True
     assert delete_payload["message"] == "用户已删除"
+
+
+async def test_user_list_returns_display_name(test_client, user_management_test_users):
+    """用户列表必须返回已同步的展示姓名，供管理界面区分同类账号。"""
+
+    # 当前集成库可能已有大量迁移用户，避免默认分页遗漏本用例新建的账号。
+    response = await test_client.get(
+        "/api/auth/users?limit=10000",
+        headers=user_management_test_users["admin_headers"],
+    )
+
+    assert response.status_code == 200, response.text
+    listed_user = next(
+        item
+        for item in response.json()
+        if item["id"] == user_management_test_users["admin_id"]
+    )
+    assert listed_user["display_name"] == "用户列表管理员"
+
+
+async def test_user_list_paginates_and_returns_filtered_total(test_client, user_management_test_users):
+    """用户列表只返回目标页，并在响应头提供筛选后的总数。"""
+
+    keyword = user_management_test_users["admin_username"]
+    response = await test_client.get(
+        f"/api/auth/users?skip=0&limit=1&keyword={keyword}",
+        headers=user_management_test_users["admin_headers"],
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["x-total-count"] == "1"
+    assert len(response.json()) == 1
+    assert response.json()[0]["id"] == user_management_test_users["admin_id"]
+
+    # 请求超出唯一匹配项的下一页时仍保留总数，但不返回重复或额外数据。
+    next_page = await test_client.get(
+        f"/api/auth/users?skip=1&limit=1&keyword={keyword}",
+        headers=user_management_test_users["admin_headers"],
+    )
+    assert next_page.status_code == 200, next_page.text
+    assert next_page.headers["x-total-count"] == "1"
+    assert next_page.json() == []
 
 
 async def test_admin_password_mutations_reject_passwords_shorter_than_eight_characters(
@@ -593,7 +656,9 @@ async def test_user_management_follows_authorized_organization_subtree(test_clie
         assert refreshed_tree.status_code == 200, refreshed_tree.text
         assert new_child["id"] in {department["id"] for department in refreshed_tree.json()}
 
-        superadmin_list_response = await test_client.get("/api/auth/users?limit=1000", headers=admin_headers)
+        # 集成库可能已同步大量旧 OA 用户；此处验证的是超级管理员的可见范围，
+        # 因此显式扩大页大小，避免默认分页或历史数据量截断本用例创建的用户。
+        superadmin_list_response = await test_client.get("/api/auth/users?limit=10000", headers=admin_headers)
         assert superadmin_list_response.status_code == 200, superadmin_list_response.text
         superadmin_user_ids = {user["id"] for user in superadmin_list_response.json()}
         assert user_a["id"] in superadmin_user_ids

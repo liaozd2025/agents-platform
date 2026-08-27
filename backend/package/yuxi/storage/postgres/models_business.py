@@ -55,6 +55,10 @@ class Department(Base):
     node_type = Column(String(16), nullable=False, default=DEPARTMENT_NODE_TYPE)
     # 物化路径，形如 /1/3/7/，记录从集团根到自身的祖先链，供权限判定零查询地取得祖先集合
     path = Column(String(512), nullable=False, default="")
+    # 旧 OA 部门的稳定编码仅用于同步和用户归属匹配，不参与当前权限判定。
+    oa_department_code = Column(String(64), nullable=True, unique=True, index=True)
+    # 旧 OA 的部门主键用于人员接口关联；接口可能以 200004.0 形式返回，迁移脚本会先规范化。
+    oa_department_id = Column(Integer, nullable=True, unique=True, index=True)
 
     # 关联关系
     users = relationship("User", back_populates="department", cascade="all, delete-orphan")
@@ -73,12 +77,16 @@ class Department(Base):
 
 
 class User(Base):
-    """用户模型"""
+    """用户模型。
+
+    ``display_name`` 仅供界面识别用户，不能替代 ``username`` 参与登录或 OA 身份匹配。
+    """
 
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    username = Column(String, nullable=False, unique=True, index=True)  # 显示名称
+    username = Column(String, nullable=False, unique=True, index=True)  # 登录账号
+    display_name = Column(String(100), nullable=True)  # 界面展示姓名，不参与登录身份识别
     uid = Column(String, nullable=False, unique=True, index=True)  # 登录标识
     phone_number = Column(String, nullable=True, unique=True, index=True)  # 手机号
     avatar = Column(String, nullable=True)  # 头像URL
@@ -113,6 +121,7 @@ class User(Base):
         result = {
             "id": self.id,
             "username": self.username,
+            "display_name": self.display_name,
             "uid": self.uid,
             "phone_number": self.phone_number,
             "avatar": normalize_public_minio_url(self.avatar),
@@ -1116,6 +1125,16 @@ class AgentRunAttempt(Base):
     )
     attempt_no = Column(Integer, nullable=False, comment="Run 内递增的执行序号")
     worker_id = Column(String(128), nullable=False, comment="取得执行所有权的 owner token")
+    adapter = Column(String(32), nullable=True, comment="本 attempt 冻结的执行 adapter")
+    instance_id = Column(String(128), nullable=True, comment="adapter 创建的实例 ID")
+    route_reason = Column(Text, nullable=True, comment="选择 adapter 的稳定理由")
+    route_snapshot = Column(JSON_VALUE, nullable=True, comment="claim 时冻结的选路输入")
+    runtime_manifest = Column(JSON_VALUE, nullable=True, comment="PI Runner/Node/Skill 锁定清单")
+    runtime_manifest_digest = Column(String(64), nullable=True, comment="PI Runtime Manifest SHA-256")
+    result_events = Column(JSON_VALUE, nullable=False, default=list, comment="PI 幂等 envelope ledger")
+    final_acked_at = Column(DateTime, nullable=True, comment="final 结果完成持久化并可 ACK 的时间")
+    cleanup_error = Column(Text, nullable=True, comment="实例删除无法确认时的独立 orphan 事实")
+    cleanup_failed_at = Column(DateTime, nullable=True, comment="实例删除最后失败时间")
     started_at = Column(DateTime, nullable=False, comment="取得执行所有权时间")
     heartbeat_at = Column(DateTime, nullable=True, comment="本 attempt 最近一次续租时间")
     lease_expires_at = Column(DateTime, nullable=True, comment="本 attempt 最近一次租约到期时间")
@@ -1141,6 +1160,16 @@ class AgentRunAttempt(Base):
             "run_id": self.run_id,
             "attempt_no": self.attempt_no,
             "worker_id": self.worker_id,
+            "adapter": self.adapter,
+            "instance_id": self.instance_id,
+            "route_reason": self.route_reason,
+            "route_snapshot": self.route_snapshot,
+            "runtime_manifest": self.runtime_manifest,
+            "runtime_manifest_digest": self.runtime_manifest_digest,
+            "result_events": self.result_events or [],
+            "final_acked_at": format_utc_datetime(self.final_acked_at),
+            "cleanup_error": self.cleanup_error,
+            "cleanup_failed_at": format_utc_datetime(self.cleanup_failed_at),
             "started_at": format_utc_datetime(self.started_at),
             "heartbeat_at": format_utc_datetime(self.heartbeat_at),
             "lease_expires_at": format_utc_datetime(self.lease_expires_at),

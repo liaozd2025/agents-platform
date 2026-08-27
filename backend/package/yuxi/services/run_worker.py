@@ -25,6 +25,15 @@ from yuxi.services.agent_request_queue_service import (
 from yuxi.services.agent_run_manifest_service import build_run_manifest, compute_manifest_fingerprint
 from yuxi.services.chat_service import get_agent_state_view, stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
+from yuxi.services.pi_execution_service import (
+    LocalPiAdapter,
+    PiCleanupFailed,
+    PiExecutionCancelled,
+    PiExecutionUnknown,
+    PiRuntimeMismatch,
+    build_default_pi_runtime_manifest,
+    execute_pi_attempt,
+)
 from yuxi.services.run_queue_service import (
     RUN_RECONCILIATION_SECONDS,
     WORKER_HEALTH_INTERVAL_SECONDS,
@@ -263,15 +272,59 @@ async def _clear_cancel_signal_best_effort(run_id: str) -> None:
         logger.warning(f"Failed to clear non-authoritative AgentRun cancel signal: run={run_id}", exc_info=True)
 
 
-async def mark_run_running(run_id: str, worker_id: str) -> bool:
+async def mark_run_running(run_id: str, worker_id: str, attempt_metadata: dict | None = None) -> bool:
     async with pg_manager.get_async_session_context() as db:
         repo = AgentRunRepository(db)
         _, acquired = await repo.mark_running(
             run_id,
             worker_id=worker_id,
             lease_seconds=RUN_LEASE_SECONDS,
+            attempt_metadata=attempt_metadata,
         )
         return acquired
+
+
+async def get_current_run_attempt(run_id: str, worker_id: str):
+    """读取 worker 当前拥有的开放 attempt。"""
+
+    async with pg_manager.get_async_session_context() as db:
+        return await AgentRunRepository(db).get_current_run_attempt(run_id, worker_id=worker_id)
+
+
+async def bind_pi_instance(run_id: str, attempt_id: int, instance_id: str, worker_id: str) -> bool:
+    """在独立事务中 write-once 绑定 PI instance。"""
+
+    async with pg_manager.get_async_session_context() as db:
+        return await AgentRunRepository(db).bind_pi_instance(
+            run_id,
+            attempt_id=attempt_id,
+            instance_id=instance_id,
+            worker_id=worker_id,
+        )
+
+
+async def record_pi_envelope(run_id: str, attempt_id: int, envelope: dict, worker_id: str) -> dict[str, bool]:
+    """持久化 PI envelope，并只在 durable commit 后返回 ACK。"""
+
+    async with pg_manager.get_async_session_context() as db:
+        return await AgentRunRepository(db).record_pi_envelope(
+            run_id,
+            attempt_id=attempt_id,
+            envelope=envelope,
+            worker_id=worker_id,
+        )
+
+
+async def record_pi_cleanup_failure(run_id: str, attempt_id: int, worker_id: str, error_message: str) -> None:
+    """持久化无法确认删除的 PI instance，避免 orphan 只留在日志。"""
+
+    async with pg_manager.get_async_session_context() as db:
+        await AgentRunRepository(db).record_pi_cleanup_failure(
+            run_id,
+            attempt_id=attempt_id,
+            worker_id=worker_id,
+            error_message=error_message,
+        )
 
 
 async def renew_run_lease(run_id: str, worker_id: str) -> bool:
@@ -583,7 +636,30 @@ async def process_agent_run(ctx, run_id: str):
         return
 
     worker_id = _run_owner_token(ctx)
-    if not await mark_run_running(run_id, worker_id):
+    pi_runtime: tuple[dict, str] | None = None
+    runtime_payload = run.input_payload.get("runtime") if isinstance(run.input_payload, dict) else None
+    if isinstance(runtime_payload, dict) and runtime_payload.get("executor") == "pi":
+        try:
+            pi_runtime = build_default_pi_runtime_manifest()
+        except Exception as exc:
+            await mark_run_terminal(
+                run_id,
+                "failed",
+                "runtime_manifest_invalid",
+                f"PI Runtime Manifest 构建失败，执行未开始：{exc}",
+            )
+            return
+    attempt_metadata = None
+    if pi_runtime is not None:
+        manifest, manifest_digest = pi_runtime
+        attempt_metadata = {
+            "adapter": "local",
+            "route_reason": "t2_local_only",
+            "route_snapshot": {"rule_version": "t2-local-only"},
+            "runtime_manifest": manifest,
+            "runtime_manifest_digest": manifest_digest,
+        }
+    if not await mark_run_running(run_id, worker_id, attempt_metadata):
         logger.info(f"Run lease is owned elsewhere or expired, skip: {run_id}")
         return
 
@@ -698,6 +774,125 @@ async def process_agent_run(ctx, run_id: str):
                     worker_id=worker_id,
                 )
                 return
+
+        if pi_runtime is not None:
+            manifest, manifest_digest = pi_runtime
+            attempt = await get_current_run_attempt(run_id, worker_id)
+            if attempt is None:
+                raise RuntimeError("当前 PI attempt 不存在")
+            adapter = LocalPiAdapter(
+                uid=str(user.uid),
+                run_id=run_id,
+                attempt_id=str(attempt.id),
+            )
+
+            async def persist_pi_result(envelope: dict) -> dict[str, bool]:
+                ack = await record_pi_envelope(run_id, attempt.id, envelope, worker_id)
+                if envelope["type"] != "final":
+                    await _append_run_event_best_effort(
+                        run_id,
+                        "custom",
+                        {"name": f"yuxi.pi.{envelope['type']}", "envelope": envelope},
+                        thread_id=thread_id,
+                    )
+                return ack
+
+            try:
+                await run_ctx.start()
+                await execute_pi_attempt(
+                    attempt={
+                        "run_id": run_id,
+                        "attempt_id": str(attempt.id),
+                        "manifest": manifest,
+                        "manifest_digest": manifest_digest,
+                    },
+                    adapter=adapter,
+                    result_sink=persist_pi_result,
+                    cancel_event=run_ctx.cancel_event,
+                    instance_sink=lambda instance_id: bind_pi_instance(
+                        run_id,
+                        attempt.id,
+                        instance_id,
+                        worker_id,
+                    ),
+                )
+            except PiExecutionCancelled as exc:
+                raise asyncio.CancelledError(f"run {run_id} PI execution cancelled") from exc
+            except PiRuntimeMismatch as exc:
+                transition = await mark_run_terminal(
+                    run_id,
+                    "failed",
+                    "runtime_mismatch",
+                    str(exc),
+                    worker_id=worker_id,
+                )
+                if transition.changed:
+                    await _append_end_event(
+                        run_id,
+                        transition.status or "failed",
+                        thread_id=thread_id,
+                        payload={"error_type": "runtime_mismatch"},
+                    )
+                return
+            except PiExecutionUnknown as exc:
+                transition = await mark_run_terminal(
+                    run_id,
+                    "failed",
+                    "execution_unknown",
+                    str(exc),
+                    worker_id=worker_id,
+                )
+                if transition.changed:
+                    await _append_end_event(
+                        run_id,
+                        transition.status or "failed",
+                        thread_id=thread_id,
+                        payload={"error_type": "execution_unknown"},
+                    )
+                return
+            except PiCleanupFailed as exc:
+                primary = exc.primary
+                if isinstance(primary, PiExecutionCancelled) or await _confirmed_user_cancel(run_id):
+                    await _finish_user_cancel(
+                        run_id=run_id,
+                        request_id=request_id,
+                        thread_id=thread_id,
+                        current_user=user,
+                        worker_id=worker_id,
+                        writer=writer,
+                    )
+                    await record_pi_cleanup_failure(run_id, attempt.id, worker_id, str(exc))
+                    logger.info(f"Run PI cancellation settled with cleanup orphan: run={run_id}")
+                    return
+                error_type = (
+                    "execution_unknown"
+                    if isinstance(primary, PiExecutionUnknown)
+                    else "runtime_mismatch"
+                    if isinstance(primary, PiRuntimeMismatch)
+                    else "cleanup_failed"
+                )
+                transition = await mark_run_terminal(
+                    run_id,
+                    "failed",
+                    error_type,
+                    str(primary or exc),
+                    worker_id=worker_id,
+                )
+                await record_pi_cleanup_failure(run_id, attempt.id, worker_id, str(exc))
+                if transition.changed:
+                    await _append_end_event(
+                        run_id,
+                        transition.status or "failed",
+                        thread_id=thread_id,
+                        payload={"error_type": error_type},
+                    )
+                return
+            except Exception as exc:
+                if await _confirmed_user_cancel(run_id):
+                    raise asyncio.CancelledError(f"run {run_id} PI result rejected after cancellation") from exc
+                raise
+            await _append_end_event(run_id, "completed", thread_id=thread_id)
+            return
 
         # 运行清单必须在真正构造执行上下文前固化；固化失败时执行不得开始。
         try:

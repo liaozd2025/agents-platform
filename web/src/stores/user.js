@@ -109,23 +109,9 @@ export const useUserStore = defineStore('user', () => {
   }
 
   // 用户管理功能
-  async function getUsers({ pageSize = 100 } = {}) {
+  async function getUsers({ skip = 0, limit = 100, keyword = '', departmentId = null, role = '' } = {}) {
     try {
-      const users = []
-      let skip = 0
-
-      while (true) {
-        const batch = await authApi.getUsers({ skip, limit: pageSize })
-        users.push(...batch)
-
-        if (batch.length < pageSize) {
-          break
-        }
-
-        skip += pageSize
-      }
-
-      return users
+      return await authApi.getUsers({ skip, limit, keyword, departmentId, role })
     } catch (error) {
       console.error('获取用户列表错误:', error)
       throw error

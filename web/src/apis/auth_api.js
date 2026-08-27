@@ -102,9 +102,15 @@ async function checkFirstRun() {
   return apiGet('/api/auth/check-first-run', {}, false)
 }
 
-async function getUsers({ skip = 0, limit = 100 } = {}) {
+async function getUsers({ skip = 0, limit = 100, keyword = '', departmentId = null, role = '' } = {}) {
   const params = new URLSearchParams({ skip: String(skip), limit: String(limit) })
-  return apiGet(`/api/auth/users?${params}`)
+  if (keyword.trim()) params.set('keyword', keyword.trim())
+  if (departmentId != null) params.set('department_id', String(departmentId))
+  if (role) params.set('role', role)
+
+  // 保持其他接口仍只返回 JSON；用户列表需要同时读取分页总数响应头。
+  const response = await apiGet(`/api/auth/users?${params}`, {}, true, 'response')
+  return { users: await response.json(), total: Number(response.headers.get('X-Total-Count') || 0) }
 }
 
 async function createUser(userData) {

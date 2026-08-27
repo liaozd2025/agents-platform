@@ -87,6 +87,49 @@ async def list_authorized_users(
     return visible_rows
 
 
+async def list_authorized_users_page(
+    authorization: AuthorizationContext,
+    permission_key: str,
+    *,
+    skip: int = 0,
+    limit: int = 100,
+    department_id: int | None = None,
+    direct: bool = False,
+    keyword: str | None = None,
+    role: str | None = None,
+    db: AsyncSession | None = None,
+) -> tuple[list[tuple[User, str | None]], int] | None:
+    """把授权范围编译成 SQL，并在仓储层完成筛选、计数和分页。"""
+
+    if department_id is not None and not await department_is_accessible(
+        authorization, permission_key, department_id, db=db
+    ):
+        return None
+
+    clauses: list[Any] = []
+    current_department_id = authorization.user.department_id
+    for scope_type, selected_ids in authorization.permission_scopes(permission_key):
+        if scope_type == "all":
+            clauses.append(True)
+        elif scope_type == "self":
+            clauses.append(User.id == authorization.user.id)
+        elif scope_type == "organization_and_descendants" and current_department_id is not None:
+            clauses.append(Department.path.like(f"%/{current_department_id}/%"))
+        elif scope_type == "selected_organizations_and_descendants":
+            clauses.extend(Department.path.like(f"%/{item}/%") for item in selected_ids)
+
+    return await UserRepository().list_with_department_page(
+        visibility_clauses=tuple(clauses),
+        department_id=department_id,
+        direct=direct,
+        keyword=keyword,
+        role=role,
+        skip=skip,
+        limit=limit,
+        session=db,
+    )
+
+
 async def list_authorized_departments(
     authorization: AuthorizationContext,
     permission_key: str = "department:read",

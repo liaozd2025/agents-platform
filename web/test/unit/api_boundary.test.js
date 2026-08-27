@@ -119,6 +119,41 @@ test('受保护请求的 401 才清理会话并跳转登录页', async () => {
   })
 })
 
+test('用户列表只发起一次分页请求并读取总数响应头', async () => {
+  await withServer(async (server) => {
+    storageValues.clear()
+    const requestedUrls = []
+    globalThis.fetch = async (url) => {
+      requestedUrls.push(String(url))
+      return new Response(JSON.stringify([{ id: 1, username: 'page-user' }]), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'X-Total-Count': '27'
+        }
+      })
+    }
+
+    setActivePinia(createPinia())
+    const { useUserStore } = await server.ssrLoadModule('/src/stores/user.js')
+    const userStore = useUserStore()
+    userStore.token = 'test-token'
+
+    const result = await userStore.getUsers({
+      skip: 10,
+      limit: 10,
+      keyword: 'page',
+      departmentId: 8,
+      role: 'user'
+    })
+
+    assert.deepEqual(result, { users: [{ id: 1, username: 'page-user' }], total: 27 })
+    assert.deepEqual(requestedUrls, [
+      '/api/auth/users?skip=10&limit=10&keyword=page&department_id=8&role=user'
+    ])
+  })
+})
+
 test('用户 Store 的 422 传播链不泄露认证头、密码或 Pydantic input', async () => {
   await withServer(async (server) => {
     storageValues.clear()
