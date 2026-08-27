@@ -6,7 +6,7 @@ from datetime import UTC
 from datetime import datetime as dt
 from typing import Annotated, Any
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -128,9 +128,14 @@ class UserRepository:
             return result.scalar_one_or_none()
 
     async def get_by_login_identifier(self, identifier: str) -> User | None:
-        """按 uid 优先、手机号兜底查找登录用户。"""
+        """按 uid、账号、手机号顺序查找登录用户。"""
         async with self._session() as session:
             result = await session.execute(select(User).where(User.uid == identifier))
+            user = result.scalar_one_or_none()
+            if user is not None:
+                return user
+            # 旧 OA 的 uid 是稳定身份关联键；username 保留 OA 账号以支持独立账号密码登录。
+            result = await session.execute(select(User).where(User.username == identifier))
             user = result.scalar_one_or_none()
             if user is not None:
                 return user
@@ -203,10 +208,84 @@ class UserRepository:
         if session is not None:
             result = await session.execute(query)
             return [(_attach_department_ancestors(user, path), name) for user, name, path in result.all()]
-
         async with self._session() as managed_session:
             result = await managed_session.execute(query)
             return [(_attach_department_ancestors(user, path), name) for user, name, path in result.all()]
+
+    async def list_with_department_page(
+        self,
+        *,
+        visibility_clauses: tuple[Any, ...],
+        department_id: int | None = None,
+        direct: bool = False,
+        keyword: str | None = None,
+        role: str | None = None,
+        skip: int = 0,
+        limit: int = 100,
+        session: AsyncSession | None = None,
+    ) -> tuple[list[tuple[User, str | None]], int]:
+        """按授权 SQL 条件筛选并分页返回用户，避免先加载完整用户目录。"""
+
+        criteria = [User.is_deleted == 0, or_(*visibility_clauses) if visibility_clauses else False]
+        if department_id is not None:
+            department_clause = User.department_id == department_id
+            if not direct:
+                department_clause = Department.path.like(f"%/{department_id}/%")
+            criteria.append(department_clause)
+        if keyword:
+            pattern = f"%{keyword.strip()}%"
+            criteria.append(
+                or_(
+                    User.display_name.ilike(pattern),
+                    User.username.ilike(pattern),
+                    User.uid.ilike(pattern),
+                    User.phone_number.ilike(pattern),
+                )
+            )
+        if role:
+            criteria.append(
+                exists(
+                    select(UserRoleAssignment.id)
+                    .join(Role, Role.id == UserRoleAssignment.role_id)
+                    .where(
+                        UserRoleAssignment.user_id == User.id,
+                        Role.code == role,
+                    )
+                )
+            )
+
+        async def execute_queries(db: AsyncSession) -> tuple[list[tuple[User, str | None]], int]:
+            base = (
+                select(User)
+                .select_from(User)
+                .outerjoin(Department, User.department_id == Department.id)
+                .where(*criteria)
+            )
+            total = int((await db.scalar(select(func.count()).select_from(base.subquery()))) or 0)
+            rows = await db.execute(
+                select(
+                    User,
+                    Department.name.label("department_name"),
+                    Department.path.label("department_path"),
+                )
+                .options(
+                    selectinload(User.role_assignments).selectinload(UserRoleAssignment.scope_departments),
+                    selectinload(User.role_assignments)
+                    .selectinload(UserRoleAssignment.role)
+                    .selectinload(Role.default_departments),
+                )
+                .outerjoin(Department, User.department_id == Department.id)
+                .where(*criteria)
+                .order_by(User.id.asc())
+                .offset(max(skip, 0))
+                .limit(max(limit, 0))
+            )
+            return [(_attach_department_ancestors(user, path), name) for user, name, path in rows.all()], total
+
+        if session is not None:
+            return await execute_queries(session)
+        async with self._session() as managed_session:
+            return await execute_queries(managed_session)
 
     async def create(self, data: dict[str, Any], *, default_role_code: str = "user") -> User:
         """创建用户"""

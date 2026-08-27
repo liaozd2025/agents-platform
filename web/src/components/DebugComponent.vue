@@ -535,7 +535,9 @@ const printAgentConfig = async () => {
 // 获取用户列表
 const fetchUsers = async () => {
   try {
-    state.users = await userStore.getUsers()
+    // 调试页仅需少量候选用户，避免沿用管理页的全量拉取行为。
+    const result = await userStore.getUsers({ limit: 100 })
+    state.users = result.users
   } catch (err) {
     message.error(`获取用户列表失败: ${err.message}`)
   }

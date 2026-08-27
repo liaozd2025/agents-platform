@@ -582,6 +582,8 @@ class PostgresManager(metaclass=SingletonMeta):
             for permission_key in role.permission_keys
         )
         stmts = [
+            # 展示姓名与登录账号分离，存量库启动时幂等补列；不回填或改写账号。
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS display_name VARCHAR(100)",
             """
             CREATE TABLE IF NOT EXISTS roles (
                 id SERIAL PRIMARY KEY,
@@ -1178,6 +1180,11 @@ class PostgresManager(metaclass=SingletonMeta):
                 "node_type VARCHAR(16) NOT NULL DEFAULT 'department'"
             ),
             "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS path VARCHAR(512) NOT NULL DEFAULT ''",
+            # 名称允许跨组织重复，旧 OA 用户归属必须使用稳定部门编码匹配。
+            "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS oa_department_code VARCHAR(64)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_oa_department_code ON departments(oa_department_code) WHERE oa_department_code IS NOT NULL",
+            "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS oa_department_id INTEGER",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_oa_department_id ON departments(oa_department_id) WHERE oa_department_id IS NOT NULL",
             # 集团根原地改造：id=1 升为根，尚未挂靠的存量节点挂到它下面，再回填还没有路径的节点。
             # 后两条 UPDATE 带幂等条件，重复执行不会覆盖人工调整过的树结构；第一条每次都把根写回
             # 根形态，因为集团根的层级身份不允许被改动。
@@ -1294,57 +1301,77 @@ class PostgresManager(metaclass=SingletonMeta):
             DECLARE target_table TEXT;
             BEGIN
                 FOREACH target_table IN ARRAY ARRAY['knowledge_bases', 'agents', 'skills'] LOOP
-                    EXECUTE format(
-                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_id_snapshot INTEGER', target_table
-                    );
-                    EXECUTE format(
-                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_path_snapshot VARCHAR(512)', target_table
-                    );
-                    EXECUTE format(
-                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_snapshot_inferred BOOLEAN', target_table
-                    );
+                    -- 这些资源表由知识库 schema 创建；空库初始化时尚未建表，不能提前执行兼容迁移。
+                    IF to_regclass('public.' || target_table) IS NOT NULL THEN
+                        EXECUTE format(
+                            'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_id_snapshot INTEGER', target_table
+                        );
+                        EXECUTE format(
+                            'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_path_snapshot VARCHAR(512)', target_table
+                        );
+                        EXECUTE format(
+                            'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_snapshot_inferred BOOLEAN', target_table
+                        );
+                    END IF;
                 END LOOP;
             END $$;
             """,
             """
-            UPDATE knowledge_bases AS resource
-            SET organization_id_snapshot = users.department_id,
-                organization_path_snapshot = departments.path,
-                organization_snapshot_inferred = TRUE
-            FROM users LEFT JOIN departments ON departments.id = users.department_id
-            WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL
+            DO $$
+            BEGIN
+                IF to_regclass('public.knowledge_bases') IS NOT NULL THEN
+                    UPDATE knowledge_bases AS resource
+                    SET organization_id_snapshot = users.department_id,
+                        organization_path_snapshot = departments.path,
+                        organization_snapshot_inferred = TRUE
+                    FROM users LEFT JOIN departments ON departments.id = users.department_id
+                    WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL;
+                END IF;
+            END $$;
             """,
             """
-            UPDATE agents AS resource
-            SET organization_id_snapshot = users.department_id,
-                organization_path_snapshot = departments.path,
-                organization_snapshot_inferred = TRUE
-            FROM users LEFT JOIN departments ON departments.id = users.department_id
-            WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL
+            DO $$
+            BEGIN
+                IF to_regclass('public.agents') IS NOT NULL THEN
+                    UPDATE agents AS resource
+                    SET organization_id_snapshot = users.department_id,
+                        organization_path_snapshot = departments.path,
+                        organization_snapshot_inferred = TRUE
+                    FROM users LEFT JOIN departments ON departments.id = users.department_id
+                    WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL;
+                END IF;
+            END $$;
             """,
             """
-            UPDATE skills AS resource
-            SET organization_id_snapshot = users.department_id,
-                organization_path_snapshot = departments.path,
-                organization_snapshot_inferred = TRUE
-            FROM users LEFT JOIN departments ON departments.id = users.department_id
-            WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL
+            DO $$
+            BEGIN
+                IF to_regclass('public.skills') IS NOT NULL THEN
+                    UPDATE skills AS resource
+                    SET organization_id_snapshot = users.department_id,
+                        organization_path_snapshot = departments.path,
+                        organization_snapshot_inferred = TRUE
+                    FROM users LEFT JOIN departments ON departments.id = users.department_id
+                    WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL;
+                END IF;
+            END $$;
             """,
             """
             DO $$
             DECLARE target_table TEXT;
             BEGIN
                 FOREACH target_table IN ARRAY ARRAY['knowledge_bases', 'agents', 'skills'] LOOP
-                    EXECUTE format(
-                        'UPDATE %I SET organization_snapshot_inferred = TRUE '
-                        'WHERE organization_snapshot_inferred IS NULL', target_table
-                    );
-                    EXECUTE format(
-                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET DEFAULT FALSE', target_table
-                    );
-                    EXECUTE format(
-                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET NOT NULL', target_table
-                    );
+                    IF to_regclass('public.' || target_table) IS NOT NULL THEN
+                        EXECUTE format(
+                            'UPDATE %I SET organization_snapshot_inferred = TRUE '
+                            'WHERE organization_snapshot_inferred IS NULL', target_table
+                        );
+                        EXECUTE format(
+                            'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET DEFAULT FALSE', target_table
+                        );
+                        EXECUTE format(
+                            'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET NOT NULL', target_table
+                        );
+                    END IF;
                 END LOOP;
             END $$;
             """,
