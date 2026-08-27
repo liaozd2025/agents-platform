@@ -62,7 +62,7 @@
         <a-button v-if="hasActiveFilters" @click="resetFilters">重置</a-button>
       </div>
       <span class="filter-summary">
-        共 {{ filteredUsers.length }} 名用户 · 全部 {{ userManagement.users.length }} 名
+        共 {{ userManagement.totalUsers }} 名用户
       </span>
     </div>
 
@@ -74,7 +74,7 @@
 
       <a-table
         :columns="userTableColumns"
-        :data-source="filteredUsers"
+        :data-source="userManagement.users"
         :loading="userManagement.loading"
         :pagination="tablePagination"
         :scroll="{ x: 920 }"
@@ -89,16 +89,16 @@
               <FallbackAvatar
                 :src="user.avatar"
                 :default-src="getUserDefaultAvatarSrc(user)"
-                :name="user.username"
+                :name="user.display_name || user.username"
                 :seed="user.uid || user.username"
                 kind="user"
                 :size="32"
                 shape="circle"
-                :alt="user.username"
+                :alt="user.display_name || user.username"
               />
               <div class="user-identity-copy">
-                <strong :title="user.username">{{ user.username }}</strong>
-                <code :title="`登录 ID：${user.uid || '-'}`">登录 ID：{{ user.uid || '-' }}</code>
+                <strong :title="user.display_name || user.username">{{ user.display_name || user.username }}</strong>
+                <code :title="`账号：${user.username}`">账号：{{ user.username }}</code>
               </div>
             </div>
           </template>
@@ -368,7 +368,7 @@
 </template>
 
 <script setup>
-import { reactive, onMounted, watch, computed } from 'vue'
+import { reactive, onBeforeUnmount, onMounted, watch, computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/stores/user'
 import { departmentApi } from '@/apis'
@@ -380,19 +380,21 @@ import { generatePixelAvatar } from '@/utils/pixelAvatar'
 import {
   buildDepartmentScopeTree,
   buildDepartmentTree,
-  isDepartmentSelectionCovered,
   normalizeDepartmentSelection
 } from '@/utils/departmentTree'
 import { getAssignableScopeTypes, resetRoleAssignmentScope } from '@/utils/roleOverview'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 
 const userStore = useUserStore()
+let userFilterTimer = null
+let userListRequestVersion = 0
 
 // 用户管理相关状态
 const userManagement = reactive({
   loading: false,
   refreshing: false,
   users: [],
+  totalUsers: 0,
   searchKeyword: '',
   departmentFilter: null,
   roleFilter: '',
@@ -480,36 +482,10 @@ const hasActiveFilters = computed(
     Boolean(userManagement.roleFilter)
 )
 
-const filteredUsers = computed(() => {
-  const keyword = userManagement.searchKeyword.trim().toLowerCase()
-
-  return userManagement.users.filter((user) => {
-    const matchesKeyword =
-      !keyword ||
-      [user.username, user.uid, user.phone_number].some((value) =>
-        String(value || '')
-          .toLowerCase()
-          .includes(keyword)
-      )
-    const matchesDepartment =
-      userManagement.departmentFilter == null ||
-      isDepartmentSelectionCovered(
-        departmentManagement.departments,
-        [userManagement.departmentFilter],
-        [user.department_id]
-      )
-    const matchesRole =
-      !userManagement.roleFilter ||
-      (user.roles || []).some((role) => role.code === userManagement.roleFilter)
-
-    return matchesKeyword && matchesDepartment && matchesRole
-  })
-})
-
 const tablePagination = computed(() => ({
   current: userManagement.currentPage,
   pageSize: Number(userManagement.pageSize),
-  total: filteredUsers.value.length,
+  total: userManagement.totalUsers,
   pageSizeOptions: ['10', '20', '50'],
   showSizeChanger: true,
   showTotal: (total, range) => `第 ${range[0]}–${range[1]} 条，共 ${total} 条`
@@ -524,8 +500,16 @@ const resetFilters = () => {
 
 /** 保持表格分页受控，以便筛选和数据刷新时能校正当前页。 */
 const handleTableChange = (pagination) => {
-  userManagement.currentPage = pagination.current
-  userManagement.pageSize = pagination.pageSize
+  const nextPage = Number(pagination.current)
+  const nextPageSize = Number(pagination.pageSize)
+  const pageSizeChanged = nextPageSize !== Number(userManagement.pageSize)
+
+  if (!pageSizeChanged && nextPage === userManagement.currentPage) return
+
+  userManagement.pageSize = nextPageSize
+  userManagement.currentPage = pageSizeChanged ? 1 : nextPage
+  // 翻页或修改每页数量时只请求目标页，避免为了前端分页一次取回全部用户。
+  fetchUsers()
 }
 
 // 获取组织机构列表
@@ -738,16 +722,13 @@ watch(
   () => [userManagement.searchKeyword, userManagement.departmentFilter, userManagement.roleFilter],
   () => {
     userManagement.currentPage = 1
-  }
-)
-
-watch(
-  () => filteredUsers.value.length,
-  (total) => {
-    const maxPage = Math.max(1, Math.ceil(total / Number(userManagement.pageSize)))
-    if (userManagement.currentPage > maxPage) {
-      userManagement.currentPage = maxPage
-    }
+    // 输入搜索词时等待用户停止输入，避免每个字符都触发一次服务端分页查询。
+    if (userFilterTimer) clearTimeout(userFilterTimer)
+    userFilterTimer = setTimeout(() => {
+      userFilterTimer = null
+      // 筛选条件属于全局查询，重置页码后由服务端返回符合条件的第一页。
+      fetchUsers()
+    }, 300)
   }
 )
 
@@ -761,16 +742,31 @@ const isUserDeleteDisabled = (user) =>
 
 // 获取用户列表
 const fetchUsers = async () => {
+  // 关键词防抖与翻页可能并发；只允许最新请求更新页面，避免旧响应覆盖新筛选结果。
+  const requestVersion = ++userListRequestVersion
   try {
     userManagement.loading = true
-    const users = await userStore.getUsers()
-    userManagement.users = users
-    userManagement.error = null
+    const result = await userStore.getUsers({
+      skip: (userManagement.currentPage - 1) * Number(userManagement.pageSize),
+      limit: Number(userManagement.pageSize),
+      keyword: userManagement.searchKeyword,
+      departmentId: userManagement.departmentFilter,
+      role: userManagement.roleFilter
+    })
+    if (requestVersion === userListRequestVersion) {
+      userManagement.users = result.users
+      userManagement.totalUsers = result.total
+      userManagement.error = null
+    }
   } catch (error) {
     console.error('获取用户列表失败:', error)
-    userManagement.error = '获取用户列表失败'
+    if (requestVersion === userListRequestVersion) {
+      userManagement.error = '获取用户列表失败'
+    }
   } finally {
-    userManagement.loading = false
+    if (requestVersion === userListRequestVersion) {
+      userManagement.loading = false
+    }
   }
 }
 
@@ -1036,6 +1032,11 @@ const confirmDeleteUser = (user) => {
 // 在组件挂载时获取用户列表
 onMounted(async () => {
   await Promise.all([fetchUsers(), fetchDepartments(), fetchRoleOptions()])
+})
+
+onBeforeUnmount(() => {
+  // 组件关闭后不再触发延迟查询，防止已销毁页面继续更新状态。
+  if (userFilterTimer) clearTimeout(userFilterTimer)
 })
 </script>
 

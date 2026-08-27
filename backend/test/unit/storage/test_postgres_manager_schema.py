@@ -221,6 +221,29 @@ async def test_ensure_business_schema_adds_run_origin_snapshot_columns():
 
 
 @pytest.mark.asyncio
+async def test_ensure_business_schema_adds_oa_department_code_with_unique_index():
+    """旧 OA 部门编码必须可幂等回填，并拒绝非空编码重复。"""
+    async with _recording_manager() as (manager, connection):
+        await manager.ensure_business_schema()
+
+    statements = "\n".join(connection.statements)
+    assert "departments ADD COLUMN IF NOT EXISTS oa_department_code VARCHAR(64)" in statements
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_oa_department_code" in statements
+    assert "departments ADD COLUMN IF NOT EXISTS oa_department_id INTEGER" in statements
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_oa_department_id" in statements
+
+
+@pytest.mark.asyncio
+async def test_ensure_business_schema_adds_user_display_name():
+    """存量 users 表须幂等补展示姓名列，登录账号列保持原有语义。"""
+    async with _recording_manager() as (manager, connection):
+        await manager.ensure_business_schema()
+
+    statements = "\n".join(connection.statements)
+    assert "users ADD COLUMN IF NOT EXISTS display_name VARCHAR(100)" in statements
+
+
+@pytest.mark.asyncio
 async def test_ensure_business_schema_backfills_historical_organization_snapshots_idempotently():
     """旧历史事件应只按当前组织关系推算一次，并保留明确标记。"""
 
@@ -279,6 +302,9 @@ async def test_ensure_business_schema_backfills_resource_creation_snapshots_idem
     assert "resource.created_by = users.uid" in statements
     assert "resource.organization_snapshot_inferred IS NULL" in statements
     assert "ARRAY['knowledge_bases', 'agents', 'skills']" in statements
+    assert "to_regclass('public.' || target_table) IS NOT NULL" in statements
+    for table_name in ("knowledge_bases", "agents", "skills"):
+        assert f"to_regclass('public.{table_name}') IS NOT NULL" in statements
 
 
 @pytest.mark.asyncio

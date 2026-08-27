@@ -94,6 +94,7 @@ export default defineConfig({
           { text: '品牌自定义', link: '/advanced/branding' },
           { text: '其他配置', link: '/advanced/misc' },
           { text: '生产部署', link: '/advanced/deployment' },
+          { text: '旧 OA 用户与部门同步', link: '/advanced/oa-user-department-sync' },
           { text: 'API Key 外部集成', link: '/advanced/api-key-integration' },
           { text: 'OA iframe 集成', link: '/enterprise/oa-embed-integration' },
           { text: '第三方认证', link: '/advanced/third-party-auth' }

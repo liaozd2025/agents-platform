@@ -51,6 +51,12 @@ def test_cors_allows_configured_origin_with_credentials():
     assert response.headers["access-control-allow-credentials"] == "true"
 
 
+def test_cors_exposes_user_list_total_count_header():
+    options = _build_cors_options(["http://localhost:5173"])
+
+    assert "X-Total-Count" in options["expose_headers"]
+
+
 def test_cors_rejects_unconfigured_origin():
     client = _client_for_origins(["http://localhost:5173"])
 

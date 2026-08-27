@@ -1,6 +1,6 @@
 import re
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, ConfigDict, Field
@@ -55,6 +55,7 @@ from yuxi.services.user_management_service import (
     department_is_accessible,
     get_authorized_user,
     list_authorized_users,
+    list_authorized_users_page,
 )
 from yuxi.services.user_role_service import (
     UserRoleAuthorizationError,
@@ -146,6 +147,8 @@ class UserRoleResponse(BaseModel):
 class UserResponse(BaseModel):
     id: int
     username: str
+    # 旧 OA 同步的真实姓名，仅用于管理界面展示，不能替代登录账号。
+    display_name: str | None = None
     uid: str
     phone_number: str | None = None
     avatar: str | None = None
@@ -724,24 +727,33 @@ async def create_user(
 # 路由：获取所有用户（管理员权限）
 @auth.get("/users", response_model=list[UserResponse])
 async def read_users(
+    response: Response,
     skip: int = 0,
     limit: int = 100,
     department_id: int | None = None,
     direct: bool = False,
+    keyword: str | None = None,
+    role: str | None = None,
     authorization: AuthorizationContext = Depends(require_permission("user:read")),
 ):
     """返回管理域内用户；组织筛选默认包含全部后代。"""
 
-    # ponytail: 授权后分页会扫描当前用户目录；规模影响延迟时再把有效范围编译为 SQL 条件。
-    visible_rows = await list_authorized_users(
+    page_result = await list_authorized_users_page(
         authorization,
         "user:read",
+        skip=skip,
+        limit=limit,
         department_id=department_id,
         direct=direct,
+        keyword=keyword,
+        role=role,
     )
-    if visible_rows is None:
+    if page_result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
-    return [serialize_user(user, department_name) for user, department_name in visible_rows[skip : skip + limit]]
+    visible_rows, total = page_result
+    response.headers["X-Total-Count"] = str(total)
+    logger.info("用户列表分页查询完成：skip=%s limit=%s total=%s", skip, limit, total)
+    return [serialize_user(user, department_name) for user, department_name in visible_rows]
 
 
 @auth.get("/users/access-options", response_model=list[UserAccessOption])

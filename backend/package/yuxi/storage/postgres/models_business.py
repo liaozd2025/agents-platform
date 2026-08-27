@@ -55,6 +55,10 @@ class Department(Base):
     node_type = Column(String(16), nullable=False, default=DEPARTMENT_NODE_TYPE)
     # 物化路径，形如 /1/3/7/，记录从集团根到自身的祖先链，供权限判定零查询地取得祖先集合
     path = Column(String(512), nullable=False, default="")
+    # 旧 OA 部门的稳定编码仅用于同步和用户归属匹配，不参与当前权限判定。
+    oa_department_code = Column(String(64), nullable=True, unique=True, index=True)
+    # 旧 OA 的部门主键用于人员接口关联；接口可能以 200004.0 形式返回，迁移脚本会先规范化。
+    oa_department_id = Column(Integer, nullable=True, unique=True, index=True)
 
     # 关联关系
     users = relationship("User", back_populates="department", cascade="all, delete-orphan")
@@ -73,12 +77,16 @@ class Department(Base):
 
 
 class User(Base):
-    """用户模型"""
+    """用户模型。
+
+    ``display_name`` 仅供界面识别用户，不能替代 ``username`` 参与登录或 OA 身份匹配。
+    """
 
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    username = Column(String, nullable=False, unique=True, index=True)  # 显示名称
+    username = Column(String, nullable=False, unique=True, index=True)  # 登录账号
+    display_name = Column(String(100), nullable=True)  # 界面展示姓名，不参与登录身份识别
     uid = Column(String, nullable=False, unique=True, index=True)  # 登录标识
     phone_number = Column(String, nullable=True, unique=True, index=True)  # 手机号
     avatar = Column(String, nullable=True)  # 头像URL
@@ -113,6 +121,7 @@ class User(Base):
         result = {
             "id": self.id,
             "username": self.username,
+            "display_name": self.display_name,
             "uid": self.uid,
             "phone_number": self.phone_number,
             "avatar": normalize_public_minio_url(self.avatar),
