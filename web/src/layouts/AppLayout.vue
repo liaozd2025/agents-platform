@@ -417,18 +417,14 @@ provide('settingsModal', {
   >
     <div v-if="showSidebar" class="header">
       <div class="sidebar-brand" @click.stop>
-        <router-link
-          v-if="!layoutSidebarCollapsed"
-          :to="isEmbedded ? '/embed' : '/'"
-          class="brand-link"
-        >
+        <div v-if="!layoutSidebarCollapsed" class="brand-identity">
           <img :src="infoStore.organization.avatar" class="brand-avatar" />
           <span class="brand-name">{{ organizationName }}</span>
-        </router-link>
+        </div>
         <button
           v-else
           type="button"
-          class="brand-link brand-expand-button"
+          class="brand-identity brand-expand-button"
           aria-label="展开侧边栏"
           @click="setSidebarCollapsed(false)"
         >
@@ -805,7 +801,7 @@ div.header,
     gap: 8px;
   }
 
-  .brand-link {
+  .brand-identity {
     display: flex;
     flex: 1 1 auto;
     align-items: center;
@@ -816,6 +812,9 @@ div.header,
     border: 0;
     background: transparent;
     padding: 0 4px;
+  }
+
+  button.brand-identity {
     cursor: pointer;
   }
 
