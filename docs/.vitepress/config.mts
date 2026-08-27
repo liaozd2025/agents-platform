@@ -97,6 +97,7 @@ export default defineConfig({
           { text: '旧 OA 用户与部门同步', link: '/advanced/oa-user-department-sync' },
           { text: 'API Key 外部集成', link: '/advanced/api-key-integration' },
           { text: 'OA iframe 集成', link: '/enterprise/oa-embed-integration' },
+          { text: 'H5 会话迁移', link: '/enterprise/h5-conversation-migration-guide' },
           { text: '第三方认证', link: '/advanced/third-party-auth' }
         ]
       },
