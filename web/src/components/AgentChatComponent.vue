@@ -3210,8 +3210,13 @@ const handleSendOrStop = async (payload) => {
   const hasNewInput = Boolean(String(userInput.value || '').trim() || payload?.image)
   if (threadState?.activeRunId && threadState?.isStreaming && !hasNewInput) {
     try {
+      // 先登记取消保留标记，再请求后端终止，避免终态事件到达时清掉本地半截回答。
+      threadState.pendingInterrupt = {
+        kind: 'cancelled',
+        interruptedRunId: threadState.activeRunId,
+        threadId
+      }
       await agentApi.cancelAgentRun(threadState.activeRunId)
-      threadState.pendingInterrupt = null
       if (approvalState.threadId === threadId) {
         hideApprovalState()
       }

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -443,6 +445,68 @@ async def test_stream_agent_chat_output_persistence_failure_is_terminal_error(
     assert chunks[-1]["status"] == "error"
     assert chunks[-1]["error_type"] == "output_persistence_error"
     assert all(chunk.get("status") not in {"finished", "warning"} for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_chat_persists_partial_reply_when_cancelled(
+    stub_system_options,
+    stub_content_guard,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """用户停止生成时，已产生的回答必须作为取消态消息持久化。"""
+    saved: dict[str, object] = {}
+
+    class FakeAgent:
+        context_schema = _FakeContext
+
+        async def stream_messages_with_state(self, messages, input_context=None, **kwargs):
+            del messages, input_context, kwargs
+            yield "messages", (AIMessageChunk(content="已经生成的半截回答"), {"node": "llm"})
+            raise asyncio.CancelledError("user cancelled")
+
+    @asynccontextmanager
+    async def fake_session_context():
+        yield _FakeSession()
+
+    async def fake_save_partial_message(_repo, thread_id, full_msg=None, **kwargs):
+        saved.update(
+            {
+                "thread_id": thread_id,
+                "content": full_msg.content,
+                **kwargs,
+            }
+        )
+
+    _patch_stream_scaffolding(monkeypatch, agent=FakeAgent())
+    monkeypatch.setattr(svc.pg_manager, "get_async_session_context", fake_session_context)
+    monkeypatch.setattr(svc, "save_partial_message", fake_save_partial_message)
+
+    chunks = []
+    async for chunk in svc.stream_agent_chat(
+        agent_slug="test-agent",
+        thread_id="cancel-thread",
+        meta={
+            "run_id": "cancel-run",
+            "request_id": "cancel-request",
+            "worker_id": "cancel-worker:attempt-1",
+        },
+        input_message=build_chat_input_message("请开始回答"),
+        current_user=SimpleNamespace(id=1, uid="user-1", role="user", department_id="dept-1"),
+        db=_FakeSession(),
+    ):
+        chunks.append(json.loads(chunk.decode("utf-8")))
+
+    assert saved == {
+        "thread_id": "cancel-thread",
+        "content": "已经生成的半截回答",
+        "error_message": "对话已取消，回答未生成完整",
+        "error_type": "cancelled",
+        "trace_info": {},
+        "run_id": "cancel-run",
+        "request_id": "cancel-request",
+        "worker_id": "cancel-worker:attempt-1",
+    }
+    assert chunks[-1]["status"] == "interrupted"
 
 
 @pytest.mark.asyncio

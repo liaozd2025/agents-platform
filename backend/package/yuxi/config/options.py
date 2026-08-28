@@ -113,13 +113,15 @@ system_options = Option(
                 "key": "default_model",
                 "label": "默认对话模型",
                 "type": "model",
-                "default": "siliconflow-cn:Pro/MiniMaxAI/MiniMax-M2.5",
+                # 默认对话模型使用 SiliconFlow 的 DeepSeek V4 Flash。
+                "default": "siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash",
             },
             {
                 "key": "fast_model",
                 "label": "快速响应模型",
                 "type": "model",
-                "default": "siliconflow-cn:Pro/MiniMaxAI/MiniMax-M2.5",
+                # 快速响应模型与默认对话模型保持一致，避免同一会话切换模型。
+                "default": "siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash",
             },
             {
                 "key": "embed_model",

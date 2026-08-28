@@ -181,7 +181,7 @@
 
 <script setup>
 import { computed, inject, nextTick, ref, watch } from 'vue'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 import {
   Settings2,
   ChevronDown,
@@ -340,14 +340,24 @@ const handleHistorySelect = async (threadId) => {
 
 const handleHistoryDelete = async (threadId) => {
   if (!threadId) return
-  try {
-    await chatThreadsStore.deleteThread(threadId)
-    if (getRouteThreadId() === threadId) {
-      await router.replace({ name: 'EmbedAgent' })
+  Modal.confirm({
+    title: '删除会话',
+    content: '确定要删除该会话吗？删除后无法恢复。',
+    okText: '删除',
+    okType: 'danger',
+    cancelText: '取消',
+    // 只有用户确认后才调用删除接口，避免误触删除历史会话。
+    onOk: async () => {
+      try {
+        await chatThreadsStore.deleteThread(threadId)
+        if (getRouteThreadId() === threadId) {
+          await router.replace({ name: 'EmbedAgent' })
+        }
+      } catch (error) {
+        console.warn('删除对话失败:', error)
+      }
     }
-  } catch (error) {
-    console.warn('删除对话失败:', error)
-  }
+  })
 }
 
 const handleHistoryRename = async ({ chatId, title }) => {

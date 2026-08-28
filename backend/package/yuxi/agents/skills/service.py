@@ -37,6 +37,7 @@ from yuxi.utils.logging_config import logger
 from yuxi.utils.paths import ensure_within_root
 
 SKILL_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+SKILL_PROJECTION_TEMP_PATTERN = re.compile(r"^\.[a-z0-9]+(?:-[a-z0-9]+)*\.tmp-[0-9a-f]+$")
 SKILL_NAME_PATTERN = SKILL_SLUG_PATTERN
 
 TEXT_FILE_EXTENSIONS = {
@@ -422,6 +423,10 @@ def sync_thread_readable_skills(
         for entry in thread_skills_root.iterdir():
             if entry.name in readable_slugs:
                 continue
+            # 并发 worker 可能正在写入临时投影目录；清理时跳过，避免复制过程被删除。
+            if SKILL_PROJECTION_TEMP_PATTERN.fullmatch(entry.name):
+                logger.info(f"跳过并发 Skill 临时目录清理: path={entry}")
+                continue
             if entry.is_dir() and not entry.is_symlink():
                 shutil.rmtree(entry)
             else:
@@ -453,7 +458,16 @@ def sync_thread_readable_skills(
             temp_target = thread_skills_root / f".{slug}.tmp-{uuid.uuid4().hex[:8]}"
             try:
                 shutil.copytree(source_dir, temp_target, symlinks=False)
-                temp_target.rename(target_dir)
+                try:
+                    temp_target.rename(target_dir)
+                except OSError:
+                    # 多个 worker 同步同一 Skill 线程时，另一个进程可能已完成投影。
+                    # Windows bind mount 会把此类目录替换竞争表现为 PermissionError；
+                    # 仅在内容一致时复用，其他存储或权限错误仍向上抛出。
+                    if target_dir.is_dir() and not target_dir.is_symlink() and _dirs_equal(target_dir, source_dir):
+                        logger.info(f"Skill 投影已由并发 worker 完成，复用现有目录: slug={slug}")
+                    else:
+                        raise
             finally:
                 if temp_target.exists():
                     shutil.rmtree(temp_target, ignore_errors=True)

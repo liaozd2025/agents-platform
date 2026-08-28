@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import shutil
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -560,6 +561,53 @@ def test_sync_thread_readable_skills(
             assert entry.is_dir()
             assert not entry.is_symlink()
             assert (entry / "SKILL.md").read_text(encoding="utf-8") == content
+
+
+def test_sync_thread_readable_skills_reuses_identical_projection_created_by_another_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """跨 worker 同步竞争时，已完整落盘的相同投影不应让子任务失败。"""
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
+    source_dir = tmp_path / "skills" / "alpha"
+    source_dir.mkdir(parents=True)
+    (source_dir / "SKILL.md").write_text("alpha", encoding="utf-8")
+
+    original_rename = Path.rename
+
+    def competing_rename(self: Path, target: str | Path) -> Path:
+        target_path = Path(target)
+        if self.name.startswith(".alpha.tmp-"):
+            shutil.copytree(source_dir, target_path)
+            raise PermissionError("Windows bind mount rejects replacing an existing directory")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", competing_rename)
+
+    thread_root = svc.sync_thread_readable_skills("thread_1", ["alpha"])
+
+    assert (thread_root / "alpha" / "SKILL.md").read_text(encoding="utf-8") == "alpha"
+    assert not list(thread_root.glob(".alpha.tmp-*"))
+
+
+def test_sync_thread_readable_skills_does_not_delete_concurrent_temp_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """并发同步清理旧条目时，不应删除另一个 worker 正在写入的临时目录。"""
+    monkeypatch.setenv("SAVE_DIR", str(tmp_path))
+    source_dir = tmp_path / "skills" / "alpha"
+    source_dir.mkdir(parents=True)
+    (source_dir / "SKILL.md").write_text("alpha", encoding="utf-8")
+    thread_skills = tmp_path / "threads" / "thread_1" / "skills"
+    concurrent_temp = thread_skills / ".alpha.tmp-abcdef12"
+    concurrent_temp.mkdir(parents=True)
+    (concurrent_temp / "SKILL.md").write_text("partial", encoding="utf-8")
+
+    svc.sync_thread_readable_skills("thread_1", ["alpha"])
+
+    assert concurrent_temp.exists()
+    assert (thread_skills / "alpha" / "SKILL.md").read_text(encoding="utf-8") == "alpha"
 
 
 @pytest.mark.asyncio

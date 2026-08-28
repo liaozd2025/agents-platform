@@ -156,6 +156,10 @@ export function useAgentRunStream({
 
   const hasPendingInterruptForRun = (threadState, runId) => {
     const pendingInterrupt = threadState?.pendingInterrupt
+    // 用户主动停止也需要保留当前 Run 的本地半截回答，但不应伪装成审批问题。
+    if (pendingInterrupt?.kind === 'cancelled') {
+      return !pendingInterrupt.interruptedRunId || pendingInterrupt.interruptedRunId === runId
+    }
     if (!hasPendingInterruptPayload(pendingInterrupt)) return false
     return !pendingInterrupt.interruptedRunId || pendingInterrupt.interruptedRunId === runId
   }

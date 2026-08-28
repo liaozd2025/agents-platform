@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, provide, watch } from 'vue'
+import { Modal } from 'ant-design-vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
   BarChart3,
@@ -359,14 +360,24 @@ const handleSearchSelectFile = (entry) => {
 
 const handleDeleteChat = async (threadId) => {
   if (!threadId) return
-  try {
-    await chatThreadsStore.deleteThread(threadId)
-    if (route.params.thread_id === threadId) {
-      await router.replace({ name: getAgentRouteName() })
+  Modal.confirm({
+    title: '删除会话',
+    content: '确定要删除该会话吗？删除后无法恢复。',
+    okText: '删除',
+    okType: 'danger',
+    cancelText: '取消',
+    // 只有用户确认后才调用删除接口，避免误触删除历史会话。
+    onOk: async () => {
+      try {
+        await chatThreadsStore.deleteThread(threadId)
+        if (route.params.thread_id === threadId) {
+          await router.replace({ name: getAgentRouteName() })
+        }
+      } catch (error) {
+        console.warn('删除对话失败:', error)
+      }
     }
-  } catch (error) {
-    console.warn('删除对话失败:', error)
-  }
+  })
 }
 
 const handleRenameChat = async ({ chatId, title }) => {

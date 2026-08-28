@@ -119,14 +119,22 @@ def _source_status(value: Any) -> str:
     return status if status in {"active", "archived", "deleted"} else "active"
 
 
+def _restore_escaped_newlines(value: Any) -> str:
+    """还原 H5 文本中的字面量换行，供 Markdown 正常分段渲染。"""
+
+    text = _as_text(value)
+    # H5 历史记录将换行写成两个字符，迁移前统一恢复；不解析其他转义，避免误改内容。
+    return text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+
+
 def _message_content(message: Mapping[str, Any]) -> tuple[str, str]:
     """按照 H5 消息来源选择用户问题或助手答案。"""
 
     source = _as_text(message.get("from_source")).lower()
     if source == "human":
-        role, content = "user", _as_text(message.get("query_content"))
+        role, content = "user", _restore_escaped_newlines(message.get("query_content"))
     elif source == "assistant":
-        role, content = "assistant", _as_text(message.get("answer"))
+        role, content = "assistant", _restore_escaped_newlines(message.get("answer"))
     else:
         raise ValueError(f"不支持的 H5 消息来源: {source or '<empty>'}")
     if not content:

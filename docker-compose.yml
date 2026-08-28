@@ -64,6 +64,8 @@ services:
       - ./backend/test:/app/test
       - ./backend/scripts:/app/scripts
       - ./docker/sandbox_provisioner:/app/docker/sandbox_provisioner:ro
+      # 旧 OA 授权文件仅供用户、部门同步脚本读取，禁止写入容器。
+      - ./docker/volumes/secrets/oa-license.lic:/run/secrets/oa-license.lic:ro
       - ./.env:/app/.env
       - /var/run/docker.sock:/var/run/docker.sock
       - nltk_data:/root/nltk_data  # 使用命名卷持久化NLTK数据，避免路径展开差异
@@ -112,6 +114,8 @@ services:
       - ./backend/test:/app/test
       - ./backend/scripts:/app/scripts
       - ./docker/sandbox_provisioner:/app/docker/sandbox_provisioner:ro
+      # Worker 与 API 使用同一只读授权文件，避免热重载后环境不一致。
+      - ./docker/volumes/secrets/oa-license.lic:/run/secrets/oa-license.lic:ro
       - ./.env:/app/.env
       - ./backend/pyproject.toml:/app/pyproject.toml
       - ./backend/uv.lock:/app/uv.lock

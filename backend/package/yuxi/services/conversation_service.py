@@ -263,7 +263,8 @@ async def get_thread_history_view(
     messages = [
         message
         for message in messages
-        if not (message.role == "user" and message.delivery_status in {"queued", "cancelled", "rejected"})
+        # queued/rejected 代表消息尚未真正送达；cancelled 代表已送达后取消执行，仍需展示给用户。
+        if not (message.role == "user" and message.delivery_status in {"queued", "rejected"})
     ]
 
     run_ids_in_messages = {msg.run_id for msg in messages if msg.run_id}
