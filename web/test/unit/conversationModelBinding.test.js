@@ -7,6 +7,19 @@ const source = readFileSync(
   'utf8'
 )
 
+test('OA iframe 鏂扮嚎绋嬩娇鐢ㄦ寚瀹氱殑 DeepSeek 榛樿妯″瀷', () => {
+  const modelBlock = source.slice(
+    source.indexOf('const currentModelSpec = computed'),
+    source.indexOf('const handleModelSelect')
+  )
+
+  assert.match(modelBlock, /props\.embedMode \? EMBED_DEFAULT_MODEL : ''/)
+  assert.ok(
+    modelBlock.indexOf('currentThread.value?.metadata?.model_spec') <
+      modelBlock.indexOf('props.embedMode ? EMBED_DEFAULT_MODEL :')
+  )
+})
+
 test('模型选择按当前选择、Conversation、智能体默认的顺序解析', () => {
   const modelBlock = source.slice(
     source.indexOf('const currentModelSpec = computed'),

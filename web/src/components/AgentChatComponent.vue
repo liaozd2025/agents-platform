@@ -1360,6 +1360,8 @@ const currentChatId = computed(() => currentThreadId.value)
 // ==================== 对话级模型覆盖 ====================
 // 当前选择优先；否则依次使用 Conversation、智能体和系统默认模型。
 const DRAFT_MODEL_KEY = '__draft__'
+// OA iframe 使用独立默认模型，避免继承已欠费的远端 Agent 模型；已有会话仍优先使用自身绑定模型。
+const EMBED_DEFAULT_MODEL = 'siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash'
 const selectedModelByThread = reactive({})
 const savedToolApprovalMode = ref(readToolApprovalModePreference())
 const agentDefaultModel = computed(
@@ -1373,6 +1375,7 @@ const currentModelSpec = computed(
   () =>
     selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY] ||
     currentThread.value?.metadata?.model_spec ||
+    (props.embedMode ? EMBED_DEFAULT_MODEL : '') ||
     agentDefaultModel.value
 )
 const handleModelSelect = (spec) => {
