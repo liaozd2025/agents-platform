@@ -87,7 +87,8 @@ services:
       YUXI_RUNTIME_DIR: /app/runtime/api
       YUXI_USER_DATA_DIR: /app/user-data
     # endregion api_envs
-    command: uv run --no-sync --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050 --reload --reload-dir /app/server --reload-dir /app/package --timeout-graceful-shutdown 5
+    entrypoint: ["/bin/sh", "-c", "umask 077; exec uv run --no-sync --no-dev uvicorn server.main:app --host 0.0.0.0 --port 5050 --reload --reload-dir /app/server --reload-dir /app/package --timeout-graceful-shutdown 5"]
+    command: []
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:5050/api/system/ready || exit 1"]
@@ -139,7 +140,8 @@ services:
       <<: *api-worker-env
       YUXI_RUNTIME_DIR: /app/runtime/worker
       YUXI_USER_DATA_DIR: /app/user-data
-    command: watchfiles --filter python "arq server.worker_main.WorkerSettings" /app/server /app/package
+    entrypoint: ["/bin/sh", "-c", "umask 077; exec uv run --no-sync --no-dev watchfiles --filter python 'arq server.worker_main.WorkerSettings' /app/server /app/package"]
+    command: []
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "uv run --no-sync --no-dev arq --check server.worker_main.WorkerSettings"]

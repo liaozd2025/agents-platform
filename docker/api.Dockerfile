@@ -57,6 +57,8 @@ RUN uv sync --no-cache --group test --no-dev --frozen
 # 复制 server 代码
 COPY backend/server /app/server
 COPY docker/api-entrypoint.sh /usr/local/bin/yuxi-entrypoint
+# Windows 工作区可能将脚本保存为 CRLF；镜像内统一转换为 Unix 换行，确保 shebang 可执行。
+RUN sed -i 's/\r$//' /usr/local/bin/yuxi-entrypoint
 
 RUN groupadd --gid 1000 yuxi \
     && useradd --uid 1000 --gid 1000 --create-home yuxi \
