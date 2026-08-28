@@ -161,7 +161,7 @@ import { useUserStore } from '@/stores/user'
 import { message } from 'ant-design-vue'
 import { queryApi } from '@/apis/knowledge_api'
 import { SearchOutlined } from '@ant-design/icons-vue'
-import { Braces, RefreshCw } from 'lucide-vue-next'
+import { Braces, RefreshCw } from '@lucide/vue'
 
 const store = useDatabaseStore()
 const userStore = useUserStore()

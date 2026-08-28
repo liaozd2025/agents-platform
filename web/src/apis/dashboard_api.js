@@ -7,7 +7,7 @@ const withDepartment = (path, departmentId) => {
 
 /**
  * Dashboard API模块
- * 用于管理员查看所有用户的对话记录
+ * 用于有 dashboard:view 权限的用户查看授权组织范围内的数据
  */
 
 export const dashboardApi = {
@@ -19,23 +19,33 @@ export const dashboardApi = {
   /**
    * 获取所有对话记录
    * @param {Object} params - 查询参数
-   * @param {string} params.uid - 用户 UID 过滤
-   * @param {string} params.agent_id - 智能体ID过滤
-   * @param {string} params.status - 状态过滤 (active/deleted/all)
-   * @param {number} params.limit - 每页数量
-   * @param {number} params.offset - 偏移量
-   * @returns {Promise<Array>} - 对话列表
+   * @param {string} [params.uid] - 用户 UID 过滤
+   * @param {string} [params.agent_id] - 智能体ID过滤
+   * @param {string} [params.status] - 状态过滤 (active/archived/deleted/all)
+   * @param {string} [params.search] - 标题/ID/UID 关键字搜索
+   * @param {number} [params.limit] - 每页数量
+   * @param {number} [params.offset] - 偏移量
+   * @returns {Promise<Object>} - 分页对话列表（items/total/limit/offset）
    */
   getConversations: (params = {}) => {
     const queryParams = new URLSearchParams()
     if (params.uid) queryParams.append('uid', params.uid)
     if (params.agent_id) queryParams.append('agent_id', params.agent_id)
     if (params.status) queryParams.append('status', params.status)
+    if (params.search) queryParams.append('search', params.search)
     if (params.limit) queryParams.append('limit', params.limit)
     if (params.offset) queryParams.append('offset', params.offset)
     if (params.department_id != null) queryParams.append('department_id', params.department_id)
 
     return apiGet(`/api/dashboard/conversations?${queryParams.toString()}`)
+  },
+
+  /**
+   * 获取会话审计筛选选项
+   * @returns {Promise<Object>} - 用户与智能体选项
+   */
+  getConversationFilterOptions: (departmentId = null) => {
+    return apiGet(withDepartment('/api/dashboard/conversations/options', departmentId))
   },
 
   /**
@@ -48,7 +58,7 @@ export const dashboardApi = {
   },
 
   /**
-   * 获取Dashboard统计信息
+   * 获取Dashboard基础统计信息
    * @returns {Promise<Object>} - 统计信息
    */
   getStats: (departmentId = null) => {
@@ -58,8 +68,8 @@ export const dashboardApi = {
   /**
    * 获取用户反馈列表
    * @param {Object} params - 查询参数
-   * @param {string} params.rating - 反馈类型过滤 (like/dislike/all)
-   * @param {string} params.agent_id - 智能体ID过滤
+   * @param {string} [params.rating] - 反馈类型过滤 (like/dislike/all)
+   * @param {string} [params.agent_id] - 智能体ID过滤
    * @returns {Promise<Array>} - 反馈列表
    */
   getFeedbacks: (params = {}) => {
@@ -70,8 +80,6 @@ export const dashboardApi = {
 
     return apiGet(`/api/dashboard/feedbacks?${queryParams.toString()}`)
   },
-
-  // ========== 新增并行API接口 ==========
 
   /**
    * 获取用户活跃度统计
@@ -107,6 +115,24 @@ export const dashboardApi = {
    */
   getAgentStats: (departmentId = null) => {
     return apiGet(withDepartment('/api/dashboard/stats/agents', departmentId))
+  },
+
+  /**
+   * 获取会话（Thread）多维分析统计
+   * @param {Object} params - 查询参数
+   * @param {string} [params.timeRange='30days'] - 时间范围 (7days/14days/30days/90days)
+   * @param {string} [params.agentId] - 智能体过滤
+   * @param {boolean} [params.includeSubagents=false] - 是否纳入子智能体会话
+   * @returns {Promise<Object>} - 会话分析统计数据
+   */
+  getThreadStats: (params = {}) => {
+    const queryParams = new URLSearchParams()
+    if (params.timeRange) queryParams.append('time_range', params.timeRange)
+    if (params.agentId) queryParams.append('agent_id', params.agentId)
+    if (params.includeSubagents) queryParams.append('include_subagents', 'true')
+    if (params.departmentId != null) queryParams.append('department_id', params.departmentId)
+
+    return apiGet(`/api/dashboard/stats/threads?${queryParams.toString()}`)
   },
 
   /**

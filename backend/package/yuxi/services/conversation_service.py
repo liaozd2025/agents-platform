@@ -3,15 +3,21 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import INVOCATION_CONVERSATION_SOURCES, ConversationRepository
+from yuxi.repositories.project_repository import ProjectRepository
 from yuxi.repositories.user_repository import UserRepository
-from yuxi.services.attachment_service import delete_thread_attachment_objects, serialize_attachment
+from yuxi.services.attachment_service import serialize_attachment
+from yuxi.services.project_service import create_implicit_project
+from yuxi.services.workdir_service import ensure_conversation_workdir_available, resolve_conversation_workdir_path
 from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES, AgentRun
 from yuxi.utils.datetime_utils import format_utc_datetime
 from yuxi.utils.logging_config import logger
+from yuxi.workspace.paths import ensure_bound_user_workdir
+from yuxi.workspace.workdir import Workdir
 
 
 def _thread_status(run_id: str | None, run_status: str | None, last_viewed_run_id: str | None) -> str:
@@ -28,18 +34,38 @@ def _thread_status(run_id: str | None, run_status: str | None, last_viewed_run_i
     return "ready"
 
 
-def _serialize_thread(conversation: Any, *, thread_status: str) -> dict:
+async def _serialize_thread(
+    conversation: Any,
+    *,
+    thread_status: str,
+    db,
+    workdir_path: str | None = None,
+) -> dict:
+    """序列化线程，列表调用方可传入已联查的 Project Workdir。"""
     return {
         "id": conversation.thread_id,
         "uid": conversation.uid,
         "agent_id": conversation.agent_id,
         "title": conversation.title,
         "is_pinned": bool(conversation.is_pinned),
+        "project_id": conversation.project_id,
+        "workdir_path": workdir_path
+        or await resolve_conversation_workdir_path(conversation=conversation, uid=str(conversation.uid), db=db),
         "created_at": conversation.created_at.isoformat(),
         "updated_at": conversation.updated_at.isoformat(),
         "metadata": conversation.extra_metadata or {},
         "thread_status": thread_status,
     }
+
+
+def _matches_thread_creation_intent(conversation, project, *, agent_slug: str, project_id: str | None) -> bool:
+    """判断已有 Conversation 是否匹配当前幂等创建意图。"""
+    same_project_intent = (
+        conversation.project_id == project_id
+        if project_id
+        else project is not None and project.selection_status == "implicit"
+    )
+    return conversation.agent_id == agent_slug and same_project_intent
 
 
 def _format_naive_utc_isoformat(value: Any) -> str | None:
@@ -59,11 +85,16 @@ async def require_user_conversation(conv_repo: ConversationRepository, thread_id
 async def create_thread_view(
     *,
     agent_slug: str,
+    request_id: str | None,
     title: str | None,
     metadata: dict | None,
+    project_id: str | None = None,
     db: AsyncSession,
     current_uid: str,
 ) -> dict:
+    if metadata and "attachments" in metadata:
+        raise HTTPException(status_code=400, detail="metadata.attachments 是服务端保留字段")
+
     current_user = await UserRepository().get_by_uid_with_db(db, str(current_uid))
     if not current_user:
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -73,19 +104,99 @@ async def create_thread_view(
     if not agent_item:
         raise HTTPException(status_code=404, detail="智能体不存在")
 
-    thread_id = str(uuid.uuid4())
     conv_repo = ConversationRepository(db)
+    normalized_request_id = str(request_id or "").strip() or None
+    if normalized_request_id:
+        existing = await conv_repo.get_conversation_by_creation_request_id(str(current_uid), normalized_request_id)
+        if existing is not None:
+            existing_project = await ProjectRepository(db).get_for_user(existing.project_id, str(current_uid))
+            if not _matches_thread_creation_intent(
+                existing,
+                existing_project,
+                agent_slug=agent_item.slug,
+                project_id=project_id,
+            ):
+                raise HTTPException(status_code=409, detail="request_id 已用于其他 Conversation 创建意图")
+            await ensure_conversation_workdir_available(conversation=existing, uid=str(current_uid), db=db)
+            return await _serialize_thread(existing, thread_status="done", db=db)
+
+    thread_id = str(uuid.uuid4())
     thread_metadata = dict(metadata or {})
     thread_metadata["backend_id"] = agent_item.backend_id
-    conversation = await conv_repo.create_conversation(
-        uid=str(current_uid),
-        agent_id=agent_item.slug,
-        title=title or "新的对话",
-        thread_id=thread_id,
-        metadata=thread_metadata,
-    )
+    if project_id:
+        project = await ProjectRepository(db).get_for_user(project_id, str(current_uid))
+        if project is None or project.selection_status != "selectable":
+            raise HTTPException(status_code=404, detail="Project 不存在")
+        try:
+            Workdir.open_existing(str(current_uid), project.workdir_path)
+        except (FileNotFoundError, NotADirectoryError, PermissionError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail="项目目录不可用") from exc
+    else:
+        try:
+            project = await create_implicit_project(
+                uid=str(current_uid),
+                db=db,
+                idempotency_key=f"thread:{normalized_request_id}" if normalized_request_id else None,
+            )
+        except IntegrityError:
+            await db.rollback()
+            if not normalized_request_id:
+                raise
+            project = await ProjectRepository(db).get_by_idempotency_key(
+                f"thread:{normalized_request_id}", str(current_uid)
+            )
+            if project is None or project.selection_status != "implicit":
+                raise HTTPException(status_code=409, detail="request_id 已用于其他 Conversation 创建意图")
+    try:
+        conversation = await conv_repo.add_conversation(
+            uid=str(current_uid),
+            agent_id=agent_item.slug,
+            title=title or "新的对话",
+            thread_id=thread_id,
+            metadata=thread_metadata,
+            project_id=project.id,
+            creation_request_id=normalized_request_id,
+        )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        if not normalized_request_id:
+            raise
+        conversation = await conv_repo.get_conversation_by_creation_request_id(str(current_uid), normalized_request_id)
+        if conversation is None:
+            implicit_project = await ProjectRepository(db).get_by_idempotency_key(
+                f"thread:{normalized_request_id}", str(current_uid)
+            )
+            if implicit_project is None or project_id:
+                raise
+            project = implicit_project
+            conversation = await conv_repo.add_conversation(
+                uid=str(current_uid),
+                agent_id=agent_item.slug,
+                title=title or "新的对话",
+                thread_id=thread_id,
+                metadata=thread_metadata,
+                project_id=project.id,
+                creation_request_id=normalized_request_id,
+            )
+            await db.commit()
+        existing_project = await ProjectRepository(db).get_for_user(conversation.project_id, str(current_uid))
+        if not _matches_thread_creation_intent(
+            conversation,
+            existing_project,
+            agent_slug=agent_item.slug,
+            project_id=project_id,
+        ):
+            raise HTTPException(status_code=409, detail="request_id 已用于其他 Conversation 创建意图")
+        project = existing_project
 
-    return _serialize_thread(conversation, thread_status="done")
+    try:
+        if project.directory_mode == "managed":
+            ensure_bound_user_workdir(str(current_uid), project.workdir_path)
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return await _serialize_thread(conversation, thread_status="done", db=db)
 
 
 async def list_threads_view(
@@ -111,12 +222,14 @@ async def list_threads_view(
     run_map = await run_repo.get_latest_top_level_runs_for_threads(str(current_uid), thread_ids)
 
     return [
-        _serialize_thread(
+        await _serialize_thread(
             conv,
             thread_status=_thread_status(
                 *run_map.get(conv.thread_id, (None, None)),
                 conv.last_viewed_run_id,
             ),
+            db=db,
+            workdir_path=conv.project.workdir_path,
         )
         for conv in conversations
     ]
@@ -189,7 +302,6 @@ async def delete_thread_view(
     if not deleted:
         raise HTTPException(status_code=404, detail="对话线程不存在")
 
-    await delete_thread_attachment_objects(thread_id)
     return {"message": "删除成功"}
 
 
@@ -218,9 +330,10 @@ async def update_thread_view(
     run_map = await run_repo.get_latest_top_level_runs_for_threads(str(current_uid), [updated_conv.thread_id])
     run_id, run_status = run_map.get(updated_conv.thread_id, (None, None))
 
-    return _serialize_thread(
+    return await _serialize_thread(
         updated_conv,
         thread_status=_thread_status(run_id, run_status, updated_conv.last_viewed_run_id),
+        db=db,
     )
 
 
@@ -241,9 +354,10 @@ async def mark_thread_viewed_view(
     if run_id and run_status in AGENT_RUN_TERMINAL_STATUSES:
         conversation = await conv_repo.mark_thread_viewed(thread_id, run_id)
 
-    return _serialize_thread(
+    return await _serialize_thread(
         conversation,
         thread_status=_thread_status(run_id, run_status, conversation.last_viewed_run_id),
+        db=db,
     )
 
 
@@ -297,7 +411,9 @@ async def get_thread_history_view(
             request_id = attachment.get("request_id")
             if not request_id or str(request_id) not in message_request_ids:
                 continue
-            attachments_by_request_id.setdefault(str(request_id), []).append(serialize_attachment(attachment))
+            attachments_by_request_id.setdefault(str(request_id), []).append(
+                serialize_attachment(attachment, thread_id=thread_id)
+            )
 
     history: list[dict] = []
     role_type_map = {"user": "human", "assistant": "ai", "tool": "tool", "system": "system"}

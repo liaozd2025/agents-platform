@@ -355,7 +355,7 @@ import {
   X,
   Plus,
   ChevronDown
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { skillApi } from '@/apis/skill_api'
 import AgentFilePreview from '@/components/AgentFilePreview.vue'
 import FileTreeComponent from '@/components/FileTreeComponent.vue'
@@ -432,7 +432,8 @@ const currentSkillStatusLabel = computed(() => {
 const selectedFilePreview = computed(() => ({
   content: fileContent.value,
   previewType: 'text',
-  supported: true
+  supported: true,
+  status: 'ready'
 }))
 
 const toolDependencyOptions = computed(() =>
@@ -615,9 +616,6 @@ const resetFileState = () => {
   fileContent.value = ''
 }
 
-const expandAllKeys = (nodes) =>
-  nodes.flatMap((node) => (node.is_dir ? [node.key, ...expandAllKeys(node.children || [])] : []))
-
 const reloadTree = async () => {
   if (!currentSkill.value || !isInstalledSkill.value) return
   loading.value = true
@@ -625,7 +623,7 @@ const reloadTree = async () => {
     const result = await skillApi.getSkillTree(currentSkill.value.slug)
     const normalized = normalizeTree(result?.data || [])
     treeData.value = normalized
-    expandedKeys.value = expandAllKeys(normalized)
+    expandedKeys.value = []
   } catch {
     message.error('加载目录树失败')
   } finally {

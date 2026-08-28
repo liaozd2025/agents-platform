@@ -371,9 +371,9 @@
 import { reactive, onBeforeUnmount, onMounted, watch, computed } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { useUserStore } from '@/stores/user'
-import { departmentApi } from '@/apis'
+import { authApi, departmentApi } from '@/apis'
 import { getRoleOverview } from '@/apis/role_api'
-import { MoreHorizontal, Plus, Trash2, RefreshCw, Search } from 'lucide-vue-next'
+import { MoreHorizontal, Plus, Trash2, RefreshCw, Search } from '@lucide/vue'
 import { formatDateTime } from '@/utils/time'
 import { isPasswordLongEnough, MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
@@ -746,15 +746,23 @@ const fetchUsers = async () => {
   const requestVersion = ++userListRequestVersion
   try {
     userManagement.loading = true
-    const result = await userStore.getUsers({
-      skip: (userManagement.currentPage - 1) * Number(userManagement.pageSize),
-      limit: Number(userManagement.pageSize),
-      keyword: userManagement.searchKeyword,
+    const pageSize = Number(userManagement.pageSize)
+    const result = await authApi.getUsersPage({
+      offset: (userManagement.currentPage - 1) * pageSize,
+      limit: pageSize,
+      search: userManagement.searchKeyword.trim(),
       departmentId: userManagement.departmentFilter,
       role: userManagement.roleFilter
     })
     if (requestVersion === userListRequestVersion) {
-      userManagement.users = result.users
+      const maxPage = Math.max(1, Math.ceil(result.total / pageSize))
+      if (userManagement.currentPage > maxPage) {
+        userManagement.currentPage = maxPage
+        await fetchUsers()
+        return
+      }
+
+      userManagement.users = result.items
       userManagement.totalUsers = result.total
       userManagement.error = null
     }

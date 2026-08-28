@@ -3,11 +3,10 @@
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from yuxi.permissions.authorization import AuthorizationContext, AuthorizationTarget, parse_department_ancestor_ids
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.user_repository import UserRepository
-from yuxi.storage.postgres.models_business import User
+from yuxi.storage.postgres.models_business import Department, User
 
 
 def _user_target(user: User) -> AuthorizationTarget:

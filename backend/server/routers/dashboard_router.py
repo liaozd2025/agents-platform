@@ -1,22 +1,17 @@
 """Dashboard 统计与监控 HTTP 路由。"""
 
 import traceback
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from yuxi.config.runtime import knowledge_capability_enabled
-from yuxi.permissions import (
-    ResourcePermission,
-    resolve_agent_permission,
-    resolve_knowledge_base_permission,
-    resolve_skill_permission,
-)
 from yuxi.permissions.authorization import AuthorizationContext, AuthorizationTarget, parse_department_ancestor_ids
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.dashboard_repository import DashboardRepository
 from yuxi.repositories.department_repository import DepartmentRepository
-from yuxi.services.dashboard_scope_service import dashboard_history_filter, dashboard_resource_subjects
+from yuxi.services.dashboard_scope_service import dashboard_history_filter, dashboard_tool_history_filter
+from yuxi.services.dashboard_service import DashboardService
 from yuxi.services.user_management_service import (
     department_is_accessible,
     list_authorized_departments,
@@ -24,13 +19,10 @@ from yuxi.services.user_management_service import (
 )
 from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.storage.postgres.models_business import (
-    Agent,
     Conversation,
     MessageFeedback,
     OperationLog,
     SecurityAudit,
-    Skill,
-    ToolCall,
 )
 from yuxi.utils.logging_config import logger
 
@@ -93,12 +85,48 @@ class ConversationListItem(BaseModel):
 
     thread_id: str
     uid: str
+    username: str | None = None
+    user_avatar: str | None = None
+    user_deleted: bool = False
     agent_id: str
+    agent_name: str | None = None
+    agent_avatar: str | None = None
+    agent_deleted: bool = False
     title: str | None
     status: str
+    run_status: str | None = None
+    is_pinned: bool = False
     message_count: int
+    total_tokens: int = 0
     created_at: str
     updated_at: str
+
+
+class ConversationListResponse(BaseModel):
+    """会话分页列表响应。"""
+
+    items: list[ConversationListItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class ConversationFilterOption(BaseModel):
+    """会话审计筛选选项。"""
+
+    uid: str | None = None
+    username: str | None = None
+    agent_id: str | None = None
+    agent_name: str | None = None
+    avatar: str | None = None
+    is_deleted: bool = False
+
+
+class ConversationFilterOptionsResponse(BaseModel):
+    """会话审计用户与 Agent 筛选项。"""
+
+    users: list[ConversationFilterOption]
+    agents: list[ConversationFilterOption]
 
 
 class ConversationDetailResponse(BaseModel):
@@ -106,9 +134,17 @@ class ConversationDetailResponse(BaseModel):
 
     thread_id: str
     uid: str
+    username: str | None = None
+    user_avatar: str | None = None
+    user_deleted: bool = False
     agent_id: str
+    agent_name: str | None = None
+    agent_avatar: str | None = None
+    agent_deleted: bool = False
     title: str | None
     status: str
+    run_status: str | None = None
+    is_pinned: bool = False
     message_count: int
     created_at: str
     updated_at: str
@@ -209,13 +245,14 @@ async def get_current_organization_stats(
     )
 
 
-@dashboard.get("/conversations", response_model=list[ConversationListItem])
+@dashboard.get("/conversations", response_model=ConversationListResponse)
 async def get_all_conversations(
     uid: str | None = None,
     agent_id: str | None = None,
-    status: str = "active",
-    limit: int = 100,
-    offset: int = 0,
+    status: Literal["active", "archived", "deleted", "subagent", "all"] = "active",
+    search: Annotated[str | None, Query(max_length=255)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
     department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
     authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
@@ -230,10 +267,11 @@ async def get_all_conversations(
             department_id,
             owner_uid_column=Conversation.uid,
         )
-        return await DashboardRepository(db).list_conversations(
+        return await DashboardService(db).list_conversations(
             uid=uid,
             agent_id=agent_id,
             status=status,
+            search=search,
             limit=limit,
             offset=offset,
             scope_filter=scope_filter,
@@ -244,6 +282,24 @@ async def get_all_conversations(
         logger.error(f"Error getting conversations: {exc}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to get conversations: {exc}") from exc
+
+
+@dashboard.get("/conversations/options", response_model=ConversationFilterOptionsResponse)
+async def get_conversation_filter_options(
+    department_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
+):
+    """获取当前历史组织范围内的会话筛选项。"""
+
+    scope_filter = await dashboard_history_filter(
+        db,
+        authorization,
+        Conversation.organization_path_snapshot,
+        department_id,
+        owner_uid_column=Conversation.uid,
+    )
+    return await DashboardService(db).get_conversation_filter_options(scope_filter=scope_filter)
 
 
 @dashboard.get("/conversations/{thread_id}", response_model=ConversationDetailResponse)
@@ -276,42 +332,10 @@ async def get_conversation_detail(
         ):
             raise HTTPException(status_code=404, detail="Conversation not found")
 
-        messages = await repository.get_messages(conversation.id)
-        stats = await repository.get_stats(conversation.id)
-        message_list = []
-        for message in messages:
-            message_data = {
-                "id": message.id,
-                "role": message.role,
-                "content": message.content,
-                "message_type": message.message_type,
-                "created_at": message.created_at.isoformat(),
-            }
-            if message.tool_calls:
-                message_data["tool_calls"] = [
-                    {
-                        "id": tool_call.id,
-                        "tool_name": tool_call.tool_name,
-                        "tool_input": tool_call.tool_input,
-                        "tool_output": tool_call.tool_output,
-                        "status": tool_call.status,
-                    }
-                    for tool_call in message.tool_calls
-                ]
-            message_list.append(message_data)
-
-        return {
-            "thread_id": conversation.thread_id,
-            "uid": conversation.uid,
-            "agent_id": conversation.agent_id,
-            "title": conversation.title,
-            "status": conversation.status,
-            "message_count": stats.message_count if stats else len(message_list),
-            "created_at": conversation.created_at.isoformat(),
-            "updated_at": conversation.updated_at.isoformat(),
-            "total_tokens": stats.total_tokens if stats else 0,
-            "messages": message_list,
-        }
+        data = await DashboardService(db).get_conversation_detail(thread_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return data
     except HTTPException:
         raise
     except Exception as exc:
@@ -367,12 +391,7 @@ async def get_tool_call_stats(
     """按历史组织快照获取工具调用统计。"""
 
     try:
-        scope_filter = await dashboard_history_filter(
-            db,
-            authorization,
-            ToolCall.organization_path_snapshot,
-            department_id,
-        )
+        scope_filter = await dashboard_tool_history_filter(db, authorization, department_id)
         return ToolCallStats(**await DashboardRepository(db).get_tool_call_stats(scope_filter=scope_filter))
     except HTTPException:
         raise
@@ -390,53 +409,11 @@ async def get_resource_scope_stats(
 ):
     """分别统计资源创建组织和当前共享可见范围。"""
 
-    subjects = await dashboard_resource_subjects(db, authorization, department_id)
-    repository = DashboardRepository(db)
-
-    async def summarize(model, resolver) -> ResourceScopeMetric:
-        """按资源主键去重后汇总一种资源。"""
-
-        created_resources = []
-        shared_resources = []
-        # ponytail: 直接复用现有 ACL；资源或组织主体量出现慢查询后再下推为 SQL。
-        for resource in await repository.list_resources(model):
-            ancestor_ids = parse_department_ancestor_ids(resource.organization_path_snapshot)
-            target = AuthorizationTarget(
-                owner_user_id=authorization.user.id if resource.created_by == authorization.user.uid else None,
-                department_ancestor_ids=ancestor_ids,
-            )
-            if (department_id is None or department_id in ancestor_ids) and authorization.allows(
-                "dashboard:view", target
-            ):
-                created_resources.append(resource)
-            if any(resolver(subject, resource) != ResourcePermission.NONE for subject in subjects):
-                shared_resources.append(resource)
-
-        return ResourceScopeMetric(
-            creation_count=len(created_resources),
-            shared_visible_count=len(shared_resources),
-            contains_inferred_data=any(
-                resource.organization_snapshot_inferred for resource in created_resources + shared_resources
-            ),
-        )
-
-    if knowledge_capability_enabled():
-        from yuxi.storage.postgres.models_knowledge import KnowledgeBase
-
-        knowledge_bases = await summarize(KnowledgeBase, resolve_knowledge_base_permission)
-    else:
-        knowledge_bases = ResourceScopeMetric(
-            creation_count=0,
-            shared_visible_count=0,
-            contains_inferred_data=False,
-        )
-    agents = await summarize(Agent, resolve_agent_permission)
-    skills = await summarize(Skill, resolve_skill_permission)
     return ResourceScopeStats(
-        knowledge_bases=knowledge_bases,
-        agents=agents,
-        skills=skills,
-        contains_inferred_data=any(metric.contains_inferred_data for metric in (knowledge_bases, agents, skills)),
+        **await DashboardService(db).get_resource_scope_stats(
+            authorization=authorization,
+            department_id=department_id,
+        )
     )
 
 
@@ -463,12 +440,7 @@ async def get_agent_analytics(
             department_id,
             owner_uid_column=MessageFeedback.uid,
         )
-        tool_filter = await dashboard_history_filter(
-            db,
-            authorization,
-            ToolCall.organization_path_snapshot,
-            department_id,
-        )
+        tool_filter = await dashboard_tool_history_filter(db, authorization, department_id)
         return AgentAnalytics(
             **await DashboardRepository(db).get_agent_analytics(
                 conversation_filter=conversation_filter,
@@ -507,12 +479,7 @@ async def get_dashboard_stats(
             department_id,
             owner_uid_column=MessageFeedback.uid,
         )
-        tool_filter = await dashboard_history_filter(
-            db,
-            authorization,
-            ToolCall.organization_path_snapshot,
-            department_id,
-        )
+        tool_filter = await dashboard_tool_history_filter(db, authorization, department_id)
         operation_filter = await dashboard_history_filter(
             db,
             authorization,
@@ -599,18 +566,70 @@ async def get_all_feedbacks(
         raise HTTPException(status_code=500, detail=f"Failed to get feedbacks: {exc}") from exc
 
 
+class ThreadSummary(BaseModel):
+    """会话汇总指标。"""
+
+    total_threads: int
+    active_threads: int
+    total_messages: int
+    total_tokens: int
+    avg_messages_per_thread: float
+    avg_tokens_per_thread: float
+    pinned_threads: int = 0
+
+
+class ThreadDailyTrend(BaseModel):
+    """每日会话趋势。"""
+
+    date: str
+    new_threads: int
+    active_threads: int
+    message_count: int
+
+
+class ThreadAgentStat(BaseModel):
+    """智能体会话分布指标。"""
+
+    agent_id: str
+    agent_name: str
+    thread_count: int
+    message_count: int
+    token_count: int
+    avg_messages: float
+    agent_avatar: str | None = None
+
+
+class ThreadUserStat(BaseModel):
+    """高频用户统计项。"""
+
+    uid: str
+    username: str | None
+    avatar: str | None
+    thread_count: int
+    message_count: int
+    last_active_at: str | None
+
+
+class ThreadAnalyticsResponse(BaseModel):
+    """会话多维分析响应模型。"""
+
+    summary: ThreadSummary
+    daily_trends: list[ThreadDailyTrend]
+    depth_distribution: dict[str, int]
+    agent_distribution: list[ThreadAgentStat]
+    top_users: list[ThreadUserStat]
+    status_distribution: dict[str, int]
+
+
 @dashboard.get("/stats/calls/timeseries", response_model=TimeSeriesStats)
 async def get_call_timeseries_stats(
-    type: str = "models",
-    time_range: str = "14days",
+    type: Literal["models", "agents", "tokens", "tools"] = "models",
+    time_range: Literal["14hours", "14days", "14weeks"] = "14days",
     department_id: int | None = None,
     db: AsyncSession = Depends(get_db),
     authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
 ):
     """按历史组织快照获取调用分析时间序列。"""
-
-    if type not in {"models", "agents", "tokens", "tools"}:
-        raise HTTPException(status_code=422, detail=f"Invalid type: {type}")
 
     try:
         conversation_filter = await dashboard_history_filter(
@@ -620,12 +639,7 @@ async def get_call_timeseries_stats(
             department_id,
             owner_uid_column=Conversation.uid,
         )
-        tool_filter = await dashboard_history_filter(
-            db,
-            authorization,
-            ToolCall.organization_path_snapshot,
-            department_id,
-        )
+        tool_filter = await dashboard_tool_history_filter(db, authorization, department_id)
         return TimeSeriesStats(
             **await DashboardRepository(db).get_call_timeseries(
                 metric_type=type,
@@ -640,3 +654,29 @@ async def get_call_timeseries_stats(
         logger.error(f"Error getting call timeseries stats: {exc}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to get call timeseries stats: {exc}") from exc
+
+
+@dashboard.get("/stats/threads", response_model=ThreadAnalyticsResponse)
+async def get_thread_analytics_stats(
+    time_range: Literal["7days", "14days", "30days", "90days"] = "30days",
+    agent_id: str | None = None,
+    include_subagents: bool = Query(False, description="是否将子智能体会话纳入统计"),
+    department_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    authorization: AuthorizationContext = Depends(require_permission("dashboard:view")),
+):
+    """按历史组织快照获取会话多维分析统计。"""
+    scope_filter = await dashboard_history_filter(
+        db,
+        authorization,
+        Conversation.organization_path_snapshot,
+        department_id,
+        owner_uid_column=Conversation.uid,
+    )
+    data = await DashboardService(db).get_thread_analytics(
+        time_range=time_range,
+        agent_id=agent_id,
+        include_subagents=include_subagents,
+        scope_filter=scope_filter,
+    )
+    return ThreadAnalyticsResponse(**data)

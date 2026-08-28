@@ -1,9 +1,11 @@
 from typing import Any
 
+from yuxi.agents.tool_approval import PI_DELEGATED_SANDBOX_TOOLS
 from yuxi.utils import logger
 
 # 工具元数据缓存
 _metadata_cache: list[dict] = []
+_CORE_INTERACTION_TOOL_NAMES = ("ask_user_question",)
 
 
 def _extract_tool_info(tool_obj) -> dict:
@@ -97,12 +99,17 @@ def get_tool_instances_by_category(category: str) -> list[Any]:
 async def resolve_configured_runtime_tools(context) -> list[Any]:
     from yuxi.agents.mcp.service import get_enabled_mcp_tools
 
-    selected_tools = []
-    selected_tool_names: set[str] = set()
     buildin_tools = {tool.name: tool for tool in get_tool_instances_by_category("buildin")}
+    selected_tools = [buildin_tools[name] for name in _CORE_INTERACTION_TOOL_NAMES]
+    selected_tool_names = set(_CORE_INTERACTION_TOOL_NAMES)
+    selected_tool_sources = {name: "local" for name in _CORE_INTERACTION_TOOL_NAMES}
 
     for tool_name in getattr(context, "tools", None) or []:
-        if not isinstance(tool_name, str) or tool_name in selected_tool_names:
+        if (
+            not isinstance(tool_name, str)
+            or tool_name in selected_tool_names
+            or tool_name in PI_DELEGATED_SANDBOX_TOOLS
+        ):
             continue
         tool = buildin_tools.get(tool_name)
         if tool is None:
@@ -110,6 +117,7 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
             continue
         selected_tools.append(tool)
         selected_tool_names.add(tool_name)
+        selected_tool_sources[tool_name] = "local"
 
     selected_mcp_servers: set[str] = set()
     for server_name in getattr(context, "mcps", None) or []:
@@ -126,19 +134,28 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
             continue
         for tool in mcp_tools:
             if tool.name in selected_tool_names:
-                continue
+                raise RuntimeError(
+                    f"工具名冲突：MCP '{server_name}' 的 '{tool.name}' 与 {selected_tool_sources[tool.name]} 工具同名"
+                )
             selected_tools.append(tool)
             selected_tool_names.add(tool.name)
+            selected_tool_sources[tool.name] = f"MCP '{server_name}'"
 
     # Skill 依赖的本地工具：必须随基础工具一起注册进 create_agent 的 ToolNode 才可执行，
     # 否则 Skill 激活后模型虽能发起调用，执行器仍报 "not a valid tool"。
     # 默认绑定给模型的可见性由 SkillsMiddleware 按 Skill 激活状态门控（保持按需加载）。
-    from yuxi.agents.middlewares.skills import resolve_skill_gated_tools
+    from yuxi.agents.skills.runtime import resolve_skill_gated_tools
 
     for tool in resolve_skill_gated_tools(context):
+        if tool.name in PI_DELEGATED_SANDBOX_TOOLS:
+            continue
         if tool.name in selected_tool_names:
+            if selected_tool_sources[tool.name] != "local":
+                source = selected_tool_sources[tool.name]
+                raise RuntimeError(f"工具名冲突：Skill 本地工具 '{tool.name}' 与 {source} 同名")
             continue
         selected_tools.append(tool)
         selected_tool_names.add(tool.name)
+        selected_tool_sources[tool.name] = "local"
 
     return selected_tools

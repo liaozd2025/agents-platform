@@ -2,10 +2,8 @@ import traceback
 import uuid
 from typing import Any
 
-import aiofiles
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.config.options import system_options
 from yuxi.agents.tool_approval import ToolApprovalMode
@@ -15,7 +13,6 @@ from yuxi.services.attachment_service import (
     delete_thread_attachment_view,
     list_thread_attachments_view,
     parse_tmp_attachment_view,
-    upload_thread_attachment_view,
     upload_tmp_attachment_view,
 )
 from yuxi.services.chat_service import get_agent_state_view
@@ -28,18 +25,14 @@ from yuxi.services.conversation_service import (
     search_threads_view,
     update_thread_view,
 )
-from yuxi.services.feedback_service import get_message_feedback_view, submit_message_feedback_view
-from yuxi.services.file_preview import detect_media_type
-from yuxi.services.thread_files_service import (
-    list_thread_files_view,
-    read_thread_file_content_view,
+from yuxi.services.artifact_service import (
     resolve_thread_artifact_view,
     save_thread_artifact_to_workspace_view,
 )
+from yuxi.services.feedback_service import get_message_feedback_view, submit_message_feedback_view
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.image_processor import process_uploaded_image
 from yuxi.utils.logging_config import logger
-from yuxi.utils.paths import VIRTUAL_PATH_PREFIX
 
 from server.utils.agent_permissions import require_agent_use_permission
 from server.utils.auth_middleware import get_db, get_required_user
@@ -129,9 +122,15 @@ async def get_thread_state(
 
 
 class ThreadCreate(BaseModel):
+    """新线程创建请求，只允许在创建时选择 Project。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str | None = Field(None, max_length=64)
     title: str | None = None
     agent_id: str
     metadata: dict | None = None
+    project_id: str | None = None
 
 
 class ThreadResponse(BaseModel):
@@ -140,6 +139,8 @@ class ThreadResponse(BaseModel):
     agent_id: str
     title: str | None = None
     is_pinned: bool = False
+    project_id: str | None = None
+    workdir_path: str
     created_at: str
     updated_at: str
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -178,7 +179,6 @@ class AttachmentResponse(BaseModel):
     artifact_url: str | None = None
     original_path: str | None = None
     original_artifact_url: str | None = None
-    minio_url: str | None = None
     request_id: str | None = None
 
 
@@ -193,13 +193,10 @@ class AttachmentListResponse(BaseModel):
 
 
 class TmpAttachmentResponse(BaseModel):
-    tmp_file_id: str
     file_name: str
     file_type: str | None = None
     file_size: int
-    bucket_name: str
     object_name: str
-    minio_url: str
     uploaded_at: str
     parse_supported: bool = False
     parse_methods: list[str] = Field(default_factory=list)
@@ -207,30 +204,20 @@ class TmpAttachmentResponse(BaseModel):
 
 class TmpAttachmentParseRequest(BaseModel):
     object_name: str
-    file_name: str
     parse_method: str | None = None
-    bucket_name: str | None = None
 
 
 class TmpAttachmentParseResponse(BaseModel):
-    tmp_file_id: str
-    file_name: str
-    bucket_name: str
-    object_name: str
     parsed_object_name: str
-    parsed_minio_url: str
     parse_method: str
     status: str
     truncated: bool = False
 
 
 class TmpAttachmentConfirmItem(BaseModel):
-    file_name: str
     file_type: str | None = None
-    bucket_name: str
     object_name: str
     parsed_object_name: str | None = None
-    truncated: bool = False
 
 
 class TmpAttachmentConfirmRequest(BaseModel):
@@ -241,31 +228,9 @@ class TmpAttachmentConfirmResponse(BaseModel):
     attachments: list[AttachmentResponse]
 
 
-class ThreadFileEntry(BaseModel):
-    path: str
-    name: str
-    is_dir: bool
-    size: int
-    modified_at: str | None = None
-    artifact_url: str | None = None
-
-
-class ThreadFileListResponse(BaseModel):
-    path: str
-    files: list[ThreadFileEntry]
-
-
-class ThreadFileContentResponse(BaseModel):
-    path: str
-    content: list[str]
-    offset: int
-    limit: int
-    total_lines: int
-    artifact_url: str
-
-
 class SaveThreadArtifactRequest(BaseModel):
     path: str
+    destination_path: str | None = None
 
 
 class SaveThreadArtifactResponse(BaseModel):
@@ -289,8 +254,10 @@ async def create_thread(
     """创建新对话线程 (使用新存储系统)"""
     return await create_thread_view(
         agent_slug=thread.agent_id,
+        request_id=thread.request_id,
         title=thread.title,
         metadata=thread.metadata,
+        project_id=thread.project_id,
         db=db,
         current_uid=str(current_user.uid),
     )
@@ -341,6 +308,10 @@ async def delete_thread(
 
 
 class ThreadUpdate(BaseModel):
+    """线程可变展示字段，不接受绑定字段。"""
+
+    model_config = ConfigDict(extra="forbid")
+
     title: str | None = None
     is_pinned: bool | None = None
     tool_approval_mode: ToolApprovalMode | None = None
@@ -400,9 +371,7 @@ async def parse_tmp_attachment(
     """解析 tmp 附件并返回解析后的 tmp URL。"""
     return await parse_tmp_attachment_view(
         object_name=request.object_name,
-        file_name=request.file_name,
         parse_method=request.parse_method,
-        bucket_name=request.bucket_name,
         current_uid=str(current_user.uid),
     )
 
@@ -418,22 +387,6 @@ async def confirm_tmp_thread_attachments(
     return await confirm_tmp_thread_attachments_view(
         thread_id=thread_id,
         attachments=[item.model_dump() for item in request.attachments],
-        db=db,
-        current_uid=str(current_user.uid),
-    )
-
-
-@chat.post("/thread/{thread_id}/attachments", response_model=AttachmentResponse)
-async def upload_thread_attachment(
-    thread_id: str,
-    file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_agent_use_permission),
-):
-    """上传原始附件并关联到指定对话线程。"""
-    return await upload_thread_attachment_view(
-        thread_id=thread_id,
-        file=file,
         db=db,
         current_uid=str(current_user.uid),
     )
@@ -469,65 +422,24 @@ async def delete_thread_attachment(
     )
 
 
-@chat.get("/thread/{thread_id}/files", response_model=ThreadFileListResponse)
-async def list_thread_files(
-    thread_id: str,
-    path: str = Query(f"{VIRTUAL_PATH_PREFIX}"),
-    recursive: bool = Query(False),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_agent_use_permission),
-):
-    """列出线程文件目录。"""
-    return await list_thread_files_view(
-        thread_id=thread_id,
-        current_uid=str(current_user.uid),
-        db=db,
-        path=path,
-        recursive=recursive,
-    )
-
-
-@chat.get("/thread/{thread_id}/files/content", response_model=ThreadFileContentResponse)
-async def read_thread_file_content(
-    thread_id: str,
-    path: str = Query(...),
-    offset: int = Query(0, ge=0),
-    limit: int = Query(2000, ge=1, le=5000),
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_agent_use_permission),
-):
-    """读取线程文本文件（按行分页）。"""
-    return await read_thread_file_content_view(
-        thread_id=thread_id,
-        current_uid=str(current_user.uid),
-        db=db,
-        path=path,
-        offset=offset,
-        limit=limit,
-    )
-
-
 @chat.get("/thread/{thread_id}/artifacts/{path:path}")
 async def get_thread_artifact(
     thread_id: str,
     path: str,
     download: bool = Query(False),
+    preview: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_agent_use_permission),
 ):
     """下载或预览线程文件。"""
-    file_path = await resolve_thread_artifact_view(
+    return await resolve_thread_artifact_view(
         thread_id=thread_id,
         current_uid=str(current_user.uid),
         db=db,
         path=path,
+        download=download,
+        preview=preview,
     )
-
-    async with aiofiles.open(file_path, "rb") as artifact_file:
-        file_head = await artifact_file.read(512)
-    media_type = detect_media_type(file_path.name, file_head)
-    headers = {"Content-Disposition": f'attachment; filename="{file_path.name}"'} if download else None
-    return FileResponse(path=file_path, media_type=media_type, headers=headers)
 
 
 @chat.post("/thread/{thread_id}/artifacts/save", response_model=SaveThreadArtifactResponse)
@@ -537,12 +449,13 @@ async def save_thread_artifact_to_workspace(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_agent_use_permission),
 ):
-    """保存交付物到共享 workspace/saved_artifacts 目录。"""
+    """保存交付物到用户工作区中指定的目录。"""
     return await save_thread_artifact_to_workspace_view(
         thread_id=thread_id,
         current_uid=str(current_user.uid),
         db=db,
         path=request.path,
+        destination_path=request.destination_path,
     )
 
 

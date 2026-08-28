@@ -431,6 +431,47 @@ async def test_admin_can_create_and_delete_user(test_client, admin_headers):
     assert delete_payload["success"] is True
     assert delete_payload["message"] == "用户已删除"
 
+    list_response = await test_client.get("/api/auth/users?limit=1000", headers=admin_headers)
+    assert list_response.status_code == 200, list_response.text
+    assert created_user["id"] not in {user["id"] for user in list_response.json()}
+
+
+async def test_admin_user_page_filters_before_pagination_and_excludes_deleted(test_client, admin_headers):
+    suffix = uuid.uuid4().hex[:8]
+    created_users = []
+    try:
+        for index in range(3):
+            response = await test_client.post(
+                "/api/auth/users",
+                json={
+                    "username": f"paged_{suffix}_{index}",
+                    "password": "routerTest123!",
+                    "role": "user",
+                },
+                headers=admin_headers,
+            )
+            assert response.status_code == 200, response.text
+            created_users.append(response.json())
+
+        delete_response = await test_client.delete(f"/api/auth/users/{created_users[1]['id']}", headers=admin_headers)
+        assert delete_response.status_code == 200, delete_response.text
+
+        page_response = await test_client.get(
+            "/api/auth/users/page",
+            params={"search": f"paged_{suffix}", "offset": 1, "limit": 1, "role": "user"},
+            headers=admin_headers,
+        )
+        assert page_response.status_code == 200, page_response.text
+        page = page_response.json()
+        assert page["total"] == 2
+        assert page["limit"] == 1
+        assert page["offset"] == 1
+        assert [item["id"] for item in page["items"]] == [created_users[2]["id"]]
+        assert created_users[1]["id"] not in {item["id"] for item in page["items"]}
+    finally:
+        for user in created_users:
+            await test_client.delete(f"/api/auth/users/{user['id']}", headers=admin_headers)
+
 
 async def test_user_list_returns_display_name(test_client, user_management_test_users):
     """用户列表必须返回已同步的展示姓名，供管理界面区分同类账号。"""
@@ -587,6 +628,16 @@ async def test_user_management_follows_authorized_organization_subtree(test_clie
         direct_ids = {user["id"] for user in direct_response.json()}
         assert user_a["id"] in direct_ids
         assert child_user["id"] not in direct_ids
+
+        page_response = await test_client.get(
+            "/api/auth/users/page",
+            params={"department_id": department_a["id"], "limit": 100},
+            headers=dept_a["admin_headers"],
+        )
+        assert page_response.status_code == 200, page_response.text
+        paged_user_ids = {user["id"] for user in page_response.json()["items"]}
+        assert {user_a["id"], child_user["id"]}.issubset(paged_user_ids)
+        assert user_b["id"] not in paged_user_ids
 
         options_response = await test_client.get(
             f"/api/auth/users/access-options?department_id={department_a['id']}",

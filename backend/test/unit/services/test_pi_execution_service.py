@@ -21,6 +21,7 @@ from yuxi.services.pi_execution_service import (
     PiRuntimeMismatch,
     build_pi_runtime_manifest,
     execute_pi_attempt,
+    resolve_pi_model_runtime,
 )
 
 
@@ -55,11 +56,53 @@ class FakeAdapter:
         self.stop_preserve_outputs.append(preserve_outputs)
 
 
+def _model_info(*, api_key: str = "", headers: dict[str, str] | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        model_type="chat",
+        provider_type="openai",
+        model_id="model-1",
+        display_name="Model 1",
+        api_key=api_key,
+        base_url="https://example.com/v1",
+        headers=headers or {},
+        extra={},
+        request_body_overrides={},
+    )
+
+
+def test_pi_model_runtime_rejects_missing_authentication(monkeypatch):
+    monkeypatch.setattr(pi_execution_service.model_cache, "get_model_info", lambda _spec: _model_info())
+
+    with pytest.raises(ValueError, match="缺少 API key"):
+        resolve_pi_model_runtime("provider:model-1")
+
+
+def test_pi_model_runtime_accepts_explicit_authentication_header(monkeypatch):
+    info = _model_info(headers={"Authorization": "Bearer gateway-token"})
+    monkeypatch.setattr(pi_execution_service.model_cache, "get_model_info", lambda _spec: info)
+
+    _, credentials = resolve_pi_model_runtime("provider:model-1")
+
+    assert credentials == {
+        "api_key": "",
+        "headers": info.headers,
+        "auth_header": False,
+    }
+
+
 def _skill_digest(skill_dir: Path) -> str:
     hasher = hashlib.sha256()
-    for path in sorted(item for item in skill_dir.rglob("*") if item.is_file()):
+    for path in sorted(skill_dir.rglob("*"), key=lambda item: item.relative_to(skill_dir).as_posix()):
         hasher.update(path.relative_to(skill_dir).as_posix().encode())
         hasher.update(b"\0")
+        if path.is_dir():
+            hasher.update(b"directory\0")
+            continue
+        if not path.is_file():
+            hasher.update(b"other\0")
+            continue
+        hasher.update(b"file\0")
+        hasher.update(bytes([path.stat().st_mode & 0o111]))
         hasher.update(path.read_bytes())
         hasher.update(b"\0")
     return hasher.hexdigest()
@@ -78,7 +121,7 @@ def _manifest(tmp_path: Path) -> tuple[dict, str, dict]:
         "pi_version": PI_PACKAGE_VERSION,
         "pi_integrity": PI_PACKAGE_INTEGRITY,
         "node_version": PI_NODE_VERSION,
-        "skills": {"pi-golden": _skill_digest(skill_dir)},
+        "skills": {manifest["skill_bundle"]["items"][0]["path"]: _skill_digest(skill_dir)},
         "skill_bundle": manifest["skill_bundle"],
     }
     return manifest, digest, actual
@@ -105,10 +148,10 @@ async def test_manifest_mismatch_stops_before_pi_execute(tmp_path):
 @pytest.mark.asyncio
 async def test_bundle_digest_mismatch_stops_before_pi_execute(tmp_path):
     manifest, digest, actual = _manifest(tmp_path)
-    actual["skill_bundle"] = {**actual["skill_bundle"], "digest": "0" * 64}
+    actual["skills"][manifest["skill_bundle"]["items"][0]["path"]] = "0" * 64
     adapter = FakeAdapter(actual)
 
-    with pytest.raises(PiRuntimeMismatch, match="skill_bundle"):
+    with pytest.raises(PiRuntimeMismatch, match="skill pi-golden"):
         await execute_pi_attempt(
             attempt={"run_id": "run-1", "attempt_id": "1", "manifest": manifest, "manifest_digest": digest},
             adapter=adapter,
@@ -447,37 +490,222 @@ async def test_cancel_between_events_prevents_final_ack(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_local_ref_rejects_path_escape_symlink_and_wrong_digest(tmp_path, monkeypatch):
-    outputs = tmp_path / "outputs"
-    outputs.mkdir()
-    artifact = outputs / "artifact.txt"
-    artifact.write_text("ok", encoding="utf-8")
-    outside = tmp_path / "outside.txt"
-    outside.write_text("secret", encoding="utf-8")
-    (outputs / "escape").symlink_to(outside)
+async def test_final_ack_wins_over_concurrent_cancel_and_preserves_outputs(tmp_path):
+    manifest, digest, actual = _manifest(tmp_path)
+    cancel_event = asyncio.Event()
+    refs = {
+        "artifact": {"path": "artifact.json", "sha256": "a" * 64},
+        "patch": {"path": "output.patch", "sha256": "b" * 64},
+        "session": {"path": "pi-session/session.jsonl", "sha256": "c" * 64},
+    }
+    events = [
+        {"event_id": f"{kind}-1", "sequence": sequence, "type": kind, "ref": ref}
+        for sequence, (kind, ref) in enumerate(refs.items())
+    ]
+    events.append(
+        {
+            "event_id": "final-1",
+            "sequence": 3,
+            "type": "final",
+            "payload": {"text": "done", **refs},
+        }
+    )
+
+    class StreamingAdapter(FakeAdapter):
+        streams_events = True
+
+        async def execute(self, _instance_id, _job, *, event_sink):
+            self.execute_calls += 1
+            for event in self.events:
+                await event_sink(event)
+            await asyncio.sleep(0.01)
+            return self.events
+
+    adapter = StreamingAdapter(actual, events)
+
+    async def sink(envelope):
+        if envelope["type"] == "final":
+            cancel_event.set()
+        return {"ack": True, "duplicate": False}
+
+    result = await execute_pi_attempt(
+        attempt={"run_id": "run-1", "attempt_id": "1", "manifest": manifest, "manifest_digest": digest},
+        adapter=adapter,
+        result_sink=sink,
+        cancel_event=cancel_event,
+    )
+
+    assert result == events
+    assert adapter.stop_preserve_outputs == [True]
+
+
+@pytest.mark.asyncio
+async def test_local_create_uses_attempt_isolated_workdir_and_skill_projection(monkeypatch):
+    workdir = object()
+    calls: dict[str, object] = {}
+
+    class Backend:
+        id = "sandbox-1"
+
+        def __init__(self, thread_id: str, **kwargs):
+            calls["backend"] = (thread_id, kwargs)
+
+    class WorkdirFactory:
+        @staticmethod
+        def open_existing(uid: str, path: str):
+            calls["open_workdir"] = (uid, path)
+            return workdir
+
+    monkeypatch.setattr(pi_execution_service, "get_sandbox_provider", object)
+    monkeypatch.setattr(
+        pi_execution_service,
+        "ensure_bound_user_workdir",
+        lambda uid, path: calls.setdefault("workdir", (uid, path)),
+    )
+    monkeypatch.setattr(pi_execution_service, "Workdir", WorkdirFactory)
+    monkeypatch.setattr(
+        pi_execution_service,
+        "sync_user_accessible_skills",
+        lambda uid, sources: calls.setdefault("skills", (uid, sources)),
+    )
+    monkeypatch.setattr(pi_execution_service, "ProvisionerSandboxBackend", Backend)
+
+    adapter = LocalPiAdapter(uid="user-1", run_id="run-1", attempt_id="7")
+    instance_id = await adapter.create({"run_id": "run-1", "attempt_id": "7"})
+
+    runtime_uid, workdir_path = calls["workdir"]
+    assert instance_id == "sandbox-1"
+    assert runtime_uid == adapter._scope != "user-1"
+    assert workdir_path.startswith("projects/")
+    assert calls["open_workdir"] == (runtime_uid, workdir_path)
+    assert adapter._workdir is workdir
+    assert calls["skills"] == (runtime_uid, {"pi-golden": pi_execution_service.PI_GOLDEN_SKILL_DIR})
+    assert calls["backend"] == (
+        adapter._scope,
+        {
+            "uid": runtime_uid,
+            "inherit_env": False,
+            "create_if_missing": True,
+            "workdir_path": workdir_path,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_create_failure_cleans_partial_workdir_and_skill_projection(monkeypatch):
+    projection_calls: list[tuple[str, dict]] = []
+
+    class WorkdirInstance:
+        cleanup_calls: list[frozenset[str]] = []
+
+        def cleanup(self, *, preserve_directories=frozenset()):
+            self.cleanup_calls.append(preserve_directories)
+
+    workdir = WorkdirInstance()
+
+    class WorkdirFactory:
+        @staticmethod
+        def open_existing(_uid: str, _path: str):
+            return workdir
+
+    def sync(uid: str, sources: dict):
+        projection_calls.append((uid, sources))
+        if sources:
+            raise RuntimeError("projection failed")
+
+    monkeypatch.setattr(pi_execution_service, "get_sandbox_provider", object)
+    monkeypatch.setattr(pi_execution_service, "ensure_bound_user_workdir", lambda _uid, _path: None)
+    monkeypatch.setattr(pi_execution_service, "Workdir", WorkdirFactory)
+    monkeypatch.setattr(pi_execution_service, "sync_user_accessible_skills", sync)
+
+    adapter = LocalPiAdapter(uid="user-1", run_id="run-1", attempt_id="7")
+
+    with pytest.raises(RuntimeError, match="projection failed"):
+        await adapter.create({"run_id": "run-1", "attempt_id": "7"})
+
+    assert workdir.cleanup_calls == [frozenset()]
+    assert projection_calls == [
+        (adapter._runtime_uid, {"pi-golden": pi_execution_service.PI_GOLDEN_SKILL_DIR}),
+        (adapter._runtime_uid, {}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_local_model_job_deletes_ephemeral_secret_when_runner_start_fails():
+    calls: dict[str, object] = {}
+
+    class Backend:
+        id = "sandbox-1"
+
+        def write_ephemeral_secret(self, path: str, _content: str) -> None:
+            calls["written"] = path
+
+        def delete_ephemeral_secret(self, path: str) -> None:
+            calls["deleted"] = path
+
+        async def aexecute_stream(self, _command, _sink, **kwargs):
+            calls["stream"] = kwargs
+            raise RuntimeError("runner launch failed")
+
+    adapter = LocalPiAdapter.__new__(LocalPiAdapter)
+    adapter._backend = Backend()
+    adapter._stopped = False
+    adapter._output_subdir = "pi-runs/0123456789abcdef01234567"
+    adapter._credentials = {"api_key": "temporary"}
+    adapter._run_id = "run-1"
+    adapter._attempt_id = "1"
+
+    with pytest.raises(RuntimeError, match="runner launch failed"):
+        await adapter.execute(
+            "sandbox-1",
+            {
+                "manifest": {
+                    "model": {"model_id": "model-1"},
+                    "policy": {"timeout_seconds": 60},
+                }
+            },
+        )
+
+    assert calls["written"] == calls["deleted"]
+    assert calls["stream"] == {
+        "timeout": 60,
+        "max_output_bytes": pi_execution_service.PI_MAX_EVENT_STREAM_BYTES,
+    }
+
+
+@pytest.mark.asyncio
+async def test_local_ref_rejects_path_escape_symlink_and_wrong_digest():
+    class Workdir:
+        def stat(self, path: str):
+            if path.endswith("/escape"):
+                raise PermissionError("symlink paths are not allowed")
+            return {"is_dir": False, "size": 2}
+
+        def read_file(self, path: str, max_bytes: int):
+            assert path == "/outputs/pi-runs/0123456789abcdef01234567/artifact.txt"
+            assert max_bytes == 2
+            return b"ok"
+
     adapter = LocalPiAdapter.__new__(LocalPiAdapter)
     adapter._scope = "scope"
-    monkeypatch.setattr(pi_execution_service, "sandbox_outputs_dir", lambda _scope: outputs)
+    adapter._runtime_uid = "scope"
+    adapter._workdir_path = "projects/11111111-1111-4111-8111-111111111111"
+    adapter._workdir = Workdir()
+    adapter._output_subdir = "pi-runs/0123456789abcdef01234567"
+    adapter._credentials = {}
 
     with pytest.raises(ValueError, match="安全相对路径"):
-        adapter.output_path("/absolute.txt")
+        adapter.read_output("/absolute.txt")
     with pytest.raises(ValueError, match="安全相对路径"):
-        adapter.output_path("../outside.txt")
-    with pytest.raises(ValueError, match="逃逸"):
-        adapter.output_path("escape")
+        adapter.read_output("../outside.txt")
+    with pytest.raises(PermissionError, match="symlink"):
+        adapter.read_output("escape")
     with pytest.raises(ValueError, match="摘要不匹配"):
         await adapter.validate_ref({"path": "artifact.txt", "sha256": "0" * 64})
 
 
 @pytest.mark.asyncio
-async def test_local_stop_retries_release_and_keeps_only_acked_outputs(tmp_path, monkeypatch):
-    root = tmp_path / "scope"
-    outputs = root / "outputs"
-    (root / "skills").mkdir(parents=True)
-    (root / "uploads").mkdir()
-    outputs.mkdir()
-    (outputs / "result.txt").write_text("ok", encoding="utf-8")
-
+async def test_local_stop_retries_release_and_keeps_only_acked_outputs(monkeypatch):
     class Provider:
         calls = 0
 
@@ -486,43 +714,163 @@ async def test_local_stop_retries_release_and_keeps_only_acked_outputs(tmp_path,
             if self.calls == 1:
                 raise TimeoutError("transient delete failure")
 
+    class Workdir:
+        cleanup_calls: list[frozenset[str]] = []
+
+        def cleanup(self, *, preserve_directories=frozenset()):
+            self.cleanup_calls.append(preserve_directories)
+            return False
+
     adapter = LocalPiAdapter.__new__(LocalPiAdapter)
     adapter._scope = "scope"
-    adapter._uid = "user-1"
-    adapter._backend = SimpleNamespace(id="sandbox-1")
+    adapter._runtime_uid = "scope"
+    adapter._workdir_path = "projects/11111111-1111-4111-8111-111111111111"
+    adapter._workdir = Workdir()
+    adapter._backend = SimpleNamespace(id="sandbox-1", close=lambda: None)
     adapter._provider = Provider()
     adapter._stopped = False
-    monkeypatch.setattr(pi_execution_service, "sandbox_user_data_dir", lambda _scope: root)
-    monkeypatch.setattr(pi_execution_service, "sandbox_outputs_dir", lambda _scope: outputs)
+    adapter._reuse_sandbox = False
+    projection_calls = []
+    monkeypatch.setattr(
+        pi_execution_service,
+        "sync_user_accessible_skills",
+        lambda uid, sources: projection_calls.append((uid, sources)),
+    )
 
     await adapter.stop("sandbox-1", preserve_outputs=True)
     await adapter.stop("sandbox-1", preserve_outputs=True)
 
     assert adapter._provider.calls == 2
-    assert [path.name for path in root.iterdir()] == ["outputs"]
-    assert (outputs / "result.txt").read_text(encoding="utf-8") == "ok"
+    assert adapter._workdir.cleanup_calls == [frozenset({"outputs"})]
+    assert projection_calls == [(adapter._runtime_uid, {})]
 
 
 @pytest.mark.asyncio
-async def test_local_stop_removes_cancelled_attempt_scope(tmp_path, monkeypatch):
-    root = tmp_path / "scope"
-    outputs = root / "outputs"
-    (root / "skills").mkdir(parents=True)
-    outputs.mkdir()
+async def test_local_stop_keeps_bind_data_when_release_cannot_be_confirmed(monkeypatch):
+    """实例可能仍存活时不得先删 bind-mounted Workdir 或 Skill 投影。"""
 
+    class Provider:
+        calls = 0
+
+        def release(self, *_args, **_kwargs):
+            self.calls += 1
+            raise TimeoutError("delete unavailable")
+
+    adapter = LocalPiAdapter.__new__(LocalPiAdapter)
+    adapter._scope = "scope"
+    adapter._runtime_uid = "scope"
+    adapter._workdir_path = "projects/11111111-1111-4111-8111-111111111111"
+    adapter._workdir = SimpleNamespace(cleanup=lambda **_kwargs: pytest.fail("must not cleanup workdir"))
+    adapter._backend = SimpleNamespace(id="sandbox-1", close=lambda: None)
+    adapter._provider = Provider()
+    adapter._stopped = False
+    adapter._reuse_sandbox = False
+    monkeypatch.setattr(
+        pi_execution_service,
+        "sync_user_accessible_skills",
+        lambda *_args, **_kwargs: pytest.fail("must not cleanup projection"),
+    )
+
+    with pytest.raises(TimeoutError, match="delete unavailable"):
+        await adapter.stop("sandbox-1", preserve_outputs=True)
+
+    assert adapter._provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_local_stop_removes_cancelled_attempt_scope(monkeypatch):
     class Provider:
         def release(self, *_args, **_kwargs):
             return None
 
+    class Workdir:
+        cleanup_calls: list[frozenset[str]] = []
+
+        def cleanup(self, *, preserve_directories=frozenset()):
+            self.cleanup_calls.append(preserve_directories)
+            return True
+
     adapter = LocalPiAdapter.__new__(LocalPiAdapter)
     adapter._scope = "scope"
-    adapter._uid = "user-1"
-    adapter._backend = SimpleNamespace(id="sandbox-1")
+    adapter._runtime_uid = "scope"
+    adapter._workdir_path = "projects/11111111-1111-4111-8111-111111111111"
+    adapter._workdir = Workdir()
+    adapter._backend = SimpleNamespace(id="sandbox-1", close=lambda: None)
     adapter._provider = Provider()
     adapter._stopped = False
-    monkeypatch.setattr(pi_execution_service, "sandbox_user_data_dir", lambda _scope: root)
-    monkeypatch.setattr(pi_execution_service, "sandbox_outputs_dir", lambda _scope: outputs)
+    adapter._reuse_sandbox = False
+    projection_calls = []
+    monkeypatch.setattr(
+        pi_execution_service,
+        "sync_user_accessible_skills",
+        lambda uid, sources: projection_calls.append((uid, sources)),
+    )
 
     await adapter.stop("sandbox-1", preserve_outputs=False)
 
-    assert root.exists() is False
+    assert adapter._workdir.cleanup_calls == [frozenset()]
+    assert projection_calls == [(adapter._runtime_uid, {})]
+
+
+@pytest.mark.asyncio
+async def test_local_child_adapter_reuses_parent_sandbox_without_releasing_it(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class Backend:
+        id = "sandbox-parent"
+
+        def __init__(self, thread_id: str, **kwargs):
+            calls["backend"] = (thread_id, kwargs)
+
+        def ensure_available(self):
+            calls["ensured"] = True
+
+        def close(self):
+            calls["closed"] = True
+
+    workdir = SimpleNamespace(delete=lambda path: calls.setdefault("deleted", path))
+
+    class WorkdirFactory:
+        @staticmethod
+        def open_existing(uid: str, path: str):
+            calls["workdir"] = (uid, path)
+            return workdir
+
+    class Provider:
+        def release(self, *_args, **_kwargs):
+            raise AssertionError("PI child must not release the parent sandbox")
+
+    monkeypatch.setattr(pi_execution_service, "ProvisionerSandboxBackend", Backend)
+    monkeypatch.setattr(pi_execution_service, "Workdir", WorkdirFactory)
+    monkeypatch.setattr(pi_execution_service, "get_sandbox_provider", Provider)
+    adapter = LocalPiAdapter(
+        uid="user-1",
+        run_id="run-1",
+        attempt_id="7",
+        runtime_scope_id="root-thread",
+        workdir_path="projects/11111111-1111-4111-8111-111111111111",
+        skill_sources={},
+        reuse_sandbox=True,
+    )
+
+    instance_id = await adapter.create(
+        {
+            "run_id": "run-1",
+            "attempt_id": "7",
+            "manifest": {"skill_bundle": {"items": []}},
+        }
+    )
+    await adapter.stop(instance_id, preserve_outputs=True)
+
+    assert calls["backend"] == (
+        "root-thread",
+        {
+            "uid": "user-1",
+            "inherit_env": True,
+            "create_if_missing": False,
+            "workdir_path": "projects/11111111-1111-4111-8111-111111111111",
+        },
+    )
+    assert calls["ensured"] is True
+    assert calls["closed"] is True
+    assert "deleted" not in calls

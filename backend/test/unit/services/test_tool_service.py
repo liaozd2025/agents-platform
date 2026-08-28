@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from yuxi.agents.toolkits import service as tool_service
 
 
@@ -46,3 +48,19 @@ def test_get_tool_metadata_includes_config_guide(monkeypatch):
     ]
 
     tool_service._metadata_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_runtime_tools_always_include_user_question_without_agent_configuration(monkeypatch):
+    question_tool = SimpleNamespace(name="ask_user_question")
+    monkeypatch.setattr(
+        tool_service,
+        "get_tool_instances_by_category",
+        lambda category: [question_tool] if category == "buildin" else [],
+    )
+
+    tools = await tool_service.resolve_configured_runtime_tools(
+        SimpleNamespace(tools=[], mcps=[], _runtime_skills={}, _effective_skill_slugs=[])
+    )
+
+    assert [tool.name for tool in tools] == ["ask_user_question"]

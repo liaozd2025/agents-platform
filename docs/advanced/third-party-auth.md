@@ -1,105 +1,109 @@
-# 第三方登录认证
-Yuxi 支持以OIDC接入第三方登录认证，方便企业用户集成现有的身份认证系统。
-> 此功能默认关闭，需要在配置文件中启用并提供相关参数。
+# 接入 OIDC 登录
 
-## 配置步骤
-### 1. 前提条件
-在你的SSO系统中注册一个新的客户端应用，获取以下信息：
-- 客户端ID（Client ID）
-- 客户端密钥（Client Secret）
-- ISSUER URL
-- Provider discovery 地址或 JWKS URL
+Yuxi 可以通过 OpenID Connect（OIDC）接入企业身份提供商。功能默认关闭；开启前，需要在身份提供商中注册客户端，并准备与用户实际访问地址完全一致的回调地址。
 
-填入回调地址（Redirect URI）：https://<your_yuxi_host>/api/auth/oidc/callback
+## 1. 注册 OIDC 客户端
 
-### 2. 配置Yuxi
-在Yuxi的.env文件中添加以下配置项：
+记录以下信息：
 
-```sh
-# 是否启用 OIDC 认证 (true/false)
-# OIDC_ENABLED=false
+- Client ID；
+- Client Secret；
+- Issuer URL。
 
-# 认证源名称（显示在登录按钮上的文字，建议简短且具有辨识度, 默认: OIDC登录）
-# OIDC_PROVIDER_NAME="OIDC登录"
+把下面的后端回调地址注册为允许的 Redirect URI。生产环境请替换为实际域名并使用 HTTPS：
 
-# OIDC Provider 的 Issuer URL (例如: https://auth.example.com)
-# OIDC_ISSUER_URL=
-
-# OIDC Client ID
-# OIDC_CLIENT_ID=
-
-# OIDC Client Secret
-# OIDC_CLIENT_SECRET=
-
-# OIDC 回调 URL (可选，默认自动构建为 /api/auth/oidc/callback, 不建议自定义)
-# 填写完整的地址：https://<your_yuxi_host>/api/auth/oidc/callback
-# 需要确保此 URL 在 OIDC Provider 中已注册
-# OIDC_REDIRECT_URI=
-
-# 授权端点 (可选，自动从 discovery 获取)
-# OIDC_AUTHORIZATION_ENDPOINT=
-
-# Token 端点 (可选，自动从 discovery 获取)
-# OIDC_TOKEN_ENDPOINT=
-
-# UserInfo 端点 (可选，自动从 discovery 获取)
-# OIDC_USERINFO_ENDPOINT=
-
-# JWKS 地址（使用显式端点时必填，discovery 模式自动获取）
-# OIDC_JWKS_URI=
-
-# 登出端点 (可选，自动从 discovery 获取)
-# OIDC_END_SESSION_ENDPOINT=
-
-# 请求的 scope (默认: openid profile email)
-# OIDC_SCOPES=openid profile email
-
-# 是否自动创建用户 (true/false，默认: true)
-# OIDC_AUTO_CREATE_USER=true
-
-# OIDC 首次登录创建的新用户固定获得内置 user 角色，管理员可在用户管理中调整
-
-# 用户名映射字段 (默认: preferred_username)
-# OIDC_USERNAME_CLAIM=preferred_username
-
-# 邮箱映射字段 (默认: email)
-# OIDC_EMAIL_CLAIM=email
-
-# 姓名映射字段 (默认: name)
-# OIDC_NAME_CLAIM=name
-
-# 是否使用原始用户名（不带 oidc: 前缀），允许映射到 Yuxi 已有的本地账号 (true/false，默认: false)
-# 开启后，OIDC 返回的 username 会直接作为业务登录标识 uid 登录，需要管理员提前创建好用户账号
-# OIDC_USE_RAW_USERNAME=false
-
-# 是否从 OIDC userinfo 中获取部门 claim (true/false，默认: false)
-# OIDC_FETCH_DEPARTMENT_INFO=false
-
-# 部门名称字段映射 (默认: department)
-# OIDC_DEPARTMENT_CLAIM=department
-
-# OIDC 登录时是否强制提示用户重新登录 (添加 prompt=login 参数，true/false，默认: true)
-# OIDC_FORCE_PROMPT_LOGIN=true
-
+```text
+https://<your-yuxi-host>/api/auth/oidc/callback
 ```
-### 3. 重启Yuxi服务使配置生效
+
+本机开发可以使用 Vite 代理后的 `http://localhost:5173/api/auth/oidc/callback`，前提是身份提供商允许该地址。Yuxi 位于反向代理后时，回调地址必须是用户访问的外部地址，而不是容器内部地址。
+
+## 2. 配置 Yuxi
+
+在 `.env` 或生产环境使用的 env file 中设置：
+
 ```bash
-docker restart api-dev web-dev
+OIDC_ENABLED=true
+OIDC_PROVIDER_NAME=企业登录
+OIDC_ISSUER_URL=https://auth.example.com
+OIDC_CLIENT_ID=<your-client-id>
+OIDC_CLIENT_SECRET=<your-client-secret>
+OIDC_REDIRECT_URI=https://<your-yuxi-host>/api/auth/oidc/callback
 ```
 
-## 功能说明
+常用可选项：
 
-### 使用原始用户名（OIDC_USE_RAW_USERNAME=true）
-当你需要将 Yuxi 系统中已有的本地账号与 OIDC SSO 绑定，可以开启此选项。
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `OIDC_SCOPES` | `openid profile email` | 请求的 scope |
+| `OIDC_AUTO_CREATE_USER` | `true` | 找不到本地账号时是否创建用户 |
+| `OIDC_USERNAME_CLAIM` | `preferred_username` | 登录标识字段 |
+| `OIDC_EMAIL_CLAIM` | `email` | 邮箱字段 |
+| `OIDC_NAME_CLAIM` | `name` | 展示名称字段 |
+| `OIDC_FORCE_PROMPT_LOGIN` | `true` | 是否在授权请求中加入 `prompt=login` |
+| `OIDC_USE_RAW_USERNAME` | `false` | 是否用 OIDC 用户名匹配已有 Yuxi `uid` |
+| `OIDC_FETCH_DEPARTMENT_INFO` | `false` | 是否读取组织节点 claim |
+| `OIDC_DEPARTMENT_CLAIM` | `department` | 组织节点名称字段 |
 
-**绑定原理**（无需修改数据库）：  
-系统会创建一个标记为删除的占位用户 `oidc:{sub}:{target_user_id}` 来记录 OIDC sub 与 Yuxi 用户的绑定关系，确保只有绑定过的 OIDC 身份才能登录对应的账号，**防止账号冒用**。其中 `target_user_id` 是数据库中的数值 `users.id`；用户登录标识仍使用字符串 `uid`。
+自动创建的用户固定获得内置 `user` 角色，后续由有权限的管理员调整。系统没有 `OIDC_DEFAULT_ROLE` 或自动创建部门的配置。
 
-### 身份令牌与部门信息
+### Discovery 与显式端点
 
-系统会验证 `id_token` 的签名、`iss`、`aud`、`exp`、`iat`、`sub` 和 `nonce`。使用显式端点配置时，必须同时设置 `OIDC_ISSUER_URL` 和 `OIDC_JWKS_URI`；discovery 返回的 `issuer` 必须与 `OIDC_ISSUER_URL` 完全一致。OIDC 端点必须使用 HTTPS，仅 `YUXI_ENV=development` 时允许本机 HTTP Provider。
+未设置 `OIDC_AUTHORIZATION_ENDPOINT` 时，Yuxi 根据 `OIDC_ISSUER_URL` 请求 `/.well-known/openid-configuration`，读取授权、Token、UserInfo、JWKS 和可选登出端点。
 
-开启 `OIDC_FETCH_DEPARTMENT_INFO` 后，系统会从 OIDC claims 的 `OIDC_DEPARTMENT_CLAIM` 字段读取组织节点名称，仅在全部已有组织节点中精确命中一个时关联用户；已有用户再次登录也会按本次 claim 更新归属节点。
+只要设置了 `OIDC_AUTHORIZATION_ENDPOINT`，显式端点即成为权威配置，并且必须同时提供：
 
-- claim 命中 0 个或多个同名节点时，用户回落到集团根，并写入 warning 日志
-- 登录流程不会创建组织节点，不做模糊匹配或路径字符串解析
+- `OIDC_TOKEN_ENDPOINT`；
+- `OIDC_USERINFO_ENDPOINT`；
+- `OIDC_JWKS_URI`。
+
+`OIDC_END_SESSION_ENDPOINT` 可选。系统会校验 `id_token` 的签名、`iss`、`aud`、`exp`、`iat`、`sub` 和 `nonce`；Discovery 返回的 Issuer 必须与配置完全一致。OIDC 端点必须使用 HTTPS，仅开发环境允许 localhost HTTP。
+
+`OIDC_CLIENT_SECRET` 和其他凭据只能放在受保护的运行环境中，不要提交到仓库或打印到日志。
+
+## 3. 重建 API 容器
+
+OIDC 配置在 API 启动时读取。修改环境变量后需要重新创建 API 容器：
+
+```bash
+docker compose up -d --force-recreate api
+```
+
+生产环境示例：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --force-recreate api
+```
+
+## 登录流程
+
+1. 前端向 `/api/auth/oidc/login-url` 请求授权地址。
+2. 身份提供商登录后回调 `/api/auth/oidc/callback`。
+3. API 校验一次性 `state`，用授权码换取 Token，校验 `id_token` 并读取 UserInfo。
+4. API 把一次性登录 code 交给前端 `/auth/oidc/callback` 页面。
+5. 前端调用 `/api/auth/oidc/exchange-code` 换取 Yuxi 登录态。
+
+## 绑定已有账号
+
+设置 `OIDC_USE_RAW_USERNAME=true` 后，Yuxi 会用 OIDC 返回的用户名匹配已有 `uid`。首次成功匹配时，系统创建一条已删除状态的占位用户，保存 OIDC `sub` 与目标用户的绑定关系；占位记录不能用于登录。
+
+占位用户的 `uid` 格式为 `oidc:{sub}:{target_user_id}`。如果同一个 `sub` 已绑定到其他用户，登录会被拒绝。启用此模式前，应确认身份提供商中的用户名稳定且唯一，并提前创建需要绑定的账号。
+
+## 映射组织节点
+
+设置 `OIDC_FETCH_DEPARTMENT_INFO=true` 后，系统读取 `OIDC_DEPARTMENT_CLAIM` 指定的名称，并在全部现有组织节点中精确匹配：
+
+- 只命中一个节点时，关联该节点；
+- 没有命中或存在多个同名节点时，回落到集团根，并记录 warning；
+- 已有用户再次登录时，也会按本次 claim 更新归属节点；
+- 登录流程不会创建组织节点，不做模糊匹配，也不解析路径字符串。
+
+## 排查登录失败
+
+1. 检查 API 是否读取了 `OIDC_ENABLED=true` 和完整客户端配置。
+2. 检查身份提供商登记的 Redirect URI 是否与 `OIDC_REDIRECT_URI` 完全一致。
+3. 检查 API 能否访问 Issuer、JWKS 和 UserInfo 端点。
+4. 检查 claims 中是否有 `sub` 和配置的用户名字段。
+5. 查看 API 日志中的 OIDC 错误，但不要附带 Client Secret 或 Token。
+
+登录页没有 OIDC 按钮，通常表示 OIDC 未启用或基础配置不完整；回调失败时，页面会返回登录页并显示可读错误。

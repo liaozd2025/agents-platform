@@ -2,144 +2,91 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from deepagents.backends.composite import (
-    CompositeBackend,
-    _remap_file_info_path,
-    _route_for_path,
-    _strip_route_from_pattern,
+from deepagents.backends import CompositeBackend
+from deepagents.middleware.filesystem import (
+    TOOLS_EXCLUDED_FROM_EVICTION,
+    FilesystemMiddleware,
 )
-from deepagents.backends.protocol import FileInfo, GlobResult
-from deepagents.middleware.filesystem import FilesystemMiddleware
+from langchain_core.messages import ToolMessage
 
-from yuxi.agents.skills.service import (
-    get_thread_skills_root_dir,
-    normalize_string_list,
-    sync_thread_readable_skills_async,
+from yuxi.agents.backends.paths import (
+    VIRTUAL_PERSONAL_SKILLS_PATH,
+    VIRTUAL_SKILLS_PATH,
+    runtime_workdir_path,
 )
-from yuxi.utils.paths import VIRTUAL_PATH_CONVERSATION_HISTORY, VIRTUAL_PATH_LARGE_TOOL_RESULTS, VIRTUAL_PATH_OUTPUTS
+from yuxi.agents.skills.service import refresh_user_skill_projection_async
+from yuxi.agents.tool_approval import PI_DELEGATED_SANDBOX_TOOLS
 
 from .sandbox import ProvisionerSandboxBackend
-from .skills_backend import SelectedSkillsReadonlyBackend
 
-_TOOL_RESULT_EVICTION_EXEMPT_TOOLS = frozenset({"read_file", "open_kb_document"})
+# Yuxi 在 DeepAgents 内建排除集之上额外豁免知识库文档工具结果，
+# 避免 read_file/offload 循环：该工具自带分页与引用语义。
+_TOOL_RESULT_EVICTION_EXEMPT_TOOLS = frozenset(TOOLS_EXCLUDED_FROM_EVICTION) | {"open_kb_document"}
 
-
-def _coerce_glob_result(result) -> GlobResult:
-    if isinstance(result, GlobResult):
-        return result
-    return GlobResult(matches=result or [])
-
-
-class CustomCompositeBackend(CompositeBackend):
-    """修复 glob 路由逻辑的 CompositeBackend。"""
-
-    def glob(self, pattern: str, path: str = "/") -> GlobResult:
-        backend, backend_path, route_prefix = _route_for_path(
-            default=self.default,
-            sorted_routes=self.sorted_routes,
-            path=path,
-        )
-        if route_prefix is not None:
-            result = _coerce_glob_result(backend.glob(pattern, backend_path))
-            if result.error:
-                return result
-            return GlobResult(matches=[_remap_file_info_path(fi, route_prefix) for fi in (result.matches or [])])
-
-        if path is None or path == "/":
-            results: list[FileInfo] = []
-            default_result = _coerce_glob_result(self.default.glob(pattern, path))
-            if default_result.error:
-                return default_result
-            results.extend(default_result.matches or [])
-            for route_prefix, backend in self.routes.items():
-                route_pattern = _strip_route_from_pattern(pattern, route_prefix)
-                result = _coerce_glob_result(backend.glob(route_pattern, "/"))
-                if result.error:
-                    return result
-                results.extend(_remap_file_info_path(fi, route_prefix) for fi in (result.matches or []))
-            results.sort(key=lambda x: x.get("path", ""))
-            return GlobResult(matches=results)
-
-        return _coerce_glob_result(self.default.glob(pattern, path))
-
-    async def aglob(self, pattern: str, path: str = "/") -> GlobResult:
-        backend, backend_path, route_prefix = _route_for_path(
-            default=self.default,
-            sorted_routes=self.sorted_routes,
-            path=path,
-        )
-        if route_prefix is not None:
-            result = _coerce_glob_result(await backend.aglob(pattern, backend_path))
-            if result.error:
-                return result
-            return GlobResult(matches=[_remap_file_info_path(fi, route_prefix) for fi in (result.matches or [])])
-
-        if path is None or path == "/":
-            results: list[FileInfo] = []
-            default_result = _coerce_glob_result(await self.default.aglob(pattern, path))
-            if default_result.error:
-                return default_result
-            results.extend(default_result.matches or [])
-            for route_prefix, backend in self.routes.items():
-                route_pattern = _strip_route_from_pattern(pattern, route_prefix)
-                result = _coerce_glob_result(await backend.aglob(route_pattern, "/"))
-                if result.error:
-                    return result
-                results.extend(_remap_file_info_path(fi, route_prefix) for fi in (result.matches or []))
-            results.sort(key=lambda x: x.get("path", ""))
-            return GlobResult(matches=results)
-
-        return _coerce_glob_result(await self.default.aglob(pattern, path))
+# 文件工具 allowlist：显式排除 destructive delete。Yuxi backend 未实现 delete，
+# 且删除语义需要审批与审计设计，开放前不应让模型看到该工具。
+_PI_REDIRECTED_TOOLS = PI_DELEGATED_SANDBOX_TOOLS | {"read_file"}
 
 
 class YuxiFilesystemMiddleware(FilesystemMiddleware):
-    """Filesystem middleware that budgets large tool outputs before they hit model context."""
+    """只允许模型通过 read_file 读取只读 Skill 投影。"""
+
+    @staticmethod
+    def _is_skill_read(request) -> bool:
+        tool_call = request.tool_call if isinstance(request.tool_call, dict) else {}
+        if tool_call.get("name") != "read_file":
+            return False
+        args = tool_call.get("args") if isinstance(tool_call.get("args"), dict) else {}
+        file_path = str(args.get("file_path") or "").strip()
+        return any(
+            file_path.startswith(f"{root.rstrip('/')}/") for root in (VIRTUAL_SKILLS_PATH, VIRTUAL_PERSONAL_SKILLS_PATH)
+        )
+
+    @staticmethod
+    def _sandbox_redirect(request) -> ToolMessage:
+        tool_call = request.tool_call if isinstance(request.tool_call, dict) else {}
+        return ToolMessage(
+            "用户沙箱文件必须通过 pi_sandbox 交给 PI Agent 处理。",
+            tool_call_id=str(tool_call.get("id") or ""),
+        )
 
     def wrap_tool_call(self, request, handler):
+        if request.tool_call["name"] in _PI_REDIRECTED_TOOLS and not self._is_skill_read(request):
+            return self._sandbox_redirect(request)
         tool_result = handler(request)
 
-        if self._tool_token_limit_before_evict is None:
-            return tool_result
         if request.tool_call["name"] in _TOOL_RESULT_EVICTION_EXEMPT_TOOLS:
             return tool_result
+        if self._tool_token_limit_before_evict is None:
+            return tool_result
 
-        return self._intercept_large_tool_result(tool_result, request.runtime)
+        return self._intercept_large_tool_result(tool_result)
 
     async def awrap_tool_call(self, request, handler):
+        if request.tool_call["name"] in _PI_REDIRECTED_TOOLS and not self._is_skill_read(request):
+            return self._sandbox_redirect(request)
         tool_result = await handler(request)
 
-        if self._tool_token_limit_before_evict is None:
-            return tool_result
         if request.tool_call["name"] in _TOOL_RESULT_EVICTION_EXEMPT_TOOLS:
             return tool_result
+        if self._tool_token_limit_before_evict is None:
+            return tool_result
 
-        return await self._aintercept_large_tool_result(tool_result, request.runtime)
+        return await self._aintercept_large_tool_result(tool_result)
 
 
 @dataclass(frozen=True)
 class _BackendScope:
-    thread_id: str
+    runtime_scope_id: str
+    workdir_relative_path: str
     uid: str
-    skill_sources: dict[str, str]
-    file_thread_id: str
-    skills_thread_id: str
+
+    @property
+    def workdir_path(self) -> str:
+        return runtime_workdir_path(self.workdir_relative_path)
 
     @classmethod
-    def from_runtime(cls, runtime) -> _BackendScope:
-        config = getattr(runtime, "config", None)
-        configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-        context = getattr(runtime, "context", None)
-        state = getattr(runtime, "state", None)
-        return cls.from_sources(
-            configurable if isinstance(configurable, dict) else {},
-            context,
-            state if isinstance(state, dict) else {},
-            readable_skills_source=context,
-            error_context="runtime configurable context",
-        )
-
-    @classmethod
-    def from_sources(cls, *sources, readable_skills_source, error_context: str) -> _BackendScope:
+    def from_sources(cls, *sources, error_context: str) -> _BackendScope:
         def string_value(key: str) -> str | None:
             for source in sources:
                 value = source.get(key) if isinstance(source, dict) else getattr(source, key, None)
@@ -155,82 +102,54 @@ class _BackendScope:
         if not uid:
             raise ValueError(f"uid is required in {error_context}")
 
-        selected = getattr(readable_skills_source, "_readable_skills", [])
-        readable_skills = normalize_string_list(selected if isinstance(selected, list) else [])
-        raw_sources = getattr(readable_skills_source, "_runtime_skill_sources", {})
-        skill_sources = {
-            slug: str(path)
-            for slug, path in (raw_sources.items() if isinstance(raw_sources, dict) else [])
-            if slug in readable_skills and isinstance(path, str) and path
-        }
+        runtime_scope_id = string_value("runtime_scope_id") or thread_id
+        relative_path = string_value("workdir_relative_path") or ""
         return cls(
-            thread_id=thread_id,
+            runtime_scope_id=runtime_scope_id,
+            workdir_relative_path=relative_path,
             uid=uid,
-            skill_sources=skill_sources,
-            file_thread_id=string_value("file_thread_id") or thread_id,
-            skills_thread_id=string_value("skills_thread_id") or thread_id,
         )
 
     def create_backend(self) -> CompositeBackend:
-        thread_skills_root = get_thread_skills_root_dir(self.skills_thread_id)
-        return CustomCompositeBackend(
+        if not self.workdir_relative_path:
+            raise ValueError("workdir path is required in runtime context")
+        # artifacts_root 指向 outputs 目录：Filesystem/Summarization middleware 由此
+        # 派生 large_tool_results 与 conversation_history 前缀，与 Yuxi 契约一致。
+        return CompositeBackend(
             default=ProvisionerSandboxBackend(
-                thread_id=self.thread_id,
+                thread_id=self.runtime_scope_id,
                 uid=self.uid,
-                readable_skills=list(self.skill_sources),
-                skill_sources=self.skill_sources,
-                file_thread_id=self.file_thread_id,
-                skills_thread_id=self.skills_thread_id,
+                workdir_path=self.workdir_relative_path,
+                create_if_missing=False,
             ),
-            routes={
-                "/skills/": SelectedSkillsReadonlyBackend(
-                    selected_slugs=list(self.skill_sources),
-                    root_dir=thread_skills_root,
-                ),
-            },
-            artifacts_root=VIRTUAL_PATH_OUTPUTS,
+            routes={},
+            artifacts_root=f"{self.workdir_path.rstrip('/')}/outputs",
         )
 
 
 async def sync_agent_context_skills(context) -> None:
-    """在 Agent Run 初始化时同步当前上下文的共享 Skill 投影。"""
-    scope = _BackendScope.from_sources(
-        context,
-        readable_skills_source=context,
-        error_context="runtime context",
-    )
-    await sync_thread_readable_skills_async(
-        scope.skills_thread_id,
-        list(scope.skill_sources),
-        scope.skill_sources,
-    )
+    """在 Agent Run 初始化时同步当前用户获授权的共享 Skill 投影。"""
+    scope = _BackendScope.from_sources(context, error_context="runtime context")
+    await refresh_user_skill_projection_async(scope.uid)
 
 
-def create_agent_composite_backend(runtime) -> CompositeBackend:
-    return _BackendScope.from_runtime(runtime).create_backend()
+def create_agent_composite_backend(context) -> CompositeBackend:
+    """按已准备的 Agent context 构造本 Run 独享的 CompositeBackend 实例。
+
+    DeepAgents 0.7 移除了 backend factory：每次 graph 构造时基于 context 创建
+    具体实例，并由 filesystem 与 summary middleware 共用同一实例，保持
+    user/thread/file_thread 的隔离边界。
+    """
+    return _BackendScope.from_sources(context, error_context="agent context").create_backend()
 
 
 def create_agent_filesystem_middleware(
     tool_token_limit_before_evict: int | None = None,
     *,
-    context=None,
+    backend: CompositeBackend,
 ) -> FilesystemMiddleware:
-    backend = create_agent_composite_backend
-    if context is not None:
-
-        def build_context_backend(_runtime):
-            """按可变运行上下文重建文件作用域，读取已同步的 Skill 投影。"""
-            return _BackendScope.from_sources(
-                context,
-                readable_skills_source=context,
-                error_context="runtime context",
-            ).create_backend()
-
-        backend = build_context_backend
-    middleware = YuxiFilesystemMiddleware(
+    return YuxiFilesystemMiddleware(
         backend=backend,
         tool_token_limit_before_evict=tool_token_limit_before_evict,
+        tools=["read_file"],
     )
-    middleware._large_tool_results_prefix = VIRTUAL_PATH_LARGE_TOOL_RESULTS
-    middleware._conversation_history_prefix = VIRTUAL_PATH_CONVERSATION_HISTORY
-    return middleware

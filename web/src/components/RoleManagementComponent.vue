@@ -561,7 +561,7 @@ import {
   Plus,
   Search,
   SquarePen
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { useUserStore } from '@/stores/user'
 import { getDepartments } from '@/apis/department_api'
 import { copyRole, createRole, deactivateRole, getRoleOverview, updateRole } from '@/apis/role_api'

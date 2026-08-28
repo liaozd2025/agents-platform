@@ -345,7 +345,10 @@ async def test_oa_account_exchange_does_not_login_when_oa_identity_validation_fa
             return None
 
         async def post(self, *_args, **_kwargs):
-            return httpx.Response(200, json={"data": {"account": "oa-user-1", "oaToken": "oa-token", "saToken": "sa-token"}})
+            return httpx.Response(
+                200,
+                json={"data": {"account": "oa-user-1", "oaToken": "oa-token", "saToken": "sa-token"}},
+            )
 
     monkeypatch.setattr(oa_sso_service.httpx, "AsyncClient", FakeAsyncClient)
     monkeypatch.setattr(oa_sso_service.oa_account_login_config, "enabled", True)

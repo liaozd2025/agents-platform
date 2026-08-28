@@ -2,7 +2,15 @@ from scripts.migrate_oa_departments import OaDepartment, _flatten, build_departm
 
 
 def test_flatten_preserves_parent_ids():
-    assert _flatten([{"id": 1, "treeCode": "001", "treeName": "研发", "children": [{"id": 2, "treeCode": "001001", "treeName": "平台"}]}]) == [
+    payload = [
+        {
+            "id": 1,
+            "treeCode": "001",
+            "treeName": "研发",
+            "children": [{"id": 2, "treeCode": "001001", "treeName": "平台"}],
+        }
+    ]
+    assert _flatten(payload) == [
         OaDepartment(1, "001", "研发", None),
         OaDepartment(2, "001001", "平台", 1),
     ]
