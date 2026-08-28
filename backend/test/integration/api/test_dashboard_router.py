@@ -4,11 +4,13 @@ Integration tests for dashboard router endpoints.
 
 from __future__ import annotations
 
+import os
 import uuid
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.agents.skills.repository import SkillRepository
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
@@ -17,12 +19,14 @@ from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
     ROOT_DEPARTMENT_ID,
     Agent,
+    AgentRun,
     Department,
     Conversation,
     ConversationStats,
     Message,
     MessageFeedback,
     OperationLog,
+    Project,
     Role,
     RolePermission,
     Skill,
@@ -33,6 +37,9 @@ from yuxi.storage.postgres.models_business import (
 from yuxi.storage.postgres.models_knowledge import KnowledgeBase
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.config.runtime import knowledge_capability_enabled
+from yuxi.utils.datetime_utils import utc_now_naive
+
+from test.live_api_cleanup import make_test_conversation_metadata, make_test_conversation_title
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -124,6 +131,7 @@ async def dashboard_scope_users(test_client):
             "department_child_path": department_child_path,
             "department_b_path": department_b_path,
             "manager_a_id": user_ids[0],
+            "manager_a_uid": user_uids[0],
             "manager_b_id": user_ids[1],
             "manager_b_uid": user_uids[1],
             "child_user_id": user_ids[2],
@@ -138,6 +146,7 @@ async def dashboard_scope_users(test_client):
                 await session.scalars(select(Conversation.id).where(Conversation.uid.in_(user_uids)))
             )
             if conversation_ids:
+                await session.execute(delete(AgentRun).where(AgentRun.conversation_id.in_(conversation_ids)))
                 message_ids = list(
                     await session.scalars(select(Message.id).where(Message.conversation_id.in_(conversation_ids)))
                 )
@@ -149,12 +158,30 @@ async def dashboard_scope_users(test_client):
                     delete(ConversationStats).where(ConversationStats.conversation_id.in_(conversation_ids))
                 )
                 await session.execute(delete(Conversation).where(Conversation.id.in_(conversation_ids)))
+            await session.execute(delete(Project).where(Project.uid.in_(user_uids)))
             await session.execute(delete(OperationLog).where(OperationLog.user_id.in_(user_ids)))
             await session.execute(delete(User).where(User.id.in_(user_ids)))
             await session.execute(delete(Role).where(Role.id == role_id))
             for department_id in department_ids:
                 await session.execute(delete(Department).where(Department.id == department_id))
         await pg_manager.async_engine.dispose()
+
+
+async def _set_conversation_statuses(subagent_thread_id: str, deleted_thread_id: str) -> None:
+    """使用绑定当前测试事件循环的一次性引擎写入状态事实。"""
+    engine = create_async_engine(os.environ["POSTGRES_URL"])
+    try:
+        session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        async with session_factory() as db:
+            await db.execute(
+                update(Conversation).where(Conversation.thread_id == subagent_thread_id).values(status="subagent")
+            )
+            await db.execute(
+                update(Conversation).where(Conversation.thread_id == deleted_thread_id).values(status="deleted")
+            )
+            await db.commit()
+    finally:
+        await engine.dispose()
 
 
 async def test_dashboard_requires_authentication(test_client):
@@ -170,7 +197,93 @@ async def test_standard_user_is_forbidden(test_client, standard_user):
 async def test_admin_can_fetch_conversations(test_client, admin_headers):
     response = await test_client.get("/api/dashboard/conversations", headers=admin_headers)
     assert response.status_code == 200, response.text
-    assert isinstance(response.json(), list)
+    data = response.json()
+    assert set(data) == {"items", "total", "limit", "offset"}
+    assert isinstance(data["items"], list)
+    assert data["total"] >= len(data["items"])
+
+
+async def test_admin_can_fetch_conversation_filter_options(test_client, admin_headers):
+    response = await test_client.get("/api/dashboard/conversations/options", headers=admin_headers)
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert set(data) == {"users", "agents"}
+    assert all("is_deleted" in item for item in data["users"])
+    assert all("is_deleted" in item for item in data["agents"])
+
+
+async def test_dashboard_conversation_audit_reports_latest_run_status(test_client, dashboard_scope_users):
+    """会话生命周期保持 active 时，审计接口仍返回最新 Run 的真实终态。"""
+    project_id = str(uuid.uuid4())
+    thread_id = str(uuid.uuid4())
+    marker = f"dashboard-run-status-{uuid.uuid4().hex}"
+    now = utc_now_naive()
+
+    async with pg_manager.get_async_session_context() as session:
+        session.add(
+            Project(
+                id=project_id,
+                uid=dashboard_scope_users["manager_a_uid"],
+                selection_status="implicit",
+                workdir_path=f"projects/{project_id}",
+                directory_mode="managed",
+            )
+        )
+        await session.flush()
+        conversation = await ConversationRepository(session).add_conversation(
+            uid=dashboard_scope_users["manager_a_uid"],
+            agent_id="pytest-dashboard-run-status-agent",
+            title=marker,
+            thread_id=thread_id,
+            project_id=project_id,
+        )
+        session.add(
+            AgentRun(
+                id=str(uuid.uuid4()),
+                conversation_thread_id=thread_id,
+                runtime_scope_id=thread_id,
+                agent_slug=conversation.agent_id,
+                uid=conversation.uid,
+                status="completed",
+                request_id=str(uuid.uuid4()),
+                conversation_id=conversation.id,
+                run_type="chat",
+                input_payload={},
+                created_at=now,
+                finished_at=now,
+            )
+        )
+        await session.commit()
+
+    response = await test_client.get(
+        "/api/dashboard/conversations",
+        params={"search": marker, "status": "active"},
+        headers=dashboard_scope_users["a"],
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+    item = response.json()["items"][0]
+    assert item["status"] == "active"
+    assert item["run_status"] == "completed"
+
+    detail = await test_client.get(
+        f"/api/dashboard/conversations/{thread_id}",
+        headers=dashboard_scope_users["a"],
+    )
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["status"] == "active"
+    assert detail.json()["run_status"] == "completed"
+
+
+async def test_dashboard_rejects_invalid_query_ranges(test_client, admin_headers):
+    responses = [
+        await test_client.get("/api/dashboard/stats/threads?time_range=365days", headers=admin_headers),
+        await test_client.get("/api/dashboard/conversations?limit=0", headers=admin_headers),
+        await test_client.get("/api/dashboard/conversations?offset=-1", headers=admin_headers),
+    ]
+
+    assert [response.status_code for response in responses] == [422, 422, 422]
 
 
 async def test_admin_can_fetch_stats(test_client, admin_headers):
@@ -202,6 +315,83 @@ async def test_knowledge_stats_matches_runtime_capability(test_client, admin_hea
         "databases_by_type",
         "file_type_distribution",
     }
+
+
+async def test_admin_can_fetch_thread_analytics(test_client, admin_headers):
+    """Test that thread analytics endpoint returns complete statistics schema."""
+    response = await test_client.get(
+        "/api/dashboard/stats/threads?time_range=30days",
+        headers=admin_headers,
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert "summary" in data
+    assert "daily_trends" in data
+    assert "depth_distribution" in data
+    assert "agent_distribution" in data
+    assert "top_users" in data
+    assert "status_distribution" in data
+    assert len(data["daily_trends"]) == 30
+    assert data["summary"]["total_threads"] >= 0
+
+
+async def test_dashboard_http_applies_subagent_and_deleted_conversation_scopes(test_client, admin_headers):
+    default_agent = await test_client.get("/api/agent/default", headers=admin_headers)
+    assert default_agent.status_code == 200, default_agent.text
+    agent = default_agent.json()["agent"]
+    agent_id = str(agent.get("slug") or agent["agent_id"])
+    marker = f"dashboard-scope-{uuid.uuid4().hex[:10]}"
+
+    async def analytics(*, include_subagents: bool) -> dict:
+        response = await test_client.get(
+            "/api/dashboard/stats/threads",
+            params={
+                "time_range": "30days",
+                "agent_id": agent_id,
+                "include_subagents": str(include_subagents).lower(),
+            },
+            headers=admin_headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    baseline_default = await analytics(include_subagents=False)
+    baseline_including_subagents = await analytics(include_subagents=True)
+    thread_ids = []
+    for status in ("active", "subagent", "deleted"):
+        response = await test_client.post(
+            "/api/chat/thread",
+            headers=admin_headers,
+            json={
+                "agent_id": agent_id,
+                "title": make_test_conversation_title(f"{marker}-{status}"),
+                "metadata": make_test_conversation_metadata(marker),
+            },
+        )
+        assert response.status_code == 200, response.text
+        thread_ids.append(str(response.json().get("thread_id") or response.json()["id"]))
+
+    await _set_conversation_statuses(thread_ids[1], thread_ids[2])
+
+    default_scope = await analytics(include_subagents=False)
+    subagent_scope = await analytics(include_subagents=True)
+    assert default_scope["summary"]["total_threads"] == baseline_default["summary"]["total_threads"] + 1
+    assert subagent_scope["summary"]["total_threads"] == baseline_including_subagents["summary"]["total_threads"] + 2
+
+    default_audit = await test_client.get(
+        "/api/dashboard/conversations",
+        params={"search": marker, "limit": 10},
+        headers=admin_headers,
+    )
+    deleted_audit = await test_client.get(
+        "/api/dashboard/conversations",
+        params={"search": marker, "status": "deleted", "limit": 10},
+        headers=admin_headers,
+    )
+    assert default_audit.status_code == 200, default_audit.text
+    assert deleted_audit.status_code == 200, deleted_audit.text
+    assert {item["thread_id"] for item in default_audit.json()["items"]} == set(thread_ids[:2])
+    assert {item["thread_id"] for item in deleted_audit.json()["items"]} == {thread_ids[2]}
 
 
 async def test_admin_can_fetch_feedbacks(test_client, admin_headers):
@@ -251,10 +441,22 @@ async def test_historical_stats_keep_write_time_organization_and_mark_inferred_d
 ):
     async with pg_manager.get_async_session_context() as session:
         repository = ConversationRepository(session)
+        project_id = str(uuid.uuid4())
+        session.add(
+            Project(
+                id=project_id,
+                uid=dashboard_scope_users["child_user_uid"],
+                selection_status="implicit",
+                workdir_path=f"projects/{project_id}",
+                directory_mode="managed",
+            )
+        )
+        await session.flush()
         before_move = await repository.add_conversation(
             uid=dashboard_scope_users["child_user_uid"],
             agent_id="pytest-dashboard-agent",
             thread_id=f"pytest-dashboard-before-{uuid.uuid4().hex}",
+            project_id=project_id,
         )
         before_message = Message(conversation=before_move, role="assistant", content="before")
         session.add(before_message)
@@ -276,6 +478,7 @@ async def test_historical_stats_keep_write_time_organization_and_mark_inferred_d
             uid=dashboard_scope_users["child_user_uid"],
             agent_id="pytest-dashboard-agent",
             thread_id=f"pytest-dashboard-after-{uuid.uuid4().hex}",
+            project_id=project_id,
         )
         after_message = Message(conversation=after_move, role="assistant", content="after")
         session.add(after_message)

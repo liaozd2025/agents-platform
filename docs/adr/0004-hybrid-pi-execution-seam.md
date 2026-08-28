@@ -22,7 +22,7 @@ Yuxi 当前只执行 LangGraph Agent，仓库没有 PI Runner 或 PI 依赖。�
 
 现有 Redis Run event envelope 继续作为 SSE 投影，现有 assistant Message、`output_message_id` 与终态事务继续拥有最终文本结果。PI 执行模块新增一个内部 Result Sink seam，接收统一 envelope 并按稳定 `event_id` 幂等处理；final 只有在当前运行尝试仍有效、文本结果与 artifact/session manifest 已持久化后才返回 ACK。当前线程 outputs 只覆盖本机/PVC 文件，没有跨腾讯沙盒的上传、digest 或 PI session Owner，因此 Result Sink 必须在停止实例前把这些数据写回服务器可读存储。
 
-取消继续复用 `request_cancel_agent_run` 的 PostgreSQL 事实与 Redis 通知。PI 执行模块观察取消后调用当前尝试绑定 adapter 的 `stop`，再通过 `AgentRunRepository` 提交单一 `cancelled` 终态。正常 Run 当前没有调用 `ProvisionerSandboxProvider.release`，只依赖 idle reaper 或进程 shutdown；PI 路径必须在 final ACK、取消和已知启动失败后显式 `stop` 并释放全局 token，reconciler 负责暴露无法确认删除的 orphan。
+取消继续复用 `request_cancel_agent_run` 的 PostgreSQL 事实与 Redis 通知。PI 执行模块观察取消后调用当前尝试绑定 adapter 的 `stop`，再通过 `AgentRunRepository` 提交单一 `cancelled` 终态。正常 Run 当前没有调用 `ProvisionerSandboxProvider.release`，只依赖 idle reaper 或进程 shutdown；PI 路径必须在 final ACK、取消和已知启动失败后显式 `stop` 并释放全局 token。无法确认删除时，attempt 持久化 `cleanup_failed_at`，worker 周期重建 Local adapter，并以 PostgreSQL `FOR UPDATE SKIP LOCKED` 排他重试同一 cleanup fact；实例释放成功前不删除 bind-mounted 数据。final ACK 保留业务结果，`execution_unknown` 保留可能已被持久事件引用的 outputs，取消与已知启动失败则在确认释放后清理。
 
 ## 状态流
 
@@ -59,7 +59,7 @@ flowchart LR
 
 最小确定性测试从 PI 执行模块的 interface 进入，注入 fake Local Adapter、fake Result Sink 和可控路由快照。fake 重放同一 event/final 两次，测试回读运行尝试、最终 Message、artifact manifest 和 ACK，证明一个逻辑结果、adapter 只绑定一次、ACK 后调用一次 stop；取消用同一 seam 证明只形成一个 `cancelled` 终态。该测试不经过 HTTP mock 调用次数判断完成，而回读 PostgreSQL 事实与 fake adapter 的最终资源状态。
 
-Local golden Task 使用一个审核过、只读、带固定 digest 的 `pi-golden` Skill。任务要求 PI 读取该 Skill，把精确文本 `YUXI_PI_GOLDEN_V1` 写入 `/home/gem/user-data/outputs/pi-golden.txt`，并提交包含文件 SHA-256、PI session ref、Runtime Manifest digest 的 artifact/final envelope。验收回读服务器文件与 digest，收到 final ACK 后确认 Local sandbox 已停止且服务器结果仍可读。项目仓库 Skill、交互式 RPC、容量阈值与腾讯凭据不进入该 Task。
+Local golden Task 使用一个审核过、只读、带固定 digest 的 `pi-golden` Skill。任务要求 PI 读取该 Skill，把精确文本 `YUXI_PI_GOLDEN_V1` 写入 attempt 独立 Workdir 的 `outputs/pi-golden.txt`，并提交包含文件 SHA-256、PI session ref、Runtime Manifest digest 的 artifact/final envelope。验收回读服务器文件与 digest，收到 final ACK 后确认 Local sandbox 已停止且服务器结果仍可读。项目仓库 Skill、交互式 RPC、容量阈值与腾讯凭据不进入该 Task。
 
 实现后的最小命令为：
 
@@ -74,4 +74,4 @@ docker compose exec api uv run --group test pytest test/e2e/test_pi_local_tracer
 
 PI 接入不会改变 HTTP 路由、请求队列、Run 状态词汇或现有 LangGraph Agent 行为。新增维护表面集中在一个 PI 执行模块、一个内部 adapter seam、attempt 执行字段与一个 Result Sink seam；Local/Tencent 差异留在 adapter 内。
 
-当前代码只能证明既有 Request/Run/Attempt、sandbox、Skill 和输出 seam 可隔离测试，不能证明 PI、Runtime Manifest 校验、跨沙盒回传或按 attempt 清理已经实现。后续 Local tracer 必须先建立上述 red-capable seam，再写正式实现。
+当前 Local tracer 已实现 Request/Run/Attempt 复用、Runtime Manifest 校验、幂等结果 ACK、按 attempt 清理和持久 orphan 重试；跨腾讯沙盒回传与 Tencent adapter 仍未实现，不能用 Local 测试代替其验收。

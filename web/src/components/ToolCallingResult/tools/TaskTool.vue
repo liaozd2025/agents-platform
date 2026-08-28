@@ -59,7 +59,12 @@ const parsedArgs = computed(() => {
 
 const subagentRun = computed(() => props.toolCall.subagent_run || null)
 const subagentDisplayName = computed(
-  () => subagentRun.value?.subagent_name || props.toolCall.display_label || '子智能体'
+  () =>
+    subagentRun.value?.subagent_name ||
+    props.toolCall.display_label ||
+    ((props.toolCall.name || props.toolCall.function?.name) === 'pi_sandbox'
+      ? 'PI Agent'
+      : '子智能体')
 )
 const description = computed(
   () => parsedArgs.value.description || subagentRun.value?.description || ''

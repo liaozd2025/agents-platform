@@ -22,7 +22,7 @@
           <h1 class="brand-text">
             <span v-if="brandOrgName" class="brand-org">{{ brandOrgName }}</span>
             <span v-if="brandOrgName && brandName !== brandOrgName" class="brand-separator"></span>
-            <span class="brand-main">{{ brandName }}</span>
+            <span v-if="brandName !== brandOrgName" class="brand-main">{{ brandName }}</span>
           </h1>
         </div>
       </div>
@@ -292,7 +292,7 @@ import {
   Lock as LockIcon,
   Key as KeyIcon,
   AlertCircle as ExclamationCircleIcon
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { tryAutoStartOIDC, sanitizeRedirect } from '@/utils/oidcAutoStart'
 import { MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 

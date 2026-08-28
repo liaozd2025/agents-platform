@@ -70,7 +70,12 @@ def test_existing_user_updates_changed_display_name_without_changing_identity():
 
 
 def test_empty_and_duplicate_accounts_are_skipped():
-    users = [OaUser("", "Alice", "研发部", 200004), OaUser("alice", "", "研发部", 200004), OaUser("alice", "Alice", "研发部", 200004), OaUser("alice", "Alice", "研发部", 200004)]
+    users = [
+        OaUser("", "Alice", "研发部", 200004),
+        OaUser("alice", "", "研发部", 200004),
+        OaUser("alice", "Alice", "研发部", 200004),
+        OaUser("alice", "Alice", "研发部", 200004),
+    ]
     actions = build_migration_actions(users, [(3, 200004)], [])
     assert [action.reason for action in actions] == ["账号为空", "姓名为空", None, "OA 账号重复"]
 

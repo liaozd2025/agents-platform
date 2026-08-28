@@ -14,10 +14,7 @@ async def _allow_knowledge_manage(_kb_id: str | None, _user) -> None:
     """让工作区导入单测专注文件处理主路径。"""
 
 
-async def test_import_workspace_files_uploads_workspace_file_to_minio(tmp_path, monkeypatch):
-    source = tmp_path / "note.md"
-    source.write_text("# workspace note\n", encoding="utf-8")
-
+async def test_import_workspace_files_uploads_workspace_file_to_minio(monkeypatch):
     async def fake_ensure_database_supports_documents(slug: str, operation: str) -> None:
         assert slug == "db_1"
         assert "文档添加" in operation
@@ -43,15 +40,22 @@ async def test_import_workspace_files_uploads_workspace_file_to_minio(tmp_path, 
         "_ensure_database_supports_documents",
         fake_ensure_database_supports_documents,
     )
+    user = SimpleNamespace(id="user_1")
+
+    async def fake_read_workspace_file_bytes(*, path, current_user):
+        assert path == "/note.md"
+        assert current_user is user
+        return "note.md", b"# workspace note\n"
+
     monkeypatch.setattr(knowledge_router, "_require_manage_permission_if_kb_id", _allow_knowledge_manage)
-    monkeypatch.setattr(knowledge_router, "resolve_workspace_file_path", lambda **_kwargs: source)
+    monkeypatch.setattr(knowledge_router, "read_workspace_file_bytes", fake_read_workspace_file_bytes)
     monkeypatch.setattr(knowledge_router.knowledge_base, "file_existed_in_db", fake_file_existed_in_db)
     monkeypatch.setattr(knowledge_router.knowledge_base, "get_same_name_files", fake_get_same_name_files)
     monkeypatch.setattr(knowledge_router, "aupload_file_to_minio", fake_upload)
 
     result = await knowledge_router.import_workspace_files(
         knowledge_router.WorkspaceImportRequest(kb_id="db_1", paths=["/note.md"]),
-        current_user=SimpleNamespace(id="user_1"),
+        current_user=user,
     )
 
     assert result["status"] == "success"
@@ -66,11 +70,11 @@ async def test_import_workspace_files_uploads_workspace_file_to_minio(tmp_path, 
     assert item["workspace_path"] == "/note.md"
 
 
-async def test_import_workspace_files_rejects_directory(tmp_path, monkeypatch):
+async def test_import_workspace_files_rejects_directory(monkeypatch):
     async def fake_ensure_database_supports_documents(slug: str, operation: str) -> None:
         return None
 
-    def fake_resolve_workspace_file_path(**_kwargs):
+    async def fake_read_workspace_file_bytes(**_kwargs):
         raise HTTPException(status_code=400, detail="当前路径不是文件: /folder")
 
     monkeypatch.setattr(
@@ -79,7 +83,7 @@ async def test_import_workspace_files_rejects_directory(tmp_path, monkeypatch):
         fake_ensure_database_supports_documents,
     )
     monkeypatch.setattr(knowledge_router, "_require_manage_permission_if_kb_id", _allow_knowledge_manage)
-    monkeypatch.setattr(knowledge_router, "resolve_workspace_file_path", fake_resolve_workspace_file_path)
+    monkeypatch.setattr(knowledge_router, "read_workspace_file_bytes", fake_read_workspace_file_bytes)
 
     with pytest.raises(HTTPException) as exc_info:
         await knowledge_router.import_workspace_files(

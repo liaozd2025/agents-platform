@@ -4,7 +4,6 @@ from dataclasses import asdict
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from yuxi.permissions.authorization import (
     AuthorizationContext,
     AuthorizationTarget,
@@ -13,8 +12,8 @@ from yuxi.permissions.authorization import (
 from yuxi.permissions.role_catalog import DATA_SCOPE_CATALOG, PERMISSION_CATALOG
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.repositories.role_repository import RoleRepository
-from yuxi.services.user_role_service import get_assignable_role_constraints
 from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
+from yuxi.services.user_role_service import get_assignable_role_constraints
 from yuxi.storage.postgres.models_business import (
     Role,
     RoleDefaultDepartment,

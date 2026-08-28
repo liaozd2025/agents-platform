@@ -2,7 +2,7 @@
   <BaseToolCall :tool-call="toolCall">
     <template #header>
       <div class="sep-header">
-        <span class="note">Edit</span>
+        <span class="note">编辑文件</span>
         <span class="separator" v-if="filePath">|</span>
         <span class="description" :title="filePath">
           <span class="code">{{ fileName }}</span>
@@ -36,7 +36,7 @@ const parsedArgs = computed(() => {
   }
 })
 
-const filePath = computed(() => parsedArgs.value.file_path || '')
+const filePath = computed(() => parsedArgs.value.file_path || parsedArgs.value.path || '')
 
 // 仅显示文件名，悬浮时通过 title 显示完整路径
 const fileName = computed(() => {
@@ -46,12 +46,12 @@ const fileName = computed(() => {
 })
 
 const addedLines = computed(() => {
-  const newStr = parsedArgs.value.new_string || ''
+  const newStr = parsedArgs.value.new_string || parsedArgs.value.newText || ''
   return newStr ? String(newStr).split('\n').length : 0
 })
 
 const removedLines = computed(() => {
-  const oldStr = parsedArgs.value.old_string || ''
+  const oldStr = parsedArgs.value.old_string || parsedArgs.value.oldText || ''
   return oldStr ? String(oldStr).split('\n').length : 0
 })
 </script>

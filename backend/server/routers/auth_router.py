@@ -1,6 +1,6 @@
 import re
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, ConfigDict, Field
@@ -163,6 +163,13 @@ class CurrentUserResponse(UserResponse):
     """当前登录用户及其请求级有效功能权限。"""
 
     effective_permissions: list[str] = Field(default_factory=list)
+
+
+class UserPageResponse(BaseModel):
+    items: list[UserResponse]
+    total: int
+    limit: int
+    offset: int
 
 
 class UserAccessOption(BaseModel):
@@ -722,6 +729,36 @@ async def create_user(
     if new_user is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="用户创建后读取失败")
     return serialize_user(new_user)
+
+
+@auth.get("/users/page", response_model=UserPageResponse)
+async def read_users_page(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    search: str | None = Query(None, max_length=100),
+    department_id: int | None = Query(None, ge=1),
+    role: str | None = Query(None, max_length=64),
+    authorization: AuthorizationContext = Depends(require_permission("user:read")),
+):
+    """以统一多角色数据范围返回分页用户。"""
+    page_result = await list_authorized_users_page(
+        authorization,
+        "user:read",
+        skip=offset,
+        limit=limit,
+        department_id=department_id,
+        role=role,
+        keyword=search.strip() if search else None,
+    )
+    if page_result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
+    rows, total = page_result
+    return {
+        "items": [serialize_user(user, department_name) for user, department_name in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 # 路由：获取所有用户（管理员权限）

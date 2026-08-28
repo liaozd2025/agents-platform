@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from yuxi.knowledge.cache import cache_kb_config, delete_cached_kb_config, kb_config_cache_lock
 from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
@@ -11,6 +11,17 @@ from yuxi.storage.postgres.models_knowledge import KnowledgeBase
 
 
 class KnowledgeBaseRepository:
+    async def count_by_type(self, *, kb_ids: list[str] | None = None) -> list[tuple[str, int]]:
+        """按知识库类型聚合数量。"""
+        if kb_ids == []:
+            return []
+        statement = select(KnowledgeBase.kb_type, func.count(KnowledgeBase.id))
+        if kb_ids is not None:
+            statement = statement.where(KnowledgeBase.kb_id.in_(kb_ids))
+        async with pg_manager.get_async_session_context() as session:
+            result = await session.execute(statement.group_by(KnowledgeBase.kb_type))
+            return [(str(kb_type or "unknown"), int(count or 0)) for kb_type, count in result.all()]
+
     async def get_all(self) -> list[KnowledgeBase]:
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(select(KnowledgeBase))

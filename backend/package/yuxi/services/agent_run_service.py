@@ -38,6 +38,7 @@ from yuxi.services.input_message_service import (
     AgentRunInputMessage,
     build_resume_input_message,
 )
+from yuxi.services.langfuse_service import get_trace_url_by_id_async
 from yuxi.services.run_queue_service import (
     build_run_event_envelope,
     get_arq_pool,
@@ -632,6 +633,7 @@ async def persist_agent_run_record(
     *,
     agent_slug: str,
     conversation_thread_id: str,
+    runtime_scope_id: str | None = None,
     current_uid: str,
     db: AsyncSession,
     request_id: str,
@@ -653,6 +655,7 @@ async def persist_agent_run_record(
             run = await AgentRunRepository(db).create_run(
                 run_id=run_id,
                 conversation_thread_id=conversation_thread_id,
+                runtime_scope_id=runtime_scope_id,
                 agent_slug=agent_slug,
                 uid=str(current_uid),
                 request_id=request_id,
@@ -707,7 +710,7 @@ async def prepare_agent_run_creation_scope(
     current_uid: str,
     db: AsyncSession,
     request_id: str,
-    run_type: Literal["chat", "resume", "subagent"],
+    run_type: Literal["chat", "resume", "subagent", "sandbox"],
     agent_kind: Literal["main", "subagent"],
     created_by_run_id: str | None = None,
     subagent_thread_relation_id: int | None = None,
@@ -849,7 +852,28 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
     }
     if run.error_type or run.error_message:
         payload["error"] = {"type": run.error_type, "message": run.error_message}
+    if isinstance(output_metadata.get("pi"), dict):
+        payload["pi"] = output_metadata["pi"]
     return payload
+
+
+async def get_agent_run_langfuse_link(*, run_id: str, current_uid: str, db: AsyncSession) -> dict:
+    """按用户可见 Run 的权威输出绑定解析 Langfuse 跳转地址。"""
+    result = await get_agent_run_result(run_id=run_id, current_uid=current_uid, db=db)
+    if result.get("error", {}).get("type") == "run_not_found":
+        raise HTTPException(status_code=404, detail="运行任务不存在")
+
+    trace_id = result.get("langfuse_trace_id")
+    if not isinstance(trace_id, str) or not trace_id.strip():
+        return {"run_id": run_id, "available": False, "reason": "trace_not_available"}
+
+    # 远端项目解析可能等待数秒，先结束只读事务并归还数据库连接。
+    await db.commit()
+    trace_url = await get_trace_url_by_id_async(trace_id)
+    if not trace_url:
+        return {"run_id": run_id, "available": False, "reason": "langfuse_unavailable"}
+
+    return {"run_id": run_id, "available": True, "url": trace_url}
 
 
 async def load_agent_run_result(*, run_id: str, current_uid: str) -> dict:
@@ -882,20 +906,13 @@ async def request_cancel_agent_run(
 ):
     """请求取消一个 run，并可同时向仍活跃的子 run 发布取消信号。"""
     repo = AgentRunRepository(db)
-    run = await repo.get_run_for_user(run_id, str(current_uid))
-    if not run:
+    run, cancelled_ids = await repo.request_cancel_execution_tree(
+        run_id=run_id,
+        uid=str(current_uid),
+        cascade_descendants=cascade_children,
+    )
+    if run is None:
         raise HTTPException(status_code=404, detail="运行任务不存在")
-
-    # FOR UPDATE 写锁在同一会话上必须串行；取消信号之间互不依赖，统一并发发布。
-    cancelled_ids = []
-    if cascade_children:
-        child_runs = await repo.list_active_child_runs_for_user(run_id, str(current_uid))
-        for child_run in child_runs:
-            await repo.request_cancel(child_run.id)
-            cancelled_ids.append(child_run.id)
-
-    run = await repo.request_cancel(run_id)
-    cancelled_ids.append(run_id)
     await db.commit()
     await asyncio.gather(*(publish_cancel_signal(cid) for cid in cancelled_ids))
     return run
@@ -974,7 +991,11 @@ async def stream_agent_run_events(
             if emitted_terminal:
                 return
 
-            if run.status in TERMINAL_RUN_STATUSES and not events:
+            if (
+                run.status in TERMINAL_RUN_STATUSES
+                and not bool(getattr(run, "runtime_cleanup_pending", False))
+                and not events
+            ):
                 terminal_seq = last_seq
                 if terminal_seq in {"", "0-0"}:
                     terminal_seq = await get_last_run_stream_seq(run_id)

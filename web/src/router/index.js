@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import AppLayout from '@/layouts/AppLayout.vue'
-import BlankLayout from '@/layouts/BlankLayout.vue'
 import { useUserStore } from '@/stores/user'
 import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
 import { canAccessRoute, getAuthenticatedHomePath } from '@/utils/authNavigation'
@@ -28,16 +27,7 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      name: 'main',
-      component: BlankLayout,
-      children: [
-        {
-          path: '',
-          name: 'Home',
-          component: () => import('../views/HomeView.vue'),
-          meta: { keepAlive: true, requiresAuth: false }
-        }
-      ]
+      redirect: '/agent'
     },
     {
       path: '/login',

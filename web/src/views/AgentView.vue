@@ -54,7 +54,7 @@
               </button>
             </div>
           </template>
-          <template #input-actions-left="{ hasActiveThread }">
+          <template #input-actions-left="{ hasActiveThread, isCreatingThread }">
             <a-dropdown
               v-if="selectedAgentId"
               v-model:open="agentDropdownOpen"
@@ -66,7 +66,8 @@
                 ref="agentDropdownTriggerRef"
                 type="button"
                 class="input-action-btn config-dropdown-trigger"
-                :class="{ disabled: isLoadingConfig }"
+                :class="{ disabled: isLoadingConfig || isCreatingThread }"
+                :disabled="isCreatingThread"
                 :aria-label="currentAgentLabel"
               >
                 <FallbackAvatar
@@ -77,7 +78,7 @@
                   :name="currentAgentOption.label"
                   :seed="currentAgentOption.value || currentAgentOption.label"
                   kind="agent"
-                  :size="18"
+                  :size="20"
                   shape="rounded"
                   alt=""
                 />
@@ -96,7 +97,7 @@
                       selected: agent.value === selectedAgentId,
                       disabled: hasActiveThread && agent.value !== selectedAgentId
                     }"
-                    @click="handleAgentSwitch(agent.value, hasActiveThread)"
+                    @click="handleAgentSwitch(agent.value, hasActiveThread, isCreatingThread)"
                   >
                     <FallbackAvatar
                       class="config-dropdown-item-icon-image"
@@ -192,7 +193,7 @@ import {
   PictureInPicture2,
   Plus,
   X
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { useRoute, useRouter } from 'vue-router'
 import { agentApi } from '@/apis/agent_api'
 import { useEmbedContext } from '@/composables/useEmbedMode'
@@ -265,6 +266,7 @@ const syncSelectedThreadFromRoute = async () => {
     }
 
     const ok = await chatComponent.selectThreadFromRoute(threadId)
+    if (ok === null) return
     if (threadId && !ok) {
       await router.replace({ name: embedMode.value ? 'EmbedAgent' : 'AgentComp' })
     }
@@ -284,7 +286,8 @@ const consumeRouteAgentSelection = async () => {
     }
 
     await nextTick()
-    await chatComponentRef.value?.selectThreadFromRoute?.('')
+    const canSwitch = await chatComponentRef.value?.selectThreadFromRoute?.('')
+    if (canSwitch === null) return
     await agentStore.selectAgent(targetAgentId)
   } catch (error) {
     handleChatError(error, 'load')
@@ -417,8 +420,12 @@ const loadAgentBackends = async () => {
   agentBackendsLoaded.value = true
 }
 
-const handleAgentSwitch = async (agentId, hasActiveThread) => {
+const handleAgentSwitch = async (agentId, hasActiveThread, isCreatingThread) => {
   if (!agentId || agentId === selectedAgentId.value) return
+  if (isCreatingThread) {
+    message.info('正在创建新对话，请稍候')
+    return
+  }
   if (hasActiveThread) {
     message.info('当前对话已绑定智能体，请新建对话后切换')
     return
@@ -606,12 +613,21 @@ useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdown
   min-width: 0;
   width: 100%;
   padding: 6px 8px;
+  margin: 3px 0;
   border: none;
   border-radius: 6px;
   background: transparent;
   text-align: left;
   cursor: pointer;
   transition: background-color 0.15s ease;
+
+  &:first-child {
+    margin-top: 0;
+  }
+
+  &:last-child {
+    margin-bottom: 0;
+  }
 }
 
 .config-dropdown-overlay .config-dropdown-item:hover {
@@ -638,6 +654,7 @@ useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdown
 .config-dropdown-overlay .config-dropdown-actions .config-dropdown-item {
   flex: 1;
   width: auto;
+  margin: 0;
 }
 
 .config-dropdown-overlay .config-dropdown-item-label {
@@ -658,7 +675,7 @@ useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdown
 }
 
 .config-dropdown-overlay .config-dropdown-item-icon {
-  color: var(--gray-500);
+  color: var(--gray-700);
 }
 
 .config-dropdown-overlay .config-dropdown-item-icon-image,

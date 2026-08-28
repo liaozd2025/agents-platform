@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,8 +13,12 @@ from sqlalchemy import func as sa_func
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.services.agent_request_queue_service import (
+    DispatchResult,
+    IntakeResult,
     NOT_IMPLEMENTED_QUEUE_POLICIES,
     cancel_queued_request,
+    finalize_dispatch,
+    finalize_intake,
     intake_request,
     steer_queued_request,
     validate_queue_policy,
@@ -21,6 +27,207 @@ from yuxi.storage.postgres.models_business import AgentRunRequest, Base, Message
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = [pytest.mark.unit]
+
+
+# ── finalize ordering ──
+
+
+@pytest.mark.asyncio
+async def test_finalize_dispatch_materializes_workdir_after_commit_before_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[str] = []
+
+    class Db:
+        async def commit(self):
+            events.append("commit")
+
+    def ensure_workdir(uid: str, workdir_path: str):
+        assert uid == "user-1"
+        assert workdir_path == "projects/11111111-1111-4111-8111-111111111111"
+        events.append("materialize")
+
+    async def enqueue(run_id: str):
+        assert run_id == "run-1"
+        events.append("enqueue")
+
+    from yuxi.services import agent_request_queue_service as service
+
+    monkeypatch.setattr(service, "ensure_bound_user_workdir", ensure_workdir)
+    monkeypatch.setattr(service, "enqueue_agent_run", enqueue)
+
+    await finalize_dispatch(
+        db=Db(),
+        dispatch=DispatchResult(
+            request_id="request-1",
+            run_id="run-1",
+            uid="user-1",
+            workdir_path="projects/11111111-1111-4111-8111-111111111111",
+            materialize_managed=True,
+        ),
+    )
+
+    assert events == ["commit", "materialize", "enqueue"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_dispatch_does_not_materialize_when_commit_fails(monkeypatch: pytest.MonkeyPatch):
+    """Owner 事务失败时不得留下无归属的 managed 目录。"""
+
+    class Db:
+        async def commit(self):
+            raise RuntimeError("commit failed")
+
+    from yuxi.services import agent_request_queue_service as service
+
+    monkeypatch.setattr(
+        service,
+        "ensure_bound_user_workdir",
+        lambda *_args: pytest.fail("commit 失败后不应物化目录"),
+    )
+    monkeypatch.setattr(
+        service,
+        "enqueue_agent_run",
+        lambda *_args: pytest.fail("commit 失败后不应投递 Run"),
+    )
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await finalize_dispatch(
+            db=Db(),
+            dispatch=DispatchResult(
+                request_id="request-1",
+                run_id="run-1",
+                uid="user-1",
+                workdir_path="projects/project-1",
+                materialize_managed=True,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_finalize_queued_intake_recovers_missing_managed_workdir(monkeypatch: pytest.MonkeyPatch):
+    """排队请求提交后仍需幂等恢复 managed Project 目录。"""
+
+    events: list[str] = []
+
+    class Db:
+        async def commit(self):
+            events.append("commit")
+
+    def ensure_workdir(uid: str, workdir_path: str):
+        assert (uid, workdir_path) == ("user-1", "projects/project-1")
+        events.append("materialize")
+
+    from yuxi.services import agent_request_queue_service as service
+
+    monkeypatch.setattr(service, "ensure_bound_user_workdir", ensure_workdir)
+
+    await finalize_intake(
+        db=Db(),
+        intake=IntakeResult(
+            request_id="request-1",
+            status="queued",
+            queue_policy="enqueue",
+            message_id=1,
+            thread_id="thread-1",
+            queue_position=1,
+        ),
+        uid="user-1",
+        workdir_path="projects/project-1",
+        materialize_managed=True,
+    )
+
+    assert events == ["commit", "materialize"]
+
+
+@pytest.mark.asyncio
+async def test_recover_pending_dispatches_isolates_failed_scope(monkeypatch: pytest.MonkeyPatch):
+    """一个损坏 scope 不得阻断其他 pending Run 的恢复。"""
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class Db:
+        calls = 0
+
+        async def execute(self, _statement):
+            self.calls += 1
+            return Result(
+                [("user-1", "main", "bad-thread"), ("user-1", "main", "good-thread")]
+                if self.calls == 1
+                else []
+            )
+
+    @asynccontextmanager
+    async def session_context():
+        yield Db()
+
+    recovered: list[str] = []
+
+    async def dispatch_next_request(**kwargs):
+        if kwargs["thread_id"] == "bad-thread":
+            raise RuntimeError("broken scope")
+        recovered.append(kwargs["thread_id"])
+        return "run-good"
+
+    from yuxi.services import agent_request_queue_service as service
+
+    monkeypatch.setattr(service.pg_manager, "get_async_session_context", session_context)
+    monkeypatch.setattr(service, "dispatch_next_request", dispatch_next_request)
+
+    await service.recover_pending_dispatches()
+
+    assert recovered == ["good-thread"]
+
+
+@pytest.mark.asyncio
+async def test_pending_linked_run_is_enqueued_without_opening_missing_directory(monkeypatch: pytest.MonkeyPatch):
+    """linked 目录失效由 worker 记为终态，不能卡在 pending 且未投递。"""
+
+    events: list[str] = []
+    conversation = SimpleNamespace(id=1, uid="user-1", agent_id="main", status="active")
+
+    @asynccontextmanager
+    async def session_context():
+        yield object()
+        events.append("commit")
+
+    class ConversationRepo:
+        def __init__(self, _db):
+            pass
+
+        async def lock_conversation_by_thread_id(self, _thread_id):
+            return conversation
+
+    class RunRepo:
+        def __init__(self, _db):
+            pass
+
+        async def get_active_run_by_thread_for_user(self, **_kwargs):
+            return SimpleNamespace(id="run-linked", status="pending")
+
+    async def resolve_binding(**_kwargs):
+        return "clients/missing", SimpleNamespace(directory_mode="linked")
+
+    async def enqueue(run_id):
+        events.append(f"enqueue:{run_id}")
+
+    from yuxi.services import agent_request_queue_service as service
+
+    monkeypatch.setattr(service.pg_manager, "get_async_session_context", session_context)
+    monkeypatch.setattr(service, "ConversationRepository", ConversationRepo)
+    monkeypatch.setattr(service, "AgentRunRepository", RunRepo)
+    monkeypatch.setattr(service, "resolve_conversation_workdir_binding", resolve_binding)
+    monkeypatch.setattr(service, "enqueue_agent_run", enqueue)
+
+    result = await service.dispatch_next_request(uid="user-1", agent_slug="main", thread_id="thread-1")
+
+    assert result == "run-linked"
+    assert events == ["commit", "enqueue:run-linked"]
 
 
 # ── validate_queue_policy ──
@@ -101,6 +308,108 @@ async def test_channel_steer_is_accepted_for_active_message_run(
 
     assert result.status == "queued"
     assert result.queue_policy == "steer"
+
+
+@pytest.mark.asyncio
+async def test_intake_request_binds_resolved_model_to_conversation(session, monkeypatch: pytest.MonkeyPatch):
+    from yuxi.services import agent_request_queue_service
+    from yuxi.services.input_message_service import build_chat_input_message
+    from yuxi.storage.postgres.models_business import Conversation
+
+    resolved_requests = []
+
+    async def resolve_config(model_spec, *_args):
+        resolved_requests.append(model_spec)
+        return model_spec or "provider:agent-default", "default"
+
+    monkeypatch.setattr(agent_request_queue_service, "resolve_agent_run_config", resolve_config)
+    await _seed_thread(session)
+
+    first = await intake_request(
+        db=session,
+        request_id="request-model-a",
+        uid="user-1",
+        agent_slug="main",
+        thread_id="t1",
+        input_message=build_chat_input_message("first"),
+        agent_item=MagicMock(),
+        agent_backend=MagicMock(),
+        model_spec="provider:conversation-model",
+    )
+
+    conversation = await session.get(Conversation, 10)
+    await session.refresh(conversation)
+    assert first.status == "dispatched"
+    assert conversation.extra_metadata["model_spec"] == "provider:conversation-model"
+
+    second = await intake_request(
+        db=session,
+        request_id="request-model-b",
+        uid="user-1",
+        agent_slug="main",
+        thread_id="t1",
+        input_message=build_chat_input_message("second"),
+        agent_item=MagicMock(),
+        agent_backend=MagicMock(),
+    )
+    assert second.status == "queued"
+    assert resolved_requests == ["provider:conversation-model", "provider:conversation-model"]
+
+    rejected = await intake_request(
+        db=session,
+        request_id="request-model-rejected",
+        uid="user-1",
+        agent_slug="main",
+        thread_id="t1",
+        queue_policy="reject",
+        input_message=build_chat_input_message("rejected"),
+        agent_item=MagicMock(),
+        agent_backend=MagicMock(),
+        model_spec="provider:rejected-model",
+    )
+
+    await session.refresh(conversation)
+    assert rejected.status == "rejected"
+    assert conversation.extra_metadata["model_spec"] == "provider:conversation-model"
+
+
+@pytest.mark.asyncio
+async def test_reject_dispatch_conflict_does_not_change_conversation_model(
+    session, monkeypatch: pytest.MonkeyPatch
+):
+    from yuxi.services import agent_request_queue_service
+    from yuxi.services.input_message_service import build_chat_input_message
+    from yuxi.storage.postgres.models_business import Conversation
+
+    async def resolve_config(model_spec, *_args):
+        return model_spec, "default"
+
+    async def lose_dispatch_race(**_kwargs):
+        return None
+
+    monkeypatch.setattr(agent_request_queue_service, "resolve_agent_run_config", resolve_config)
+    monkeypatch.setattr(agent_request_queue_service, "_dispatch_ready_head", lose_dispatch_race)
+    await _seed_thread(session)
+    conversation = await session.get(Conversation, 10)
+    conversation.extra_metadata = {"model_spec": "provider:existing-model"}
+    await session.commit()
+
+    result = await intake_request(
+        db=session,
+        request_id="request-reject-race",
+        uid="user-1",
+        agent_slug="main",
+        thread_id="t1",
+        queue_policy="reject",
+        input_message=build_chat_input_message("reject race"),
+        agent_item=MagicMock(),
+        agent_backend=MagicMock(),
+        model_spec="provider:rejected-model",
+    )
+
+    await session.refresh(conversation)
+    assert result.status == "rejected"
+    assert conversation.extra_metadata["model_spec"] == "provider:existing-model"
 
 
 @pytest.mark.asyncio
@@ -192,9 +501,28 @@ async def session():
 
 
 async def _seed_thread(session, *, uid="user-1", msg_id=100, conv_id=10):
-    from yuxi.storage.postgres.models_business import Conversation, Message
+    from yuxi.storage.postgres.models_business import Conversation, Message, Project
 
-    session.add(Conversation(id=conv_id, thread_id="t1", uid=uid, agent_id="main", status="active"))
+    project_id = f"project-{uid}-t1"
+    session.add(
+        Project(
+            id=project_id,
+            uid=uid,
+            selection_status="implicit",
+            workdir_path=f"projects/workdir-{uid}-t1",
+            directory_mode="managed",
+        )
+    )
+    session.add(
+        Conversation(
+            id=conv_id,
+            thread_id="t1",
+            project_id=project_id,
+            uid=uid,
+            agent_id="main",
+            status="active",
+        )
+    )
     session.add(Message(id=msg_id, conversation_id=conv_id, role="user", content="hi"))
     await session.commit()
 
@@ -218,12 +546,14 @@ async def _seed_active_run(session, *, source="chat", status="running", run_type
         AgentRun(
             id="active-run",
             conversation_thread_id="t1",
+            runtime_scope_id="t1",
             agent_slug="main",
             uid="user-1",
             status=status,
             request_id="active-request",
             conversation_id=10,
             run_type=run_type,
+            created_by_run_id="interrupted-run" if run_type == "resume" else None,
             input_payload={},
         )
     )
@@ -495,7 +825,16 @@ async def test_intake_idempotent_rejects_scope_mismatch(session):
     from yuxi.storage.postgres.models_business import Conversation
 
     await _seed_thread(session)
-    session.add(Conversation(id=11, thread_id="t2", uid="user-1", agent_id="other", status="active"))
+    session.add(
+        Conversation(
+            id=11,
+            thread_id="t2",
+            project_id="project-user-1-t2",
+            uid="user-1",
+            agent_id="other",
+            status="active",
+        )
+    )
     await _create_request(session, request_id="req-scope")
 
     with pytest.raises(HTTPException) as exc_info:
@@ -564,6 +903,7 @@ async def test_dispatch_sets_delivery_status_dispatched(session):
         agent_slug="main",
         thread_id="t1",
         conversation_id=10,
+        workdir_path="projects/workdir-user-1-t1",
     )
     assert dispatched is not None
 
@@ -602,6 +942,7 @@ async def test_dispatches_multiple_queued_requests_one_at_a_time(session):
         agent_slug="main",
         thread_id="t1",
         conversation_id=10,
+        workdir_path="projects/workdir-user-1-t1",
     )
     await session.commit()
     assert dispatched_b is not None
@@ -638,12 +979,25 @@ async def test_dispatches_multiple_queued_requests_one_at_a_time(session):
     )
     assert completed is True
     await session.commit()
+    blocked_c = await _dispatch_ready_head(
+        db=session,
+        uid="user-1",
+        agent_slug="main",
+        thread_id="t1",
+        conversation_id=10,
+        workdir_path="projects/workdir-user-1-t1",
+    )
+    assert blocked_c is None
+    persisted_b = await run_repository.get_run(run_b)
+    persisted_b.runtime_cleanup_pending = False
+    await session.commit()
     dispatched_c = await _dispatch_ready_head(
         db=session,
         uid="user-1",
         agent_slug="main",
         thread_id="t1",
         conversation_id=10,
+        workdir_path="projects/workdir-user-1-t1",
     )
     await session.commit()
 
@@ -669,6 +1023,7 @@ async def test_reject_with_active_run_persists_request_and_is_idempotent(session
         AgentRun(
             id=str(_uuid.uuid4()),
             conversation_thread_id="t1",
+            runtime_scope_id="t1",
             agent_slug="main",
             uid="user-1",
             request_id="existing",
@@ -744,6 +1099,7 @@ async def _seed_terminal_run(session, *, run_id: str, status: str, created_at, f
         AgentRun(
             id=run_id,
             conversation_thread_id="t1",
+            runtime_scope_id="t1",
             agent_slug="main",
             uid="user-1",
             request_id=f"request-{run_id}",
@@ -875,6 +1231,9 @@ async def test_continue_dispatches_only_paused_fifo_head(session):
 
     repo = AgentRunRequestRepository(session)
     assert dispatched.request_id == "request-b"
+    assert dispatched.uid == "user-1"
+    assert dispatched.workdir_path == "projects/workdir-user-1-t1"
+    assert dispatched.materialize_managed is True
     assert (await repo.get_by_request_id("request-b")).status == "dispatched"
     assert await repo.get_queue_position("request-c") == 1
 

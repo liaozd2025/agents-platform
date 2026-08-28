@@ -13,7 +13,7 @@ from yuxi.config.runtime import knowledge_capability_enabled
 from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.services.readiness_service import get_readiness
 from yuxi.storage.postgres.models_business import User
-from yuxi.utils.logging_config import logger
+from yuxi.utils.logging_config import LOG_FILE, logger
 
 from server.utils.auth_middleware import get_authorization_context, get_db, get_required_user, require_permission
 
@@ -165,14 +165,12 @@ async def get_system_logs(
     levels: str | None = None,
     _authorization: AuthorizationContext = Depends(require_permission("system_log:read")),
 ):
-    """获取系统日志
+    """获取当前 API 进程日志。
 
     Args:
         levels: 可选的日志级别过滤，多个级别用逗号分隔，如 "INFO,ERROR,DEBUG,WARNING"
     """
     try:
-        from yuxi.utils.logging_config import LOG_FILE
-
         # 解析日志级别过滤条件
         level_filter = None
         if levels:
@@ -200,7 +198,7 @@ async def get_system_logs(
                         lines.pop(0)
 
         log = "".join(lines)
-        return {"log": log, "message": "success", "log_file": LOG_FILE}
+        return {"log": log, "message": "success", "log_file": LOG_FILE, "scope": "api"}
     except Exception as e:
         logger.error(f"获取系统日志失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取系统日志失败: {str(e)}")

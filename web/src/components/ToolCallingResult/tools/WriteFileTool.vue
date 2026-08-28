@@ -2,7 +2,7 @@
   <BaseToolCall :tool-call="toolCall">
     <template #header>
       <div class="sep-header">
-        <span class="note">write_file</span>
+        <span class="note">写入文件</span>
         <span class="separator" v-if="filePath">|</span>
         <span class="description code">{{ filePath }}</span>
         <span class="tag success" v-if="lineCount > 0"> +{{ lineCount }}</span>
@@ -35,7 +35,7 @@ const parsedArgs = computed(() => {
   }
 })
 
-const filePath = computed(() => parsedArgs.value.file_path || '')
+const filePath = computed(() => parsedArgs.value.file_path || parsedArgs.value.path || '')
 const content = computed(() => parsedArgs.value.content || '')
 const lineCount = computed(() => {
   if (!content.value) return 0

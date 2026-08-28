@@ -49,5 +49,5 @@ gh api --method POST repos/liaozd2025/agents-platform/issues/<child>/dependencie
 ## 本仓库的补充约定
 
 - **语言**：issue 标题与正文用**中文**（与仓库其余文档一致）。标签字符串、命令片段保持英文原样。
-- **提交**：由 issue 派生的提交遵循 [CLAUDE.md](../../CLAUDE.md) 的提交规范——Conventional Commits + 中文说明。
-- **术语**：优先使用 [ARCHITECTURE.md](../../ARCHITECTURE.md) 中已有的模块与边界名称，不要另造同义词。
+- **提交**：由 issue 派生的提交遵循 [CLAUDE.md](https://github.com/liaozd2025/agents-platform/blob/main/CLAUDE.md) 的提交规范——Conventional Commits + 中文说明。
+- **术语**：优先使用 [ARCHITECTURE.md](https://github.com/liaozd2025/agents-platform/blob/main/ARCHITECTURE.md) 中已有的模块与边界名称，不要另造同义词。

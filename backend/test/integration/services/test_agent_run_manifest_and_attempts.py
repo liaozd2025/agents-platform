@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import uuid
 from datetime import timedelta
@@ -16,7 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.services.agent_run_manifest_service import compute_manifest_fingerprint
 from yuxi.storage.postgres.manager import AGENT_RUN_FACT_SCHEMA_STATEMENTS
-from yuxi.storage.postgres.models_business import AgentRun, AgentRunAttempt, Conversation, Message
+from yuxi.storage.postgres.models_business import AgentRun, AgentRunAttempt, Conversation, Message, Project, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -41,8 +42,27 @@ async def _create_run(session_factory, *, status: str = "pending") -> tuple[str,
     request_id = f"fact-{uuid.uuid4()}"
     thread_id = f"pytest-fact-{uuid.uuid4()}"
     uid = f"pytest-user-{uuid.uuid4()}"
+    project_id = str(uuid.uuid4())
     async with session_factory() as db:
-        conversation = Conversation(thread_id=thread_id, uid=uid, agent_id="main", status="active")
+        db.add(User(username=uid, uid=uid, password_hash="test"))
+        await db.flush()
+        db.add(
+            Project(
+                id=project_id,
+                uid=uid,
+                selection_status="implicit",
+                workdir_path=f"projects/{project_id}",
+                directory_mode="managed",
+            )
+        )
+        await db.flush()
+        conversation = Conversation(
+            thread_id=thread_id,
+            uid=uid,
+            project_id=project_id,
+            agent_id="main",
+            status="active",
+        )
         db.add(conversation)
         await db.flush()
         message = Message(
@@ -58,6 +78,7 @@ async def _create_run(session_factory, *, status: str = "pending") -> tuple[str,
             AgentRun(
                 id=run_id,
                 conversation_thread_id=thread_id,
+                runtime_scope_id=thread_id,
                 agent_slug="main",
                 uid=uid,
                 request_id=request_id,
@@ -74,6 +95,11 @@ async def _create_run(session_factory, *, status: str = "pending") -> tuple[str,
 
 async def _cleanup_runs(session_factory, thread_ids: list[str]) -> None:
     async with session_factory() as db:
+        rows = (
+            await db.execute(
+                select(Conversation.project_id, Conversation.uid).where(Conversation.thread_id.in_(thread_ids))
+            )
+        ).all()
         conversation_ids = list(
             (await db.scalars(select(Conversation.id).where(Conversation.thread_id.in_(thread_ids)))).all()
         )
@@ -81,6 +107,8 @@ async def _cleanup_runs(session_factory, thread_ids: list[str]) -> None:
             await db.execute(delete(Message).where(Message.conversation_id.in_(conversation_ids)))
         await db.execute(delete(AgentRun).where(AgentRun.conversation_thread_id.in_(thread_ids)))
         await db.execute(delete(Conversation).where(Conversation.thread_id.in_(thread_ids)))
+        await db.execute(delete(Project).where(Project.id.in_([row.project_id for row in rows])))
+        await db.execute(delete(User).where(User.uid.in_([row.uid for row in rows])))
         await db.commit()
 
 
@@ -176,6 +204,13 @@ async def test_attempt_history_survives_retry_takeover_and_reconciliation(fact_d
         assert released is True
 
         async with session_factory() as db:
+            run = await db.get(AgentRun, run_id)
+            assert run is not None
+            assert run.runtime_cleanup_pending is True
+            run.runtime_cleanup_pending = False
+            await db.commit()
+
+        async with session_factory() as db:
             repository = AgentRunRepository(db)
             _, second_claim = await repository.mark_running(
                 run_id, worker_id=owner_b, lease_seconds=5, now=now + timedelta(seconds=12)
@@ -186,12 +221,13 @@ async def test_attempt_history_survives_retry_takeover_and_reconciliation(fact_d
         reconciled_at = now + timedelta(seconds=30)
         async with session_factory() as db:
             repository = AgentRunRepository(db)
-            reconciled = await repository.reconcile_expired_leases(now=reconciled_at)
+            reconciled, cancelled_descendants = await repository.reconcile_expired_leases(now=reconciled_at)
             await db.commit()
 
         attempts = await _persisted_attempts(session_factory, run_id)
 
         assert [run.id for run in reconciled] == [run_id]
+        assert cancelled_descendants == []
         assert [attempt.attempt_no for attempt in attempts] == [1, 2]
         first, second = attempts
         assert first.worker_id == owner_a
@@ -478,6 +514,7 @@ async def test_pi_envelope_replay_is_idempotent_and_final_ack_is_durable(fact_da
         "runtime_manifest_digest": manifest_digest,
         "payload": {
             "text": "YUXI_PI_GOLDEN_V1",
+            "output_subdir": "pending",
             "artifact": {"path": "pi-golden.txt", "sha256": "b" * 64},
             "session": {"id": "session-1"},
         },
@@ -498,6 +535,10 @@ async def test_pi_envelope_replay_is_idempotent_and_final_ack_is_durable(fact_da
             await db.commit()
         attempt = (await _persisted_attempts(session_factory, run_id))[0]
         final["attempt_id"] = str(attempt.id)
+        final["payload"]["output_subdir"] = (
+            f"pi-runs/{hashlib.sha256(f'{run_id}:{attempt.id}'.encode()).hexdigest()[:24]}"
+        )
+        final["payload_digest"] = compute_manifest_fingerprint(final["payload"])
         log = {
             "job_id": run_id,
             "attempt_id": str(attempt.id),

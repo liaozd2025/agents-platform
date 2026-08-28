@@ -18,6 +18,8 @@ def _context(summary_threshold: int = 123) -> SimpleNamespace:
         summary_l2_trigger_ratio=0.75,
         tool_token_limit=3,
         model_retry_times=1,
+        workdir_relative_path="projects/11111111-1111-4111-8111-111111111111",
+        workdir_path="/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111",
     )
 
 
@@ -35,8 +37,8 @@ def _patch_common_graph_deps(monkeypatch: pytest.MonkeyPatch, graph_module, capt
 @pytest.mark.parametrize(
     ("graph_module", "threshold", "build_args", "patch_subagent_task"),
     [
-        (chatbot_graph, 123, (), True),
-        (subagent_graph, 64, ("default",), False),
+        (chatbot_graph, 123, (object(),), True),
+        (subagent_graph, 64, (object(), "default"), False),
     ],
 )
 @pytest.mark.unit

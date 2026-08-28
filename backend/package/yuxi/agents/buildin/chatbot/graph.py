@@ -3,7 +3,12 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware
 
 from yuxi.agents import BaseAgent, load_chat_model, resolve_chat_model_spec
-from yuxi.agents.backends import create_agent_filesystem_middleware, sync_agent_context_skills
+from yuxi.agents.backends import (
+    create_agent_composite_backend,
+    create_agent_filesystem_middleware,
+    sync_agent_context_skills,
+)
+from yuxi.agents.backends.paths import runtime_workdir_path
 from yuxi.agents.context import (
     DEFAULT_SUMMARY_KEEP_MESSAGES,
     DEFAULT_SUMMARY_L2_TRIGGER_RATIO,
@@ -17,10 +22,11 @@ from yuxi.agents.middlewares import (
     ImageInputCompatibilityMiddleware,
     SteerMiddleware,
     TokenUsageMiddleware,
+    create_memory_middleware,
     create_summary_middleware,
-    save_attachments_to_fs,
 )
 from yuxi.agents.middlewares.skills import SkillsMiddleware
+from yuxi.agents.middlewares.pi_sandbox import create_pi_sandbox_middleware
 from yuxi.agents.middlewares.subagent_task import create_subagent_task_middleware
 from yuxi.agents.tool_approval import create_tool_approval_middleware, normalize_tool_approval_mode
 from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
@@ -30,7 +36,7 @@ from .prompt import TODO_MID_PROMPT, build_prompt_with_context
 from .state import ChatBotState
 
 
-async def _build_middlewares(context):
+async def _build_middlewares(context, backend):
     """构建中间件列表"""
     # summary middleware
     # 主 Agent 上下文优化：默认 100k tokens 触发压缩，压缩后保留最近 10 条消息
@@ -46,6 +52,7 @@ async def _build_middlewares(context):
     model_spec = resolve_chat_model_spec(context.model)
     summary_middleware = create_summary_middleware(
         model=load_chat_model(fully_specified_name=model_spec),
+        backend=backend,
         trigger=("tokens", summary_trigger_tokens),
         keep=("messages", summary_keep_messages),
         summary_prompt=summary_prompt,
@@ -58,11 +65,14 @@ async def _build_middlewares(context):
         SteerMiddleware(),
         create_agent_filesystem_middleware(
             getattr(context, "tool_token_limit", DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS) * 1024,
-            context=context,
+            backend=backend,
         ),
-        save_attachments_to_fs,
         SkillsMiddleware(),
+        create_pi_sandbox_middleware(context),
     ]
+    memory_middleware = await create_memory_middleware(context)
+    if memory_middleware:
+        middlewares.append(memory_middleware)
     subagent_middleware = await create_subagent_task_middleware(context)
     if subagent_middleware:
         middlewares.append(subagent_middleware)
@@ -77,7 +87,8 @@ async def _build_middlewares(context):
         ]
     )
     approval_middleware = create_tool_approval_middleware(
-        normalize_tool_approval_mode(getattr(context, "tool_approval_mode", "default"))
+        normalize_tool_approval_mode(getattr(context, "tool_approval_mode", "default")),
+        current_project_path=runtime_workdir_path(context.workdir_relative_path),
     )
     if approval_middleware:
         middlewares.append(approval_middleware)
@@ -101,13 +112,17 @@ class ChatbotAgent(BaseAgent):
         )
         await sync_agent_context_skills(context)
 
+        # DeepAgents 0.7 移除 backend factory：每次 graph 构造创建本 Run 独享的
+        # CompositeBackend，filesystem 与 summary middleware 共用同一实例。
+        backend = create_agent_composite_backend(context)
+
         # 使用 create_agent 创建智能体
         model_spec = resolve_chat_model_spec(context.model)
         graph = create_agent(
             model=load_chat_model(fully_specified_name=model_spec),
             tools=await resolve_configured_runtime_tools(context),
             system_prompt=build_prompt_with_context(context),
-            middleware=await _build_middlewares(context),
+            middleware=await _build_middlewares(context, backend),
             state_schema=ChatBotState,
             checkpointer=await self._get_checkpointer(),
         )

@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/components/FileUploadModal.vue、backend/package/yuxi/repositories/knowledge_file_repository.py
+Owner：web/src/components/FileUploadModal.vue
 
 ## 问题
 浏览器文件夹上传虽然携带每个文件的相对路径，但入库请求未传递该路径，导致知识库文件列表把所有文件显示在同一目录。
