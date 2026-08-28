@@ -9,7 +9,7 @@
           <span class="description skill-name">{{ skillName }}</span>
         </template>
         <template v-else>
-          <span class="note">Read</span>
+          <span class="note">读取文件</span>
           <span class="separator" v-if="filePath">|</span>
           <span class="description" :title="filePath">
             <span class="code">{{ fileName }}</span>
@@ -43,7 +43,7 @@ const parsedArgs = computed(() => {
   }
 })
 
-const filePath = computed(() => parsedArgs.value.file_path || '')
+const filePath = computed(() => parsedArgs.value.file_path || parsedArgs.value.path || '')
 
 // 仅显示文件名，悬浮时通过 title 显示完整路径
 const fileName = computed(() => {

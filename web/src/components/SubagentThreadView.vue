@@ -1,6 +1,6 @@
 <template>
   <div class="subagent-thread-view">
-    <div ref="scrollContainerRef" class="subagent-thread-scroll">
+    <div ref="scrollContainerRef" class="subagent-thread-scroll" @scroll="handleScroll">
       <div ref="contentRef" class="subagent-thread-content">
         <div v-if="loading && !hasRenderableMessages" class="subagent-thread-state">
           正在加载子智能体消息...
@@ -83,7 +83,9 @@ const streamedMessages = computed(() => {
     .map(MessageProcessor.mergeMessageChunk)
     .filter(Boolean)
   return chunks.length
-    ? MessageProcessor.convertToolResultToMessages(chunks).filter((message) => message.type !== 'tool')
+    ? MessageProcessor.convertToolResultToMessages(chunks).filter(
+        (message) => message.type !== 'tool'
+      )
     : []
 })
 const displayMessages = computed(() => messages.value)
@@ -94,6 +96,9 @@ const scrollController = new ScrollController(() => scrollContainerRef.value, {
   threshold: 80,
   scrollDelay: 80
 })
+const handleScroll = (event) => {
+  scrollController.handleScroll(event)
+}
 
 const flattenContent = (content) => {
   if (typeof content === 'string') return content
@@ -143,9 +148,7 @@ const loadThread = async () => {
   try {
     const response = await agentApi.getAgentState(props.threadId, { includeMessages: true })
     if (disposed || version !== loadVersion) return
-    currentRunId.value = response?.subagent_run?.run_id
-      ? String(response.subagent_run.run_id)
-      : ''
+    currentRunId.value = response?.subagent_run?.run_id ? String(response.subagent_run.run_id) : ''
     currentRunStatus.value = normalizeRunStatus(response?.subagent_run?.status)
 
     if (!currentRunId.value || isTerminalRunStatus(currentRunStatus.value)) {
@@ -283,7 +286,7 @@ onUnmounted(() => {
 
 .subagent-thread-scroll {
   overflow-y: auto;
-  padding: 16px 20px 28px;
+  padding: 16px 28px 28px;
 }
 
 .subagent-thread-content {

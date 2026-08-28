@@ -669,7 +669,12 @@ async def test_stream_agent_run_events_compact_fallback_end_keeps_request_id(mon
 
         async def get_run_for_user(self, run_id: str, uid: str):
             del run_id, uid
-            return SimpleNamespace(status="completed", conversation_thread_id="thread-1", request_id="req-1")
+            return SimpleNamespace(
+                status="completed",
+                conversation_thread_id="thread-1",
+                request_id="req-1",
+                runtime_cleanup_pending=False,
+            )
 
     async def fake_list_events(run_id: str, *, after_seq: str, limit: int):
         del run_id, after_seq, limit
@@ -699,6 +704,58 @@ async def test_stream_agent_run_events_compact_fallback_end_keeps_request_id(mon
     data = _sse_data(chunks[0])
     assert data["request_id"] == "req-1"
     assert data["payload"] == {"status": "completed"}
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_run_events_does_not_fallback_end_before_runtime_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """PostgreSQL 已终态但 cleanup fence 未清除时，SSE 不能越过 worker 提前合成 end。"""
+
+    @asynccontextmanager
+    async def fake_session_ctx():
+        yield object()
+
+    class Repo:
+        def __init__(self, db):
+            self.db = db
+
+        async def get_run_for_user(self, run_id: str, uid: str):
+            del run_id, uid
+            return SimpleNamespace(
+                status="completed",
+                conversation_thread_id="thread-1",
+                request_id="req-1",
+                runtime_cleanup_pending=True,
+            )
+
+    async def fake_list_events(run_id: str, *, after_seq: str, limit: int):
+        del run_id, after_seq, limit
+        return []
+
+    sleep_calls = 0
+
+    async def stop_after_one_poll(_seconds: float):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        raise agent_run_service.asyncio.CancelledError
+
+    monkeypatch.setattr(agent_run_service.pg_manager, "get_async_session_context", fake_session_ctx)
+    monkeypatch.setattr(agent_run_service, "AgentRunRepository", Repo)
+    monkeypatch.setattr(agent_run_service, "list_run_stream_events", fake_list_events)
+    monkeypatch.setattr(agent_run_service.asyncio, "sleep", stop_after_one_poll)
+
+    chunks = []
+    async for chunk in agent_run_service.stream_agent_run_events(
+        run_id="run-1",
+        after_seq="0",
+        current_uid="user-1",
+        verbose=False,
+    ):
+        chunks.append(chunk)
+
+    assert sleep_calls == 1
+    assert not any(chunk.startswith("event: end") for chunk in chunks)
 
 
 @pytest.mark.asyncio
@@ -1281,6 +1338,102 @@ async def test_get_agent_run_result_missing_run_returns_failed(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_get_agent_run_langfuse_link_resolves_bound_trace(monkeypatch: pytest.MonkeyPatch):
+    class FakeDb:
+        committed = False
+
+        async def commit(self):
+            self.committed = True
+
+    async def fake_result(*, run_id: str, current_uid: str, db):
+        assert (run_id, current_uid, db) == ("run-1", "user-1", fake_db)
+        return {"status": "completed", "langfuse_trace_id": "trace-1"}
+
+    async def fake_trace_url(trace_id: str):
+        assert trace_id == "trace-1"
+        assert fake_db.committed is True
+        return "https://langfuse.example/project/project-1/traces/trace-1"
+
+    monkeypatch.setattr(agent_run_service, "get_agent_run_result", fake_result)
+    monkeypatch.setattr(agent_run_service, "get_trace_url_by_id_async", fake_trace_url)
+    fake_db = FakeDb()
+
+    payload = await agent_run_service.get_agent_run_langfuse_link(
+        run_id="run-1",
+        current_uid="user-1",
+        db=fake_db,
+    )
+
+    assert payload == {
+        "run_id": "run-1",
+        "available": True,
+        "url": "https://langfuse.example/project/project-1/traces/trace-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_langfuse_link_does_not_resolve_without_trace(monkeypatch: pytest.MonkeyPatch):
+    async def fake_result(**_kwargs):
+        return {"status": "completed", "langfuse_trace_id": None}
+
+    async def unexpected_trace_url(_trace_id: str):
+        raise AssertionError("无 trace 的 Run 不应调用 Langfuse")
+
+    monkeypatch.setattr(agent_run_service, "get_agent_run_result", fake_result)
+    monkeypatch.setattr(agent_run_service, "get_trace_url_by_id_async", unexpected_trace_url)
+
+    payload = await agent_run_service.get_agent_run_langfuse_link(
+        run_id="run-1",
+        current_uid="user-1",
+        db=object(),
+    )
+
+    assert payload == {"run_id": "run-1", "available": False, "reason": "trace_not_available"}
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_langfuse_link_reports_optional_provider_unavailable(monkeypatch: pytest.MonkeyPatch):
+    class FakeDb:
+        async def commit(self):
+            return None
+
+    async def fake_result(**_kwargs):
+        return {"status": "completed", "langfuse_trace_id": "trace-1"}
+
+    async def fake_trace_url(_trace_id: str):
+        return None
+
+    monkeypatch.setattr(agent_run_service, "get_agent_run_result", fake_result)
+    monkeypatch.setattr(agent_run_service, "get_trace_url_by_id_async", fake_trace_url)
+
+    payload = await agent_run_service.get_agent_run_langfuse_link(
+        run_id="run-1",
+        current_uid="user-1",
+        db=FakeDb(),
+    )
+
+    assert payload == {"run_id": "run-1", "available": False, "reason": "langfuse_unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_get_agent_run_langfuse_link_hides_missing_run(monkeypatch: pytest.MonkeyPatch):
+    async def fake_result(**_kwargs):
+        return {"status": "failed", "error": {"type": "run_not_found", "message": "运行任务不存在"}}
+
+    monkeypatch.setattr(agent_run_service, "get_agent_run_result", fake_result)
+
+    with pytest.raises(agent_run_service.HTTPException) as exc:
+        await agent_run_service.get_agent_run_langfuse_link(
+            run_id="run-x",
+            current_uid="user-1",
+            db=object(),
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "运行任务不存在"
+
+
+@pytest.mark.asyncio
 async def test_await_agent_run_result_drains_stream_then_loads_result(monkeypatch: pytest.MonkeyPatch):
     drained: list[str] = []
 
@@ -1347,19 +1500,12 @@ async def test_cancel_agent_run_view_cascades_children(monkeypatch: pytest.Monke
         def __init__(self, db):
             self.db = db
 
-        async def get_run_for_user(self, run_id: str, uid: str):
+        async def request_cancel_execution_tree(self, *, run_id: str, uid: str, cascade_descendants: bool):
             assert run_id == "parent-run"
             assert uid == "user-1"
-            return parent_run
-
-        async def list_active_child_runs_for_user(self, created_by_run_id: str, uid: str):
-            assert created_by_run_id == "parent-run"
-            assert uid == "user-1"
-            return child_runs
-
-        async def request_cancel(self, run_id: str):
-            requested.append(run_id)
-            return parent_run if run_id == "parent-run" else SimpleNamespace(id=run_id)
+            assert cascade_descendants is True
+            requested.extend(["parent-run", *(child.id for child in child_runs)])
+            return parent_run, list(requested)
 
     async def fake_publish_cancel_signal(run_id: str):
         signals.append((run_id, db.committed))
@@ -1375,8 +1521,8 @@ async def test_cancel_agent_run_view_cascades_children(monkeypatch: pytest.Monke
     )
 
     assert result["run"]["id"] == "parent-run"
-    assert requested == ["child-1", "child-2", "parent-run"]
-    assert signals == [("child-1", True), ("child-2", True), ("parent-run", True)]
+    assert requested == ["parent-run", "child-1", "child-2"]
+    assert signals == [("parent-run", True), ("child-1", True), ("child-2", True)]
 
 
 @pytest.mark.asyncio

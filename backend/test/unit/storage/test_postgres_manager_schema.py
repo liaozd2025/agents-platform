@@ -4,7 +4,13 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from yuxi.storage.postgres.manager import BusinessBase, KnowledgeBase, PostgresManager
+from yuxi.storage.postgres.manager import (
+    BUSINESS_SCHEMA_VERSION,
+    KNOWLEDGE_SCHEMA_VERSION,
+    BusinessBase,
+    KnowledgeBase,
+    PostgresManager,
+)
 
 
 def test_business_and_knowledge_metadata_are_disjoint():
@@ -17,6 +23,37 @@ def test_business_and_knowledge_metadata_are_disjoint():
     assert "knowledge_bases" in KnowledgeBase.metadata.tables
     assert "evaluation_runs" in KnowledgeBase.metadata.tables
     assert "users" not in KnowledgeBase.metadata.tables
+
+
+@pytest.mark.asyncio
+async def test_require_current_schema_rejects_missing_or_incompatible_domains(monkeypatch):
+    manager = PostgresManager()
+
+    monkeypatch.setattr(manager, "get_schema_versions", lambda: _async_value({}))
+    with pytest.raises(RuntimeError, match=r"business=missing .*knowledge=missing"):
+        await manager.require_current_schema(include_knowledge=True)
+
+    monkeypatch.setattr(manager, "get_schema_versions", lambda: _async_value({"business": 99}))
+    with pytest.raises(RuntimeError, match=r"business=99"):
+        await manager.require_current_schema(include_knowledge=False)
+
+    monkeypatch.setattr(
+        manager,
+        "get_schema_versions",
+        lambda: _async_value({"business": BUSINESS_SCHEMA_VERSION, "knowledge": KNOWLEDGE_SCHEMA_VERSION}),
+    )
+    await manager.require_current_schema(include_knowledge=True)
+
+
+async def _async_value(value):
+    return value
+
+
+def test_project_uid_foreign_key_has_schema_convergence_name():
+    """ORM fresh schema 必须与后续收敛 SQL 使用同一 FK 名称。"""
+    projects = BusinessBase.metadata.tables["projects"]
+
+    assert [constraint.name for constraint in projects.foreign_key_constraints] == ["fk_projects_uid_users"]
 
 
 class _RecordingConnection:
@@ -317,6 +354,21 @@ async def test_ensure_business_schema_adds_idempotent_agent_run_lease_columns_an
     assert "agent_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP WITHOUT TIME ZONE" in statements
     assert "agent_runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMP WITHOUT TIME ZONE" in statements
     assert "CREATE INDEX IF NOT EXISTS ix_agent_runs_status_lease_expires" in statements
+
+
+@pytest.mark.asyncio
+async def test_ensure_business_schema_adds_nonterminal_run_shape_constraint_without_scanning_history():
+    async with _recording_manager() as (manager, connection):
+        await manager.ensure_business_schema()
+
+    statements = "\n".join(connection.statements)
+    assert "ck_agent_runs_nonterminal_shape" in statements
+    assert "run_type = 'resume'" in statements
+    assert "run_type = 'subagent'" in statements
+    assert "run_type = 'sandbox'" in statements
+    assert "DROP CONSTRAINT IF EXISTS ck_agent_runs_nonterminal_shape" in statements
+    assert "NOT VALID" in statements
+    assert "EXCEPTION WHEN duplicate_object" in statements
 
 
 @pytest.mark.asyncio

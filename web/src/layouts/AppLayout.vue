@@ -6,7 +6,7 @@ import {
   ClipboardList,
   LibraryBig,
   Box,
-  FolderKanban,
+  HardDrive,
   PanelLeft,
   PanelLeftOpen,
   PanelRight,
@@ -15,7 +15,7 @@ import {
   PictureInPicture2,
   Search,
   X
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 import { useConfigStore } from '@/stores/config'
 import { useAgentStore } from '@/stores/agent'
@@ -34,7 +34,6 @@ import {
 import { useOAEmbedBridge } from '@/composables/useOAEmbedBridge'
 import { storeToRefs } from 'pinia'
 import UserInfoComponent from '@/components/UserInfoComponent.vue'
-import DebugComponent from '@/components/DebugComponent.vue'
 import TaskCenterDrawer from '@/components/TaskCenterDrawer.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
 import GlobalSearchModal from '@/components/GlobalSearchModal.vue'
@@ -67,7 +66,7 @@ const {
 provide('oaEmbedBridge', oaEmbedBridge)
 const { activeCount: activeCountRef, isDrawerOpen } = storeToRefs(taskerStore)
 const { knowledgeEnabled } = storeToRefs(runtimeCapabilitiesStore)
-const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads } =
+const { threads, currentThreadId, hasMoreThreads, isLoadingMoreThreads, threadCreationInFlight } =
   storeToRefs(chatThreadsStore)
 const conversationRouteNames = new Set([
   'AgentComp',
@@ -80,9 +79,6 @@ const embedModeOptions = [
   { value: 'floating', label: '浮窗模式', icon: PictureInPicture2 },
   { value: 'fullscreen', label: '全屏模式', icon: Maximize2 }
 ]
-
-// Add state for debug modal
-const showDebugModal = ref(false)
 
 const { sidebarCollapsed } = storeToRefs(chatUIStore)
 const embedSidebarCollapsed = ref(false)
@@ -115,11 +111,6 @@ const openSettingsModal = (tab) => {
   if (!target) return
 
   router.push({ path: target.path, query: { returnTo: route.fullPath } })
-}
-
-// Handle debug modal close
-const handleDebugModalClose = () => {
-  showDebugModal.value = false
 }
 
 const getRemoteConfig = async () => {
@@ -168,7 +159,20 @@ const initializeLayoutWhenReady = () => {
   }
 }
 
+const handleGlobalKeydown = (event) => {
+  if (
+    (event.ctrlKey || event.metaKey) &&
+    event.shiftKey &&
+    event.key.toLowerCase() === 'd' &&
+    userStore.hasPermission('system_log:read')
+  ) {
+    event.preventDefault()
+    infoStore.showDebugModal = !infoStore.showDebugModal
+  }
+}
+
 onMounted(() => {
+  window.addEventListener('keydown', handleGlobalKeydown)
   initializeLayoutWhenReady()
   startThreadStatusSync()
 })
@@ -192,6 +196,7 @@ const startThreadStatusSync = () => {
 }
 
 onUnmounted(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown)
   if (threadStatusSyncTimer) {
     clearInterval(threadStatusSyncTimer)
     threadStatusSyncTimer = null
@@ -237,10 +242,10 @@ const mainList = computed(() => {
   }
 
   items.push({
-    name: '工作区',
+    name: '个人空间',
     path: resolveAppNavigationPath(isEmbedded.value, '/workspace'),
-    icon: FolderKanban,
-    activeIcon: FolderKanban
+    icon: HardDrive,
+    activeIcon: HardDrive
   })
 
   if (canAccessExtensions.value) {
@@ -324,7 +329,7 @@ const requestEmbedClose = () => requestClose(currentThreadId.value)
 
 const handleSelectChat = (threadId) => {
   if (!threadId) return
-  chatThreadsStore.setCurrentThreadId(threadId)
+  if (!chatThreadsStore.setCurrentThreadId(threadId)) return
   router.push({
     name: getAgentRouteName(true),
     params: { thread_id: threadId }
@@ -342,7 +347,7 @@ const handleSearchSelectThread = (thread) => {
 }
 
 const handleCreateConversationFromSearch = () => {
-  chatThreadsStore.setCurrentThreadId(null)
+  if (!chatThreadsStore.setCurrentThreadId(null)) return
   router.push({ name: getAgentRouteName() })
 }
 
@@ -395,6 +400,7 @@ watch(
   () => [route.path, route.params.thread_id],
   () => {
     if (!isConversationRoute.value) return
+    if (threadCreationInFlight.value) return
     const threadId = typeof route.params.thread_id === 'string' ? route.params.thread_id : null
     chatThreadsStore.setCurrentThreadId(threadId)
   },
@@ -606,26 +612,13 @@ provide('settingsModal', {
       :default-mode="canUseAgents ? 'conversation' : 'file'"
       :recent-threads="threads"
       :file-search="searchWorkspace"
-      file-placeholder="搜索工作区文件..."
+      file-placeholder="搜索个人空间文件..."
       @select-thread="handleSearchSelectThread"
       @create-thread="handleCreateConversationFromSearch"
       @thread-found="handleSearchThreadFound"
       @select-file="handleSearchSelectFile"
     />
 
-    <!-- Debug Modal -->
-    <a-modal
-      v-model:open="showDebugModal"
-      title="调试面板"
-      width="90%"
-      :footer="null"
-      @cancel="handleDebugModalClose"
-      :maskClosable="true"
-      :destroyOnClose="true"
-      class="debug-modal"
-    >
-      <DebugComponent />
-    </a-modal>
     <TaskCenterDrawer v-if="userStore.hasPermission('system_task:manage')" />
   </div>
 </template>
@@ -773,7 +766,7 @@ div.header,
     justify-content: flex-start;
     align-items: stretch;
     position: relative;
-    gap: 0;
+    gap: 2px;
   }
 
   .sidebar-conversations {
@@ -924,13 +917,6 @@ div.header,
       outline: none;
     }
 
-    &.active {
-      border-color: transparent;
-      background-color: color-mix(in srgb, var(--main-color) 6%, var(--gray-0));
-      font-weight: 600;
-      color: var(--main-color);
-    }
-
     &.primary-action {
       margin-bottom: 8px;
       border-color: var(--gray-150);
@@ -941,7 +927,7 @@ div.header,
       &:hover {
         border-color: var(--gray-200);
         background-color: var(--gray-0);
-        color: var(--main-color);
+        color: var(--gray-900);
         box-shadow: 0 3px 4px rgba(0, 10, 20, 0.07);
       }
     }
@@ -952,8 +938,15 @@ div.header,
 
     &:hover {
       border-color: transparent;
-      background-color: var(--main-20);
-      color: var(--main-color);
+      background-color: var(--gray-50);
+      color: var(--gray-900);
+    }
+
+    &.active {
+      border-color: transparent;
+      background-color: color-mix(in srgb, var(--gray-100) 6%, var(--gray-100));
+      font-weight: 600;
+      color: var(--gray-1000);
     }
 
     &.api-docs {

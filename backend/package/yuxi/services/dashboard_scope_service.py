@@ -12,6 +12,7 @@ from yuxi.services.user_management_service import (
     list_authorized_departments,
     list_authorized_users,
 )
+from yuxi.storage.postgres.models_business import Conversation, ToolCall
 
 
 def dashboard_visibility_filter(
@@ -67,6 +68,22 @@ async def dashboard_history_filter(
     if department_id is None:
         return visibility
     return and_(visibility, path_column.like(f"%/{department_id}/%"))
+
+
+async def dashboard_tool_history_filter(
+    db: AsyncSession,
+    authorization: AuthorizationContext,
+    department_id: int | None,
+) -> Any:
+    """通过 ToolCall 所属会话生成用户与组织历史范围。"""
+
+    return await dashboard_history_filter(
+        db,
+        authorization,
+        ToolCall.organization_path_snapshot,
+        department_id,
+        owner_uid_column=Conversation.uid,
+    )
 
 
 async def dashboard_resource_subjects(

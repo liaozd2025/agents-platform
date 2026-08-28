@@ -45,6 +45,23 @@ export const databaseApi = {
     return apiPost(`/api/knowledge/databases/${kbId}/stats/repair`, {})
   },
 
+  detectVirtualFolders: async (kbId) => {
+    return apiGet(`/api/knowledge/databases/${kbId}/virtual-folders/detect`)
+  },
+
+  startVirtualFolderMigration: async (kbId) => {
+    return apiPost(`/api/knowledge/databases/${kbId}/virtual-folders/migrate`, {})
+  },
+
+  streamVirtualFolderMigration: async (kbId, taskId, signal) => {
+    return apiGet(
+      `/api/knowledge/databases/${kbId}/virtual-folders/migrations/${taskId}/events`,
+      { signal },
+      true,
+      'response'
+    )
+  },
+
   /**
    * 更新知识库信息
    * @param {string} kbId - 知识库ID
@@ -143,6 +160,18 @@ export const documentApi = {
     return apiPost(`/api/knowledge/databases/${kbId}/folders`, {
       folder_name: folderName,
       parent_id: parentId
+    })
+  },
+
+  renameFolder: async (kbId, folderId, folderName) => {
+    return apiPut(`/api/knowledge/databases/${kbId}/folders/${folderId}/rename`, {
+      folder_name: folderName
+    })
+  },
+
+  moveDocument: async (kbId, documentId, newParentId) => {
+    return apiPut(`/api/knowledge/databases/${kbId}/documents/${documentId}/move`, {
+      new_parent_id: newParentId
     })
   },
 
@@ -249,19 +278,26 @@ export const documentApi = {
    * 手动触发文档解析
    * @param {string} kbId - 知识库ID
    * @param {Array} fileIds - 文件ID列表
+   * @param {Object} params - 处理参数（如 ocr_engine）
    * @returns {Promise} - 解析任务结果
    */
-  parseDocuments: async (kbId, fileIds) => {
-    return apiPost(`/api/knowledge/databases/${kbId}/documents/parse`, fileIds)
+  parseDocuments: async (kbId, fileIds, params = {}) => {
+    return apiPost(`/api/knowledge/databases/${kbId}/documents/parse`, {
+      file_ids: fileIds,
+      params
+    })
   },
 
   /**
    * 手动触发全部待解析文档解析
    * @param {string} kbId - 知识库ID
+   * @param {Object} params - 处理参数（如 ocr_engine）
    * @returns {Promise} - 解析任务结果
    */
-  parsePendingDocuments: async (kbId) => {
-    return apiPost(`/api/knowledge/databases/${kbId}/documents/parse-pending`, {})
+  parsePendingDocuments: async (kbId, params = {}) => {
+    return apiPost(`/api/knowledge/databases/${kbId}/documents/parse-pending`, {
+      params
+    })
   },
 
   /**

@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -11,6 +11,7 @@ class _FakeDb:
     """记录 SkillRepository 创建行为的最小数据库替身。"""
 
     def __init__(self):
+        self.flush = AsyncMock()
         self.commit = AsyncMock()
         self.refresh = AsyncMock()
 
@@ -49,3 +50,38 @@ async def test_builtin_skill_creation_does_not_resolve_system_as_user(monkeypatc
 
     assert captured_uids == [None]
     assert skill.created_by == "system"
+
+@pytest.mark.asyncio
+async def test_skill_repository_flushes_without_committing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "yuxi.agents.skills.repository.get_user_organization_snapshot",
+        AsyncMock(
+            return_value={
+                "organization_id_snapshot": 1,
+                "organization_path_snapshot": "/1/",
+                "organization_snapshot_inferred": False,
+            }
+        ),
+    )
+    db = Mock()
+    db.flush = AsyncMock()
+    db.refresh = AsyncMock()
+    db.commit = AsyncMock()
+
+    item = await SkillRepository(db).create(
+        slug="demo",
+        name="Demo",
+        description="demo",
+        source_type="upload",
+        tool_dependencies=[],
+        mcp_dependencies=[],
+        skill_dependencies=[],
+        dir_path="shared/demo",
+        share_config={"version": 2, "read_scope": None, "manage_scope": None},
+        created_by="user-1",
+    )
+
+    db.add.assert_called_once_with(item)
+    db.flush.assert_awaited_once()
+    db.refresh.assert_awaited_once_with(item)
+    db.commit.assert_not_awaited()

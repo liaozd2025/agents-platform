@@ -24,14 +24,12 @@ def test_filter_disabled_tools_keeps_allowed_tools_order():
         SimpleNamespace(name="calculator"),
     ]
 
-    filtered = subagent_graph._filter_disabled_tools(
-        tools, subagent_graph._disabled_tools_for("default")
-    )
+    filtered = subagent_graph._filter_disabled_tools(tools, subagent_graph._disabled_tools_for("default"))
 
     assert [subagent_graph._tool_name(tool) for tool in filtered] == ["search", "calculator"]
 
 
-def test_filter_disabled_tools_removes_sensitive_backend_tools_only_in_default_mode():
+def test_filter_disabled_tools_never_exposes_direct_sandbox_execution_tools():
     tools = [
         SimpleNamespace(name="read_file"),
         SimpleNamespace(name="write_file"),
@@ -39,17 +37,13 @@ def test_filter_disabled_tools_removes_sensitive_backend_tools_only_in_default_m
         SimpleNamespace(name="execute"),
     ]
 
-    default_mode_filtered = subagent_graph._filter_disabled_tools(
-        tools, subagent_graph._disabled_tools_for("default")
-    )
+    default_mode_filtered = subagent_graph._filter_disabled_tools(tools, subagent_graph._disabled_tools_for("default"))
     assert [subagent_graph._tool_name(tool) for tool in default_mode_filtered] == ["read_file"]
 
     always_trust_filtered = subagent_graph._filter_disabled_tools(
         tools, subagent_graph._disabled_tools_for("always_trust")
     )
-    assert [
-        subagent_graph._tool_name(tool) for tool in always_trust_filtered
-    ] == ["read_file", "write_file", "edit_file", "execute"]
+    assert [subagent_graph._tool_name(tool) for tool in always_trust_filtered] == ["read_file"]
 
 
 @pytest.mark.asyncio
@@ -66,11 +60,13 @@ async def test_subagent_tool_filter_middleware_filters_before_handler(use_async:
         seen["tools"] = request.tools
         return "ok"
 
-    request = _Request([
-        SimpleNamespace(name="present_artifacts"),
-        {"name": "ask_user_question"},
-        SimpleNamespace(name="allowed_tool"),
-    ])
+    request = _Request(
+        [
+            SimpleNamespace(name="present_artifacts"),
+            {"name": "ask_user_question"},
+            SimpleNamespace(name="allowed_tool"),
+        ]
+    )
     if use_async:
         result = await middleware.awrap_model_call(request, async_handler)
     else:

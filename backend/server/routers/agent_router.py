@@ -29,12 +29,14 @@ from yuxi.services.agent_run_service import (
     cancel_agent_run_view,
     create_agent_run_view,
     get_active_run_by_thread,
+    get_agent_run_langfuse_link,
     get_agent_run_result,
     get_agent_run_view,
     stream_agent_run_events,
 )
 from yuxi.services.input_message_service import build_chat_input_message
 from yuxi.services.run_submission_service import RunOrigin, RunSubmissionCommand, submit_run_command
+from yuxi.services.user_role_service import has_active_role
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
 
@@ -467,6 +469,21 @@ async def get_agent_run_result_route(
     run_id: str, current_user: User = Depends(require_agent_use_permission), db: AsyncSession = Depends(get_db)
 ):
     return await get_agent_run_result(run_id=run_id, current_uid=str(current_user.uid), db=db)
+
+
+@agent_router.get("/runs/{run_id}/langfuse")
+async def get_agent_run_langfuse_link_route(
+    run_id: str,
+    authorization: AuthorizationContext = Depends(get_authorization_context),
+    db: AsyncSession = Depends(get_db),
+):
+    if not has_active_role(authorization.user, "superadmin"):
+        raise HTTPException(status_code=403, detail="只有超级管理员可以查看 Langfuse 运行链路")
+    return await get_agent_run_langfuse_link(
+        run_id=run_id,
+        current_uid=str(authorization.user.uid),
+        db=db,
+    )
 
 
 @agent_router.post("/runs/{run_id}/cancel")

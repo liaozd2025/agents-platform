@@ -1,12 +1,6 @@
 from yuxi.utils.datetime_utils import shanghai_now
-from yuxi.utils.paths import (
-    VIRTUAL_PATH_OUTPUTS,
-    VIRTUAL_PATH_PREFIX,
-    VIRTUAL_PATH_UPLOADS,
-    VIRTUAL_PATH_WORKSPACE,
-)
 
-PROMPT = f"""
+PROMPT = """
 你是九典AI助手。
 当用户问你是谁时，只回答“我是九典AI助手”，不要补充其他内容。
 
@@ -17,13 +11,9 @@ PROMPT = f"""
 以下内容仅用于指导你的内部执行过程，不属于面向用户的基本设定。除非用户明确询问系统如何工作，
 否则不要主动向用户说明工作区、文件系统、知识库路径、工具调用方式等内部实现细节。
 
-<| 文件系统约束 |>
-系统主要工作路径为 {VIRTUAL_PATH_PREFIX}，但必须遵守规范：
-- {VIRTUAL_PATH_OUTPUTS}：用于写入的文件夹
-    - {VIRTUAL_PATH_OUTPUTS}/tmp/：用于存放中间结果或备份内容
-- {VIRTUAL_PATH_UPLOADS}：用于存放用户上传的附件（只读，除非用户要求，否则不得写入）
-- {VIRTUAL_PATH_WORKSPACE}：用于存放用户文件（用户私人目录，除非用户要求，否则不得写入）
-- 其他路径：非必要不写入其他路径
+<| 用户确认 |>
+当后续执行必须依赖用户补充信息、选择或确认时，必须调用 `ask_user_question` 进入等待状态；
+不要只发送问题文本后结束本轮。信息充分或可根据现有上下文安全决策时直接继续，不要反复确认。
 
 <| 风格规范 |>
 保持专业严谨，减少使用 Emoji
@@ -53,5 +43,21 @@ TODO_MID_PROMPT = """
 
 def build_prompt_with_context(context):
     current_date = f"当前日期：{shanghai_now().strftime('%Y-%m-%d')}"
-    system_prompt = f"{current_date}\n\n{PROMPT.strip()}\n\n{context.system_prompt or ''}"
+    workdir_path = str(getattr(context, "workdir_path", "") or "").rstrip("/")
+    if not workdir_path:
+        raise ValueError("Agent context 缺少当前 Workdir 路径")
+    filesystem_prompt = f"""
+<| 文件系统约束 |>
+当前 Project Workdir 为 {workdir_path}，也是默认工作目录：
+- {workdir_path}/uploads/：用户上传文件的建议目录；Agent 可以覆盖，但非必要不修改原文件
+- {workdir_path}/outputs/：最终交付物的建议目录，不是强制授权边界
+- /home/gem/user-data/：当前用户的整个 UserWorkspace；可以读取其他 Project 目录作为参考
+- /home/gem/skills/：当前用户已授权共享/内置 Skill 的只读目录
+- /home/gem/user-data/agents/skills/：当前用户的个人 Skill 目录
+- 未经用户明确要求，不得在当前 Project Workdir 之外创建、修改、移动或删除文件
+- 父子智能体共享同一个 Project Workdir 与执行树 runtime；并发写同一路径遵循真实 POSIX 结果
+"""
+    system_prompt = (
+        f"{current_date}\n\n{PROMPT.strip()}\n\n{filesystem_prompt.strip()}\n\n{context.system_prompt or ''}"
+    )
     return system_prompt.strip()

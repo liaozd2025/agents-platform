@@ -11,7 +11,7 @@ from yuxi.repositories.conversation_repository import (
     INVOCATION_CONVERSATION_SOURCES,
     MAX_CONVERSATION_TITLE_LENGTH,
 )
-from yuxi.storage.postgres.models_business import Base, Conversation, Department, Message, User
+from yuxi.storage.postgres.models_business import Base, Conversation, Department, Message, Project, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = pytest.mark.unit
@@ -61,9 +61,18 @@ async def test_conversation_and_tool_call_capture_organization_at_each_write(con
     user = User(username="快照用户", uid="snapshot-user", password_hash="x", department=department_a)
     conversation_session.add(user)
     await conversation_session.flush()
+    project = Project(
+        id="snapshot-project",
+        uid=user.uid,
+        selection_status="selectable",
+        workdir_path="projects/snapshot-project",
+        directory_mode="managed",
+    )
+    conversation_session.add(project)
+    await conversation_session.flush()
 
     repository = ConversationRepository(conversation_session)
-    conversation = await repository.add_conversation(uid=user.uid, agent_id="agent-a")
+    conversation = await repository.add_conversation(uid=user.uid, agent_id="agent-a", project_id=project.id)
     user.department = department_b
     message = Message(conversation=conversation, role="assistant", content="done")
     conversation_session.add(message)
@@ -82,6 +91,7 @@ def _seed_invocation_excluding_conversations() -> tuple[Conversation, Conversati
     now = utc_now_naive()
     normal = Conversation(
         thread_id="thread-normal",
+        project_id="project-thread-normal",
         uid="user-a",
         agent_id="agent-a",
         title="Normal",
@@ -92,6 +102,7 @@ def _seed_invocation_excluding_conversations() -> tuple[Conversation, Conversati
     )
     agent_call = Conversation(
         thread_id="thread-call",
+        project_id="project-thread-call",
         uid="user-a",
         agent_id="agent-a",
         title="Agent Call Run",
@@ -103,6 +114,7 @@ def _seed_invocation_excluding_conversations() -> tuple[Conversation, Conversati
     )
     agent_eval = Conversation(
         thread_id="thread-eval",
+        project_id="project-thread-eval",
         uid="user-a",
         agent_id="agent-a",
         title="Agent Evaluation Run",
@@ -136,6 +148,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     now = utc_now_naive()
     active = Conversation(
         thread_id="thread-active",
+        project_id="project-thread-active",
         uid="user-a",
         agent_id="agent-a",
         title="Active Thread",
@@ -145,6 +158,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     )
     deleted = Conversation(
         thread_id="thread-deleted",
+        project_id="project-thread-deleted",
         uid="user-a",
         agent_id="agent-a",
         title="Deleted Thread",
@@ -154,6 +168,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     )
     other_user = Conversation(
         thread_id="thread-other-user",
+        project_id="project-thread-other-user",
         uid="user-b",
         agent_id="agent-a",
         title="Other User Thread",
@@ -163,6 +178,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     )
     tool_only = Conversation(
         thread_id="thread-tool-only",
+        project_id="project-thread-tool-only",
         uid="user-a",
         agent_id="agent-a",
         title="Tool Only Thread",
@@ -266,6 +282,7 @@ async def test_search_conversations_by_message_content_filters_agent_and_paginat
     old = now - timedelta(days=1)
     first = Conversation(
         thread_id="thread-first",
+        project_id="project-thread-first",
         uid="user-a",
         agent_id="agent-a",
         title="First",
@@ -275,6 +292,7 @@ async def test_search_conversations_by_message_content_filters_agent_and_paginat
     )
     second = Conversation(
         thread_id="thread-second",
+        project_id="project-thread-second",
         uid="user-a",
         agent_id="agent-a",
         title="Second",
@@ -284,6 +302,7 @@ async def test_search_conversations_by_message_content_filters_agent_and_paginat
     )
     other_agent = Conversation(
         thread_id="thread-other-agent",
+        project_id="project-thread-other-agent",
         uid="user-a",
         agent_id="agent-b",
         title="Other Agent",

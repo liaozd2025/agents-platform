@@ -258,7 +258,7 @@ import { computed, onMounted, reactive, watch } from 'vue'
 import { notification, message, Modal } from 'ant-design-vue'
 import { departmentApi } from '@/apis'
 import { authApi } from '@/apis/auth_api'
-import { ChevronsDown, ChevronsUp, Plus, RefreshCw, SquarePen, Trash2 } from 'lucide-vue-next'
+import { ChevronsDown, ChevronsUp, Plus, RefreshCw, SquarePen, Trash2 } from '@lucide/vue'
 import {
   buildDepartmentTree,
   getDepartmentExpandableKeys,
