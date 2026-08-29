@@ -1,38 +1,55 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import {
+  DEFAULT_CHAT_MODEL,
+  resolveConversationModel
+} from '../../src/utils/conversationModel.js'
 
 const source = readFileSync(
   new URL('../../src/components/AgentChatComponent.vue', import.meta.url),
   'utf8'
 )
 
-test('OA iframe 鏂扮嚎绋嬩娇鐢ㄦ寚瀹氱殑 DeepSeek 榛樿妯″瀷', () => {
-  const modelBlock = source.slice(
-    source.indexOf('const currentModelSpec = computed'),
-    source.indexOf('const handleModelSelect')
-  )
-
-  assert.match(modelBlock, /props\.embedMode \? EMBED_DEFAULT_MODEL : ''/)
-  assert.ok(
-    modelBlock.indexOf('currentThread.value?.metadata?.model_spec') <
-      modelBlock.indexOf('props.embedMode ? EMBED_DEFAULT_MODEL :')
-  )
+test('OA iframe 新会话使用指定的 DeepSeek 默认模型', () => {
+  assert.equal(DEFAULT_CHAT_MODEL, 'siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash')
+  assert.equal(resolveConversationModel({}), DEFAULT_CHAT_MODEL)
 })
 
-test('模型选择按当前选择、Conversation、智能体默认的顺序解析', () => {
+test('独立登录新会话固定使用 DeepSeek，不受异步配置加载影响', () => {
+  const selectorStart = source.indexOf('<ModelSelectorComponent')
   const modelBlock = source.slice(
     source.indexOf('const currentModelSpec = computed'),
     source.indexOf('const handleModelSelect')
   )
-
-  assert.ok(
-    modelBlock.indexOf('selectedModelByThread') <
-      modelBlock.indexOf('currentThread.value?.metadata?.model_spec')
+  const selectorBlock = source.slice(
+    selectorStart,
+    source.indexOf('@select-model', selectorStart)
   )
-  assert.ok(
-    modelBlock.indexOf('currentThread.value?.metadata?.model_spec') <
-      modelBlock.indexOf('agentDefaultModel.value')
+
+  assert.equal(
+    resolveConversationModel({
+      agentModel: 'alibaba-cn:qwen3.7-max',
+      systemDefaultModel: 'alibaba-cn:qwen3.7-max'
+    }),
+    DEFAULT_CHAT_MODEL
+  )
+  assert.match(modelBlock, /resolveConversationModel\(\{/)
+  assert.doesNotMatch(modelBlock, /agentConfig|currentAgent|configStore/)
+  assert.doesNotMatch(selectorBlock, /auto-select-first/)
+})
+
+test('模型选择按当前选择、Conversation、DeepSeek 默认的顺序解析', () => {
+  assert.equal(
+    resolveConversationModel({
+      selectedModel: 'manual:model',
+      conversationModel: 'conversation:model'
+    }),
+    'manual:model'
+  )
+  assert.equal(
+    resolveConversationModel({ conversationModel: 'conversation:model' }),
+    'conversation:model'
   )
 })
 
