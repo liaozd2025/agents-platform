@@ -15,6 +15,7 @@
     "format": "prettier --write --experimental-cli src/"
   },
   "dependencies": {
+    "3d-force-graph": "^1.80.0",
     "@ant-design/icons-vue": "^7.0.1",
     "@antv/g6": "^5.1.1",
     "@lucide/vue": "^1.34.0",
@@ -43,6 +44,7 @@
     "pinia-plugin-persistedstate": "^4.7.1",
     "shiki": "^4.4.3",
     "sigma": "^3.0.3",
+    "three": "^0.185.1",
     "vue": "^3.5.41",
     "vue-router": "^5.2.0"
   },
