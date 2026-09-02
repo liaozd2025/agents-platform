@@ -22,6 +22,41 @@
 
 下文使用 `<compose-command>` 表示生产环境实际使用的 Compose 命令，例如 `docker compose -f docker-compose.yml -f docker-compose.prod.yml`。不要把本地端口覆盖文件带到生产环境。
 
+## 推荐：一键同步
+
+部署准备完成后，优先使用统一脚本。它固定按“部门 -> 用户”的顺序执行，避免用户因部门映射尚未建立而被错误跳过。
+
+先执行预演，不会写入数据库：
+
+```bash
+<compose-command> exec -T api uv run --no-sync python scripts/sync_oa_data.py
+```
+
+确认输出中部门和用户计划都没有 `conflict` 后，才执行写入：
+
+```bash
+<compose-command> exec -T api uv run --no-sync python scripts/sync_oa_data.py --apply
+```
+
+脚本会从 `OA_USER_MIGRATION_URL` 推导部门接口地址，使用只读授权文件在运行时取得临时 Code；不会把 Code、授权文件内容、人员明细写入日志。默认命令会模拟部门写入后的映射再计算用户计划，因此首次全量同步也能看到可用的用户预演统计。
+
+`--apply` 是唯一写入开关。它会先提交部门事务，再重新读取数据库中的真实部门映射并提交用户事务。两个阶段分别是独立事务：部门成功、用户失败时，部门结果会保留。此时应根据日志处理用户冲突或接口异常，核对后重新执行预演，不能直接盲目重复 `--apply`。
+
+### 一次性部署准备
+
+- 部署包含三个同步脚本的版本：`sync_oa_data.py`、`migrate_oa_departments.py`、`migrate_oa_users.py`。
+- 在服务器 `.env` 配置 OA 用户接口、公司编码和授权文件容器路径；真实授权内容只放在受控文件中，不提交到仓库。
+- 将授权文件以只读方式挂载到 API 容器，并确认 OA 网络、PostgreSQL 与 API 容器均正常。
+- 首次全量写入前备份生产 PostgreSQL；同步期间不要同时执行用户、角色或部门的批量维护。
+
+### 每次同步前
+
+先运行不带 `--apply` 的预演，检查 `conflict` 和 `skip` 汇总；确认无冲突且业务范围正确后才使用 `--apply`。普通版本升级不需要重复同步，只有旧 OA 的人员或组织数据变化、首次启用该能力、或需要重新核对数据时才执行。
+
+## 手动控制与排障
+
+以下四步脚本保留给排障或需要单独控制部门、用户阶段的场景。正常同步优先使用上面的一键命令。
+
 ## 首次全量同步
 
 先同步部门，再同步用户。用户脚本依赖已回填的旧 OA 部门 ID，因此顺序不可交换。

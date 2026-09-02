@@ -302,7 +302,6 @@
                           size="nano"
                           display-name="mini"
                           placeholder="选择模型"
-                          :auto-select-first="agentStore.isInitialized && !currentModelSpec"
                           @select-model="handleModelSelect"
                         />
                       </div>
@@ -871,6 +870,7 @@ import ProjectSelectionSection from '@/components/ProjectSelectionSection.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { enrichTaskToolCalls, parseToolCallArgs } from '@/components/ToolCallingResult/toolRegistry'
 import { getConversationDisplayItems } from '@/utils/messageGrouping'
+import { resolveConversationModel } from '@/utils/conversationModel'
 import { makeChildThreadId } from '@/utils/subagentThread'
 import { isSubagentLaunchToolName, mergeSubagentRunsForDisplay } from '@/utils/subagentRuns'
 import {
@@ -1358,22 +1358,16 @@ const currentAgent = computed(() => {
 const currentChatId = computed(() => currentThreadId.value)
 
 // ==================== 对话级模型覆盖 ====================
-// 当前选择优先；否则依次使用 Conversation、智能体和系统默认模型。
+// 用户手动选择和已有会话绑定优先；新会话固定使用当前可用的 DeepSeek 默认模型。
 const DRAFT_MODEL_KEY = '__draft__'
 const selectedModelByThread = reactive({})
 const savedToolApprovalMode = ref(readToolApprovalModePreference())
-const agentDefaultModel = computed(
-  () =>
-    agentConfig.value?.model ||
-    currentAgent.value?.config_json?.context?.model ||
-    configStore.config?.default_model ||
-    ''
-)
 const currentModelSpec = computed(
   () =>
-    selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY] ||
-    currentThread.value?.metadata?.model_spec ||
-    agentDefaultModel.value
+    resolveConversationModel({
+      selectedModel: selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY],
+      conversationModel: currentThread.value?.metadata?.model_spec
+    })
 )
 const handleModelSelect = (spec) => {
   if (typeof spec === 'string') {
@@ -3412,8 +3406,13 @@ const handleSendOrStop = async (payload) => {
   const hasNewInput = Boolean(String(userInput.value || '').trim() || payload?.image)
   if (threadState?.activeRunId && threadState?.isStreaming && !hasNewInput) {
     try {
+      // 先登记取消保留标记，再请求后端终止，避免终态事件到达时清掉本地半截回答。
+      threadState.pendingInterrupt = {
+        kind: 'cancelled',
+        interruptedRunId: threadState.activeRunId,
+        threadId
+      }
       await agentApi.cancelAgentRun(threadState.activeRunId)
-      threadState.pendingInterrupt = null
       if (approvalState.threadId === threadId) {
         hideApprovalState()
       }

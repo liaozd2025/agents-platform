@@ -60,6 +60,7 @@
                   @click.stop
                 >
                   <a-dropdown
+                    v-model:open="selectionDropdownOpen[scope.key][option.value]"
                     :trigger="['click']"
                     placement="bottomRight"
                     overlay-class-name="share-selection-popover"
@@ -302,6 +303,11 @@ const scopes = reactive({ read_scope: null, manage_scope: null })
 const selectionSearch = reactive({
   read_scope: { department: '', user: '' },
   manage_scope: { department: '', user: '' }
+})
+// 选择浮层使用受控状态，避免树节点展开被 Dropdown 当成 overlay click 后自动关闭。
+const selectionDropdownOpen = reactive({
+  read_scope: { department: false, user: false },
+  manage_scope: { department: false, user: false }
 })
 const departmentExpandedKeys = reactive({ read_scope: [], manage_scope: [] })
 const normalizedAllowedAccessLevels = computed(() => {

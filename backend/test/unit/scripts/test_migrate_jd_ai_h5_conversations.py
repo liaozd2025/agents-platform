@@ -67,6 +67,22 @@ def test_build_message_payload_maps_human_query_and_json_metadata() -> None:
     assert payload["extra_metadata"]["files"][0]["file_name"] == "a.png"
 
 
+def test_build_message_payload_restores_h5_escaped_newlines_for_markdown() -> None:
+    payload = build_message_payload(
+        {
+            "id": 8,
+            "conversation_id": "c-1",
+            "from_source": "assistant",
+            "answer": "第一段\\n\\n- 第二段\\r\\n第三段",
+            "create_time": datetime(2026, 8, 25, 10, 0, 0),
+        },
+        files=[],
+    )
+
+    assert payload["role"] == "assistant"
+    assert payload["content"] == "第一段\n\n- 第二段\n第三段"
+
+
 def test_prepare_records_records_unknown_message_source_without_partial_conversation() -> None:
     stats = MigrationStats()
     records = prepare_records(

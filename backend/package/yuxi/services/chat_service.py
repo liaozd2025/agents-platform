@@ -1292,7 +1292,23 @@ async def stream_agent_chat(
         yield make_chunk(status="finished", meta=meta, terminal_committed=terminal_committed)
 
     except (asyncio.CancelledError, ConnectionError) as e:
+        # 用户停止生成或连接中断时，保留已累积的回答，避免刷新历史后整段内容消失。
         logger.warning(f"Client disconnected, cancelling stream: {e}")
+        full_msg = _ensure_full_msg(full_msg, accumulated_content)
+        if accumulated_content:
+            async with pg_manager.get_async_session_context() as new_db:
+                new_conv_repo = ConversationRepository(new_db)
+                await save_partial_message(
+                    new_conv_repo,
+                    thread_id,
+                    full_msg=full_msg,
+                    error_message="对话已取消，回答未生成完整",
+                    error_type="cancelled",
+                    trace_info=trace_info,
+                    run_id=meta.get("run_id"),
+                    request_id=meta.get("request_id"),
+                    worker_id=meta.get("worker_id"),
+                )
         yield make_chunk(status="interrupted", message="对话已中断", meta=meta)
 
     except Exception as e:
