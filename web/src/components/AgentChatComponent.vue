@@ -2470,7 +2470,8 @@ const insertOptimisticHumanMessage = (
 ) => {
   if (!threadState || !requestId) return
   threadState.pendingRequestId = requestId
-  threadState.replyLoadingVisible = false
+  // 用户消息已提交到本地，立即显示等待状态，不依赖 worker 返回首个 init 事件。
+  threadState.replyLoadingVisible = true
   threadState.onGoingConv.msgChunks[requestId] = [
     buildOptimisticHumanMessage({ requestId, text, imageContent, attachments })
   ]
@@ -3358,7 +3359,6 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
       })
       if (!hadActiveRun) {
         threadState.isStreaming = false
-        threadState.replyLoadingVisible = false
       }
       await resumeQueuedRequestsForThread(threadId)
     } else if (runId) {

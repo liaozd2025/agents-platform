@@ -99,6 +99,7 @@ export default defineConfig({
           { text: '服务端口', link: '/advanced/ports' },
           { text: '生产部署', link: '/advanced/deployment' },
           { text: '旧 OA 用户与部门同步', link: '/advanced/oa-user-department-sync' },
+          { text: '旧 OA 用户独立登录', link: '/advanced/oa-standalone-login' },
           { text: 'API Key 外部集成', link: '/advanced/api-key-integration' },
           { text: 'OA iframe 集成', link: '/enterprise/oa-embed-integration' },
           { text: 'H5 会话迁移', link: '/enterprise/h5-conversation-migration-guide' },

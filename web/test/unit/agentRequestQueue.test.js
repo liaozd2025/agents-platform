@@ -35,6 +35,37 @@ after(async () => {
   delete globalThis.localStorage
 })
 
+test('排队请求在等待 Run 创建期间保持 loading 状态', async () => {
+  const threadState = {
+    queuedRequests: [],
+    requestStreams: {},
+    onGoingConv: { msgChunks: {} },
+    pendingRequestId: 'request-1',
+    isStreaming: true,
+    replyLoadingVisible: true
+  }
+  const originalStreamRequestEvents = agentApi.streamRequestEvents
+  agentApi.streamRequestEvents = async () =>
+    new Response('event: queued\ndata: {"position":1}\n\n', {
+      headers: { 'Content-Type': 'text/event-stream' }
+    })
+
+  try {
+    const queue = useAgentRequestQueue({
+      getThreadState: () => threadState,
+      resetOnGoingConv: () => {},
+      startRunStream: () => {},
+      onStreamError: () => {}
+    })
+
+    await queue.startRequestStream('thread-1', 'request-1')
+
+    assert.equal(threadState.replyLoadingVisible, true)
+  } finally {
+    agentApi.streamRequestEvents = originalStreamRequestEvents
+  }
+})
+
 /** 集中 Run SSE 测试的固定依赖，只暴露各用例关心的行为。 */
 const createRunStream = ({ threadState, handleStreamChunk, resetOnGoingConv }) =>
   useAgentRunStream({
