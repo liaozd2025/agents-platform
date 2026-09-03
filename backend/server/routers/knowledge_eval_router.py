@@ -314,7 +314,8 @@ async def get_evaluation_run_results(
     run_id: str,
     page: int = 1,
     page_size: int = 20,
-    error_only: bool = False,
+    result_filter: str | None = None,
+    error_only: bool | None = None,
     current_user: User = Depends(require_evaluation_database_read),
 ):
     """获取评估运行结果"""
@@ -324,8 +325,16 @@ async def get_evaluation_run_results(
         if page_size < 1 or page_size > 100:
             raise HTTPException(status_code=400, detail="每页大小必须在1-100之间")
 
+        if result_filter not in {None, "all", "answer_errors", "errors_or_low_recall"}:
+            raise HTTPException(status_code=400, detail="无效的评估结果筛选条件")
+        if result_filter is not None and error_only is not None:
+            raise HTTPException(status_code=400, detail="不能同时使用 result_filter 和 error_only")
+
+        resolved_filter = "legacy_errors" if error_only is True else result_filter or "all"
         service = EvaluationService()
-        results = await service.get_run_results(kb_id, run_id, page=page, page_size=page_size, error_only=error_only)
+        results = await service.get_run_results(
+            kb_id, run_id, page=page, page_size=page_size, result_filter=resolved_filter
+        )
         return {"message": "success", "data": results}
     except HTTPException:
         raise

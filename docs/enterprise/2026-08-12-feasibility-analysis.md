@@ -42,7 +42,7 @@
 | Kai UI | `web/`（Vue 3，~75k LOC）|
 
 **3. 沙盒边界的设计完全一致 —— 这是最重要的一条**
-Yuxi 的 agent 跑在 `worker-dev` 进程里，`execute` 是走 HTTP 打到独立 sandbox 容器的工具（`agents/backends/sandbox/backend.py:175`，`ProvisionerSandboxBackend`）。Agent 本体从不进沙盒。这跟文章里 "the agent runs outside the sandbox and calls into it as a tool, maintaining clean execution boundaries" 是同一个决策。你不需要重新设计这个边界。
+Yuxi 的 agent 跑在 Compose `worker` 服务里，`execute` 是走 HTTP 打到独立 sandbox 容器的工具（`agents/backends/sandbox/backend.py:175`，`ProvisionerSandboxBackend`）。Agent 本体从不进沙盒。这跟文章里 "the agent runs outside the sandbox and calls into it as a tool, maintaining clean execution boundaries" 是同一个决策。你不需要重新设计这个边界。
 
 **4. Skills 是 Anthropic Agent Skills 风格 + 渐进披露 + 工具门控**
 `agents/middlewares/skills.py` 的三阶段：

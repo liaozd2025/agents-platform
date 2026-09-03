@@ -22,7 +22,7 @@ assignees: ''
 make logs
 
 # Windows
-docker logs --tail=100 api-dev
+docker compose logs --tail=100 api
 git rev-parse HEAD
 ```
 

@@ -295,7 +295,7 @@ Yuxi 使用 Docker Compose。默认 Compose 只由集成 worktree 负责，避�
 cd /Users/ddddup/Codebase/work/Yuxi-worktrees/integration-main
 docker compose up -d
 docker ps
-docker logs api-dev --tail 100
+docker compose logs --tail=100 api
 ```
 
 按改动范围执行最小验证：

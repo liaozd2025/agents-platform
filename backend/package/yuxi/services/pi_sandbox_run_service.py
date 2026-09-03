@@ -12,8 +12,8 @@ from yuxi.agents.backends.paths import VIRTUAL_PERSONAL_SKILLS_PATH, VIRTUAL_SKI
 from yuxi.agents.skills.service import compute_skill_dir_hash, is_valid_skill_slug, normalize_string_list
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
+from yuxi.repositories.project_repository import ProjectRepository
 from yuxi.services.input_message_service import build_chat_input_message
-from yuxi.services.workdir_service import resolve_conversation_workdir_binding
 from yuxi.storage.postgres.models_business import AgentRun
 from yuxi.utils.hash_utils import hash_id
 
@@ -33,6 +33,7 @@ class PiSandboxRunService:
         self.db = db
         self.run_repo = AgentRunRepository(db)
         self.conv_repo = ConversationRepository(db)
+        self.project_repo = ProjectRepository(db)
 
     async def start(
         self,
@@ -72,11 +73,22 @@ class PiSandboxRunService:
         parent_conversation = await self.conv_repo.get_conversation_by_id(creator_run.conversation_id)
         if parent_conversation is None or parent_conversation.uid != str(uid):
             raise ValueError("父运行任务的 Conversation 不存在")
-        workdir_path, project = await resolve_conversation_workdir_binding(
-            conversation=parent_conversation,
-            uid=str(uid),
-            db=self.db,
+        project = await self.project_repo.lock_active_for_user(
+            parent_conversation.project_id,
+            str(uid),
         )
+        if project is None:
+            raise ValueError("父运行任务的 Project 不存在")
+        parent_conversation = await self.conv_repo.lock_conversation_by_thread_id(creator_run.conversation_thread_id)
+        if (
+            parent_conversation is None
+            or parent_conversation.id != creator_run.conversation_id
+            or parent_conversation.uid != str(uid)
+            or parent_conversation.status == "deleted"
+            or parent_conversation.project_id != project.id
+        ):
+            raise ValueError("父运行任务的 Conversation 不存在")
+        workdir_path = project.workdir_path
         runtime_scope_id = str(creator_run.runtime_scope_id or creator_run.conversation_thread_id)
         child_thread_id = hash_id(
             "pi_",

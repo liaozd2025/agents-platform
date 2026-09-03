@@ -1,6 +1,7 @@
 import { onActivated, onDeactivated, onMounted, onUnmounted, ref, unref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChatThreadsStore } from '@/stores/chatThreads'
+import { useProjectsStore } from '@/stores/projects'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/apis/auth_api'
 import {
@@ -20,6 +21,7 @@ import { setOAEmbedAuthRequiredHandler } from '@/utils/oaEmbedSession'
 export function useOAEmbedBridge(enabled) {
   const userStore = useUserStore()
   const chatThreadsStore = useChatThreadsStore()
+  const projectsStore = useProjectsStore()
   const route = useRoute()
   const router = useRouter()
   const isAuthorized = ref(false)
@@ -45,6 +47,7 @@ export function useOAEmbedBridge(enabled) {
     statusMessage.value = message
     userStore.logout()
     chatThreadsStore.reset()
+    projectsStore.reset()
   }
 
   const requestAuthRequired = () => {

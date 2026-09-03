@@ -25,4 +25,4 @@ Owner：backend/package/yuxi/agents/buildin/chatbot/prompt.py
 
 | 验收主张 | 失败面 | 语义 Owner | 直接证据 / 命令 | 负向案例 | 当前结果 |
 |---|---|---|---|---|---|
-| 默认系统提示词使用九典身份且不包含“语析” | 默认聊天仍回答旧品牌身份，或身份回答附加其他内容 | `backend/package/yuxi/agents/buildin/chatbot/prompt.py` | `docker exec api-dev uv run --group test pytest test/unit/agents/test_chatbot_prompt.py -q` | 恢复旧身份声明后，`test_default_chatbot_identifies_as_jiudian_ai_assistant` 因缺少九典身份并出现“语析”而失败 | Passed |
+| 默认系统提示词使用九典身份且不包含“语析” | 默认聊天仍回答旧品牌身份，或身份回答附加其他内容 | `backend/package/yuxi/agents/buildin/chatbot/prompt.py` | `docker compose exec -T api uv run --group test pytest test/unit/agents/test_chatbot_prompt.py -q` | 恢复旧身份声明后，`test_default_chatbot_identifies_as_jiudian_ai_assistant` 因缺少九典身份并出现“语析”而失败 | Passed |

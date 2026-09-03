@@ -14,7 +14,7 @@ assignees: ''
 - 预期结果：您期望看到什么？
 - 实际结果：实际发生了什么？
 
-例如："执行 `docker compose up -d` 后，api-dev 服务一直重启，查看日志显示无法连接到 Milvus"
+例如："执行 `docker compose up -d` 后，api 服务一直重启，查看日志显示无法连接到 Milvus"
 
 
 ## 2️⃣ 环境信息
@@ -45,8 +45,8 @@ make up
 # 查看所有服务状态
 docker ps
 
-# 查看 api-dev 服务日志
-docker logs --tail=100 api-dev
+# 查看 api 服务日志
+docker compose logs --tail=100 api
 
 # 查看所有服务日志
 docker compose logs --tail=100
@@ -55,7 +55,7 @@ docker compose logs --tail=100
 将日志粘贴到下方（可根据问题相关性选择部分日志）：
 
 ```
-# api-dev 日志
+# api 日志
 ...
 
 # 其他相关服务日志

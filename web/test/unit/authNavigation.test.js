@@ -28,3 +28,25 @@ test('路由权限同时支持全部满足与任一满足约束', () => {
     false
   )
 })
+
+test('知识库评估详情同时要求评估管理与知识库访问权限', () => {
+  const matched = [
+    { meta: { requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage'] } },
+    { meta: { requiredPermission: 'knowledge_evaluation:manage' } }
+  ]
+
+  assert.equal(
+    canAccessRoute(matched, (permission) =>
+      ['knowledge_base:read', 'knowledge_evaluation:manage'].includes(permission)
+    ),
+    true
+  )
+  assert.equal(
+    canAccessRoute(matched, (permission) => permission === 'knowledge_base:read'),
+    false
+  )
+  assert.equal(
+    canAccessRoute(matched, (permission) => permission === 'knowledge_evaluation:manage'),
+    false
+  )
+})
