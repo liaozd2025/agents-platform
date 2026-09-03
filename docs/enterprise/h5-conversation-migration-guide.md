@@ -50,7 +50,7 @@ docker compose up -d --no-deps --force-recreate api
 检查配置是否已进入容器。以下命令只输出是否配置，不输出账号密码：
 
 ```bash
-docker exec api-dev sh -lc '
+docker compose exec -T api sh -lc '
 for key in H5_MYSQL_HOST H5_MYSQL_PORT H5_MYSQL_DATABASE H5_MYSQL_USER H5_MYSQL_PASSWORD; do
   eval "value=\${$key}"
   if [ -n "$value" ]; then echo "$key=configured"; else echo "$key=missing"; fi
@@ -75,7 +75,7 @@ done
 先预检 100 条会话。默认不写 PostgreSQL：
 
 ```bash
-docker exec api-dev sh -lc '
+docker compose exec -T api sh -lc '
 python scripts/migrate_jd_ai_h5_conversations.py \
   --cutoff <固定截止时间> \
   --limit-conversations 100 \
@@ -93,7 +93,7 @@ python scripts/migrate_jd_ai_h5_conversations.py \
 查看失败清单：
 
 ```bash
-docker exec api-dev sh -lc 'cat /tmp/h5-migration-preview-failures.json'
+docker compose exec -T api sh -lc 'cat /tmp/h5-migration-preview-failures.json'
 ```
 
 ### 2. 小批量试迁移
@@ -101,7 +101,7 @@ docker exec api-dev sh -lc 'cat /tmp/h5-migration-preview-failures.json'
 预检通过后，使用同一截止时间试迁移少量会话：
 
 ```bash
-docker exec api-dev sh -lc '
+docker compose exec -T api sh -lc '
 python scripts/migrate_jd_ai_h5_conversations.py \
   --cutoff <固定截止时间> \
   --limit-conversations 5 \
@@ -117,7 +117,7 @@ python scripts/migrate_jd_ai_h5_conversations.py \
 试迁移确认无误后，去掉 `--limit-conversations`，仍使用同一截止时间：
 
 ```bash
-docker exec api-dev sh -lc '
+docker compose exec -T api sh -lc '
 python scripts/migrate_jd_ai_h5_conversations.py \
   --cutoff <固定截止时间> \
   --apply \
@@ -128,7 +128,7 @@ python scripts/migrate_jd_ai_h5_conversations.py \
 数据量较大时，可将任务放到容器后台并记录日志：
 
 ```bash
-docker exec api-dev sh -lc '
+docker compose exec -T api sh -lc '
 nohup python scripts/migrate_jd_ai_h5_conversations.py \
   --cutoff <固定截止时间> \
   --apply \
@@ -140,7 +140,7 @@ nohup python scripts/migrate_jd_ai_h5_conversations.py \
 查看进度：
 
 ```bash
-docker exec api-dev sh -lc 'tail -n 50 /tmp/h5-migration-full.log'
+docker compose exec -T api sh -lc 'tail -n 50 /tmp/h5-migration-full.log'
 ```
 
 确认日志出现“迁移完成”后再验收结果。
@@ -196,7 +196,7 @@ LIMIT 20;
 H5 产生新会话后，可以选取新的固定截止时间，重复“只读预检 → 小批量试迁移 → 全量迁移”流程。脚本会幂等跳过已迁移会话，只创建尚未迁移的新会话。
 
 ```bash
-docker exec api-dev sh -lc '
+docker compose exec -T api sh -lc '
 python scripts/migrate_jd_ai_h5_conversations.py \
   --cutoff <新的固定截止时间> \
   --apply \

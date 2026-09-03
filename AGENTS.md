@@ -9,6 +9,7 @@ Yuxi 是基于 LangGraph、FastAPI、Vue 和多种持久化服务构建的知识
 - [工程信任系统](docs/develop-guides/engineering-trust.md)：语义 Owner、证据、决策记录、派生审计和 gate 规则。
 - [测试规范](docs/develop-guides/testing-guidelines.md)：unit、integration、E2E 的职责与命令。
 - [贡献指南](docs/develop-guides/contributing.md)：分支、独立 Review、commit 和 PR 流程。
+- [并行工作树与隔离运行环境](docs/develop-guides/parallel-worktree-environments.md)：同时运行多个分支、复用长期数据或处理 Schema 不兼容时加载。
 - 用户在当前任务中的明确要求优先于本文件；修改 `backend/`、`web/` 或 `docs/` 时同时遵循该子树的 `AGENTS.md`。子树规则只补充本目录，不复制回根文件。
 
 ## 任务与决策
@@ -93,7 +94,7 @@ GitHub Issues，仓库为 `origin`（`liaozd2025/agents-platform`，原名 `liao
 ### 本仓库对 skills 产出的约束
 
 - **语言**：spec、ticket、ADR、issue 正文一律用中文；标签字符串与命令片段保持英文。
-- **测试环境**：`/implement` 与 `/tdd` 的测试必须在容器内执行（`docker exec api-dev ...`），不要在宿主机直接跑；测试落位遵循 [testing-guidelines.md](docs/develop-guides/testing-guidelines.md)。
+- **测试环境**：`/implement` 与 `/tdd` 用 `docker compose exec -T api ...` 在容器内测试；落位遵循 [testing-guidelines.md](docs/develop-guides/testing-guidelines.md)。
 - **提交**：遵循上方「提交规范」，不要用英文 commit message。
 - **文档位置**：`docs/vibe/` 已被 gitignore，仅放临时草稿；需要入库、需要交给 agent 或团队协作的设计文档放 `docs/enterprise/`。注意 `docs/agents/` 是**产品文档**目录（智能体功能说明，挂在 VitePress 导航），不要往里写工具链配置。
 - **Review**：`/code-review` 需同时应用本文件的「代码 Review 准则」。

@@ -115,8 +115,9 @@ async def test_schema_version_is_persisted_and_runtime_validation_fails_closed()
         await admin_engine.dispose()
 
 
-async def test_business_v2_to_v3_runs_real_ddl_before_advancing_version() -> None:
-    """真实 DDL 失败时保留 v2，成功补列后才允许记录 v3。"""
+@pytest.mark.parametrize("starting_version", [1, 2, BUSINESS_SCHEMA_VERSION - 1])
+async def test_supported_business_versions_run_real_ddl_before_advancing_version(starting_version: int) -> None:
+    """真实 DDL 失败时保留原版本，成功补列后才允许记录当前版本。"""
     schema = f"pytest_business_upgrade_{uuid.uuid4().hex[:16]}"
     admin_engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
     scoped_engine = None
@@ -134,36 +135,43 @@ async def test_business_v2_to_v3_runs_real_ddl_before_advancing_version() -> Non
         await manager.create_business_tables()
         await manager.create_knowledge_tables()
         await manager.create_schema_version_table()
-        await manager.record_schema_version("business", BUSINESS_SCHEMA_VERSION - 1)
+        await manager.record_schema_version("business", starting_version)
         async with scoped_engine.begin() as connection:
             await connection.execute(text("ALTER TABLE tool_calls DROP COLUMN organization_path_snapshot"))
+            await connection.execute(text("ALTER TABLE projects DROP COLUMN status CASCADE"))
+            await connection.execute(text("ALTER TABLE projects DROP COLUMN deleted_at"))
             await connection.execute(
                 text("INSERT INTO departments (id, name, node_type, path) VALUES (2, '缺根节点', 'department', '')")
             )
 
-        async def snapshot_column_exists() -> bool:
+        async def column_exists(table_name: str, column_name: str) -> bool:
             async with scoped_engine.connect() as connection:
                 result = await connection.execute(
                     text(
                         "SELECT EXISTS ("
                         "SELECT 1 FROM information_schema.columns "
                         "WHERE table_schema = current_schema() "
-                        "AND table_name = 'tool_calls' "
-                        "AND column_name = 'organization_path_snapshot')"
-                    )
+                        "AND table_name = :table_name "
+                        "AND column_name = :column_name)"
+                    ),
+                    {"table_name": table_name, "column_name": column_name},
                 )
                 return bool(result.scalar())
 
         with pytest.raises(Exception, match="id=1"):
             await manager.ensure_business_schema()
-        assert await manager.get_schema_versions() == {"business": BUSINESS_SCHEMA_VERSION - 1}
-        assert await snapshot_column_exists() is False
+        assert await manager.get_schema_versions() == {"business": starting_version}
+        assert await column_exists("tool_calls", "organization_path_snapshot") is False
+        assert await column_exists("projects", "status") is False
+        assert await column_exists("projects", "deleted_at") is False
 
         async with scoped_engine.begin() as connection:
             await connection.execute(text("DELETE FROM departments WHERE id = 2"))
         await manager.ensure_business_schema()
-        assert await snapshot_column_exists() is True
-        assert await manager.get_schema_versions() == {"business": BUSINESS_SCHEMA_VERSION - 1}
+        assert await column_exists("tool_calls", "organization_path_snapshot") is True
+        assert await column_exists("projects", "status") is True
+        assert await column_exists("projects", "deleted_at") is True
+        assert await manager.get_schema_versions() == {"business": starting_version}
 
         await manager.record_schema_version("business", BUSINESS_SCHEMA_VERSION)
         await manager.require_current_schema(include_knowledge=False)

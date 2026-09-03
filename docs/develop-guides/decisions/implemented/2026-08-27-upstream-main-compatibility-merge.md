@@ -23,8 +23,8 @@ Owner：ARCHITECTURE.md
 - PI Local tracer 使用 attempt 独立 Workdir 和临时 Skill 投影；绑定 Workdir 的 Sandbox 命令显式使用严格 `exec_dir`，不依赖远程 shell 继承容器 `working_dir`；Python Manifest 与 Runner 的 Skill 摘要统一使用确定性 Unicode 路径顺序，不依赖运行环境 locale；创建失败、取消和已知启动失败在实例确认释放后清理，final ACK 与 `execution_unknown` 保留 outputs，避免删除已被持久事件引用的文件；释放失败由 attempt 持久化并由 worker 周期重试。
 - 用户分页采用官方 `/users/page` 响应 envelope，查询仍由产品管理域 SQL 限制；越出管理域保持 404。
 - 品牌、OA 精确部门匹配和产品全屏设置入口保持产品行为，不回退到官方默认文案、自动建部门或旧设置弹窗。
-- 新增的 RBAC/组织快照和官方业务表结构共同归 business schema v2，已记录为 v1→v2 相邻升级，避免已版本化 v1 数据库跳过 DDL。
-- 未记录 schema version 的产品数据库可能缺少官方 `creation_request_id`；v0.7.1 Workdir cutover 在 ORM 重写前幂等补列，唯一索引仍由后续 business schema v2 统一创建。
+- RBAC、组织快照和官方业务表结构统一归 business schema；当前版本与受支持升级入口由[数据库 Schema 迁移 Owner](./2026-08-24-versioned-schema-migration-owner.md)维护。
+- 未记录 schema version 的产品数据库可能缺少官方 `creation_request_id`；v0.7.1 Workdir cutover 在 ORM 重写前幂等补列，唯一索引由后续 business schema 收敛统一创建。
 
 ## 替代方案
 
@@ -35,7 +35,7 @@ Owner：ARCHITECTURE.md
 ## 后果
 
 - 产品能力与官方新增能力共用一套入口和持久化事实，没有引入长期双实现开关。
-- business v1 部署升级前必须备份并由唯一 `storage-migrator` 完成 v2；API/worker 在版本未到 v2 时拒绝启动。
+- business v1、v2、v3 部署升级前必须备份并由唯一 `storage-migrator` 完成 v4；API/worker 在版本未到 v4 时拒绝启动。
 - PI provisioner 未确认释放时不删除 bind-mounted Workdir 或 Skill 投影；多个 worker 通过 PostgreSQL `FOR UPDATE SKIP LOCKED` 排他收敛同一 attempt，成功后才清除 `cleanup_failed_at`。
 - Dashboard 资源 ACL 当前在 service 中逐资源、逐主体复用 resolver；数据量出现可测慢查询后再下推 SQL。
 - 单元与静态 gate 不能代替真实 worker、SSE、浏览器和签入后业务验收，未执行范围必须继续显式报告。
@@ -43,11 +43,11 @@ Owner：ARCHITECTURE.md
 ## 验证
 
 - `pytest test/unit -m 'not slow'`（隔离容器、只读仓库根、可写临时 Skill 投影）：1726 passed，8 warnings。
-- AgentRun repository、Skill、PI 和 worker 聚焦 unit：157 passed；Dashboard 与存储迁移聚焦 unit 各 8 passed。覆盖 ToolCall self owner、推断快照 join、资源 ACL service、共享/个人 Skill symlink 竞态、PI 创建补偿、orphan 重试和 v1→v2 升级。
-- `pytest test/integration/services/test_schema_migration_version.py`：4 passed；使用真实 PostgreSQL 唯一临时 schema，验证 advisory lock、版本 fail-closed、真实 DDL 失败不推进 v1、成功补列后显式记录 v2 及 PI cleanup 并发行锁，结束后删除 schema。
+- AgentRun repository、Skill、PI 和 worker 聚焦 unit 覆盖 ToolCall self owner、推断快照 join、资源 ACL service、共享/个人 Skill symlink 竞态、PI 创建补偿和 orphan 重试；当前 schema 回归见迁移 Owner 记录。
+- `pytest test/integration/services/test_schema_migration_version.py` 使用真实 PostgreSQL 临时 schema 验证 advisory lock、版本 fail-closed、v1/v2/v3 DDL 回滚、成功补列后显式记录 v4 及 PI cleanup 并发行锁。
 - `pytest test/integration/services/test_workdir_user_workspace.py::test_v071_thread_layout_migrates_files_empty_workdir_and_attachment_metadata`：1 passed；真实 PostgreSQL 临时 schema 先删除 `project_id` 与 `creation_request_id`，验证 cutover 可在新版 ORM 查询前兼容补列。
 - `pytest test/e2e/test_pi_local_tracer.py -m e2e`：4 passed；真实 provisioner 与 PI 镜像验证混合大小写 Skill 树摘要、golden outputs 在 final ACK 后从 Workdir 回读、取消后实例和 attempt scope 清理，以及模型任务认证 fail-closed。
 - Ruff 0.16.4 check 与 format check：通过；`git diff --check`、`git ls-files -u`：通过且无未解决索引项。
 - Web 锁定安装、ESLint、完整 unit 和生产 build：通过；VitePress 文档 build：通过。
 - 工程契约、Compose 校验和完整最终 Git 状态在本次合并交付前再次执行。
-- 未执行：会触发现有另一工作树 API/worker 的 live integration、E2E、真实浏览器签入验收，以及完整 shipping business v1→v2 部署演练。
+- 未执行：完整 shipping business v1/v2/v3→v4 部署演练、真实计费 provider 探针和完整浏览器签入验收。

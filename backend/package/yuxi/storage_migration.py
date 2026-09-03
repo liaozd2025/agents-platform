@@ -95,10 +95,10 @@ def _require_supported_version(
     actual: int | None,
     expected: int,
     *,
-    previous: int | None = None,
+    upgrade_from: tuple[int, ...] = (),
 ) -> None:
-    """只接受未版本化 baseline、受支持的相邻版本或当前版本。"""
-    if actual not in (None, previous, expected):
+    """接受未版本化 baseline、当前版本与显式可升级版本。"""
+    if actual not in (None, expected, *upgrade_from):
         raise RuntimeError(f"Unsupported {domain} schema version: {actual}; expected {expected}")
 
 
@@ -126,7 +126,7 @@ async def main() -> None:
                 "business",
                 business_version,
                 BUSINESS_SCHEMA_VERSION,
-                previous=BUSINESS_SCHEMA_VERSION - 1,
+                upgrade_from=(1, 2, 3),
             )
             if not lite_mode_enabled():
                 _require_supported_version("knowledge", versions.get("knowledge"), KNOWLEDGE_SCHEMA_VERSION)
@@ -141,9 +141,10 @@ async def main() -> None:
                     await rewrite_v071_workdir_paths(session)
                     await verify_workdir_bindings(session)
                     await session.commit()
-            if business_version != BUSINESS_SCHEMA_VERSION:
+            if business_version is None or business_version < BUSINESS_SCHEMA_VERSION:
                 await pg_manager.ensure_business_schema()
-                await pg_manager.setup_langgraph_checkpointer()
+                if business_version is None:
+                    await pg_manager.setup_langgraph_checkpointer()
                 await pg_manager.record_schema_version("business", BUSINESS_SCHEMA_VERSION)
 
             if not lite_mode_enabled() and versions.get("knowledge") is None:

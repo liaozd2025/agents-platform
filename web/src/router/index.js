@@ -124,6 +124,18 @@ const router = createRouter({
               }
             },
             {
+              path: 'knowledgebase/:kbId/evaluation/:datasetId',
+              name: 'EmbedExtensionEvaluationBenchmarkDetail',
+              component: () => import('../views/EvaluationBenchmarkDetailView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true,
+                requiredPermission: 'knowledge_evaluation:manage',
+                requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage'],
+                requiresKnowledge: true
+              }
+            },
+            {
               path: 'mcp/:slug',
               name: 'EmbedExtensionMcpDetail',
               component: () => import('../components/extensions/McpDetailView.vue'),
@@ -212,6 +224,18 @@ const router = createRouter({
               meta: {
                 keepAlive: false,
                 requiresAuth: true,
+                requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage'],
+                requiresKnowledge: true
+              }
+            },
+            {
+              path: 'knowledgebase/:kbId/evaluation/:datasetId',
+              name: 'ExtensionEvaluationBenchmarkDetail',
+              component: () => import('../views/EvaluationBenchmarkDetailView.vue'),
+              meta: {
+                keepAlive: false,
+                requiresAuth: true,
+                requiredPermission: 'knowledge_evaluation:manage',
                 requiredAnyPermissions: ['knowledge_base:read', 'knowledge_base:manage'],
                 requiresKnowledge: true
               }

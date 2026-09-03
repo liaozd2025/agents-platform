@@ -107,12 +107,13 @@ export default defineConfig({
         ]
       },
       {
-          text: '开发指南',
-          items: [
-            { text: '参与贡献', link: '/develop-guides/contributing' },
-            { text: 'Fork 与官网同步', link: '/develop-guides/fork-upstream-sync' },
-            { text: '文档编写与维护', link: '/develop-guides/documentation-guidelines' },
-            { text: '开发路线图', link: '/develop-guides/roadmap' },
+        text: '开发指南',
+        items: [
+          { text: '参与贡献', link: '/develop-guides/contributing' },
+          { text: 'Fork 与官网同步', link: '/develop-guides/fork-upstream-sync' },
+          { text: '并行工作树与隔离环境', link: '/develop-guides/parallel-worktree-environments' },
+          { text: '文档编写与维护', link: '/develop-guides/documentation-guidelines' },
+          { text: '开发路线图', link: '/develop-guides/roadmap' },
           { text: '版本变更记录', link: '/develop-guides/changelog' },
           { text: '界面设计规范', link: '/develop-guides/design' },
           { text: '测试规范', link: '/develop-guides/testing-guidelines' },

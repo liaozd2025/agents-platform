@@ -134,7 +134,16 @@ async def test_queue_history_keeps_each_request_with_its_reply(session):
 
 async def test_queue_history_keeps_cancelled_delivered_user_message(session):
     """已送达后取消的用户消息仍属于对话历史，不能按排队消息隐藏。"""
-    session.add(Conversation(id=1, thread_id="cancel-thread", uid="user-1", agent_id="main", status="active"))
+    session.add(
+        Conversation(
+            id=1,
+            thread_id="cancel-thread",
+            project_id="project-cancel-thread",
+            uid="user-1",
+            agent_id="main",
+            status="active",
+        )
+    )
     session.add(
         Message(
             id=1,

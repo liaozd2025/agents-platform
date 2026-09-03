@@ -332,6 +332,31 @@ async def test_resource_scope_aggregation_lives_in_dashboard_service(dashboard_d
     assert result["contains_inferred_data"] is True
 
 
+async def test_agent_analytics_keeps_top_performers_wire_contract(dashboard_db):
+    """智能体统计保留历史 Agent 概览与既有 TOP 5 协议。"""
+    analytics = await DashboardService(dashboard_db).get_agent_analytics()
+
+    assert set(analytics) == {
+        "total_agents",
+        "agent_conversation_counts",
+        "agent_satisfaction_rates",
+        "agent_tool_usage",
+        "top_performing_agents",
+        "agent_names",
+    }
+    assert analytics["total_agents"] == 3
+    assert analytics["agent_names"] == {
+        "agent-helper": "Helper Agent",
+        "agent-coder": "Coder Agent",
+        "removed-agent": "removed-agent",
+    }
+    assert {item["agent_id"] for item in analytics["top_performing_agents"]} == {
+        "agent-helper",
+        "agent-coder",
+        "removed-agent",
+    }
+
+
 async def test_dashboard_service_thread_analytics(dashboard_db):
     service = DashboardService(dashboard_db)
     analytics = await service.get_thread_analytics(time_range="7days")

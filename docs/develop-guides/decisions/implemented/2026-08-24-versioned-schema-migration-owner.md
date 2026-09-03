@@ -12,7 +12,7 @@ API 与 worker 在启动时执行建表和 `ensure_*_schema`，多个运行进�
 
 ## 决策
 
-现有 `storage-migrator` 是 shipping 拓扑唯一的 Yuxi Schema 修改者，不新增迁移服务或框架。迁移器持有 PostgreSQL session advisory lock，创建 `yuxi_schema_migrations` 版本表，并分别记录 `business` 与 `knowledge` 域。当前版本为 `business=2`、`knowledge=1`：未版本化的受支持 legacy baseline 执行当前幂等建表与收敛 SQL，business v1 通过唯一受支持的相邻路径执行幂等 Schema DDL 后升级到 v2；LangGraph checkpoint setup 完成后才记录 business 版本。当前版本重复运行跳过该域的 Schema DDL，其他非零版本明确失败。
+现有 `storage-migrator` 是 shipping 拓扑唯一的 Yuxi Schema 修改者，不新增迁移服务或框架。迁移器持有 PostgreSQL session advisory lock，创建 `yuxi_schema_migrations` 版本表，并分别记录 `business` 与 `knowledge` 域。当前版本为 `business=4`、`knowledge=1`：未版本化的受支持 legacy baseline 执行当前幂等建表与收敛 SQL，已发布 business v1、v2、v3 执行幂等 Schema DDL 后升级到 v4；只有未版本化数据库执行 LangGraph checkpoint setup。当前版本重复运行跳过该域的 Schema DDL，其他非零版本明确失败。
 
 LITE 只迁移并要求 business 域，不创建或要求 knowledge schema；完整模式迁移并要求两个域。API 与 worker 不执行建表、Schema 收敛或 checkpoint setup，只校验所需域等于当前程序版本；版本表或域缺失、过旧或过新时拒绝启动。Compose 继续使用 `service_completed_successfully` 阻止迁移失败后的运行进程启动。
 
@@ -35,7 +35,7 @@ LITE 只迁移并要求 business 域，不创建或要求 knowledge schema；完
 
 ## 验证
 
-- `pytest test/unit -m 'not slow'`（隔离容器）：1726 passed，8 warnings；其中 storage migration 8 项覆盖未版本化 baseline、v1→v2、当前 v2、LITE 和失败不推进版本。
-- `pytest test/integration/services/test_schema_migration_version.py`：4 passed；真实 PostgreSQL 唯一临时 schema 覆盖 session advisory lock、版本缺失/错误拒绝、v1 DDL 失败不推进版本、成功补列后显式记录 v2 及持久 cleanup 行锁，结束后删除 schema。
-- 初始 v1 发布曾在完整模式和 LITE shipping Compose 中验证首次迁移、重复运行无 DDL 及 API/worker readiness；本次 v2 尚未执行完整 shipping 升级演练，发布前仍需备份并验证 v1→v2、重复运行和 readiness。
+- `pytest test/unit -m 'not slow'`（隔离容器）覆盖未版本化 baseline、v1/v2/v3→v4、当前 v4、LITE 和失败不推进版本。
+- `pytest test/integration/services/test_schema_migration_version.py` 使用真实 PostgreSQL 临时 schema 覆盖 advisory lock、版本 fail-closed、v1/v2/v3 DDL 失败回滚、Project 生命周期与组织快照补列、显式版本推进及 cleanup 行锁。
+- v4 尚未执行完整 shipping 升级演练；发布前仍需备份并验证 v1/v2/v3→v4、重复运行和 readiness。
 - `python3 scripts/verify_engineering_contracts.py` 与 `python3 -m unittest scripts.test_verify_engineering_contracts` 作为提交前 gate 再次执行。

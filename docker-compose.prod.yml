@@ -48,7 +48,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    image: yuxi-api:${YUXI_VERSION:-0.7.2.beta2}
+    image: yuxi-api:${YUXI_VERSION:-0.7.2}
     container_name: api-prod
     working_dir: /app
     user: "1000:1000"
@@ -92,7 +92,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    image: yuxi-api:${YUXI_VERSION:-0.7.2.beta2}
+    image: yuxi-api:${YUXI_VERSION:-0.7.2}
     container_name: worker-prod
     working_dir: /app
     user: "1000:1000"
@@ -134,7 +134,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
-    image: yuxi-api:${YUXI_VERSION:-0.7.2.beta2}
+    image: yuxi-api:${YUXI_VERSION:-0.7.2}
     working_dir: /app
     user: "0:0"
     networks:
@@ -216,7 +216,7 @@ services:
       target: production
       args:
         - VITE_YUXI_EMBED_ALLOWED_ORIGINS=${YUXI_EMBED_ALLOWED_ORIGINS:-}
-    image: yuxi-web:${YUXI_VERSION:-0.7.2.beta2}
+    image: yuxi-web:${YUXI_VERSION:-0.7.2}
     container_name: web-prod
     ports:
       - "80:80"
