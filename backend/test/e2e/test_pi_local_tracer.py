@@ -220,7 +220,7 @@ async def test_pi_runner_rejects_model_job_without_supported_authentication():
         await adapter.stop(instance_id)
 
 
-async def test_pi_sandbox_assembled_path_persists_child_and_mirrors_tools(
+async def test_pi_sandbox_assembled_path_prioritizes_run_output_directory(
     monkeypatch,
 ):
     uid = f"pytest-pi-{uuid.uuid4().hex}"
@@ -309,11 +309,12 @@ async def test_pi_sandbox_assembled_path_persists_child_and_mirrors_tools(
             _effective_skill_slugs=[],
             _runtime_skills={},
         )
+        legacy_output_path = f"/home/gem/user-data/{workdir_path}/outputs/pi-golden.txt"
         command = (
             await create_pi_sandbox_middleware(context)
             .tools[0]
             .coroutine(
-                description="运行 PI golden 任务并返回产物",
+                description=f"运行 PI golden 任务，将产物写入 {legacy_output_path}",
                 runtime=SimpleNamespace(tool_call_id="call-pi-assembled"),
             )
         )

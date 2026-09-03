@@ -51,6 +51,18 @@ const runnerPath = fileURLToPath(import.meta.url);
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
+/** 构造 PI 任务提示，并让本次交付目录覆盖任务中的冲突路径。 */
+function buildTaskPrompt(task, projectRoot, outputRoot) {
+  // ponytail: 先用提示优先级保留通用 workspace 写入；模型再次越界时再增加 write-set gate。
+  return (
+    `Complete the user task in the current sandbox. The Project workspace is ${projectRoot}.` +
+    `\n\nUser task:\n${task}\n\nExecution requirement: ` +
+    `Put every generated deliverable under ${outputRoot}. ` +
+    "This assigned directory overrides any conflicting output path in the user task. " +
+    "Do not put generated deliverables elsewhere."
+  );
+}
+
 async function directoryDigest(root) {
   const entries = [];
   async function walk(path) {
@@ -357,6 +369,7 @@ async function promptUntilComplete(session, prompt) {
 async function runGolden(job, outputRoot) {
   const sessionDir = resolve(outputRoot, "pi-session");
   const outputPath = resolve(outputRoot, "pi-golden.txt");
+  const legacyOutputPath = resolve(OUTPUTS_ROOT, "pi-golden.txt");
   const patchPath = resolve(outputRoot, "pi-golden.patch");
   await mkdir(sessionDir, { recursive: true });
   const faux = fauxProvider();
@@ -371,16 +384,29 @@ async function runGolden(job, outputRoot) {
         stopReason: "toolUse",
       },
     ),
-    fauxAssistantMessage(
-      fauxToolCall(
-        "write",
-        { path: outputPath, content: GOLDEN },
-        { id: "write-golden" },
-      ),
-      {
-        stopReason: "toolUse",
-      },
-    ),
+    (context) => {
+      const prompt = context.messages
+        .find((message) => message.role === "user")
+        ?.content?.find((item) => item.type === "text")?.text;
+      const hasConflictingOutputPath =
+        typeof job.task === "string" && job.task.includes(legacyOutputPath);
+      const legacyOutputIndex = prompt?.lastIndexOf(legacyOutputPath) ?? -1;
+      const assignedOutputIndex = prompt?.lastIndexOf(outputRoot) ?? -1;
+      const assignedDirectoryWins =
+        legacyOutputIndex >= 0 && assignedOutputIndex > legacyOutputIndex;
+      const targetPath =
+        !hasConflictingOutputPath || assignedDirectoryWins
+          ? outputPath
+          : legacyOutputPath;
+      return fauxAssistantMessage(
+        fauxToolCall(
+          "write",
+          { path: targetPath, content: GOLDEN },
+          { id: "write-golden" },
+        ),
+        { stopReason: "toolUse" },
+      );
+    },
     fauxAssistantMessage("YUXI_PI_", { stopReason: "length" }),
     fauxAssistantMessage("GOLDEN_V1"),
   ]);
@@ -407,9 +433,13 @@ async function runGolden(job, outputRoot) {
   const unsubscribe = subscribeToolEvents(session, emitEvent);
   try {
     emitEvent("log", { message: "pi_started" });
+    const task =
+      typeof job.task === "string" && job.task.trim()
+        ? job.task
+        : "Use the pi-golden Skill and complete its task exactly.";
     const text = await promptUntilComplete(
       session,
-      "Use the pi-golden Skill and complete its task exactly.",
+      buildTaskPrompt(task, process.cwd(), outputRoot),
     );
     const artifact = await readFile(outputPath);
     if (
@@ -537,8 +567,7 @@ async function runTask(job, outputRoot) {
     emitEvent("log", { message: "pi_started", model: model.model_id });
     const text = await promptUntilComplete(
       session,
-      `Complete the user task in the current sandbox. The Project workspace is ${process.cwd()}. ` +
-        `Put every generated deliverable under ${outputRoot}.\n\nUser task:\n${job.task}`,
+      buildTaskPrompt(job.task, process.cwd(), outputRoot),
     );
     if (!text)
       throw new Error("PI completed without a final assistant message");
