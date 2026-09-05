@@ -12,11 +12,11 @@
 
 PI 工作目录与交付收集范围须明确分离。依赖、缓存和辅助文件不得被无差别登记为最终交付物；大于 8MiB 的普通合法文件须能交付。所有交付仍绑定当前 attempt，目录逃逸、符号链接、大小/摘要冲突必须在文件边界拒绝。只读任务允许没有交付物，不能从共享目录猜测本次产物。
 
-同一用户、Project、根会话的后续 PI 任务可以续接已保存 session；不同会话不得交叉读取 session，活动 session 串行访问。续接来源须经服务端归属验证，不能信任模型提供的历史路径。加载获准的当前 Project 指令，保留 Skill 权限快照。模型能力沿用现有元数据，真实 token usage 归属本次 child Run。
+同一用户、Project、根会话的后续 PI 任务可以续接已保存 session；服务端自动续接不得混用不同会话的 session，活动 session 串行访问。续接来源须经服务端归属验证，不能信任模型提供的历史路径。加载获准的当前 Project 指令，保留 Skill 权限快照。模型能力沿用现有元数据，真实 token usage 归属本次 child Run。
 
 PI 正文增量、命令中间输出经既有 SSE 与消息组件呈现，增量事件合并且不逐 token 重写数据库历史。运行中引导须与现有主会话 steer 请求的唯一消费语义兼容；只接受一次输入，不让当前 PI 和下一 Run 重复执行同一要求。取消和引导必须通过真实链路验证。
 
-审批默认沿用现有任务级授权与 always_trust 两种模式，并在用户批准前说明沙箱命令和用户工作区访问范围。逐命令审批仍待用户对体验选项的回复；若明确选择则补入对应执行与 UI 验收，不能仅靠提示词模拟授权边界。
+审批沿用现有任务级授权与 always_trust 两种模式，并在用户批准前说明沙箱命令和用户工作区访问范围。本期保持既有授权语义，不新增逐命令审批，也不把提示词当作授权边界。
 
 生产模板须能选择与源码匹配的 PI 镜像，构建/启动步骤包含 Runner 一致性验证；不发布不存在的镜像标签。常规 CI 使用受控模型上游经过真实 runTask 分支，验证 Request → worker → PI → SSE → 文件/数据库，不依赖计费模型或腾讯云。
 
@@ -30,9 +30,11 @@ PI 正文增量、命令中间输出经既有 SSE 与消息组件呈现，增量
 | --- | --- | --- | --- |
 | T1 | 取消收敛：pi_execution_service 与流式 backend | 无 | 外层取消、业务取消、ACK 竞态和真实命令停止 |
 | T2 | 资源预算与镜像部署：provisioner、Compose、WorkerSettings、配置文档 | 无 | 非法配置/超容量负向、真实 Docker 资源回读、部署配置验证 |
-| T3 | 工作目录与交付契约：PI runner、adapter 文件回读 | T1 | 9MiB 合法交付、依赖不入 manifest、路径/超限拒绝、真实文件回读 |
-| T4 | 会话/项目上下文/模型能力/用量：PI session、worker、Run metadata | T3 | 两轮续接、跨会话拒绝、项目指令、usage 同 Run 归属 |
-| T5 | 增量交互与引导：runner、worker、SSE、Web | T1、T4 | 首段正文/命令早于终态、引导一次消费、刷新与最终状态一致 |
-| T6 | 真实 runTask 验收、CI 与产品文档 | T2、T3、T4、T5 | HTTP/worker/PI/文件/数据库 E2E、Web lint/unit/build/浏览器、全量必要 gate |
+| T3 | 工作目录与交付契约：PI runner、adapter 文件回读 | 无 | 9MiB 合法交付、依赖不入 manifest、路径/超限拒绝、真实文件回读 |
+| T4 | 会话/项目上下文/模型能力/用量：PI session、worker、Run metadata | T1、T3 | 两轮续接、跨会话拒绝、项目指令、usage 同 Run 归属 |
+| T5-web | 增量展示、精确 Run 用量与授权说明：既有 Web SSE/Run 组件 | T1、T3 | 累计工具快照替换且保持运行态、最终结果覆盖、用量按 Run 回读 |
+| T5-runtime | 增量反馈与引导：runner、worker、SSE | T1、T4 | 首段正文/命令早于终态、引导一次消费、刷新与最终状态一致 |
+| T6-base | 真实 HTTP PI 交付/取消基线与 CI：受控模型上游、E2E、workflow | T1、T2、T3 | Request/worker/runTask/SSE/文件/数据库，正向和拒绝用例 |
+| T6-final | 续接/引导集成、产品文档与最终验收 | T4、T5-web、T5-runtime、T6-base | 两轮/引导唯一消费、Web lint/unit/build/浏览器、全量必要 gate |
 
 各实现任务在独立 worktree 完成；每次代码提交前由全新 Reviewer 审查需求、diff、测试和规范。集成后再进行完整 Standards/Spec 双轴审查。生产负载与真实供应商校准另列未验证范围，不能用 deterministic E2E 代替。

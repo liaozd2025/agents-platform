@@ -66,6 +66,15 @@ Compose 中的 `sandbox-provisioner` 使用以下变量：
 | `SANDBOX_IDLE_TIMEOUT_SECONDS` | 空闲实例回收时间 | `120` |
 | `SANDBOX_IDLE_CHECK_INTERVAL_SECONDS` | idle reaper 扫描间隔 | `10` |
 | `SANDBOX_EXEC_TIMEOUT_SECONDS` | 命令超时，也用于计算安全回收下限 | `180` |
+| `SANDBOX_MEMORY_MB` | 每个沙盒的内存硬上限，MiB | `4096` |
+| `SANDBOX_CPUS` | 每个沙盒的 CPU 上限 | `2` |
+| `SANDBOX_TMPFS_MB` | `/home/gem` 内存盘上限，MiB | `1024` |
+| `SANDBOX_MAX_INSTANCES` | 当前 provisioner 管理的实例总上限 | `6` |
+| `SANDBOX_MAX_INSTANCES_PER_USER` | 每个用户的实例上限 | `4` |
+
+API/worker 使用 `SANDBOX_CAPACITY_WAIT_SECONDS` 控制容量不足时的准备等待，默认 60 秒；`YUXI_WORKER_MAX_JOBS` 控制每个 worker 的并发，默认 4。满额创建返回 `sandbox_capacity_exhausted`，既有运行在准备阶段有界等待；超过等待预算以 `sandbox_capacity_timeout` 失败，其他创建错误不重试。该预算只约束容量等待，镜像拉取和首次健康检查仍使用各自超时。
+
+容量由单个 provisioner 进程内的创建锁与真实实例清单共同裁决。Docker 槽位使用不同容器/网络前缀；Kubernetes 槽位使用独立 namespace，且每个槽位只运行一个 provisioner。上述默认预算面向使用外部模型 API 的单机部署，生产并发仍需结合 CPU、常驻服务和代表性任务校准。
 
 当空闲回收时间小于等于命令超时时，provisioner 会把它提高到“命令超时 + 30 秒”，避免回收正在执行的任务。直接运行 provisioner 且没有 Compose 默认值时，代码默认的 idle timeout 是 600 秒；以实际 `/health` 响应为准。
 
@@ -79,10 +88,13 @@ Docker 后端需要 provisioner 能访问 Docker daemon，并能看到 API/worke
 | `SANDBOX_DOCKER_USER_DATA_HOST_PATH` | `DOCKER_USER_DATA_HOST_PATH` | UserWorkspace 在宿主机上的路径 |
 | `SANDBOX_DOCKER_SKILL_PROJECTIONS_HOST_PATH` | `DOCKER_SKILL_PROJECTIONS_HOST_PATH` | Skill 投影在宿主机上的路径 |
 | `SANDBOX_DOCKER_SANDBOX_PREFIX` | `DOCKER_SANDBOX_PREFIX` | 动态容器名称前缀 |
+| `SANDBOX_DOCKER_PIDS_LIMIT` | 同名变量 | 每个容器的进程数上限，默认 `512` |
 
 Compose 默认把 `/var/run/docker.sock`、UserWorkspace 和 Skill projection 挂载到 provisioner。只有 provisioner 持有 Docker socket；API 和 worker 不直接操作 Docker。
 
 每个动态沙盒只加入自己的 bridge 网络，网络中包含 provisioner 和该沙盒，不加入承载 PostgreSQL、Redis、MinIO、Milvus 或 Neo4j 的 `app-network`，也不向宿主机发布沙盒端口。provisioner 会在复用前检查容器的用户、Workdir、挂载和网络身份，发现不匹配时拒绝复用。
+
+Docker 内存限制同时约束 memory+swap，容器不额外获得 swap 预算。provisioner 在创建、发现和代理请求时回读实际资源配置；存活实例与当前策略不匹配时返回 `sandbox_resource_policy_mismatch`，保留实例。调整策略前使用正常任务结束或既有停机流程排空实例，再重新创建；不要以自动删除正在工作的实例来应用新限额。
 
 运行时挂载：
 
@@ -105,6 +117,8 @@ Kubernetes 后端由 provisioner 创建沙盒 Pod 和 NodePort Service。Compose
 | `SKILLS_PVC` | `SKILLS_PVC` | Skill 只读投影卷 |
 
 User Data PVC 必须提供跨节点部署需要的共享读写能力。Pod 将 `shared/<uid>/workspace` 挂载为 `/home/gem/user-data`，将 `skill-projections/<uid>` 只读挂载为 `/home/gem/skills`。Pod 默认不自动挂载 ServiceAccount token；使用 kubeconfig 或集群内 ServiceAccount 时，都应只授予目标 namespace 所需的 Pod、Service 操作权限。
+
+沙盒与 init 容器使用配置的 CPU/内存 requests 和 limits，`/home/gem` 使用带容量上限的 Memory emptyDir。`SANDBOX_DOCKER_PIDS_LIMIT` 只作用于 Docker；Kubernetes 的进程数上限由节点 kubelet `podPidsLimit` 管理，需要集群运维配置和验证。生产部署使用独立 namespace 与单个 provisioner 副本。
 
 当前实现使用 NodePort，不使用 Ingress、ClusterIP 或多集群选择器。`NODE_HOST` 只需要从 provisioner 可达，API/worker 不需要直接访问 NodePort；它们仍访问 `PROVISIONER_PUBLIC_URL` 返回的代理地址。
 
@@ -139,11 +153,17 @@ services:
 
 ## 开发环境启动和验证
 
-开发 Compose 已默认配置 Docker provisioner。初始化 `.env` 后启动：
+开发 Compose 默认配置 Docker provisioner。初始化 `.env` 后启动：
 
 ```bash
 docker compose up -d
 ```
+
+启动依赖先构建 PI 派生镜像并比较镜像中的 Runner 摘要、PI 版本和依赖完整性，再允许 provisioner 启动。设置 `SANDBOX_IMAGE` 时，检查使用指定预构建镜像，保留其原始内容和供给引用；镜像缺失或与当前源码不匹配时，启动明确失败。开发和生产 Compose 使用同一检查路径。
+
+PI 派生镜像还修正基础镜像的 `/shell/write`，将控制输入送入当前进程的 PTY；预构建镜像检查同时验证该补丁。未包含修补的镜像即使 Runner 摘要相同也不能通过启动检查。
+
+需要单独构建或检查镜像时运行 `make build-pi-sandbox`。生产配置可通过 `COMPOSE='docker compose --env-file .env.prod -f docker-compose.prod.yml'` 传给该目标；该命令只在本地构建和校验，不发布镜像。
 
 provisioner 只在第一次文件或命令操作时创建动态沙盒，刚启动时看不到沙盒容器是正常的。先检查 provisioner：
 

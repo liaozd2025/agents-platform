@@ -642,6 +642,23 @@ async def reconcile_pi_cleanup_failures() -> list[int]:
                 input_payload = attempt.get("input_payload") if isinstance(attempt.get("input_payload"), dict) else {}
                 runtime = input_payload.get("runtime") if isinstance(input_payload.get("runtime"), dict) else {}
                 reuse_sandbox = attempt.get("run_type") == "sandbox"
+                if reuse_sandbox:
+                    # 重建的 adapter 不持有原命令句柄；根执行树确认回收后才能清除 child orphan。
+                    owner = await repo.get_run_for_user(str(attempt["run_id"]), str(attempt["uid"]))
+                    ancestors = set()
+                    while owner is not None and owner.run_type in {"sandbox", "subagent"} and owner.created_by_run_id:
+                        if owner.id in ancestors or owner.runtime_scope_id != attempt.get("runtime_scope_id"):
+                            raise ValueError("PI cleanup 的执行树归属不一致")
+                        ancestors.add(owner.id)
+                        owner = await repo.get_run_for_user(str(owner.created_by_run_id), str(attempt["uid"]))
+                    if (
+                        owner is None
+                        or owner.run_type not in {"chat", "resume"}
+                        or owner.runtime_scope_id != attempt.get("runtime_scope_id")
+                        or owner.status not in TERMINAL_RUN_STATUSES
+                        or owner.runtime_cleanup_pending
+                    ):
+                        continue
                 adapter_kwargs = {
                     "uid": str(attempt["uid"]),
                     "run_id": str(attempt["run_id"]),

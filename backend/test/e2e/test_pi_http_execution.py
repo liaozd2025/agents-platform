@@ -147,6 +147,12 @@ async def pi_environment(e2e_client, e2e_headers):
         assert context["workdir"] == f"projects/{context['project']}"
         yield context
     finally:
+        if context.get("queued_request"):
+            await client.post(f"/api/agent/requests/{context['queued_request']}/cancel", headers=headers)
+            response = await client.get(f"/api/agent/requests/{context['queued_request']}", headers=headers)
+            if response.status_code == 200 and (replacement := response.json()["request"].get("dispatched_run_id")):
+                await cancel_run(client, headers, replacement)
+                await wait_cleanup(client, headers, replacement)
         if context["run"]:
             await cancel_run(client, headers, context["run"])
             await wait_cleanup(client, headers, context["run"])
@@ -186,7 +192,10 @@ async def start_case(client, headers, context, scenario):
             "model_spec": context["model"],
             "tool_approval_mode": "always_trust",
             "meta": {"request_id": context["request"]},
-            "query": f"YUXI_PI_HTTP:{context['nonce']}:{scenario} 完成沙箱任务并按指定目录交付。",
+            "query": (
+                f"YUXI_PI_HTTP:{context['nonce']}:{scenario} 完成沙箱任务并按指定目录交付。"
+                + (f" YUXI_PI_EXPECT_HISTORY:{context['expected_history']}" if context.get("expected_history") else "")
+            ),
         },
     )
     assert response.status_code == 200, response.text
@@ -238,7 +247,7 @@ def dictionaries(value):
 
 
 async def test_pi_http_delivers_large_file_with_persisted_lineage(e2e_client, e2e_headers, pi_environment):
-    """核对真实9MiB交付、父子绑定、SSE与可刷新文件卡。"""
+    """核对9MiB交付、父子绑定，并在第二轮验证续接与本次用量。"""
     context = pi_environment
     await start_case(e2e_client, e2e_headers, context, "artifact")
     run = await wait_cleanup(e2e_client, e2e_headers, context["run"])
@@ -313,6 +322,114 @@ async def test_pi_http_delivers_large_file_with_persisted_lineage(e2e_client, e2
     async with httpx.AsyncClient() as client:
         observed = await client.get(f"{UPSTREAM}/observations/{context['nonce']}")
     assert [item["phase"] for item in observed.json()["records"]] == [
+        "parent_delegate",
+        "pi_execute",
+        "pi_submit",
+        "pi_complete",
+        "parent_complete",
+    ]
+    old_session_path = f"/outputs/{output_dir}/{pi['session']['path']}"
+    old_session = workdir.read_file(old_session_path, 8 * 1024 * 1024)
+    assert hashlib.sha256(old_session).hexdigest() == pi["session"]["sha256"]
+    context["expected_history"], context["nonce"] = context["nonce"], uuid.uuid4().hex
+    await start_case(e2e_client, e2e_headers, context, "artifact")
+    second_run = await wait_cleanup(e2e_client, e2e_headers, context["run"])
+    await asyncio.wait_for(context["stream"], timeout=20)
+    assert second_run["status"] == "completed", second_run
+    second_child = await child_facts(context)
+    assert second_child["conversation_thread_id"] == child["conversation_thread_id"]
+    assert second_child["id"] != child["id"] and second_child["content"] == "PI_HTTP_CHILD_OK"
+    source = decoded(second_child["attempt"]["runtime_manifest"])["context"]["session_source"]
+    assert source["run_id"] == child["id"] and source["ref"] == pi["session"]
+    assert workdir.read_file(old_session_path, 8 * 1024 * 1024) == old_session
+    for completed_child in (child, second_child):
+        response = await e2e_client.get(f"/api/agent/runs/{completed_child['id']}", headers=e2e_headers)
+        assert response.status_code == 200, response.text
+        usage = response.json()["run"]["token_usage"]
+        assert usage["complete"] is True and usage["model_call_count"] == 3
+        assert usage["total"] == {"input_tokens": 60, "output_tokens": 30, "total_tokens": 90}
+    child_state = await e2e_client.get(
+        f"/api/chat/thread/{second_child['conversation_thread_id']}/state", headers=e2e_headers
+    )
+    assert child_state.status_code == 200, child_state.text
+    assert child_state.json()["subagent_run"]["run_id"] == second_child["id"]
+
+
+async def test_pi_http_steer_yields_at_tool_boundary_and_consumes_request_once(e2e_client, e2e_headers, pi_environment):
+    """在真实工具运行中引导；ACK后释放工具，队列只执行一次新请求。"""
+    context = pi_environment
+    await start_case(e2e_client, e2e_headers, context, "steer")
+    workdir = Workdir.open_existing(context["uid"], context["workdir"])
+    async with asyncio.timeout(120):
+        while True:
+            try:
+                workdir.stat("/steer-started")
+                break
+            except FileNotFoundError:
+                await asyncio.sleep(0.2)
+    first = await child_facts(context)
+    assert first["status"] == "running"
+    replacement_nonce = uuid.uuid4().hex
+    request_id = f"pytest-pi-run-{replacement_nonce}"
+    context["queued_request"] = request_id
+    response = await e2e_client.post(
+        "/api/agent/runs",
+        headers=e2e_headers,
+        json={
+            "agent_slug": context["agent"],
+            "thread_id": context["thread"],
+            "model_spec": context["model"],
+            "tool_approval_mode": "always_trust",
+            "queue_policy": "steer",
+            "meta": {"request_id": request_id},
+            "query": f"YUXI_PI_HTTP:{replacement_nonce}:artifact YUXI_PI_EXPECT_HISTORY:{context['nonce']}",
+        },
+    )
+    assert response.status_code == 200 and response.json()["status"] == "queued", response.text
+    async with asyncio.timeout(15):
+        while True:
+            current = await child_facts(context)
+            if any(item["type"] == "control_ack" for item in decoded(current["attempt"]["result_events"])):
+                break
+            await asyncio.sleep(0.1)
+    # 命令尚未结束时必须已收到正文与中间输出，不能由最终结果冒充流式反馈。
+    async with asyncio.timeout(10):
+        while True:
+            chunks = list(dictionaries(context["events"]))
+            if any(item.get("event") == "tool-progress" for item in chunks) and "PI_HTTP_WORKING" in json.dumps(chunks):
+                break
+            await asyncio.sleep(0.1)
+    with pytest.raises(FileNotFoundError):
+        workdir.stat("/steer-finished")
+    workdir.create_directory("/", "steer-release")
+    original_run = await wait_cleanup(e2e_client, e2e_headers, context["run"])
+    await asyncio.wait_for(context["stream"], timeout=20)
+    assert original_run["status"] == "completed", original_run
+    first = await child_facts(context)
+    assert first["status"] == "completed" and decoded(first["extra_metadata"])["pi"]["stop_reason"] == "steer"
+    assert workdir.read_file("/steer-finished", 128) == b"finished"
+    assert not any(
+        item["type"] in {"message_delta", "tool_update"} for item in decoded(first["attempt"]["result_events"])
+    )
+    async with asyncio.timeout(30):
+        while True:
+            response = await e2e_client.get(f"/api/agent/requests/{request_id}", headers=e2e_headers)
+            assert response.status_code == 200, response.text
+            replacement = response.json()["request"].get("dispatched_run_id")
+            if replacement:
+                break
+            await asyncio.sleep(0.1)
+    context["run"], context["request"] = replacement, request_id
+    replacement_run = await wait_cleanup(e2e_client, e2e_headers, replacement)
+    assert replacement_run["status"] == "completed", replacement_run
+    assert (await child_facts(context))["content"] == "PI_HTTP_CHILD_OK"
+    async with database() as db:
+        assert await db.fetchval("SELECT count(*) FROM agent_runs WHERE request_id=$1", request_id) == 1
+    async with httpx.AsyncClient() as client:
+        observed = await client.get(f"{UPSTREAM}/observations/{context['nonce']}")
+        resumed = await client.get(f"{UPSTREAM}/observations/{replacement_nonce}")
+    assert [item["phase"] for item in observed.json()["records"]] == ["parent_delegate", "pi_execute"]
+    assert [item["phase"] for item in resumed.json()["records"]] == [
         "parent_delegate",
         "pi_execute",
         "pi_submit",

@@ -38,9 +38,20 @@ Conversation 通过 `project_id` 绑定 Project；Project 拥有这项绑定和 
 | --- | --- | --- | --- |
 | 普通 Agent | 当前 thread | 根 thread | 当前 Project 的 Workdir |
 | 子 Agent | child thread | 根 thread | 继承根 Conversation |
+| PI 沙箱任务 | attempt 内的 PI session | 根 thread | 继承根 Conversation |
 | 远程 Skill 安装 | 临时 thread | 临时 thread | 无持久用户目录，`inherit_env=False` |
 
 `uid + runtime_scope_id` 派生稳定 `sandbox_id`。同一 runtime 存活期间不能改绑到另一个 Workdir。根执行树终态后，worker 清理 runtime，但保留 UserWorkspace 文件。
+
+## PI 任务的交付与持续协作
+
+`pi_sandbox` 在现有 Request、child Run 和 Attempt 中执行 PI Runner。命令的 cwd 是当前 Project；依赖和中间文件保留在工作目录，最终交付通过 `submit_artifact` 显式登记在当前 attempt 的 `outputs/pi-runs/<目录>/`。登记和 final ACK 都验证文件类型、路径、大小和摘要；单文件上限 64MiB，总量 256MiB，最多 200 个文件。只读任务可以没有交付物。artifact、session、patch 和最终消息始终绑定同一 attempt；patch 描述该次已登记交付，不是任意项目源码改动的回滚包。
+
+后续任务从相同用户、Project 和 PI child 会话的最近已 ACK 结果续接。repository 选定来源后，Workdir 有界读取并验证 session 摘要，Runner 从字节快照 fork 新 session，旧文件保持不变。Project 根 `AGENTS.md` 与获授权 Skill 路径显式投影；Runner 不自动加载工作目录中的其他 Skill、扩展或系统提示文件。模型上下文、输出上限、输入模态及 reasoning 能力来自现有逐模型配置；child Run 用量只统计本次执行，未上报时显示未知。
+
+正文增量和工具累计输出经 Redis SSE 展示，约每 250ms 合并；工具完成事件覆盖中间快照。这些高频事件校验当前 attempt 与 lease，但不追加 PostgreSQL 历史。数据库保留工具首尾和 final ACK，PI 详情从真实 child Run 回读状态及用量，不依赖 LangGraph checkpoint。
+
+运行中引导沿用根会话的 Request 队列。服务端确认当前执行树存在待处理的 steer 后，仅发送固定让位控制行；PI 完成当前整个工具批次并确认控制后，以 `stop_reason=steer` 交付，下一 Request 再执行新要求。当前 PI 不直接接收并执行那段新要求。取消会等待已启动执行停止再清理；启动响应或停止确认失败会保留可观察的清理失败事实，不能因重建 adapter 缺少旧进程句柄而宣称已回收。任务审批沿用既有授权范围，包含沙箱命令及当前用户工作区访问，不提供逐命令审批。
 
 ## 挂载和文件 Owner
 

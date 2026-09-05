@@ -543,6 +543,73 @@ async def test_pi_cleanup_reconciler_retries_persisted_orphan(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("root_status", "cleanup_pending", "expected_cleaned"),
+    [("running", False, []), ("completed", True, []), ("completed", False, [7])],
+)
+async def test_pi_child_orphan_waits_for_root_runtime_cleanup(
+    monkeypatch: pytest.MonkeyPatch, root_status, cleanup_pending, expected_cleaned
+):
+    """新建 adapter 不能凭关闭空句柄清除仍可能运行的 child 命令。"""
+    root = _build_run()
+    root.id = "root-run"
+    root.run_type = "resume"
+    root.created_by_run_id = "historical-chat"
+    root.status = root_status
+    root.runtime_cleanup_pending = cleanup_pending
+    historical = _build_run()
+    historical.id = "historical-chat"
+    historical.status = "completed"
+    child = _build_run()
+    child.run_type = "sandbox"
+    child.created_by_run_id = root.id
+    cleared = []
+
+    @asynccontextmanager
+    async def session_context():
+        yield object()
+
+    class Repo:
+        def __init__(self, _db):
+            pass
+
+        async def list_pi_cleanup_failures(self):
+            return [
+                {
+                    "attempt_id": 7,
+                    "run_id": child.id,
+                    "uid": child.uid,
+                    "run_type": "sandbox",
+                    "runtime_scope_id": child.runtime_scope_id,
+                    "cleanup_failed_at": "failed-at",
+                    "final_acked_at": None,
+                    "error_type": "execution_unknown",
+                    "instance_id": "sandbox-1",
+                }
+            ]
+
+        async def lock_pi_cleanup_failure(self, *_args, **_kwargs):
+            return True
+
+        async def get_run_for_user(self, run_id, uid):
+            assert uid == child.uid
+            return {child.id: child, root.id: root, historical.id: historical}.get(run_id)
+
+        async def clear_pi_cleanup_failure(self, attempt_id, **_kwargs):
+            cleared.append(attempt_id)
+            return True
+
+    stop = AsyncMock()
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", session_context)
+    monkeypatch.setattr(run_worker, "AgentRunRepository", Repo)
+    monkeypatch.setattr(run_worker, "LocalPiAdapter", lambda **_kwargs: SimpleNamespace(stop=stop))
+    assert await run_worker.reconcile_pi_cleanup_failures() == expected_cleaned
+    assert cleared == expected_cleaned
+    if not expected_cleaned:
+        stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_process_agent_run_persists_usage_from_canonical_state(
     monkeypatch: pytest.MonkeyPatch,
 ):

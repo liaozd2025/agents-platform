@@ -12,7 +12,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-CASE = re.compile(r"YUXI_PI_HTTP:([0-9a-f]{32}):(artifact|cancel)")
+CASE = re.compile(r"YUXI_PI_HTTP:([0-9a-f]{32}):(artifact|cancel|steer)")
 OBSERVATIONS: dict[str, list[dict]] = {}
 LOCK = threading.Lock()
 
@@ -30,7 +30,12 @@ def plan_response(request: dict) -> tuple[str, str, dict | str]:
         raise ValueError("case_marker_missing")
     nonce, scenario = match.groups()
     names = {tool.get("function", {}).get("name") for tool in request.get("tools", [])}
-    tool_messages = [message for message in messages if message.get("role") == "tool"]
+    task_index = next(
+        index
+        for index in range(len(messages) - 1, -1, -1)
+        if messages[index].get("role") == "user" and CASE.search(str(messages[index].get("content", "")))
+    )
+    tool_messages = [message for message in messages[task_index + 1 :] if message.get("role") == "tool"]
 
     if "pi_sandbox" in names:
         if not tool_messages:
@@ -44,6 +49,9 @@ def plan_response(request: dict) -> tuple[str, str, dict | str]:
     if not {"bash", "submit_artifact"} <= names:
         raise ValueError("pi_tools_missing")
     prompt = user_texts[-1]
+    expected_history = re.search(r"YUXI_PI_EXPECT_HISTORY:([0-9a-f]{32})", prompt)
+    if expected_history and f"YUXI_PI_HTTP:{expected_history[1]}:" not in json.dumps(messages[:task_index]):
+        raise ValueError("previous_pi_session_missing")
     project_match = re.search(r"Project workspace is (/home/gem/user-data/projects/[0-9a-f-]+)\.", prompt)
     output_match = re.search(r"Put every generated deliverable under (/[^\s]+)\. ", prompt)
     if not project_match or not output_match:
@@ -61,6 +69,19 @@ def plan_response(request: dict) -> tuple[str, str, dict | str]:
                 f"head -c 9437184 /dev/zero > {shlex.quote(output + '/large.bin')}; "
                 "printf 'PI_HTTP_CREATE_OK\\n'"
             )
+        elif scenario == "steer":
+            script = (
+                "import time\nfrom pathlib import Path\n"
+                "Path('steer-started').write_text('started')\n"
+                "print('PI_HTTP_STEER_RUNNING',flush=True)\n"
+                "for _ in range(300):\n"
+                " if Path('steer-release').exists(): break\n"
+                " time.sleep(.1)\n"
+                "else: raise RuntimeError('steer release timed out')\n"
+                "Path('steer-finished').write_text('finished')\n"
+                "print('PI_HTTP_STEER_FINISHED',flush=True)\n"
+            )
+            command = f"python -u -c {shlex.quote(script)}"
         else:
             script = (
                 "import os,time\nfrom pathlib import Path\n"
@@ -71,8 +92,8 @@ def plan_response(request: dict) -> tuple[str, str, dict | str]:
             command = f"python -u -c {shlex.quote(script)}"
         return nonce, "pi_execute", {"name": "bash", "args": {"command": command}}
 
-    if scenario == "cancel":
-        raise ValueError("cancelled_writer_unexpectedly_returned")
+    if scenario in {"cancel", "steer"}:
+        raise ValueError("stopped_task_unexpectedly_called_model_again")
     results = json.dumps(tool_messages, ensure_ascii=False)
     if "PI_HTTP_CREATE_OK" not in results:
         raise ValueError("real_bash_result_missing")
@@ -156,6 +177,10 @@ class ReplayHandler(BaseHTTPRequestHandler):
                 "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
             },
         ]
+        if phase == "pi_execute":
+            chunks.insert(
+                0, {"choices": [{"index": 0, "delta": {"content": "PI_HTTP_WORKING"}, "finish_reason": None}]}
+            )
         try:
             for chunk in chunks:
                 self.wfile.write(f"data: {json.dumps({**common, **chunk})}\n\n".encode())
