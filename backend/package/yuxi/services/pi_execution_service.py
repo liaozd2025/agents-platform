@@ -85,10 +85,15 @@ def resolve_pi_model_runtime(model_spec: str | None) -> tuple[dict, dict]:
         "display_name": info.display_name,
         "api": api,
         "base_url": get_docker_safe_url(info.base_url).rstrip("/"),
-        "context_window": int(info.extra.get("context_window") or 128_000),
-        "max_tokens": int(info.extra.get("max_tokens") or 32_768),
+        "spec": info.spec,
+        "context_window": info.context_length or int(info.extra.get("context_window") or 128_000),
+        "max_tokens": info.max_completion_tokens or int(info.extra.get("max_tokens") or 32_768),
+        "input": [value for value in (info.input_modalities or ["text"]) if value in {"text", "image"}],
+        "reasoning": info.reasoning,
         "sampling_params": dict(info.request_body_overrides),
     }
+    if not descriptor["input"]:
+        raise ValueError("PI 模型未声明支持文本或图片输入")
     api_key = info.api_key.strip() if isinstance(info.api_key, str) else ""
     headers = dict(info.headers)
     has_header_auth = any(
@@ -112,6 +117,7 @@ def build_pi_runtime_manifest(
     skill_sources: dict[str, Path] | None = None,
     skill_runtime_paths: dict[str, str] | None = None,
     model: dict | None = None,
+    context: dict | None = None,
 ) -> tuple[dict, str]:
     """为 Local PI Task 构建不可变 Runtime Manifest。"""
 
@@ -164,7 +170,40 @@ def build_pi_runtime_manifest(
     }
     if model:
         manifest["model"] = dict(model)
+    if context:
+        manifest["context"] = context
     return manifest, compute_manifest_fingerprint(manifest)
+
+
+def snapshot_pi_context(workdir: Workdir, previous_session: dict | None) -> tuple[dict, dict | None]:
+    """在 owning 文件边界固定 Project 指令与已授权 session 内容。"""
+    instructions = []
+    try:
+        content = b"".join(workdir.iter_file_chunks("/AGENTS.md", 64 * 1024))
+    except FileNotFoundError:
+        pass
+    else:
+        instructions.append(
+            {"path": "AGENTS.md", "content": content.decode("utf-8"), "sha256": hashlib.sha256(content).hexdigest()}
+        )
+    context = {"project_instructions": instructions, "session_source": previous_session}
+    if previous_session is None:
+        return context, None
+    ref = previous_session["ref"]
+    path = str(ref.get("path") or "")
+    if (
+        not path.startswith("pi-session/")
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or "\\" in path
+        or any(ord(char) < 32 for char in path)
+    ):
+        raise ValueError("PI 历史 session 路径无效")
+    content = b"".join(
+        workdir.iter_file_chunks(f"/outputs/{previous_session['output_subdir']}/{path}", PI_MAX_REF_BYTES)
+    )
+    if hashlib.sha256(content).hexdigest() != ref.get("sha256"):
+        raise ValueError("PI 历史 session 摘要不匹配")
+    return context, {"content": content.decode("utf-8"), "sha256": ref["sha256"]}
 
 
 def build_default_pi_runtime_manifest(*, model: dict | None = None) -> tuple[dict, str]:

@@ -56,8 +56,11 @@ class FakeAdapter:
         self.stop_preserve_outputs.append(preserve_outputs)
 
 
-def _model_info(*, api_key: str = "", headers: dict[str, str] | None = None) -> SimpleNamespace:
-    return SimpleNamespace(
+def _model_info(*, api_key: str = "", headers: dict[str, str] | None = None):
+    from yuxi.models.providers.cache import ModelInfo
+
+    return ModelInfo(
+        provider_id="provider",
         model_type="chat",
         provider_type="openai",
         model_id="model-1",

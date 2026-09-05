@@ -1707,6 +1707,9 @@ async def test_sandbox_run_reuses_parent_runtime_and_executes_pi_task(monkeypatc
     monkeypatch.setattr(run_worker, "get_user_skills_root_dir", lambda _uid: Path("/projection"))
     monkeypatch.setattr(run_worker, "compute_skill_dir_hash", lambda path: "d" * 64 if path.name == "report" else "")
     monkeypatch.setattr(run_worker, "build_pi_runtime_manifest", fake_build_manifest)
+    monkeypatch.setattr(
+        run_worker, "_snapshot_pi_run_context", AsyncMock(return_value=({"project_instructions": []}, None))
+    )
     monkeypatch.setattr(run_worker, "mark_run_running", fake_mark_running)
     monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
     monkeypatch.setattr(run_worker, "bind_pi_instance", AsyncMock(return_value=True))
