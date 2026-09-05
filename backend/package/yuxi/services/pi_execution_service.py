@@ -406,6 +406,7 @@ class LocalPiAdapter:
         skill_sources: dict[str, Path] | None = None,
         reuse_sandbox: bool = False,
         credentials: dict | None = None,
+        steer_check=None,
     ):
         self._uid = str(uid)
         self._run_id = run_id
@@ -425,6 +426,7 @@ class LocalPiAdapter:
         self._output_subdir = f"pi-runs/{output_identity}"
         self._skill_sources = dict(skill_sources or {})
         self._credentials = dict(credentials or {})
+        self._steer_check = steer_check
         self._workdir: Workdir | None = None
         self._provider = get_sandbox_provider()
         self._backend: ProvisionerSandboxBackend | None = None
@@ -510,9 +512,13 @@ class LocalPiAdapter:
             events: list[dict] = []
             invalid_lines: list[str] = []
             pending = ""
+            ready = False
+            final_seen = False
+            yield_sent = False
+            yield_acked = False
 
             async def consume_output(chunk: str) -> None:
-                nonlocal pending
+                nonlocal pending, ready, final_seen, yield_acked
                 pending += chunk
                 while "\n" in pending:
                     line, pending = pending.split("\n", 1)
@@ -523,15 +529,38 @@ class LocalPiAdapter:
                     except json.JSONDecodeError:
                         invalid_lines.append(line)
                         continue
+                    payload = event.get("payload") or {}
+                    if event.get("type") == "control_ack":
+                        if not yield_sent or payload != {"command": "yield", "attempt_id": self._attempt_id}:
+                            raise ValueError("PI 控制ACK与当前attempt不一致")
+                        yield_acked = True
+                    if event.get("type") == "final":
+                        final_seen = True
+                        if payload.get("stop_reason") == "steer" and not yield_acked:
+                            raise ValueError("PI 未确认引导控制，不能声明已让位")
                     events.append(event)
                     if event_sink is not None:
                         await _call_sink(event_sink, event)
+                    if event.get("type") == "ready":
+                        if payload != {"control": "stdin_comment_v1", "attempt_id": self._attempt_id}:
+                            raise ValueError("PI ready 控制协议与当前attempt不一致")
+                        ready = True
 
+            async def poll_control() -> str | None:
+                """仅向已ready且未final的本attempt发送一次固定让位请求。"""
+                nonlocal yield_sent
+                if ready and not final_seen and not yield_sent and await self._steer_check():
+                    yield_sent = True
+                    return f"# yuxi-pi-yield {self._attempt_id}"
+                return None
+
+            control_kwargs = {"poll_input": poll_control} if getattr(self, "_steer_check", None) is not None else {}
             result = await backend.aexecute_stream(
                 command,
                 consume_output,
                 timeout=timeout,
                 max_output_bytes=PI_MAX_EVENT_STREAM_BYTES,
+                **control_kwargs,
             )
             if result.exit_code not in {0, None}:
                 raise RuntimeError(result.output or "Local PI Runner 执行失败")

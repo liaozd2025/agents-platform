@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
 import { Type } from "typebox";
 
 import {
@@ -410,14 +411,41 @@ function boundedEventValue(value) {
 }
 
 function subscribeToolEvents(session, emitEvent) {
-  return session.subscribe((event) => {
+  let text = "";
+  const snapshots = new Map();
+  const flush = () => {
+    while (text) {
+      const content = text.slice(0, MAX_EVENT_BYTES / 4);
+      text = text.slice(content.length);
+      emitEvent("message_delta", { content });
+    }
+    for (const value of snapshots.values()) emitEvent("tool_update", value);
+    snapshots.clear();
+  };
+  const timer = setInterval(flush, 250);
+  timer.unref();
+  const unsubscribe = session.subscribe((event) => {
+    if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+      text += event.assistantMessageEvent.delta;
+      if (text.length >= MAX_EVENT_BYTES / 4) flush();
+    } else if (event.type === "message_end") {
+      flush();
+    } else if (event.type === "tool_execution_update") {
+      snapshots.set(event.toolCallId, {
+        tool_call_id: event.toolCallId,
+        name: event.toolName,
+        content: boundedEventValue(event.partialResult),
+      });
+    }
     if (event.type === "tool_execution_start") {
+      flush();
       emitEvent("tool_call", {
         tool_call_id: event.toolCallId,
         name: event.toolName,
         args: boundedEventValue(event.args),
       });
     } else if (event.type === "tool_execution_end") {
+      snapshots.delete(event.toolCallId);
       emitEvent("tool_result", {
         tool_call_id: event.toolCallId,
         name: event.toolName,
@@ -426,6 +454,42 @@ function subscribeToolEvents(session, emitEvent) {
       });
     }
   });
+  return {
+    flush,
+    close() {
+      clearInterval(timer);
+      unsubscribe();
+    },
+  };
+}
+
+/** 只接收固定注释控制；真正到达完整工具批次边界才记录让位。 */
+function installYieldControl(session, job, emitEvent) {
+  let requested = false;
+  let didYield = false;
+  const previous = session.agent.shouldStopAfterTurn;
+  const reader = createInterface({ input: process.stdin, terminal: false });
+  reader.on("line", (line) => {
+    if (!requested && line === `# yuxi-pi-yield ${job.attempt_id}`) {
+      requested = true;
+      emitEvent("control_ack", { command: "yield", attempt_id: String(job.attempt_id) });
+    }
+  });
+  session.agent.shouldStopAfterTurn = async (...args) => {
+    if (requested) {
+      didYield = true;
+      return true;
+    }
+    return Boolean(await previous?.(...args));
+  };
+  emitEvent("ready", { control: "stdin_comment_v1", attempt_id: String(job.attempt_id) });
+  return {
+    get didYield() { return didYield; },
+    close() {
+      reader.close();
+      session.agent.shouldStopAfterTurn = previous;
+    },
+  };
 }
 
 function assistantText(message) {
@@ -435,7 +499,7 @@ function assistantText(message) {
     .join("");
 }
 
-async function promptUntilComplete(session, prompt) {
+async function promptUntilComplete(session, prompt, didYield = () => false) {
   const parts = [];
   let lastAssistant;
   const unsubscribe = session.subscribe((event) => {
@@ -450,6 +514,7 @@ async function promptUntilComplete(session, prompt) {
           ? prompt
           : `${CONTINUE_TRUNCATED_RESPONSE}\n\nPartial response so far:\n${parts.join("")}`;
       await session.prompt(continuationPrompt);
+      if (didYield()) return parts.join("").trim();
       if (!lastAssistant)
         throw new Error("PI completed without a final assistant message");
       parts.push(assistantText(lastAssistant));
@@ -528,7 +593,7 @@ async function runGolden(job, outputRoot) {
   });
   let sequence = 0;
   const emitEvent = (type, value) => emit(type, sequence++, value, job);
-  const unsubscribe = subscribeToolEvents(session, emitEvent);
+  const stream = subscribeToolEvents(session, emitEvent);
   try {
     emitEvent("log", { message: "pi_started" });
     const task =
@@ -539,6 +604,7 @@ async function runGolden(job, outputRoot) {
       session,
       buildTaskPrompt(task, process.cwd(), outputRoot),
     );
+    stream.flush();
     const artifact = await readFile(outputPath);
     if (
       artifact.toString("utf8") !== GOLDEN ||
@@ -571,7 +637,7 @@ async function runGolden(job, outputRoot) {
       },
     );
   } finally {
-    unsubscribe();
+    stream.close();
     session.dispose();
   }
 }
@@ -771,13 +837,18 @@ async function runTask(job, outputRoot) {
   const firstEntry = sessionManager.getEntries().length;
   let sequence = 0;
   const emitEvent = (type, value) => emit(type, sequence++, value, job);
-  const unsubscribe = subscribeToolEvents(session, emitEvent);
+  const stream = subscribeToolEvents(session, emitEvent);
+  const control = installYieldControl(session, job, emitEvent);
   try {
     emitEvent("log", { message: "pi_started", model: model.model_id });
-    const text = await promptUntilComplete(
+    let text = await promptUntilComplete(
       session,
       buildTaskPrompt(job.task, process.cwd(), outputRoot),
+      () => control.didYield,
     );
+    control.close();
+    stream.flush();
+    if (control.didYield) text = "已完成当前工具批次，已让位给待处理的引导请求。";
     if (!text)
       throw new Error("PI completed without a final assistant message");
     const sessionPath = session.sessionFile;
@@ -792,7 +863,8 @@ async function runTask(job, outputRoot) {
     emitEvent("patch", refs.patch);
     emitEvent("session", sessionRef);
     emitEvent("final", {
-      text,
+        text,
+        ...(control.didYield ? { stop_reason: "steer" } : {}),
       output_subdir: job.output_subdir,
       artifact: refs.artifact,
       patch: refs.patch,
@@ -806,7 +878,8 @@ async function runTask(job, outputRoot) {
       ),
     });
   } finally {
-    unsubscribe();
+    control.close();
+    stream.close();
     session.dispose();
   }
 }

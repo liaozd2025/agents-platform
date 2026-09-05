@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -10,6 +11,56 @@ from langchain.messages import AIMessage, HumanMessage
 from yuxi.agents import context as agent_context
 from yuxi.workspace import paths as workspace_paths
 from yuxi.services import chat_service as svc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_relation", [True, False])
+async def test_pi_state_uses_exact_persisted_run_without_constructing_langgraph(monkeypatch, valid_relation):
+    """PI状态来自真实Run选择器，关系缺失时不能退回相邻Run或checkpoint。"""
+    conversation = SimpleNamespace(uid="u", status="subagent", extra_metadata={"source": "pi_sandbox"})
+    run = SimpleNamespace(
+        id="actual-pi-run",
+        agent_slug="main",
+        conversation_thread_id="pi-child",
+        status="completed",
+        created_at=None,
+        finished_at=None,
+        error_message=None,
+        input_payload={"runtime": {"tool_call_id": "pi-task"}},
+    )
+    monkeypatch.setattr(
+        svc,
+        "ConversationRepository",
+        lambda _db: SimpleNamespace(get_conversation_by_thread_id=AsyncMock(return_value=conversation)),
+    )
+    monkeypatch.setattr(
+        svc,
+        "AgentRunRepository",
+        lambda _db: SimpleNamespace(
+            get_latest_pi_run_with_creator=AsyncMock(
+                return_value=(run, SimpleNamespace(conversation_thread_id="real-parent")) if valid_relation else None
+            )
+        ),
+    )
+    monkeypatch.setattr(svc, "AgentRepository", lambda _db: object())
+    checkpoint = AsyncMock(side_effect=AssertionError("PI must not construct LangGraph"))
+    monkeypatch.setattr(svc, "_read_checkpoint_state", checkpoint)
+    result = AsyncMock(return_value={"output": "yielded", "pi": {"stop_reason": "steer"}})
+    monkeypatch.setattr("yuxi.services.agent_run_service.get_agent_run_result", result)
+    if not valid_relation:
+        with pytest.raises(HTTPException) as error:
+            await svc.get_agent_state_view(thread_id="pi-child", current_user=SimpleNamespace(uid="u"), db=object())
+        assert error.value.status_code == 404
+    else:
+        state = await svc.get_agent_state_view(
+            thread_id="pi-child", current_user=SimpleNamespace(uid="u"), db=object(), include_messages=True
+        )
+        assert state["subagent_run"]["run_id"] == "actual-pi-run"
+        assert state["subagent_run"]["stop_reason"] == "steer"
+        assert state["parent_thread_id"] == "real-parent"
+        assert state["messages"][0]["id"] == "pi-actual-pi-run"
+        assert result.call_args.kwargs["run_id"] == "actual-pi-run"
+    checkpoint.assert_not_called()
 
 
 def _empty_agent_context(_uid: str) -> str:

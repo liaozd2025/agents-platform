@@ -608,6 +608,7 @@ class ProvisionerSandboxBackend(BaseSandbox):
         *,
         timeout: int | None = None,
         max_output_bytes: int | None = None,
+        poll_input: Callable[[], Awaitable[str | None]] | None = None,
     ) -> ExecuteResponse:
         """异步执行命令，并把新增 stdout 片段实时交给调用方。"""
 
@@ -732,6 +733,22 @@ class ProvisionerSandboxBackend(BaseSandbox):
                                 exit_code=exit_code if status == "completed" and isinstance(exit_code, int) else 1,
                                 truncated=truncated,
                             )
+                        if poll_input is not None:
+                            control = await poll_input()
+                            if control is not None:
+                                if not re.fullmatch(r"# yuxi-pi-yield [A-Za-z0-9_-]{1,128}", control):
+                                    raise ValueError("sandbox 控制输入不是固定注释协议")
+                                written = await client.shell.write_to_process(
+                                    id=session_id,
+                                    input=control,
+                                    press_enter=True,
+                                    request_options={
+                                        "timeout_in_seconds": self._command_timeout_seconds,
+                                        "max_retries": 0,
+                                    },
+                                )
+                                if written.success is not True:
+                                    raise RuntimeError("sandbox 控制输入发送失败")
                         await asyncio.sleep(0.2)
                         viewed = await client.shell.view(
                             id=session_id,

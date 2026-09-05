@@ -484,7 +484,9 @@ async def bind_pi_instance(run_id: str, attempt_id: int, instance_id: str, worke
         )
 
 
-async def record_pi_envelope(run_id: str, attempt_id: int, envelope: dict, worker_id: str) -> dict[str, bool]:
+async def record_pi_envelope(
+    run_id: str, attempt_id: int, envelope: dict, worker_id: str, *, steer_authorized: bool = False
+) -> dict[str, bool]:
     """持久化 PI envelope，并只在 durable commit 后返回 ACK。"""
 
     async with pg_manager.get_async_session_context() as db:
@@ -493,7 +495,29 @@ async def record_pi_envelope(run_id: str, attempt_id: int, envelope: dict, worke
             attempt_id=attempt_id,
             envelope=envelope,
             worker_id=worker_id,
+            steer_authorized=steer_authorized,
         )
+
+
+async def _pi_steer_pending(run_id: str, attempt_id: int, worker_id: str) -> bool:
+    """只读取当前PI所属根Run的原队列引导事实，不消费用户输入。"""
+    from yuxi.services.agent_request_queue_service import should_end_run_for_steer
+
+    async with pg_manager.get_async_session_context() as db:
+        repo = AgentRunRepository(db)
+        run = await repo.require_pi_attempt_owner(run_id, attempt_id=attempt_id, worker_id=worker_id)
+        root = run
+        if root.run_type == "sandbox":
+            root = await repo.get_run_for_user(str(root.created_by_run_id), str(run.uid))
+        if root is not None and root.run_type == "subagent":
+            pair = await repo.get_subagent_run_with_creator(
+                uid=str(run.uid), created_by_run_id=str(root.created_by_run_id), run_id=root.id
+            )
+            root = pair[0] if pair is not None else None
+        if root is None or root.run_type not in {"chat", "resume"} or root.runtime_scope_id != run.runtime_scope_id:
+            raise ValueError("PI 引导目标不属于当前执行树")
+        root_id = root.id
+    return await should_end_run_for_steer(root_id)
 
 
 async def record_pi_cleanup_failure(run_id: str, attempt_id: int, worker_id: str, error_message: str) -> None:
@@ -809,16 +833,30 @@ def _map_chunk_to_run_event(chunk: dict) -> tuple[str, dict]:
     return "custom", {"name": f"yuxi.{status}", "chunk": chunk}
 
 
-def _pi_tool_stream_chunk(envelope: dict, *, run_id: str, thread_id: str) -> dict | None:
-    """把 PI 内部工具轨迹映射到前端既有的通用工具事件协议。"""
+def _pi_stream_chunk(envelope: dict, *, run_id: str, thread_id: str) -> dict | None:
+    """按child Run隔离PI正文和工具，复用既有SSE协议。"""
 
     event_type = envelope.get("type")
     payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
-    tool_call_id = str(payload.get("tool_call_id") or "").strip()
-    name = str(payload.get("name") or "").strip()
-    if event_type not in {"tool_call", "tool_result"} or not tool_call_id or not name:
-        return None
     message_id = f"pi-{envelope.get('job_id') or run_id}"
+    if event_type == "message_delta":
+        return {
+            "status": "loading",
+            "run_id": run_id,
+            "thread_id": thread_id,
+            "stream_event": {
+                "type": "message_delta",
+                "message_id": message_id,
+                "content": str(payload.get("content") or ""),
+                "thread_id": thread_id,
+                "namespace": [],
+            },
+        }
+    original_id = str(payload.get("tool_call_id") or "").strip()
+    tool_call_id = f"{message_id}:{original_id}"
+    name = str(payload.get("name") or "").strip()
+    if event_type not in {"tool_call", "tool_result", "tool_update"} or not original_id or not name:
+        return None
     if event_type == "tool_call":
         return {
             "status": "loading",
@@ -848,7 +886,7 @@ def _pi_tool_stream_chunk(envelope: dict, *, run_id: str, thread_id: str) -> dic
             "namespace": [],
             "thread_id": thread_id,
             "data": {
-                "event": "tool-finished",
+                "event": "tool-progress" if event_type == "tool_update" else "tool-finished",
                 "tool_call_id": tool_call_id,
                 "output": {
                     "type": "tool",
@@ -856,7 +894,11 @@ def _pi_tool_stream_chunk(envelope: dict, *, run_id: str, thread_id: str) -> dic
                     "tool_call_id": tool_call_id,
                     "name": name,
                     "content": content,
-                    "status": "error" if payload.get("is_error") else "success",
+                    "status": "running"
+                    if event_type == "tool_update"
+                    else "error"
+                    if payload.get("is_error")
+                    else "success",
                 },
             },
         },
@@ -1233,6 +1275,21 @@ async def process_agent_run(ctx, run_id: str):
                 "run_id": run_id,
                 "attempt_id": str(attempt.id),
             }
+            steer_observed = False
+            last_steer_check = 0.0
+
+            async def check_steer() -> bool:
+                """限频查询原队列；记录真实观测以校验final让位原因。"""
+                nonlocal steer_observed, last_steer_check
+                if steer_observed:
+                    return True
+                now = asyncio.get_running_loop().time()
+                if now - last_steer_check < 0.5:
+                    return False
+                last_steer_check = now
+                steer_observed = await _pi_steer_pending(run_id, attempt.id, worker_id)
+                return steer_observed
+
             if reuse_pi_sandbox:
                 adapter_kwargs.update(
                     runtime_scope_id=str(run.runtime_scope_id),
@@ -1240,21 +1297,27 @@ async def process_agent_run(ctx, run_id: str):
                     skill_sources=pi_skill_sources,
                     reuse_sandbox=True,
                     credentials=pi_credentials,
+                    steer_check=check_steer,
                 )
             adapter = LocalPiAdapter(
                 **adapter_kwargs,
             )
 
             async def persist_pi_result(envelope: dict) -> dict[str, bool]:
-                ack = await record_pi_envelope(run_id, attempt.id, envelope, worker_id)
+                authorization = {}
+                if envelope["type"] == "final" and envelope.get("payload", {}).get("stop_reason") == "steer":
+                    if not steer_observed:
+                        raise ValueError("PI 未观测到所属根Run的引导请求")
+                    authorization["steer_authorized"] = True
+                ack = await record_pi_envelope(run_id, attempt.id, envelope, worker_id, **authorization)
                 if ack.get("duplicate"):
                     return ack
-                if envelope["type"] in {"tool_call", "tool_result"}:
+                if envelope["type"] in {"tool_call", "tool_result", "tool_update", "message_delta"}:
                     targets = [(run_id, thread_id)]
                     if parent_event_target is not None:
                         targets.append(parent_event_target)
                     for target_run_id, target_thread_id in targets:
-                        chunk = _pi_tool_stream_chunk(
+                        chunk = _pi_stream_chunk(
                             envelope,
                             run_id=target_run_id,
                             thread_id=target_thread_id,
