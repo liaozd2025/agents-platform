@@ -7,3 +7,5 @@ WORKDIR /opt/yuxi-pi-runner
 COPY backend/package/yuxi/pi_runner/package.json backend/package/yuxi/pi_runner/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY backend/package/yuxi/pi_runner/runner.mjs ./runner.mjs
+COPY backend/package/yuxi/pi_runner/patch-shell-input.py ./patch-shell-input.py
+RUN python3 ./patch-shell-input.py
