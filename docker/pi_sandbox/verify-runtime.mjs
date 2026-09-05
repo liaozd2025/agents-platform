@@ -6,6 +6,9 @@ import { join } from "node:path";
 // 启动依赖必须比较当前源码与真实镜像；打印 inspect JSON 不能证明版本匹配。
 const expectedRoot = process.argv[2] || "/opt/yuxi-pi-expected";
 const runner = process.argv[3] || "/opt/yuxi-pi-runner/runner.mjs";
+execFileSync("python3", [join(expectedRoot, "patch-shell-input.py"), "--check"], {
+  timeout: 30_000, stdio: "pipe",
+});
 const runtime = JSON.parse(execFileSync(process.execPath, [runner, "--inspect"], {
   encoding: "utf8", timeout: 30_000, maxBuffer: 1024 * 1024,
 }));
