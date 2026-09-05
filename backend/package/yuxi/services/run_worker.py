@@ -49,6 +49,7 @@ from yuxi.services.pi_execution_service import (
     build_pi_runtime_manifest,
     execute_pi_attempt,
     resolve_pi_model_runtime,
+    snapshot_pi_context,
 )
 from yuxi.services.run_queue_service import (
     RUN_RECONCILIATION_SECONDS,
@@ -968,6 +969,16 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
             return
 
 
+async def _snapshot_pi_run_context(run: AgentRun) -> tuple[dict, dict | None]:
+    """按已授权 child 身份选择历史，再从 Workdir 固化本次模型上下文。"""
+    binding = await _validate_run_workdir_binding(run)
+    async with pg_manager.get_async_session_context() as db:
+        previous = await AgentRunRepository(db).get_previous_pi_session(
+            run_id=run.id, uid=str(run.uid), project_id=binding.project_id
+        )
+    return await asyncio.to_thread(snapshot_pi_context, binding.workdir, previous)
+
+
 async def process_agent_run(ctx, run_id: str):
     """执行队列中的 AgentRun，并只从 run 列和输入消息恢复运行参数。"""
     run = await _get_run(run_id)
@@ -1001,6 +1012,7 @@ async def process_agent_run(ctx, run_id: str):
     pi_runtime: tuple[dict, str] | None = None
     pi_credentials: dict | None = None
     pi_skill_sources: dict[str, Path] = {}
+    pi_previous_session = None
     reuse_pi_sandbox = False
     runtime_payload = run.input_payload.get("runtime") if isinstance(run.input_payload, dict) else None
     pi_requested = isinstance(runtime_payload, dict) and runtime_payload.get("executor") == "pi"
@@ -1048,11 +1060,13 @@ async def process_agent_run(ctx, run_id: str):
                     if compute_skill_dir_hash(source) != raw_digests[slug]:
                         raise ValueError(f"PI sandbox runtime Skill 已变化: {slug}")
                     pi_skill_sources[slug] = source
+                pi_context, pi_previous_session = await _snapshot_pi_run_context(run)
                 pi_runtime = build_pi_runtime_manifest(
                     runner_path=PI_RUNNER_PATH,
                     skill_sources=pi_skill_sources,
                     skill_runtime_paths={slug: str(raw_paths[slug]) for slug in skill_slugs},
                     model=pi_model,
+                    context=pi_context,
                 )
                 reuse_pi_sandbox = True
             else:
@@ -1271,6 +1285,8 @@ async def process_agent_run(ctx, run_id: str):
                 }
                 if reuse_pi_sandbox:
                     pi_attempt["task"] = normalized_input_message.content
+                    if pi_previous_session is not None:
+                        pi_attempt["previous_session"] = pi_previous_session
                 await execute_pi_attempt(
                     attempt=pi_attempt,
                     adapter=adapter,

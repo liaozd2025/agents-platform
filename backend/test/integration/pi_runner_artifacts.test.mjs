@@ -12,17 +12,24 @@ import {
 } from "node:fs/promises";
 import { resolve } from "node:path";
 import { test } from "node:test";
+import { crc32, deflateSync } from "node:zlib";
 
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 /** 受控上游只替换模型响应，实际运行 shipping runTask、SDK 与文件工具。 */
-async function runTaskScenario(makeSteps, verify, setup = async () => ({})) {
-  const project = await mkdtemp("/tmp/pi-artifacts-");
+async function runTaskScenario(
+  makeSteps,
+  verify,
+  setup = async () => ({}),
+  existingProject = null,
+) {
+  const project = existingProject || (await mkdtemp("/tmp/pi-artifacts-"));
   const suffix = randomBytes(12).toString("hex");
   const output = resolve(project, "outputs/pi-runs", suffix);
   const jobPath = `/home/gem/yuxi-secret-${suffix}.json`;
   const steps = makeSteps(project, output);
   const requests = [];
+  let options = {};
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -57,7 +64,10 @@ async function runTaskScenario(makeSteps, verify, setup = async () => ({})) {
             finish_reason: typeof step === "string" ? "stop" : "tool_calls",
           },
         ],
-        usage: { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
+        usage:
+          options.reportUsage === false
+            ? undefined
+            : { prompt_tokens: 20, completion_tokens: 10, total_tokens: 30 },
       },
     ])
       response.write(
@@ -67,14 +77,15 @@ async function runTaskScenario(makeSteps, verify, setup = async () => ({})) {
   });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   try {
-    const options = await setup(project, output);
+    options = await setup(project, output);
     await mkdir("/home/gem", { recursive: true });
     await writeFile(
       jobPath,
       JSON.stringify({
         attempt_id: suffix,
         output_subdir: `pi-runs/${suffix}`,
-        task: "Produce the requested deliverables.",
+        task: options.task || "Produce the requested deliverables.",
+        previous_session: options.previousSession,
         manifest: {
           model: {
             api: "openai-completions",
@@ -82,11 +93,14 @@ async function runTaskScenario(makeSteps, verify, setup = async () => ({})) {
             base_url: `http://127.0.0.1:${server.address().port}/v1`,
             context_window: 128000,
             max_tokens: 4096,
+            input: ["text"],
+            ...options.model,
           },
           policy: {
             tools: ["read", "bash", "edit", "write", "submit_artifact"],
           },
           skill_bundle: { items: options.skillItems || [] },
+          context: options.context,
         },
         credentials: { api_key: "local-controlled-test-key" },
       }),
@@ -117,12 +131,202 @@ async function runTaskScenario(makeSteps, verify, setup = async () => ({})) {
     server.closeAllConnections();
     await new Promise((done) => server.close(done));
     await rm(jobPath, { force: true });
-    await rm(project, { recursive: true, force: true });
+    if (!existingProject) await rm(project, { recursive: true, force: true });
   }
 }
 
 const bash = (command) => ({ name: "bash", args: { command } });
 const submit = (path) => ({ name: "submit_artifact", args: { path } });
+
+test("runTask forks the verified prior session, keeps original bytes and counts only this Run", async () => {
+  await runTaskScenario(
+    () => ["Remember the project decision: BLUE_ORCHID."],
+    async ({ project, output, code, stderr, events }) => {
+      assert.equal(code, 0, stderr);
+      const first = events.at(-1).payload;
+      assert.deepEqual(first.token_usage.total, {
+        input_tokens: 20,
+        output_tokens: 10,
+        total_tokens: 30,
+      });
+      const firstPath = resolve(output, first.session.path);
+      const previous = await readFile(firstPath, "utf8");
+      await runTaskScenario(
+        () => ["Continuing BLUE_ORCHID."],
+        async ({
+          output: secondOutput,
+          code: secondCode,
+          stderr: secondError,
+          requests,
+          events: secondEvents,
+        }) => {
+          assert.equal(secondCode, 0, secondError);
+          assert.match(JSON.stringify(requests[0].messages), /BLUE_ORCHID/);
+          const second = secondEvents.at(-1).payload;
+          assert.deepEqual(second.token_usage.total, {
+            input_tokens: 20,
+            output_tokens: 10,
+            total_tokens: 30,
+          });
+          assert.equal(second.token_usage.model_call_count, 1);
+          assert.equal(second.token_usage.complete, true);
+          assert.equal(digest(await readFile(firstPath)), first.session.sha256);
+          assert.notEqual(
+            resolve(secondOutput, second.session.path),
+            firstPath,
+          );
+        },
+        async () => ({
+          task: "Continue the previous project decision.",
+          context: { session_source: { ref: first.session } },
+          previousSession: { content: previous, sha256: first.session.sha256 },
+        }),
+        project,
+      );
+    },
+  );
+});
+
+test("runTask injects only the verified Project instruction snapshot", async () => {
+  const content = "PROJECT_INSTRUCTION_SNAPSHOT";
+  await runTaskScenario(
+    () => ["Instructions followed."],
+    async ({ code, stderr, requests }) => {
+      assert.equal(code, 0, stderr);
+      assert.match(
+        JSON.stringify(requests[0].messages),
+        /PROJECT_INSTRUCTION_SNAPSHOT/,
+      );
+      assert.doesNotMatch(
+        JSON.stringify(requests[0].messages),
+        /CHANGED_ON_DISK/,
+      );
+    },
+    async (project) => {
+      await writeFile(resolve(project, "AGENTS.md"), "CHANGED_ON_DISK");
+      return {
+        context: {
+          project_instructions: [
+            { path: "AGENTS.md", content, sha256: digest(content) },
+          ],
+        },
+      };
+    },
+  );
+  await runTaskScenario(
+    () => ["Must not execute."],
+    async ({ code, stderr, requests }) => {
+      assert.notEqual(code, 0);
+      assert.match(stderr, /instructions snapshot is invalid/);
+      assert.equal(requests.length, 0);
+    },
+    async () => ({
+      context: {
+        project_instructions: [
+          { path: "AGENTS.md", content, sha256: "0".repeat(64) },
+        ],
+      },
+    }),
+  );
+});
+
+test("runTask marks missing provider usage unavailable rather than a reported zero", async () => {
+  await runTaskScenario(
+    () => ["No usage returned."],
+    async ({ code, stderr, events }) => {
+      assert.equal(code, 0, stderr);
+      const usage = events.at(-1).payload.token_usage;
+      assert.equal(usage.schema_version, 2);
+      assert.equal(usage.complete, false);
+      assert.equal(usage.model_call_count, 1);
+      assert.equal(usage.usage_reported_call_count, 0);
+      assert.equal(usage.usage_unavailable_call_count, 1);
+      assert.deepEqual(usage.models["yuxi:controlled"].usage, {});
+    },
+    async () => ({ reportUsage: false }),
+  );
+});
+
+test("runTask applies explicit reasoning and output budget to the actual model request", async () => {
+  await runTaskScenario(
+    () => ["Reasoned result."],
+    async ({ code, stderr, requests }) => {
+      assert.equal(code, 0, stderr);
+      assert.equal(requests[0].reasoning_effort, "medium");
+      assert.equal(
+        requests[0].max_tokens ?? requests[0].max_completion_tokens,
+        512,
+      );
+    },
+    async () => ({ model: { reasoning: true, max_tokens: 512 } }),
+  );
+});
+
+test("runTask rejects a changed session snapshot before any model call", async () => {
+  await runTaskScenario(
+    () => ["Must not execute."],
+    async ({ code, stderr, requests }) => {
+      assert.notEqual(code, 0);
+      assert.match(stderr, /previous session snapshot is invalid/);
+      assert.equal(requests.length, 0);
+    },
+    async () => ({
+      context: { session_source: { ref: { sha256: "0".repeat(64) } } },
+      previousSession: { content: "changed", sha256: "0".repeat(64) },
+    }),
+  );
+});
+
+for (const supportsImage of [false, true]) {
+  test(`runTask image tool output follows declared image capability=${supportsImage}`, async () => {
+    await runTaskScenario(
+      (project) => [
+        { name: "read", args: { path: resolve(project, "pixel.png") } },
+        "Image handled.",
+      ],
+      async ({ code, stderr, requests }) => {
+        assert.equal(code, 0, stderr);
+        const tool = requests[1].messages.find(
+          (message) => message.role === "tool",
+        );
+        assert.equal(
+          JSON.stringify(requests[1].messages).includes("image_url"),
+          supportsImage,
+        );
+        if (!supportsImage)
+          assert.match(
+            JSON.stringify(tool),
+            /does not support images|Image reading is disabled/,
+          );
+      },
+      async (project) => {
+        const chunk = (type, data) => {
+          const bytes = Buffer.concat([Buffer.from(type), data]);
+          const length = Buffer.alloc(4);
+          const checksum = Buffer.alloc(4);
+          length.writeUInt32BE(data.length);
+          checksum.writeUInt32BE(crc32(bytes));
+          return Buffer.concat([length, bytes, checksum]);
+        };
+        await writeFile(
+          resolve(project, "pixel.png"),
+          Buffer.concat([
+            Buffer.from("89504e470d0a1a0a", "hex"),
+            chunk("IHDR", Buffer.from("00000001000000010806000000", "hex")),
+            chunk("IDAT", deflateSync(Buffer.from([0, 255, 0, 0, 255]))),
+            chunk("IEND", Buffer.alloc(0)),
+          ]),
+        );
+        return {
+          model: {
+            input: supportsImage ? ["text", "image"] : ["text"],
+            reasoning: false,
+          },
+        };
+      },
+    );
+  });
+}
 
 for (const selected of [false, true]) {
   test(`runTask ignores implicit Skills and SYSTEM files while selected Skill=${selected}`, async () => {

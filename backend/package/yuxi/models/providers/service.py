@@ -67,6 +67,21 @@ def _normalize_model_item(model: dict[str, Any]) -> dict[str, Any]:
     normalized["source"] = source
     normalized["display_name"] = str(model.get("display_name") or model.get("name") or model_id)
     normalized["extra"] = _normalize_dict(model.get("extra"))
+    for key in ("context_length", "max_completion_tokens"):
+        value = model.get(key)
+        if value is not None and (type(value) is not int or value <= 0):
+            raise ValueError(f"模型 {model_id} 的 {key} 必须是正整数")
+    modalities = model.get("input_modalities")
+    if modalities is not None and (
+        not isinstance(modalities, list)
+        or any(
+            not isinstance(value, str) or value not in {"text", "image", "audio", "video", "file", "pdf"}
+            for value in modalities
+        )
+    ):
+        raise ValueError(f"模型 {model_id} 的 input_modalities 无效")
+    if model.get("reasoning") is not None and type(model["reasoning"]) is not bool:
+        raise ValueError(f"模型 {model_id} 的 reasoning 必须是布尔值")
     if "request_body_overrides" in model:
         overrides = model.get("request_body_overrides")
         if not isinstance(overrides, dict):
@@ -264,6 +279,7 @@ def _normalize_remote_model(raw_model: dict[str, Any], model_type: str = "chat")
         "context_length": raw_model.get("context_length") or top_provider.get("context_length"),
         "max_completion_tokens": top_provider.get("max_completion_tokens"),
         "input_modalities": architecture.get("input_modalities") or [],
+        "reasoning": raw_model.get("reasoning") if type(raw_model.get("reasoning")) is bool else None,
         "output_modalities": architecture.get("output_modalities") or [],
         "supported_parameters": raw_model.get("supported_parameters") or [],
         "pricing": raw_model.get("pricing") or {},

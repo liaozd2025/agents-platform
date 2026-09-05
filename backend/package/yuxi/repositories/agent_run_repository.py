@@ -15,6 +15,7 @@ from yuxi.storage.postgres.models_business import (
     AGENT_RUN_TERMINAL_STATUSES,
     AgentRun,
     AgentRunAttempt,
+    Conversation,
     Message,
     SubagentThread,
 )
@@ -884,6 +885,49 @@ class AgentRunRepository:
 
         return await self._get_open_attempt(run_id, worker_id=worker_id)
 
+    async def get_previous_pi_session(self, *, run_id: str, uid: str, project_id: str) -> dict | None:
+        """仅从同用户、Project、child 会话的已 ACK 历史选取明确 session。"""
+        current = await self.db.scalar(
+            select(AgentRun)
+            .join(Conversation, Conversation.id == AgentRun.conversation_id)
+            .where(
+                AgentRun.id == run_id,
+                AgentRun.uid == str(uid),
+                AgentRun.run_type == "sandbox",
+                Conversation.uid == str(uid),
+                Conversation.project_id == project_id,
+                Conversation.status == "subagent",
+            )
+        )
+        if current is None:
+            raise ValueError("PI session 当前运行的用户、Project 或 child 会话不匹配")
+        row = (
+            await self.db.execute(
+                select(AgentRun, AgentRunAttempt, Message)
+                .join(AgentRunAttempt, AgentRunAttempt.run_id == AgentRun.id)
+                .join(Message, and_(Message.id == AgentRun.output_message_id, Message.run_id == AgentRun.id))
+                .where(
+                    AgentRun.uid == str(uid),
+                    AgentRun.conversation_id == current.conversation_id,
+                    AgentRun.run_type == "sandbox",
+                    AgentRun.status == "completed",
+                    AgentRun.id != current.id,
+                    AgentRunAttempt.final_acked_at.is_not(None),
+                    AgentRunAttempt.final_acked_at <= current.created_at,
+                )
+                .order_by(AgentRunAttempt.final_acked_at.desc(), AgentRunAttempt.id.desc())
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            return None
+        prior, attempt, message = row
+        pi = (message.extra_metadata or {}).get("pi") or {}
+        expected = f"pi-runs/{hashlib.sha256(f'{prior.id}:{attempt.id}'.encode()).hexdigest()[:24]}"
+        if pi.get("output_subdir") != expected or not isinstance(pi.get("session"), dict):
+            raise ValueError("已 ACK 的 PI session 引用不完整")
+        return {"run_id": prior.id, "attempt_id": attempt.id, "output_subdir": expected, "ref": pi["session"]}
+
     async def bind_pi_instance(
         self,
         run_id: str,
@@ -997,13 +1041,48 @@ class AgentRunRepository:
         _, changed = await self.set_terminal_status(
             run_id,
             status="completed",
-            token_usage={"available": False},
+            token_usage=self._pi_token_usage(payload.get("token_usage"), attempt.runtime_manifest),
             worker_id=worker_id,
             now=current_time,
         )
         if not changed:
             raise ValueError("PI final 未能提交当前 Run 终态")
         return {"ack": True, "duplicate": False}
+
+    @staticmethod
+    def _pi_token_usage(usage: dict | None, manifest: dict | None) -> dict:
+        """校验 PI wire 用量与当前模型归属，未知不伪装为已上报零消耗。"""
+        if usage is None:
+            return {"available": False}
+        counters = ("model_call_count", "usage_reported_call_count", "usage_unavailable_call_count")
+        if not isinstance(usage, dict) or usage.get("schema_version") != 2:
+            raise ValueError("PI token_usage schema 无效")
+        if any(type(usage.get(key)) is not int or usage[key] < 0 for key in counters):
+            raise ValueError("PI token_usage 调用计数无效")
+        count, reported, unavailable = (usage[key] for key in counters)
+        if reported + unavailable != count or usage.get("complete") is not (count > 0 and reported == count):
+            raise ValueError("PI token_usage 上报状态不一致")
+        total = usage.get("total")
+        keys = ("input_tokens", "output_tokens", "total_tokens")
+        if not isinstance(total, dict) or any(type(total.get(key)) is not int or total[key] < 0 for key in keys):
+            raise ValueError("PI token_usage token 计数无效")
+        if total["input_tokens"] + total["output_tokens"] != total["total_tokens"]:
+            raise ValueError("PI token_usage 总量不一致")
+        model = (manifest or {}).get("model") or {}
+        spec = model.get("spec") or f"yuxi:{model.get('model_id')}"
+        models = usage.get("models")
+        if not isinstance(models, dict) or set(models) != {spec}:
+            raise ValueError("PI token_usage 模型归属不一致")
+        bucket = models[spec]
+        if not isinstance(bucket, dict) or any(bucket.get(key) != usage[key] for key in counters[:2]):
+            raise ValueError("PI token_usage 模型调用计数不一致")
+        observed = bucket.get("usage") or {}
+        if reported == 0:
+            if observed or any(total.values()):
+                raise ValueError("PI 未上报用量不能声明已知 token 数量")
+        elif any(observed.get(key) != total[key] for key in keys) or total["total_tokens"] == 0:
+            raise ValueError("PI token_usage 模型总量不一致")
+        return usage
 
     async def record_pi_cleanup_failure(
         self,

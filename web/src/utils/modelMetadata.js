@@ -2,6 +2,30 @@ let catalogPromise
 
 export const USD_TO_CNY_RATE = 7
 
+// 模型配置保存保持逐模型能力；展示目录补充值不写入执行配置。
+export const normalizeModelConfig = (model = {}) => ({
+  id: model.id || '',
+  display_name: model.display_name || model.name || model.id || '',
+  type: model.type && model.type !== 'unknown' ? model.type : 'chat',
+  source: model.source || 'remote',
+  protocol_override: model.protocol_override || null,
+  base_url_override: model.base_url_override || null,
+  request_body_overrides:
+    model.request_body_overrides &&
+    typeof model.request_body_overrides === 'object' &&
+    !Array.isArray(model.request_body_overrides)
+      ? model.request_body_overrides
+      : {},
+  context_length: model.context_length ?? null,
+  max_completion_tokens: model.max_completion_tokens ?? null,
+  input_modalities: model.input_modalities || [],
+  reasoning: model.reasoning ?? null,
+  dimension: model.dimension || null,
+  batch_size: model.batch_size || null,
+  supported_parameters: model.supported_parameters || [],
+  extra: model.extra || {}
+})
+
 export const loadModelMetadataCatalog = () => {
   catalogPromise ||= import('@opencode-ai/models/snapshot').then(({ providers }) => ({ providers }))
   return catalogPromise

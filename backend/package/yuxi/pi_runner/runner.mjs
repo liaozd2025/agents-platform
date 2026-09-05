@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import {
   mkdir,
@@ -339,7 +339,10 @@ async function createResources(root, manifest, outputRoot) {
     (item) => item.path,
   );
   const settingsManager = SettingsManager.inMemory(
-    { retry: { enabled: false } },
+    {
+      retry: { enabled: false },
+      images: { blockImages: !manifest?.model?.input?.includes("image") },
+    },
     { projectTrusted: false },
   );
   const resourceLoader = new DefaultResourceLoader({
@@ -355,6 +358,20 @@ async function createResources(root, manifest, outputRoot) {
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
+    agentsFilesOverride: () => ({
+      agentsFiles: (manifest?.context?.project_instructions || []).map(
+        (item) => {
+          if (
+            item.path !== "AGENTS.md" ||
+            typeof item.content !== "string" ||
+            Buffer.byteLength(item.content) > 64 * 1024 ||
+            sha256(item.content) !== item.sha256
+          )
+            throw new Error("PI Project instructions snapshot is invalid");
+          return { path: resolve(root, item.path), content: item.content };
+        },
+      ),
+    }),
   });
   await resourceLoader.reload();
   const skills = resourceLoader.getSkills();
@@ -559,6 +576,106 @@ async function runGolden(job, outputRoot) {
   }
 }
 
+/** 只从已验证的字节副本 fork，原 session 路径永不打开写入。 */
+async function createTaskSessionManager(job, projectRoot, sessionDir) {
+  const source = job.manifest?.context?.session_source;
+  const previous = job.previous_session;
+  if (!source && !previous)
+    return SessionManager.create(projectRoot, sessionDir);
+  if (
+    !source ||
+    typeof previous?.content !== "string" ||
+    Buffer.byteLength(previous.content) > 16 * 1024 * 1024 ||
+    previous.sha256 !== source.ref?.sha256 ||
+    sha256(previous.content) !== previous.sha256
+  )
+    throw new Error("PI previous session snapshot is invalid");
+  const path = `/home/gem/yuxi-session-${randomBytes(12).toString("hex")}.jsonl`;
+  const file = await open(
+    path,
+    constants.O_RDWR |
+      constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    // 先 unlink 再写入；fork 的同步读取只依赖当前进程 fd，不暴露可替换的来源路径。
+    await unlink(path);
+    await file.writeFile(previous.content, "utf8");
+    return SessionManager.forkFrom(
+      `/proc/self/fd/${file.fd}`,
+      projectRoot,
+      sessionDir,
+    );
+  } finally {
+    await file.close();
+  }
+}
+
+/** 全 session 差额归属当前 Run；SDK 全零缺省 usage 保守标为未知。 */
+function taskTokenUsage(session, manager, before, firstEntry, model) {
+  const after = session.getSessionStats().tokens;
+  const delta = Object.fromEntries(
+    Object.keys(before).map((key) => [key, after[key] - before[key]]),
+  );
+  if (
+    Object.values(delta).some(
+      (value) => !Number.isSafeInteger(value) || value < 0,
+    )
+  )
+    throw new Error("PI token usage delta is invalid");
+  const usages = manager
+    .getEntries()
+    .slice(firstEntry)
+    .flatMap((entry) => {
+      if (entry.type === "message" && entry.message?.role === "assistant")
+        return [entry.message.usage];
+      if (["compaction", "branch_summary"].includes(entry.type))
+        return [entry.usage];
+      return [];
+    });
+  const reported = usages.filter((usage) =>
+    ["input", "output", "cacheRead", "cacheWrite"].some(
+      (key) => Number.isFinite(usage?.[key]) && usage[key] > 0,
+    ),
+  ).length;
+  const total = {
+    input_tokens: delta.input + delta.cacheRead + delta.cacheWrite,
+    output_tokens: delta.output,
+    total_tokens: delta.total,
+  };
+  const spec = model.spec || `yuxi:${model.model_id}`;
+  return {
+    schema_version: 2,
+    model_call_count: usages.length,
+    usage_reported_call_count: reported,
+    usage_unavailable_call_count: usages.length - reported,
+    complete: usages.length > 0 && reported === usages.length,
+    models: {
+      [spec]: {
+        model: {
+          model_id: model.model_id,
+          provider_id: spec.split(":")[0],
+          identity_source: "configured_spec",
+        },
+        model_call_count: usages.length,
+        usage_reported_call_count: reported,
+        usage: reported
+          ? {
+              ...total,
+              input_token_details: {
+                cache_read: delta.cacheRead,
+                cache_creation: delta.cacheWrite,
+              },
+            }
+          : {},
+      },
+    },
+    total,
+  };
+}
+
 async function runTask(job, outputRoot) {
   const model = job.manifest?.model;
   if (!model || typeof job.task !== "string" || !job.task.trim())
@@ -617,8 +734,8 @@ async function runTask(job, outputRoot) {
         id: model.model_id,
         name: model.display_name || model.model_id,
         api: model.api,
-        reasoning: false,
-        input: ["text"],
+        reasoning: model.reasoning === true,
+        input: model.input || ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: model.context_window,
         maxTokens: model.max_tokens,
@@ -635,6 +752,11 @@ async function runTask(job, outputRoot) {
     job.manifest,
     outputRoot,
   );
+  const sessionManager = await createTaskSessionManager(
+    job,
+    projectRoot,
+    sessionDir,
+  );
   const { session } = await createAgentSession({
     cwd: projectRoot,
     modelRuntime,
@@ -643,8 +765,10 @@ async function runTask(job, outputRoot) {
     customTools: [createArtifactTool(outputRoot, artifacts)],
     resourceLoader,
     settingsManager,
-    sessionManager: SessionManager.create(projectRoot, sessionDir),
+    sessionManager,
   });
+  const beforeTokens = session.getSessionStats().tokens;
+  const firstEntry = sessionManager.getEntries().length;
   let sequence = 0;
   const emitEvent = (type, value) => emit(type, sequence++, value, job);
   const unsubscribe = subscribeToolEvents(session, emitEvent);
@@ -667,16 +791,20 @@ async function runTask(job, outputRoot) {
     emitEvent("artifact", refs.artifact);
     emitEvent("patch", refs.patch);
     emitEvent("session", sessionRef);
-    emitEvent(
-      "final",
-      {
-        text,
-        output_subdir: job.output_subdir,
-        artifact: refs.artifact,
-        patch: refs.patch,
-        session: sessionRef,
-      },
-    );
+    emitEvent("final", {
+      text,
+      output_subdir: job.output_subdir,
+      artifact: refs.artifact,
+      patch: refs.patch,
+      session: sessionRef,
+      token_usage: taskTokenUsage(
+        session,
+        sessionManager,
+        beforeTokens,
+        firstEntry,
+        model,
+      ),
+    });
   } finally {
     unsubscribe();
     session.dispose();

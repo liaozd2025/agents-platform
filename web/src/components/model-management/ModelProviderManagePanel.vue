@@ -25,6 +25,7 @@ import { modelAvatars } from '@/utils/modelIcon'
 import {
   formatModelPriceDisplay,
   loadModelMetadataCatalog,
+  normalizeModelConfig as normalizeModel,
   resolveModelDisplayMetadata,
   USD_TO_CNY_RATE
 } from '@/utils/modelMetadata'
@@ -90,6 +91,9 @@ const editingModel = ref({
   request_body_overrides: {},
   request_body_overrides_text: '{}',
   context_length: null,
+  max_completion_tokens: null,
+  input_modalities: [],
+  reasoning: null,
   dimension: null,
   batch_size: null,
   supported_parameters: [],
@@ -504,26 +508,6 @@ const fetchRemoteModels = async (providerId) => {
 }
 
 // ============ Model Operations ============
-const normalizeModel = (model = {}) => ({
-  id: model.id || '',
-  display_name: model.display_name || model.name || model.id || '',
-  type: model.type && model.type !== 'unknown' ? model.type : 'chat',
-  source: model.source || 'remote',
-  protocol_override: model.protocol_override || null,
-  base_url_override: model.base_url_override || null,
-  request_body_overrides:
-    model.request_body_overrides &&
-    typeof model.request_body_overrides === 'object' &&
-    !Array.isArray(model.request_body_overrides)
-      ? model.request_body_overrides
-      : {},
-  context_length: model.context_length || null,
-  dimension: model.dimension || null,
-  batch_size: model.batch_size || null,
-  supported_parameters: model.supported_parameters || [],
-  extra: model.extra || {}
-})
-
 const testModelConnection = async (providerId, model) => {
   const spec = buildModelSpec(providerId, model.id)
   if (modelTestLoadingBySpec.value[spec]) return
@@ -605,6 +589,9 @@ const openCreateModal = (provider) => {
     request_body_overrides: {},
     request_body_overrides_text: '{}',
     context_length: null,
+    max_completion_tokens: null,
+    input_modalities: [],
+    reasoning: null,
     dimension: null,
     batch_size: null,
     supported_parameters: [],
@@ -1285,6 +1272,60 @@ defineExpose({
           <label class="form-label">
             <span>Base URL 覆盖</span>
             <a-input v-model:value="editingModel.base_url_override" placeholder="可选" />
+          </label>
+        </div>
+
+        <div v-if="editingModel.type === 'chat'" class="form-row">
+          <label class="form-label">
+            <span>上下文长度（tokens）</span>
+            <a-input-number
+              v-model:value="editingModel.context_length"
+              :min="1"
+              :precision="0"
+              placeholder="未设置"
+            />
+          </label>
+          <label class="form-label">
+            <span>最大输出（tokens）</span>
+            <a-input-number
+              v-model:value="editingModel.max_completion_tokens"
+              :min="1"
+              :precision="0"
+              placeholder="未设置"
+            />
+          </label>
+        </div>
+        <div v-if="editingModel.type === 'chat'" class="form-row">
+          <label class="form-label">
+            <span>输入类型</span>
+            <a-select
+              v-model:value="editingModel.input_modalities"
+              mode="multiple"
+              placeholder="未设置"
+              :options="[
+                { value: 'text', label: '文本' },
+                { value: 'image', label: '图像' },
+                { value: 'audio', label: '音频' },
+                { value: 'video', label: '视频' },
+                { value: 'file', label: '文件' },
+                { value: 'pdf', label: 'PDF' }
+              ]"
+            />
+          </label>
+          <label class="form-label">
+            <span>推理能力</span>
+            <a-select
+              :value="editingModel.reasoning == null ? undefined : String(editingModel.reasoning)"
+              allow-clear
+              placeholder="未设置"
+              @change="
+                (value) => (editingModel.reasoning = value == null ? null : value === 'true')
+              "
+              :options="[
+                { value: 'true', label: '支持' },
+                { value: 'false', label: '不支持' }
+              ]"
+            />
           </label>
         </div>
 
