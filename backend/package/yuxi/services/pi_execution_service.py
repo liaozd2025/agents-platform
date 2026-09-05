@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend
+from yuxi.agents.backends.sandbox.backend import SandboxProcessCleanupError
 from yuxi.agents.backends.sandbox.provider import get_sandbox_provider
 from yuxi.agents.skills.service import compute_skill_dir_hash, is_valid_skill_slug, sync_user_accessible_skills
 from yuxi.models.providers.cache import model_cache
@@ -226,27 +227,39 @@ async def _execute_until_cancelled(
     final_acked_event: asyncio.Event,
     event_sink,
 ):
+    """执行与取消监听由当前协程持有，退出前等待二者清理完成。"""
+
     execute_kwargs = {"event_sink": event_sink} if getattr(adapter, "streams_events", False) else {}
     if cancel_event is None:
         return await adapter.execute(instance_id, attempt, **execute_kwargs)
     execute_task = asyncio.create_task(adapter.execute(instance_id, attempt, **execute_kwargs))
     cancel_task = asyncio.create_task(cancel_event.wait())
-    done, _ = await asyncio.wait({execute_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
-    if execute_task in done and (cancel_task not in done or final_acked_event.is_set()):
-        cancel_task.cancel()
-        await asyncio.gather(cancel_task, return_exceptions=True)
-        return execute_task.result()
-    if final_acked_event.is_set():
-        cancel_task.cancel()
-        await asyncio.gather(cancel_task, return_exceptions=True)
+    cancellation = None
+    try:
+        done, _ = await asyncio.wait({execute_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+        if cancel_task in done and not final_acked_event.is_set():
+            raise PiExecutionCancelled("PI attempt cancelled")
         return await execute_task
-    if cancel_task in done:
-        execute_task.cancel()
-        await asyncio.gather(execute_task, return_exceptions=True)
-        raise PiExecutionCancelled("PI attempt cancelled")
-    cancel_task.cancel()
-    await asyncio.gather(cancel_task, return_exceptions=True)
-    return execute_task.result()
+    except asyncio.CancelledError as exc:
+        cancellation = exc
+        raise
+    finally:
+        # 外层取消同样必须先停止执行，随后 execute_pi_attempt 才能删除本次产物。
+        for task in (execute_task, cancel_task):
+            if not task.done():
+                task.cancel()
+        joined = asyncio.gather(execute_task, cancel_task, return_exceptions=True)
+        # 复用同一个join；重复取消不能再次打断backend已有的有界清理。
+        while True:
+            try:
+                await asyncio.shield(joined)
+                break
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+        if not execute_task.cancelled() and isinstance(error := execute_task.exception(), SandboxProcessCleanupError):
+            raise error
+        if cancellation is not None:
+            raise cancellation
 
 
 async def execute_pi_attempt(
@@ -281,6 +294,8 @@ async def execute_pi_attempt(
                 if ref != refs.get(ref_type):
                     raise ValueError(f"PI final {ref_type} 与已回传 ref 不一致")
                 await adapter.validate_ref(ref)
+            # commit 可能成功而 ACK 响应被取消；提交开始后不能据未收到响应删除产物。
+            preserve_outputs = True
         for sink_try in range(2):
             try:
                 response = await _call_sink(result_sink, envelope)
@@ -316,6 +331,9 @@ async def execute_pi_attempt(
             return events
         except PiExecutionCancelled:
             raise
+        except SandboxProcessCleanupError as exc:
+            preserve_outputs = True
+            raise PiCleanupFailed(f"PI cleanup_failed: {exc}", primary=exc.primary or exc) from exc
         except Exception as exc:
             preserve_outputs = True
             raise PiExecutionUnknown(f"PI execution_unknown: {exc}") from exc

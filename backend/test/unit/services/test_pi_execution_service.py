@@ -239,7 +239,8 @@ async def test_success_wraps_replayable_envelopes_and_stops_after_final_ack(tmp_
 
 
 @pytest.mark.asyncio
-async def test_lost_final_ack_replays_same_envelope_and_preserves_outputs(tmp_path):
+@pytest.mark.parametrize("ack_loss", ["timeout", "cancel"])
+async def test_lost_final_ack_replays_same_envelope_and_preserves_outputs(tmp_path, ack_loss):
     manifest, digest, actual = _manifest(tmp_path)
     refs = {
         "artifact": {"path": "pi-golden.txt", "sha256": "a" * 64},
@@ -266,18 +267,25 @@ async def test_lost_final_ack_replays_same_envelope_and_preserves_outputs(tmp_pa
             return {"ack": True, "duplicate": False}
         final_calls.append(envelope)
         if len(final_calls) == 1:
+            if ack_loss == "cancel":
+                raise asyncio.CancelledError("ACK response cancelled after commit")
             raise TimeoutError("ACK response lost after commit")
         return {"ack": True, "duplicate": True}
 
-    result = await execute_pi_attempt(
+    execution = execute_pi_attempt(
         attempt={"run_id": "run-1", "attempt_id": "1", "manifest": manifest, "manifest_digest": digest},
         adapter=adapter,
         result_sink=sink,
     )
 
-    assert result == events
-    assert len(final_calls) == 2
-    assert final_calls[0] == final_calls[1]
+    if ack_loss == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        assert len(final_calls) == 1
+    else:
+        assert await execution == events
+        assert len(final_calls) == 2
+        assert final_calls[0] == final_calls[1]
     assert adapter.stop_preserve_outputs == [True]
 
 
@@ -414,16 +422,35 @@ async def test_preflight_and_cleanup_failure_keeps_bound_instance_and_primary(tm
 
 
 @pytest.mark.asyncio
-async def test_cancel_stops_blocked_execution_once(tmp_path):
+@pytest.mark.parametrize("cancel_mode", ["business", "outer", "outer_without_event"])
+async def test_cancel_joins_execution_before_stop_and_leaves_no_waiter(tmp_path, cancel_mode):
+    """取消先等待执行清理完毕，再清理实例，并收敛取消监听任务。"""
+
     manifest, digest, actual = _manifest(tmp_path)
-    cancel_event = asyncio.Event()
+    cancel_event = None if cancel_mode == "outer_without_event" else asyncio.Event()
     adapter = FakeAdapter(actual)
+    execution_started = asyncio.Event()
+    execution_task = None
+    lifecycle = []
+    existing_tasks = asyncio.all_tasks()
 
     async def wait_forever(_instance_id, _job):
+        nonlocal execution_task
+        execution_task = asyncio.current_task()
         adapter.execute_calls += 1
-        await asyncio.Event().wait()
+        execution_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            lifecycle.append("execution_stopped")
+
+    async def stop(_instance_id, *, preserve_outputs=False):
+        lifecycle.append("instance_stopped")
+        adapter.stop_preserve_outputs.append(preserve_outputs)
 
     adapter.execute = wait_forever
+    adapter.stop = stop
     task = asyncio.create_task(
         execute_pi_attempt(
             attempt={
@@ -437,15 +464,183 @@ async def test_cancel_stops_blocked_execution_once(tmp_path):
             cancel_event=cancel_event,
         )
     )
-    await asyncio.sleep(0)
-    cancel_event.set()
+    await asyncio.wait_for(execution_started.wait(), timeout=1)
+    if cancel_mode == "business":
+        cancel_event.set()
+    else:
+        task.cancel()
 
-    with pytest.raises(PiExecutionCancelled):
+    expected_error = PiExecutionCancelled if cancel_mode == "business" else asyncio.CancelledError
+    with pytest.raises(expected_error):
         await task
 
-    assert adapter.execute_calls == 1
-    assert adapter.stop_calls == 1
-    assert adapter.stop_preserve_outputs == [False]
+    try:
+        assert lifecycle == ["execution_stopped", "instance_stopped"]
+        assert execution_task.done()
+        assert asyncio.all_tasks() <= existing_tasks
+        assert adapter.execute_calls == 1
+        assert adapter.stop_preserve_outputs == [False]
+    finally:
+        # 负控恢复原缺陷时，也收回本测试制造的孤儿任务。
+        orphan_tasks = asyncio.all_tasks() - existing_tasks
+        for orphan in orphan_tasks:
+            orphan.cancel()
+        await asyncio.gather(*orphan_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_mode", ["business", "outer", "outer_without_event"])
+async def test_failed_command_stop_preserves_files_and_reports_cleanup_orphan(tmp_path, cancel_mode):
+    """内部终止失败不能被 gather 吞掉，也不能删除仍可能被写入的文件。"""
+
+    manifest, digest, actual = _manifest(tmp_path)
+    cancel_event = None if cancel_mode == "outer_without_event" else asyncio.Event()
+    started = asyncio.Event()
+    output = tmp_path / "still-running.txt"
+    output.write_text("pending", encoding="utf-8")
+    adapter = FakeAdapter(actual)
+
+    async def execute(_instance_id, _job):
+        """在取消后模拟远端命令终止失败。"""
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise pi_execution_service.SandboxProcessCleanupError("kill unavailable", primary=exc) from exc
+
+    async def stop(_instance_id, *, preserve_outputs=False):
+        """按生产 stop 语义决定是否删除文件。"""
+        if not preserve_outputs:
+            output.unlink()
+
+    adapter.execute = execute
+    adapter.stop = stop
+    task = asyncio.create_task(
+        execute_pi_attempt(
+            attempt={"run_id": "run-1", "attempt_id": "1", "manifest": manifest, "manifest_digest": digest},
+            adapter=adapter,
+            result_sink=lambda _envelope: None,
+            cancel_event=cancel_event,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    if cancel_mode == "business":
+        cancel_event.set()
+    else:
+        task.cancel()
+
+    with pytest.raises(PiCleanupFailed, match="kill unavailable") as failure:
+        await task
+
+    assert isinstance(failure.value.primary, asyncio.CancelledError)
+    assert output.read_text(encoding="utf-8") == "pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("startup_outcome", ["response_lost", "budget_expired", "acknowledged"])
+async def test_repeated_outer_cancel_joins_real_backend_and_preserves_unknown_attempt(
+    monkeypatch, tmp_path, startup_outcome
+):
+    """组合真实执行边界验证重复取消不会吞掉启动未知或提前删除attempt。"""
+
+    manifest, digest, actual = _manifest(tmp_path)
+    monkeypatch.setattr("yuxi.agents.backends.sandbox.backend.get_sandbox_provider", object)
+    backend = pi_execution_service.ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
+    backend._command_timeout_seconds = 0.05 if startup_outcome == "budget_expired" else 1
+    monkeypatch.setattr(backend, "_get_connection", lambda: SimpleNamespace(sandbox_url="http://sandbox"))
+    remote_started = asyncio.Event()
+    reply_ready = asyncio.Event()
+    capture = tmp_path / "remote-capture.log"
+    attempt_file = tmp_path / "attempt-output.txt"
+    attempt_file.write_text("keep until confirmed", encoding="utf-8")
+    lifecycle = []
+    existing_tasks = asyncio.all_tasks()
+
+    async def exec_command(**kwargs):
+        """模拟已接受执行但尚未返回的真实SDK边界。"""
+        if kwargs["command"].startswith("rm -f -- "):
+            capture.unlink()
+            lifecycle.append("capture_removed")
+            return SimpleNamespace(data=SimpleNamespace(exit_code=0))
+        capture.write_text("remote running", encoding="utf-8")
+        remote_started.set()
+        await reply_ready.wait()
+        if startup_outcome == "response_lost":
+            raise TimeoutError("startup response lost")
+        return SimpleNamespace(data=SimpleNamespace(session_id="session-1", status="running", exit_code=None))
+
+    async def kill_process(**_kwargs):
+        """已确认身份的命令可以终止。"""
+        lifecycle.append("process_stopped")
+        return SimpleNamespace(success=True, data=SimpleNamespace(status="terminated"))
+
+    monkeypatch.setattr(
+        backend,
+        "_build_async_client",
+        lambda _url, _http: SimpleNamespace(
+            shell=SimpleNamespace(exec_command=exec_command, kill_process=kill_process)
+        ),
+    )
+    adapter = FakeAdapter(actual)
+
+    async def execute(_instance_id, _job):
+        """经实际backend启动命令，不替换取消或清理实现。"""
+
+        async def reject_output(_chunk):
+            """取消发生在首段输出前。"""
+            pytest.fail("unexpected stdout before cancellation")
+
+        return await backend.aexecute_stream("silent-command", reject_output)
+
+    async def stop(_instance_id, *, preserve_outputs=False):
+        """按实际attempt清理策略处理测试文件。"""
+        adapter.stop_preserve_outputs.append(preserve_outputs)
+        if not preserve_outputs:
+            attempt_file.unlink()
+        backend.close()
+
+    adapter.execute = execute
+    adapter.stop = stop
+    task = asyncio.create_task(
+        execute_pi_attempt(
+            attempt={"run_id": "run-1", "attempt_id": "1", "manifest": manifest, "manifest_digest": digest},
+            adapter=adapter,
+            result_sink=lambda _envelope: None,
+            cancel_event=asyncio.Event(),
+        )
+    )
+    try:
+        await asyncio.wait_for(remote_started.wait(), timeout=1)
+        task.cancel("first cancellation")
+        # 让取消沿service到达backend的在途启动请求，第二次取消打在join期间。
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        task.cancel("second cancellation")
+        if startup_outcome != "budget_expired":
+            reply_ready.set()
+
+        with pytest.raises((asyncio.CancelledError, PiCleanupFailed)) as failure:
+            await task
+        if startup_outcome == "acknowledged":
+            assert isinstance(failure.value, asyncio.CancelledError)
+            assert failure.value.args == ("first cancellation",)
+            assert lifecycle == ["process_stopped", "capture_removed"]
+            assert not attempt_file.exists()
+            assert adapter.stop_preserve_outputs == [False]
+        else:
+            assert capture.read_text(encoding="utf-8") == "remote running"
+            assert attempt_file.read_text(encoding="utf-8") == "keep until confirmed"
+            assert adapter.stop_preserve_outputs == [True]
+            assert isinstance(failure.value, PiCleanupFailed)
+            assert "启动结果未确认" in str(failure.value)
+            assert isinstance(failure.value.primary, asyncio.CancelledError)
+        assert asyncio.all_tasks() <= existing_tasks
+    finally:
+        reply_ready.set()
+        pending = asyncio.all_tasks() - existing_tasks
+        for remaining in pending:
+            remaining.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -490,9 +685,14 @@ async def test_cancel_between_events_prevents_final_ack(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_final_ack_wins_over_concurrent_cancel_and_preserves_outputs(tmp_path):
+@pytest.mark.parametrize("cancel_mode", ["business", "outer"])
+async def test_final_ack_preserves_outputs_after_business_or_outer_cancel(tmp_path, cancel_mode):
+    """已确认的 final 不因随后业务取消或外层取消删除产物。"""
+
     manifest, digest, actual = _manifest(tmp_path)
     cancel_event = asyncio.Event()
+    ack_returned = asyncio.Event()
+    finish_execution = asyncio.Event()
     refs = {
         "artifact": {"path": "artifact.json", "sha256": "a" * 64},
         "patch": {"path": "output.patch", "sha256": "b" * 64},
@@ -518,24 +718,34 @@ async def test_final_ack_wins_over_concurrent_cancel_and_preserves_outputs(tmp_p
             self.execute_calls += 1
             for event in self.events:
                 await event_sink(event)
-            await asyncio.sleep(0.01)
+            ack_returned.set()
+            await finish_execution.wait()
             return self.events
 
     adapter = StreamingAdapter(actual, events)
 
     async def sink(envelope):
-        if envelope["type"] == "final":
+        if envelope["type"] == "final" and cancel_mode == "business":
             cancel_event.set()
         return {"ack": True, "duplicate": False}
 
-    result = await execute_pi_attempt(
-        attempt={"run_id": "run-1", "attempt_id": "1", "manifest": manifest, "manifest_digest": digest},
-        adapter=adapter,
-        result_sink=sink,
-        cancel_event=cancel_event,
+    task = asyncio.create_task(
+        execute_pi_attempt(
+            attempt={"run_id": "run-1", "attempt_id": "1", "manifest": manifest, "manifest_digest": digest},
+            adapter=adapter,
+            result_sink=sink,
+            cancel_event=cancel_event,
+        )
     )
+    await asyncio.wait_for(ack_returned.wait(), timeout=1)
+    if cancel_mode == "outer":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        finish_execution.set()
+        assert await task == events
 
-    assert result == events
     assert adapter.stop_preserve_outputs == [True]
 
 

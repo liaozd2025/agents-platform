@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shlex
 import shutil
 import uuid
 from types import SimpleNamespace
@@ -158,6 +159,112 @@ async def test_pi_stream_callback_cancel_removes_instance_and_attempt_scope():
 
     assert await adapter.instance_exists() is False
     assert adapter.workdir_exists() is False
+
+
+async def test_pi_sandbox_delivers_stdout_before_command_finishes():
+    thread_id = f"pi-stream-{uuid.uuid4().hex}"
+    uid = "pi-e2e"
+    backend = ProvisionerSandboxBackend(thread_id=thread_id, uid=uid, inherit_env=False)
+    chunks: list[str] = []
+    first_output = asyncio.Event()
+    script = (
+        "const fs = require('node:fs'); console.log('first'); "
+        "const timer = setInterval(() => { if (fs.existsSync('/home/gem/pi-stream-release')) { "
+        "console.log('second'); fs.writeFileSync('/home/gem/pi-stream-done', 'done'); "
+        "clearInterval(timer); } }, 50);"
+    )
+
+    async def collect_output(chunk: str) -> None:
+        chunks.append(chunk)
+        first_output.set()
+
+    task = asyncio.create_task(backend.aexecute_stream(f"node -e {shlex.quote(script)}", collect_output, timeout=30))
+    task.add_done_callback(lambda _task: first_output.set())
+    try:
+        await asyncio.wait_for(first_output.wait(), timeout=30)
+        assert task.done() is False, task.result()
+        assert chunks == ["first\n"]
+        release = await asyncio.to_thread(
+            backend.execute,
+            "test ! -e /home/gem/pi-stream-done && touch /home/gem/pi-stream-release",
+        )
+        assert release.exit_code == 0, release.output
+        result = await task
+        assert chunks == ["first\n", "second\n"]
+        assert result.output == "first\nsecond\n"
+        assert result.exit_code == 0
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        backend.close()
+        await asyncio.to_thread(get_sandbox_provider().release, thread_id, uid=uid)
+
+
+@pytest.mark.parametrize("emit_stdout", [True, False])
+async def test_pi_sandbox_cancel_stops_command_writes_and_cleans_stream_capture(emit_stdout):
+    """取消真实长命令后核对进程、文件副作用与流式临时文件。"""
+
+    thread_id = f"pi-stream-cancel-{uuid.uuid4().hex}"
+    uid = "pi-e2e"
+    backend = ProvisionerSandboxBackend(thread_id=thread_id, uid=uid, inherit_env=False)
+    first_output = asyncio.Event()
+    script = (
+        "const fs = require('node:fs'); "
+        "fs.writeFileSync('/home/gem/pi-cancel.pid', String(process.pid)); "
+        "fs.appendFileSync('/home/gem/pi-cancel-heartbeat', 'x'); "
+        + ("console.log('started'); " if emit_stdout else "")
+        + "setInterval(() => fs.appendFileSync('/home/gem/pi-cancel-heartbeat', 'x'), 50);"
+    )
+
+    async def started(_chunk: str) -> None:
+        first_output.set()
+
+    task = asyncio.create_task(backend.aexecute_stream(f"node -e {shlex.quote(script)}", started, timeout=30))
+    task.add_done_callback(lambda _task: first_output.set())
+    try:
+        if emit_stdout:
+            await asyncio.wait_for(first_output.wait(), timeout=30)
+        else:
+            async with asyncio.timeout(30):
+                while True:
+                    ready = await asyncio.to_thread(backend.execute, "test -s /home/gem/pi-cancel-heartbeat")
+                    if ready.exit_code == 0:
+                        break
+                    assert task.done() is False, task.result()
+                    await asyncio.sleep(0.05)
+            assert first_output.is_set() is False
+        assert task.done() is False, task.result()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        probe = (
+            "const fs = require('node:fs'); "
+            "const pid = Number(fs.readFileSync('/home/gem/pi-cancel.pid', 'utf8')); "
+            "let running = true; "
+            "try { process.kill(pid, 0); } catch (e) { if (e.code !== 'ESRCH') throw e; running = false; } "
+            "console.log(JSON.stringify({running, "
+            "size: fs.statSync('/home/gem/pi-cancel-heartbeat').size, "
+            "captures: fs.readdirSync('/home/gem').filter(name => name.startsWith('.yuxi-stream-'))}));"
+        )
+        first = await asyncio.to_thread(backend.execute, f"node -e {shlex.quote(probe)}")
+        assert first.exit_code == 0, first.output
+        observed = json.loads(first.output.strip())
+        assert observed["running"] is False
+        assert observed["captures"] == []
+        assert observed["size"] > 0
+        await asyncio.sleep(0.2)
+        second = await asyncio.to_thread(backend.execute, f"node -e {shlex.quote(probe)}")
+        assert second.exit_code == 0, second.output
+        assert json.loads(second.output.strip()) == observed
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        backend.close()
+        await asyncio.to_thread(get_sandbox_provider().release, thread_id, uid=uid)
 
 
 async def test_pi_runtime_digest_matches_mixed_case_skill_tree(tmp_path):
