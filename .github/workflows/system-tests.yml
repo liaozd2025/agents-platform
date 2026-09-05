@@ -76,6 +76,27 @@ jobs:
           curl -fsS -X POST http://localhost:5050/api/auth/initialize \
             -H 'Content-Type: application/json' \
             --data "{\"uid\":\"${E2E_USERNAME}\",\"password\":\"${E2E_PASSWORD}\"}" >/dev/null
+      - name: Verify PI inspector and real SDK artifact boundaries
+        run: |
+          pi_image=$(docker compose images -q pi-sandbox-image)
+          test -n "$pi_image"
+          docker run --rm --network none --entrypoint node \
+            -v "$PWD/docker/pi_sandbox:/tmp/pi-inspector-tests:ro" \
+            "$pi_image" --test /tmp/pi-inspector-tests/verify-runtime.test.mjs
+          docker run --rm --network none --entrypoint node \
+            -v "$PWD/backend/test/integration/pi_runner_artifacts.test.mjs:/tmp/pi_runner_artifacts.test.mjs:ro" \
+            "$pi_image" --test /tmp/pi_runner_artifacts.test.mjs
+      - name: Start controlled PI model upstream on the shared reachable host
+        run: |
+          docker compose cp backend/test/support/pi_http_replay_server.py sandbox-provisioner:/tmp/yuxi-pi-http-replay.py
+          docker compose exec -d sandbox-provisioner python /tmp/yuxi-pi-http-replay.py --pid-file /tmp/yuxi-pi-http-replay.pid
+          for attempt in $(seq 1 20); do
+            if docker compose exec -T api curl -fsS http://sandbox-provisioner:8765/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
       - name: Start deterministic OpenAI-compatible replay
         run: |
           docker compose exec -d api uv run --no-sync --no-dev python test/support/openai_replay_server.py
@@ -145,6 +166,8 @@ jobs:
         run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/api/test_agent_run_result_causality.py -q
       - name: Verify deterministic Agent assembled path
         run: docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api uv run --no-sync --no-dev pytest test/e2e/test_deterministic_agent_path_e2e.py -q
+      - name: Verify real HTTP PI delivery and cancellation
+        run: docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api uv run --no-sync --no-dev pytest test/e2e/test_pi_http_execution.py -q
       - name: Verify identity transaction and replayable secret publication
         run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_identity_admin_service.py test/integration/services/test_api_key_schema_migration.py test/integration/services/test_api_key_user_lifecycle.py test/integration/api/test_apikey_router.py -q
       - name: Verify destructive storage migration and Skill authorization
