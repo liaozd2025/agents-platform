@@ -11,21 +11,29 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Annotated
+from typing import Annotated, ClassVar
 from urllib import request
 
 import httpx
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
 SANDBOX_ENV_FILE = Path(__file__).parent / "sandbox.env"
 SAFE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 PROXY_RESPONSE_HEADERS = frozenset(
-    {"cache-control", "content-disposition", "content-type", "etag", "last-modified"}
+    {
+        "accept-ranges",
+        "cache-control",
+        "content-disposition",
+        "content-range",
+        "content-type",
+        "etag",
+        "last-modified",
+    }
 )
 HOP_BY_HOP_HEADERS = frozenset(
     {
@@ -250,6 +258,68 @@ class SandboxGenerationMismatchError(RuntimeError):
     """删除请求引用的 Sandbox generation 已经过期。"""
 
 
+class SandboxCapacityError(RuntimeError):
+    """沙箱容量已满，调用方应沿现有 Run 调度等待。"""
+
+    def __init__(self, scope: str, limit: int):
+        """保存客户端可识别的容量原因。"""
+        self.detail = {
+            "code": "sandbox_capacity_exhausted",
+            "scope": scope,
+            "limit": limit,
+        }
+        super().__init__(f"sandbox {scope} capacity exhausted (limit={limit})")
+
+
+class SandboxResourcePolicyMismatchError(RuntimeError):
+    """旧实例必须先排空，不能继续无资源限制地执行或被自动终止。"""
+
+    detail: ClassVar[dict[str, str]] = {
+        "code": "sandbox_resource_policy_mismatch",
+        "message": "drain existing sandboxes before applying the resource policy",
+    }
+
+
+class SandboxResourceLimits(BaseModel):
+    """供给层启动时验证单实例硬限制与实例容量。"""
+
+    memory_mb: int = Field(default=4096, ge=6)
+    cpus: float = Field(default=2.0, ge=0.01, allow_inf_nan=False)
+    docker_pids_limit: int = Field(default=512, gt=0)
+    tmpfs_mb: int = Field(default=1024, gt=0)
+    max_instances: int = Field(default=6, gt=0)
+    max_instances_per_user: int = Field(default=4, gt=0)
+
+    @model_validator(mode="after")
+    def validate_budget(self):
+        """拒绝大于内存预算的内存盘和互相矛盾的容量。"""
+        if self.tmpfs_mb > self.memory_mb:
+            raise ValueError("SANDBOX_TMPFS_MB must not exceed SANDBOX_MEMORY_MB")
+        if self.max_instances_per_user > self.max_instances:
+            raise ValueError(
+                "SANDBOX_MAX_INSTANCES_PER_USER must not exceed SANDBOX_MAX_INSTANCES"
+            )
+        return self
+
+    @classmethod
+    def from_env(cls):
+        """只接受明确有效的环境配置，非法值阻止启动。"""
+        return cls.model_validate(
+            {
+                field: os.environ[f"SANDBOX_{field.upper()}"]
+                for field in cls.model_fields
+                if f"SANDBOX_{field.upper()}" in os.environ
+            }
+        )
+
+    def check_capacity(self, owners: list[str], uid: str) -> None:
+        """创建锁内用真实 inventory 计数，包含尚未启动或正在退出的实例。"""
+        if len(owners) >= self.max_instances:
+            raise SandboxCapacityError("global", self.max_instances)
+        if owners.count(uid) >= self.max_instances_per_user:
+            raise SandboxCapacityError("user", self.max_instances_per_user)
+
+
 class SandboxOperationPins:
     """让删除等待已经开始的 proxy 请求排空，并阻止新的请求穿过删除。"""
 
@@ -410,11 +480,13 @@ class LocalContainerProvisionerBackend:
         from docker.errors import DockerException
 
         self._docker = docker
+        self._limits = SandboxResourceLimits.from_env()
+        # ponytail: 单进程创建锁也覆盖就绪等待；扩容到多 provisioner 前需要共享准入 Owner。
         self._lock = threading.RLock()
         self._container_port = int(os.getenv("SANDBOX_CONTAINER_PORT", "8080"))
         self._sandbox_image = os.getenv(
             "SANDBOX_IMAGE",
-            "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest",
+            "yuxi-pi-sandbox:0.7.2",
         )
         self._network_prefix = os.getenv("DOCKER_NETWORK_PREFIX")
         if not self._network_prefix:
@@ -693,9 +765,48 @@ class LocalContainerProvisionerBackend:
 
         name = self._container_name(sandbox_id)
         try:
-            return self._client.containers.get(name)
+            container = self._client.containers.get(name)
         except NotFound:
             return None
+        labels = container.labels or {}
+        if (
+            labels.get("managed-by") != "yuxi-sandbox-provisioner"
+            or labels.get("sandbox-id") != sandbox_id
+        ):
+            raise ValueError("sandbox container has unexpected ownership")
+        return container
+
+    def _owned_containers(self):
+        """按本槽位容器名和标签枚举，旧实例不要求新标签即可归属。"""
+        containers = self._client.containers.list(
+            all=True,
+            filters={
+                "label": ["app=yuxi-sandbox", "managed-by=yuxi-sandbox-provisioner"]
+            },
+        )
+        return [
+            container
+            for container in containers
+            if (container.labels or {}).get("sandbox-id")
+            and container.name == self._container_name(container.labels["sandbox-id"])
+        ]
+
+    def _require_resource_policy(self, container) -> None:
+        """回读 Docker 硬限制，拒绝复用旧的无限额或配置不匹配实例。"""
+        config = container.attrs.get("HostConfig") or {}
+        expected = {
+            "Memory": self._limits.memory_mb * 1024**2,
+            "MemorySwap": self._limits.memory_mb * 1024**2,
+            "NanoCpus": int(self._limits.cpus * 10**9),
+            "PidsLimit": self._limits.docker_pids_limit,
+        }
+        tmpfs = (config.get("Tmpfs") or {}).get("/home/gem", "").split(",")
+        if any(config.get(key) != value for key, value in expected.items()) or (
+            f"size={self._limits.tmpfs_mb}m" not in tmpfs
+        ):
+            raise SandboxResourcePolicyMismatchError(
+                "sandbox_resource_policy_mismatch: drain existing sandbox"
+            )
 
     def create(
         self,
@@ -718,6 +829,10 @@ class LocalContainerProvisionerBackend:
             if existing is not None:
                 existing.reload()
                 labels = getattr(existing, "labels", None) or {}
+                if str(labels.get("uid") or "").strip() != safe_uid:
+                    raise ValueError(
+                        "sandbox user identity does not match existing generation"
+                    )
                 if str(labels.get("thread-id") or "").strip() != safe_thread_id:
                     raise ValueError(
                         "sandbox runtime identity does not match existing generation"
@@ -734,6 +849,7 @@ class LocalContainerProvisionerBackend:
                     raise ValueError(
                         "sandbox storage identity does not match existing generation"
                     )
+                self._require_resource_policy(existing)
                 if ephemeral_storage and not self._has_no_persistent_file_mounts(
                     existing
                 ):
@@ -794,6 +910,13 @@ class LocalContainerProvisionerBackend:
                         exc,
                     )
 
+            self._limits.check_capacity(
+                [
+                    str(container.labels.get("uid") or "")
+                    for container in self._owned_containers()
+                ],
+                safe_uid,
+            )
             shared_workspace = None
             user_skills = None
             if not ephemeral_storage:
@@ -832,10 +955,16 @@ class LocalContainerProvisionerBackend:
                 },
                 "volumes": {},
                 "network": network_name,
+                "mem_limit": self._limits.memory_mb * 1024**2,
+                "memswap_limit": self._limits.memory_mb * 1024**2,
+                "nano_cpus": int(self._limits.cpus * 10**9),
+                "pids_limit": self._limits.docker_pids_limit,
                 "security_opt": ["seccomp=unconfined"],
                 # The sandbox image expects /home/gem to be writable during boot.
                 # Keep it ephemeral and mount persistent user-data underneath it.
-                "tmpfs": {"/home/gem": "rw,exec,mode=777"},
+                "tmpfs": {
+                    "/home/gem": f"rw,exec,mode=777,size={self._limits.tmpfs_mb}m"
+                },
             }
             if not ephemeral_storage and user_skills is not None:
                 run_kwargs["volumes"][str(user_skills)] = {
@@ -886,6 +1015,7 @@ class LocalContainerProvisionerBackend:
         if container is None:
             return None
         container.reload()
+        self._require_resource_policy(container)
         labels = container.labels or {}
         thread_id = str(labels.get("thread-id") or "").strip()
         if not thread_id:
@@ -969,12 +1099,7 @@ class LocalContainerProvisionerBackend:
         return record
 
     def list(self) -> list[SandboxRecord]:
-        containers = self._client.containers.list(
-            all=True,
-            filters={
-                "label": ["app=yuxi-sandbox", "managed-by=yuxi-sandbox-provisioner"]
-            },
-        )
+        containers = self._owned_containers()
         records: list[SandboxRecord] = []
         for container in containers:
             labels = container.labels or {}
@@ -1007,16 +1132,21 @@ class KubernetesProvisionerBackend:
         from kubernetes import client, config
 
         self._lock = threading.RLock()
+        self._limits = SandboxResourceLimits.from_env()
         self._namespace = os.getenv("K8S_NAMESPACE", "yuxi-know")
         self._sandbox_image = os.getenv(
             "SANDBOX_IMAGE",
-            "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest",
+            "yuxi-pi-sandbox:0.7.2",
         )
         self._skill_pvc = os.getenv("SKILLS_PVC", "yuxi-skills")
         self._user_data_pvc = os.getenv("USER_DATA_PVC", "yuxi-user-data")
         self._node_host = os.getenv("NODE_HOST", "host.docker.internal")
         self._container_port = int(os.getenv("SANDBOX_CONTAINER_PORT", "8080"))
         self._sandbox_env = load_sandbox_env()
+        logger.warning(
+            "Kubernetes PID limits require kubelet podPidsLimit; "
+            "SANDBOX_DOCKER_PIDS_LIMIT only applies to Docker"
+        )
 
         kubeconfig_path = os.getenv("KUBECONFIG_PATH")
         if kubeconfig_path:
@@ -1059,6 +1189,16 @@ class KubernetesProvisionerBackend:
             f"/home/gem/user-data/{workdir_path}" if workdir_path else None
         )
         ephemeral_storage = not inherit_env and workdir_path is None
+        resources = self._client.V1ResourceRequirements(
+            limits={
+                "memory": f"{self._limits.memory_mb}Mi",
+                "cpu": str(self._limits.cpus),
+            },
+            requests={
+                "memory": f"{self._limits.memory_mb}Mi",
+                "cpu": str(self._limits.cpus),
+            },
+        )
         if ephemeral_storage:
             init_command = None
             data_mounts = []
@@ -1099,6 +1239,7 @@ class KubernetesProvisionerBackend:
                     self._client.V1Container(
                         name="init-user-data",
                         image=self._sandbox_image,
+                        resources=resources,
                         command=["python", "-c"],
                         args=[init_command],
                         volume_mounts=[
@@ -1120,6 +1261,7 @@ class KubernetesProvisionerBackend:
                     self._client.V1Container(
                         name="sandbox",
                         image=self._sandbox_image,
+                        resources=resources,
                         env=env_vars,
                         working_dir=sandbox_workdir,
                         ports=[
@@ -1170,7 +1312,9 @@ class KubernetesProvisionerBackend:
                     ),
                     self._client.V1Volume(
                         name="home-dir",
-                        empty_dir=self._client.V1EmptyDirVolumeSource(),
+                        empty_dir=self._client.V1EmptyDirVolumeSource(
+                            medium="Memory", size_limit=f"{self._limits.tmpfs_mb}Mi"
+                        ),
                     ),
                 ],
             ),
@@ -1290,11 +1434,59 @@ class KubernetesProvisionerBackend:
             return False
         if (annotations.get("storage-mode") == "ephemeral") != ephemeral_storage:
             return False
+        self._require_resource_policy(pod)
         return self._pod_has_expected_mounts(
             pod,
             uid=uid,
             ephemeral_storage=ephemeral_storage,
         )
+
+    def _require_resource_policy(self, pod) -> None:
+        """回读 Pod 的资源与内存盘预算，拒绝无界旧实例并保留其状态。"""
+        from kubernetes.utils.quantity import parse_quantity
+
+        expected = {
+            "memory": self._limits.memory_mb * 1024**2,
+            "cpu": parse_quantity(str(self._limits.cpus)),
+        }
+        containers = list(pod.spec.containers or []) + list(
+            pod.spec.init_containers or []
+        )
+        try:
+            matches = any(
+                container.name == "sandbox" for container in containers
+            ) and all(
+                parse_quantity(
+                    (getattr(container.resources, group, None) or {}).get(key, "0")
+                )
+                == value
+                for container in containers
+                for group in ("requests", "limits")
+                for key, value in expected.items()
+            )
+            home = next(
+                (
+                    volume.empty_dir
+                    for volume in pod.spec.volumes or []
+                    if volume.name == "home-dir"
+                ),
+                None,
+            )
+            matches = (
+                matches
+                and home is not None
+                and home.medium == "Memory"
+                and (
+                    parse_quantity(home.size_limit or "0")
+                    == self._limits.tmpfs_mb * 1024**2
+                )
+            )
+        except (TypeError, ValueError, ArithmeticError):
+            matches = False
+        if not matches:
+            raise SandboxResourcePolicyMismatchError(
+                "sandbox_resource_policy_mismatch: drain existing sandbox"
+            )
 
     def create(
         self,
@@ -1329,6 +1521,16 @@ class KubernetesProvisionerBackend:
                     return discovered
                 raise ValueError("sandbox identity does not match existing generation")
 
+            pods = self._core_api.list_namespaced_pod(
+                namespace=self._namespace, label_selector="app=yuxi-sandbox"
+            ).items
+            self._limits.check_capacity(
+                [
+                    str((pod.metadata.annotations or {}).get("uid") or "")
+                    for pod in pods
+                ],
+                safe_uid,
+            )
             try:
                 self._core_api.create_namespaced_pod(
                     namespace=self._namespace,
@@ -1421,6 +1623,7 @@ class KubernetesProvisionerBackend:
         safe_workdir_path = (
             normalize_workdir_path(workdir_path) if workdir_path else None
         )
+        self._require_resource_policy(pod)
         if not self._pod_has_expected_mounts(
             pod,
             uid=safe_uid,
@@ -1714,6 +1917,12 @@ def create_sandbox(payload: CreateSandboxRequest):
                     workdir_path=payload.workdir_path,
                     inherit_env=payload.inherit_env,
                 )
+            except SandboxCapacityError as exc:
+                raise HTTPException(
+                    status_code=503, detail=exc.detail, headers={"Retry-After": "5"}
+                ) from exc
+            except SandboxResourcePolicyMismatchError as exc:
+                raise HTTPException(status_code=409, detail=exc.detail) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             except Exception as exc:  # noqa: BLE001
@@ -1736,6 +1945,8 @@ def get_sandbox(sandbox_id: str):
     try:
         try:
             record = backend_impl.discover(sandbox_id)
+        except SandboxResourcePolicyMismatchError as exc:
+            raise HTTPException(status_code=409, detail=exc.detail) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1758,6 +1969,8 @@ def touch_sandbox(sandbox_id: str):
     try:
         try:
             record = backend_impl.discover(sandbox_id)
+        except SandboxResourcePolicyMismatchError as exc:
+            raise HTTPException(status_code=409, detail=exc.detail) from exc
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         if record is None:
@@ -1865,6 +2078,9 @@ async def proxy_sandbox_request(sandbox_id: str, request: Request, path: str = "
     except asyncio.CancelledError:
         sandbox_operation_pins.release(sandbox_id)
         raise
+    except SandboxResourcePolicyMismatchError as exc:
+        sandbox_operation_pins.release(sandbox_id)
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
     except Exception as exc:  # noqa: BLE001
         sandbox_operation_pins.release(sandbox_id)
         raise HTTPException(

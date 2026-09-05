@@ -13,6 +13,7 @@ x-api-worker-env: &api-worker-env
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
   RUN_CANCEL_KEY_TTL_SECONDS: ${RUN_CANCEL_KEY_TTL_SECONDS:-1800}
   RUN_EVENTS_STREAM_TTL_SECONDS: ${RUN_EVENTS_STREAM_TTL_SECONDS:-7200}
+  YUXI_WORKER_MAX_JOBS: ${YUXI_WORKER_MAX_JOBS:-4}
   READINESS_PROBE_TIMEOUT_SECONDS: ${READINESS_PROBE_TIMEOUT_SECONDS:-2}
   READINESS_CACHE_TTL_SECONDS: ${READINESS_CACHE_TTL_SECONDS:-1}
   YUXI_CORS_ORIGINS: ${YUXI_CORS_ORIGINS:-}
@@ -38,6 +39,7 @@ x-api-worker-env: &api-worker-env
   SANDBOX_VIRTUAL_PATH_PREFIX: ${SANDBOX_VIRTUAL_PATH_PREFIX:-/home/gem/user-data}
   SANDBOX_EXEC_TIMEOUT_SECONDS: ${SANDBOX_EXEC_TIMEOUT_SECONDS:-180}
   SANDBOX_MAX_OUTPUT_BYTES: ${SANDBOX_MAX_OUTPUT_BYTES:-262144}
+  SANDBOX_CAPACITY_WAIT_SECONDS: ${SANDBOX_CAPACITY_WAIT_SECONDS:-60}
   YUXI_SKILL_DATA_DIR: /app/skill-sources
   YUXI_SKILL_PROJECTION_DIR: /app/skill-projections
   NO_PROXY: localhost,127.0.0.1,milvus,graph,minio,milvus-etcd,etcd,mineru,paddlex,sandbox-provisioner,api.siliconflow.cn
@@ -157,6 +159,21 @@ services:
       postgres:
         condition: service_healthy
 
+  pi-sandbox-image:
+    image: ${COMPOSE_PROJECT_NAME:-yuxi}-pi-sandbox:${YUXI_VERSION:-0.7.2}
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: docker/pi_sandbox/Dockerfile
+      target: ${SANDBOX_IMAGE:+prebuilt}
+      args:
+        SANDBOX_PREBUILT_IMAGE: ${SANDBOX_IMAGE:-scratch}
+    volumes:
+      - ./docker/pi_sandbox/verify-runtime.mjs:/opt/yuxi-pi-verify.mjs:ro
+      - ./backend/package/yuxi/pi_runner:/opt/yuxi-pi-expected:ro
+    entrypoint: [node, /opt/yuxi-pi-verify.mjs]
+    restart: "no"
+
   sandbox-provisioner:
     build:
       context: ./docker/sandbox_provisioner
@@ -176,7 +193,13 @@ services:
       - PROVISIONER_BACKEND=${SANDBOX_PROVISIONER_BACKEND:-docker}
       - PROVISIONER_PUBLIC_URL=${SANDBOX_PROVISIONER_URL:-http://sandbox-provisioner:8002}
       - SANDBOX_PROVISIONER_TOKEN=${SANDBOX_PROVISIONER_TOKEN:?Set SANDBOX_PROVISIONER_TOKEN in .env.prod}
-      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest}
+      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-${COMPOSE_PROJECT_NAME:-yuxi}-pi-sandbox:${YUXI_VERSION:-0.7.2}}
+      - SANDBOX_MEMORY_MB=${SANDBOX_MEMORY_MB:-4096}
+      - SANDBOX_CPUS=${SANDBOX_CPUS:-2}
+      - SANDBOX_DOCKER_PIDS_LIMIT=${SANDBOX_DOCKER_PIDS_LIMIT:-512}
+      - SANDBOX_TMPFS_MB=${SANDBOX_TMPFS_MB:-1024}
+      - SANDBOX_MAX_INSTANCES=${SANDBOX_MAX_INSTANCES:-6}
+      - SANDBOX_MAX_INSTANCES_PER_USER=${SANDBOX_MAX_INSTANCES_PER_USER:-4}
       - SANDBOX_CONTAINER_PORT=${SANDBOX_CONTAINER_PORT:-8080}
       - MEMORY_SANDBOX_URL_TEMPLATE=${MEMORY_SANDBOX_URL_TEMPLATE:-http://agent-sandbox:8000}
       - SANDBOX_HEALTH_TIMEOUT_SECONDS=${SANDBOX_HEALTH_TIMEOUT_SECONDS:-300}
@@ -206,6 +229,8 @@ services:
       start_period: 10s
     restart: unless-stopped
     depends_on:
+      pi-sandbox-image:
+        condition: service_completed_successfully
       storage-migrator:
         condition: service_completed_successfully
 

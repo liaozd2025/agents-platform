@@ -133,3 +133,29 @@ def test_worker_healthcheck_uses_arq_health_contract_in_development_and_producti
             "CMD-SHELL",
             "uv run --no-sync --no-dev arq --check server.worker_main.WorkerSettings",
         ]
+
+
+def test_compose_provisions_the_buildable_pi_image_with_resource_budgets():
+    """开发和生产都从同一源码构建 PI 镜像并传递执行预算。"""
+    project_root = _project_root()
+    for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
+        compose = yaml.safe_load((project_root / filename).read_text())
+        builder = compose["services"]["pi-sandbox-image"]
+        environment = dict(item.split("=", 1) for item in compose["services"]["sandbox-provisioner"]["environment"])
+        assert environment["SANDBOX_IMAGE"] == "${SANDBOX_IMAGE:-" + builder["image"] + "}"
+        assert builder["build"]["context"] == "."
+        assert builder["build"]["dockerfile"] == "docker/pi_sandbox/Dockerfile"
+        assert builder["build"]["target"] == "${SANDBOX_IMAGE:+prebuilt}"
+        assert builder["build"]["args"]["SANDBOX_PREBUILT_IMAGE"] == "${SANDBOX_IMAGE:-scratch}"
+        assert "SANDBOX_IMAGE" not in builder["image"]
+        assert builder["pull_policy"] == "build"
+        assert not builder.get("profiles")
+        assert builder["entrypoint"] == ["node", "/opt/yuxi-pi-verify.mjs"]
+        assert compose["services"]["sandbox-provisioner"]["depends_on"]["pi-sandbox-image"] == {
+            "condition": "service_completed_successfully"
+        }
+        assert "./backend/package/yuxi/pi_runner:/opt/yuxi-pi-expected:ro" in builder["volumes"]
+        assert environment["SANDBOX_MEMORY_MB"] == "${SANDBOX_MEMORY_MB:-4096}"
+        assert environment["SANDBOX_MAX_INSTANCES"] == "${SANDBOX_MAX_INSTANCES:-6}"
+        assert environment["SANDBOX_MAX_INSTANCES_PER_USER"] == "${SANDBOX_MAX_INSTANCES_PER_USER:-4}"
+        assert compose["x-api-worker-env"]["YUXI_WORKER_MAX_JOBS"] == "${YUXI_WORKER_MAX_JOBS:-4}"

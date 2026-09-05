@@ -1913,6 +1913,9 @@ async def _worker_shutdown(ctx):
 
 class WorkerSettings:
     functions = [process_agent_run]
+    max_jobs = int(os.getenv("YUXI_WORKER_MAX_JOBS", "4"))
+    if max_jobs < 1:
+        raise ValueError("YUXI_WORKER_MAX_JOBS must be positive")
     max_tries = 2
     retry_jobs = True
     # 单任务最长执行时间（秒），可配置：超长图谱构建/深度检索场景需调大，
