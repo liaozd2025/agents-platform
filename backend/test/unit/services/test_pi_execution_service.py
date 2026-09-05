@@ -681,10 +681,10 @@ async def test_local_ref_rejects_path_escape_symlink_and_wrong_digest():
                 raise PermissionError("symlink paths are not allowed")
             return {"is_dir": False, "size": 2}
 
-        def read_file(self, path: str, max_bytes: int):
+        def iter_file_chunks(self, path: str, max_bytes: int):
             assert path == "/outputs/pi-runs/0123456789abcdef01234567/artifact.txt"
-            assert max_bytes == 2
-            return b"ok"
+            assert max_bytes == pi_execution_service.PI_MAX_REF_BYTES
+            yield b"ok"
 
     adapter = LocalPiAdapter.__new__(LocalPiAdapter)
     adapter._scope = "scope"

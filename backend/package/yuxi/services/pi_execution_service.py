@@ -39,6 +39,9 @@ PI_MODEL_APIS = {
 }
 PI_AUTH_HEADERS = frozenset({"authorization", "x-api-key", "api-key", "x-goog-api-key"})
 PI_MAX_OUTPUT_FILES = 200
+PI_MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024
+PI_MAX_OUTPUT_BYTES = 256 * 1024 * 1024
+PI_MAX_REF_BYTES = 16 * 1024 * 1024
 PI_MAX_EVENT_STREAM_BYTES = 32 * 1024 * 1024
 
 
@@ -155,7 +158,7 @@ def build_pi_runtime_manifest(
         },
         "policy": {
             "timeout_seconds": 600 if model else 60,
-            "tools": ["read", "bash", "edit", "write"] if model else ["read", "write"],
+            "tools": ["read", "bash", "edit", "write", "submit_artifact"] if model else ["read", "write"],
         },
     }
     if model:
@@ -502,21 +505,41 @@ class LocalPiAdapter:
             return
         if not isinstance(files, list) or len(files) > PI_MAX_OUTPUT_FILES:
             raise ValueError("PI artifact 文件清单无效")
+        if json.loads(content) != {"files": files}:
+            raise ValueError("PI artifact 文件清单与持久 manifest 不匹配")
+        seen = set()
+        output_bytes = 0
         for item in files:
             if not isinstance(item, dict):
                 raise ValueError("PI artifact 文件项无效")
-            item_content = self.read_output(str(item.get("path") or ""))
             item_digest = item.get("sha256")
             item_size = item.get("size")
             if (
                 not isinstance(item_digest, str)
                 or len(item_digest) != 64
-                or not isinstance(item_size, int)
-                or len(item_content) != item_size
-                or hashlib.sha256(item_content).hexdigest() != item_digest
+                or type(item_size) is not int
+                or not 0 <= item_size <= PI_MAX_OUTPUT_FILE_BYTES
             ):
                 raise ValueError("PI artifact 文件缺失、大小或摘要不匹配")
-            self._reject_persisted_credentials(item_content)
+            path = self._output_path(str(item.get("path") or ""))
+            if path in seen:
+                raise ValueError("PI artifact 文件清单含重复路径")
+            seen.add(path)
+            output_bytes += item_size
+            if output_bytes > PI_MAX_OUTPUT_BYTES:
+                raise ValueError("PI artifact 总大小超过 256 MiB")
+            digest = hashlib.sha256()
+            size = 0
+            secrets = [self._credentials.get("api_key"), *(self._credentials.get("headers") or {}).values()]
+            overlap = max((len(value.encode()) for value in secrets if isinstance(value, str)), default=0)
+            tail = b""
+            for chunk in self._workdir.iter_file_chunks(path, PI_MAX_OUTPUT_FILE_BYTES):
+                size += len(chunk)
+                digest.update(chunk)
+                self._reject_persisted_credentials(tail + chunk)
+                tail = (tail + chunk)[-(overlap - 1) :] if overlap > 1 else b""
+            if size != item_size or digest.hexdigest() != item_digest:
+                raise ValueError("PI artifact 文件缺失、大小或摘要不匹配")
 
     def _reject_persisted_credentials(self, content: bytes) -> None:
         """拒绝把本次模型凭据写入持久结果引用。"""
@@ -593,19 +616,31 @@ class LocalPiAdapter:
         )
         return connection is not None
 
-    def read_output(self, relative_path: str) -> bytes:
-        """通过 Workdir capability 回读服务器持久 outputs。"""
-
+    def _output_path(self, relative_path: str) -> str:
+        """把安全相对路径绑定到当前 attempt 交付目录。"""
         relative = PurePosixPath(relative_path)
-        if not relative.parts or relative.is_absolute() or ".." in relative.parts or "\\" in relative_path:
+        if (
+            not relative.parts
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+            or "\\" in relative_path
+            or any(ord(char) < 32 or ord(char) == 127 for char in relative_path)
+            or len(relative_path.encode()) > 1024
+        ):
             raise ValueError("PI output ref 不是安全相对路径")
         if self._workdir is None:
             raise ValueError("Local PI Workdir 未初始化")
-        output_path = f"/outputs/{self._output_subdir}/{relative.as_posix()}"
+        return f"/outputs/{self._output_subdir}/{relative.as_posix()}"
+
+    def read_output(self, relative_path: str) -> bytes:
+        """有界读取小型 ref 文档；交付文件通过分块 capability 验证。"""
+        output_path = self._output_path(relative_path)
         metadata = self._workdir.stat(output_path)
         if metadata["is_dir"]:
             raise ValueError("PI output ref 必须指向普通文件")
-        return self._workdir.read_file(output_path, int(metadata["size"]))
+        if int(metadata["size"]) > PI_MAX_REF_BYTES:
+            raise ValueError("PI output ref 超过 16 MiB")
+        return b"".join(self._workdir.iter_file_chunks(output_path, PI_MAX_REF_BYTES))
 
     def workdir_exists(self) -> bool:
         """判断 attempt 的持久 Workdir 是否仍是有效目录。"""

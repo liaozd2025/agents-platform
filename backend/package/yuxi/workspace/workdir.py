@@ -65,6 +65,10 @@ class Workdir:
     def read_file_prefix(self, path: str, max_bytes: int) -> tuple[bytes, bool]:
         return self.workspace.read_authorized_file_prefix(self.resolve_path(path), max_bytes)
 
+    def iter_file_chunks(self, path: str, max_bytes: int):
+        """在当前 Workdir 内流式读取，完整消费后才可确认摘要。"""
+        return self.workspace.iter_authorized_file_chunks(self.resolve_path(path), max_bytes)
+
     def write_file(self, path: str, content: bytes) -> dict:
         return self.workspace.write_authorized_file(self.resolve_path(path), content)
 
