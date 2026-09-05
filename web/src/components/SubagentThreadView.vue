@@ -2,6 +2,24 @@
   <div class="subagent-thread-view">
     <div ref="scrollContainerRef" class="subagent-thread-scroll" @scroll="handleScroll">
       <div ref="contentRef" class="subagent-thread-content">
+        <details v-if="currentRunId" class="subagent-run-usage">
+          <summary>
+            本次运行 Token：{{ formatUsageCount(runTokenUsage?.total?.total_tokens) }}
+            <span v-if="runTokenUsage && !runTokenUsage.complete">（部分上报）</span>
+          </summary>
+          <div v-if="runTokenUsage" class="usage-details">
+            <span>输入 {{ formatUsageCount(runTokenUsage.total?.input_tokens) }}</span>
+            <span>输出 {{ formatUsageCount(runTokenUsage.total?.output_tokens) }}</span>
+            <div v-for="(bucket, key) in runTokenUsage.models" :key="key" class="usage-model">
+              <span>{{ bucket.model?.configured_model_spec || key }}</span>
+              <span>
+                输入 {{ formatUsageCount(bucket.usage?.input_tokens) }} · 输出
+                {{ formatUsageCount(bucket.usage?.output_tokens) }}
+              </span>
+            </div>
+          </div>
+          <p v-else>本次运行用量暂不可用。</p>
+        </details>
         <div v-if="loading && !hasRenderableMessages" class="subagent-thread-state">
           正在加载子智能体消息...
         </div>
@@ -26,6 +44,8 @@ import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import ThreadMessageList from '@/components/ThreadMessageList.vue'
 import { MessageProcessor } from '@/utils/messageProcessor'
 import ScrollController from '@/utils/scrollController'
+import { formatContextToken } from '@/utils/contextUsage'
+import { getSubagentRunTokenUsage } from '@/utils/subagentRuns'
 
 const props = defineProps({
   threadId: { type: String, required: true },
@@ -38,6 +58,7 @@ const error = ref('')
 const messages = ref([])
 const currentRunId = ref('')
 const currentRunStatus = ref('')
+const runTokenUsage = ref(null)
 const streamActive = ref(false)
 const lastEventId = ref('0-0')
 const scrollContainerRef = ref(null)
@@ -50,6 +71,11 @@ let loadVersion = 0
 let disposed = false
 
 const normalizeRunStatus = (status) => String(status || '').trim()
+/** 未上报不能显示为零消耗。 */
+const formatUsageCount = (value) =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? formatContextToken(value)
+    : '未知'
 const isTerminalRunStatus = (status) => RUN_TERMINAL_STATUSES.has(normalizeRunStatus(status))
 const getStreamThreadState = (threadId) => {
   if (!streamState.threadStates[threadId]) {
@@ -132,45 +158,50 @@ const scrollToBottom = async (force = false) => {
   if (force) await scrollController.scrollToBottomStaticForce()
   else await scrollController.scrollToBottom()
 }
-const loadPersistedMessages = async () => {
-  const response = await agentApi.getAgentHistory(props.threadId)
-  messages.value = normalizeMessages(response.history || [])
-}
 const getMessageRunId = (message) => {
   const runId = message?.extra_metadata?.run_id || message?.run_id
   return typeof runId === 'string' ? runId : ''
 }
 const loadThread = async () => {
   if (!props.threadId) return
+  const threadId = props.threadId
   const version = ++loadVersion
+  stopRunStream()
+  resetStreamState()
+  runTokenUsage.value = null
+  currentRunId.value = ''
+  messages.value = []
   loading.value = true
   error.value = ''
   try {
-    const response = await agentApi.getAgentState(props.threadId, { includeMessages: true })
+    const response = await agentApi.getAgentState(threadId, { includeMessages: true })
     if (disposed || version !== loadVersion) return
-    currentRunId.value = response?.subagent_run?.run_id ? String(response.subagent_run.run_id) : ''
+    const runId = response?.subagent_run?.run_id ? String(response.subagent_run.run_id) : ''
+    currentRunId.value = runId
     currentRunStatus.value = normalizeRunStatus(response?.subagent_run?.status)
-
-    if (!currentRunId.value || isTerminalRunStatus(currentRunStatus.value)) {
-      stopRunStream()
-      resetStreamState()
-      await loadPersistedMessages()
-      if (disposed || version !== loadVersion) return
-    } else {
-      await loadPersistedMessages()
-      if (disposed || version !== loadVersion) return
-      messages.value = messages.value.filter(
-        (message) => getMessageRunId(message) !== currentRunId.value
-      )
+    const [history, runResponse] = await Promise.all([
+      agentApi.getAgentHistory(threadId),
+      // 用量暂不可用不阻止已确认 Run 的历史和实时订阅。
+      runId ? agentApi.getAgentRun(runId).catch(() => null) : null
+    ])
+    if (disposed || version !== loadVersion) return
+    messages.value = normalizeMessages(history.history || [])
+    runTokenUsage.value = getSubagentRunTokenUsage(runResponse?.run, runId, threadId)
+    if (runResponse?.run?.id === runId && runResponse.run.conversation_thread_id === threadId) {
+      currentRunStatus.value = normalizeRunStatus(runResponse.run.status)
+    }
+    if (runId && !isTerminalRunStatus(currentRunStatus.value)) {
+      messages.value = messages.value.filter((message) => getMessageRunId(message) !== runId)
       lastEventId.value = '0-0'
-      void startRunStream(currentRunId.value, lastEventId.value, true)
+      void startRunStream(runId, lastEventId.value, true)
     }
     await scrollToBottom(true)
   } catch (loadError) {
+    if (disposed || version !== loadVersion) return
     error.value = '加载子智能体消息失败'
     console.error('Failed to load subagent thread messages:', loadError)
   } finally {
-    loading.value = false
+    if (version === loadVersion) loading.value = false
   }
 }
 const scheduleReconnect = (runId) => {
@@ -195,7 +226,8 @@ const startRunStream = async (runId, afterSeq = '0-0', resetMessages = false) =>
     })
     if (!response.ok) throw new Error(`SSE response not ok: ${response.status}`)
     await processRunSseResponse(response, (event, data, eventId) => {
-      if (!data) return
+      if (!data || controller.signal.aborted || runId !== currentRunId.value) return
+      if (data.run_id && data.run_id !== runId) return
       if (eventId) lastEventId.value = String(eventId)
       const payload = data.payload || {}
       const isRetryableError =
@@ -207,6 +239,7 @@ const startRunStream = async (runId, afterSeq = '0-0', resetMessages = false) =>
           ? [payload.chunk]
           : []
       chunks.forEach((chunk) => {
+        if (chunk.run_id && chunk.run_id !== runId) return
         const threadId =
           data.thread_id ||
           payload.thread_id ||
@@ -232,19 +265,22 @@ const startRunStream = async (runId, afterSeq = '0-0', resetMessages = false) =>
       console.error('Failed to stream subagent run messages:', streamError)
     }
   } finally {
-    if (streamAbortController === controller) streamAbortController = null
-    streamActive.value = false
-    if (!controller.signal.aborted && !disposed) {
+    if (streamAbortController === controller) {
+      streamAbortController = null
+      streamActive.value = false
+    }
+    if (!controller.signal.aborted && !disposed && runId === currentRunId.value) {
       streamSmoother.flushThread(props.threadId)
       try {
         const runResponse = await agentApi.getAgentRun(runId)
-        if (!disposed) {
+        if (!disposed && !controller.signal.aborted && runId === currentRunId.value) {
+          runTokenUsage.value = getSubagentRunTokenUsage(runResponse?.run, runId, props.threadId)
           const status = normalizeRunStatus(runResponse?.run?.status)
           if (isTerminalRunStatus(status)) await loadThread()
           else scheduleReconnect(runId)
         }
       } catch {
-        scheduleReconnect(runId)
+        if (!controller.signal.aborted && runId === currentRunId.value) scheduleReconnect(runId)
       }
     }
   }
@@ -303,6 +339,33 @@ onUnmounted(() => {
 
   &.is-error {
     color: var(--color-error-600);
+  }
+}
+
+.subagent-run-usage {
+  margin-bottom: 16px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+
+  summary {
+    cursor: pointer;
+    padding: 8px 0;
+  }
+
+  .usage-details {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    padding: 8px 0;
+  }
+
+  .usage-model {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 4px 12px;
+    overflow-wrap: anywhere;
   }
 }
 </style>

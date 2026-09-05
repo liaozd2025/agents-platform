@@ -44,6 +44,9 @@
           <h4 id="tool-approval-question" class="tool-approval-question">
             {{ toolApprovalQuestion }}
           </h4>
+          <p v-if="activeToolRequest?.name === 'pi_sandbox'" class="tool-approval-scope">
+            允许后，PI Agent 可为本次任务执行命令、读取和修改你的用户工作区文件，期间不再逐条确认。
+          </p>
 
           <div
             v-if="activeToolRequest"
@@ -211,6 +214,7 @@ import {
 const TOOL_DISPLAY_NAMES = {
   write_file: '写入文件',
   edit_file: '编辑文件',
+  pi_sandbox: 'PI Agent',
   execute: '执行命令'
 }
 
@@ -249,6 +253,7 @@ const isToolApproval = computed(() => props.kind === 'tool_approval')
 const activeToolRequest = computed(() => props.actionRequests[activeToolIndex.value] || null)
 const activeToolIcon = computed(() => getToolIcon(activeToolRequest.value?.name) || Wrench)
 const toolApprovalQuestion = computed(() => {
+  if (activeToolRequest.value?.name === 'pi_sandbox') return '是否允许 PI Agent 执行本次任务？'
   if (activeToolRequest.value?.name === 'execute') return '是否允许执行以下命令？'
   if (activeToolRequest.value?.name === 'write_file') return '是否允许写入此文件？'
   if (activeToolRequest.value?.name === 'edit_file') return '是否允许编辑此文件？'
@@ -655,6 +660,13 @@ const formattedToolArgs = computed(() => formatToolApprovalArgs(activeToolReques
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+}
+
+.tool-approval-scope {
+  margin: 0 0 12px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .tool-approval-icon {

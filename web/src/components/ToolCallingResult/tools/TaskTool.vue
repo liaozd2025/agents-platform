@@ -34,6 +34,7 @@ import { computed, inject } from 'vue'
 import BaseToolCall from '../BaseToolCall.vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { MessageProcessor } from '@/utils/messageProcessor'
+import { getToolCallStatus } from '../toolRegistry'
 
 const props = defineProps({
   toolCall: {
@@ -76,34 +77,32 @@ const childThreadId = computed(
     (getSubagentThreadIdByToolCall ? getSubagentThreadIdByToolCall(props.toolCall.id) : '') ||
     ''
 )
-const hasToolResult = computed(() =>
-  Boolean(props.toolCall.tool_call_result || props.toolCall.result)
-)
 // 是否为当前真正在执行的子智能体调用（同一子线程的多次 steer 中只有最后一个为活跃）。
 const isActiveRun = computed(() =>
   Boolean(activeSubagentToolCallIds?.value?.has(String(props.toolCall.id)))
 )
 const runStatus = computed(() => {
-  if (props.toolCall.status === 'error') return 'failed'
-  // ongoing 期间工具结果不流式：有结果说明是历史/已落库，按结果展示；
-  // 没有结果时，只有「活跃」调用算运行中，其余 steer 历史调用视为已完成（结果待整轮结束后回填）。
-  if (hasToolResult.value) return subagentRun.value?.status === 'failed' ? 'failed' : 'completed'
+  const status = getToolCallStatus(props.toolCall)
+  if (status) return status
   if (isActiveRun.value) return 'running'
+  if ((props.toolCall.name || props.toolCall.function?.name) === 'pi_sandbox') return 'running'
   return 'completed'
 })
 const runStatusLabel = computed(() => {
   if (runStatus.value === 'completed') return '已完成'
-  if (runStatus.value === 'failed') return '失败'
+  if (runStatus.value === 'error') return '失败'
   if (runStatus.value === 'running') return '运行中'
+  if (runStatus.value === 'steered') return '已让位'
+  if (runStatus.value === 'cancelled') return '已取消'
+  if (runStatus.value === 'interrupted') return '已中断'
   return ''
 })
 const runStatusClass = computed(() => ({
   'is-running': runStatus.value === 'running',
   'is-completed': runStatus.value === 'completed',
-  'is-failed': runStatus.value === 'failed'
+  'is-failed': runStatus.value === 'error'
 }))
-// 映射到 BaseToolCall 的图标状态（failed → error）
-const baseStatus = computed(() => (runStatus.value === 'failed' ? 'error' : runStatus.value))
+const baseStatus = runStatus
 // ongoing 期间 task 结果不流式：只展示工具结果，状态摘要不承载后端预览文本。
 const displayResult = computed(() => {
   const toolResult = props.toolCall.tool_call_result?.content || props.toolCall.result
