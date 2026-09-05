@@ -63,6 +63,7 @@ export const getToolApprovalSummary = (request) => {
   if (typeof args === 'string') return args
   if (args === null || typeof args !== 'object') return String(args ?? '')
   if (name === 'execute') return String(args.command || args.cmd || formatToolApprovalArgs(args))
+  if (name === 'pi_sandbox') return String(args.description || formatToolApprovalArgs(args))
   if (name === 'write_file' || name === 'edit_file') {
     return String(args.file_path || args.path || formatToolApprovalArgs(args))
   }

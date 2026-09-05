@@ -61,6 +61,7 @@ import { useAgentStore } from '@/stores/agent'
 import { ToolCallRenderer } from '@/components/ToolCallingResult'
 import {
   getToolCallId,
+  getToolCallStatus,
   getToolName,
   findToolInList,
   isSubagentToolCall,
@@ -74,8 +75,8 @@ const activeSubagentToolCallIds = inject('activeSubagentToolCallIds', null)
 
 // task 工具结果不随流式返回，不能用 tool_call_result 判断运行中：只有「活跃」的 task 才算运行中。
 const toolRunState = (toolCall) => {
-  if (toolCall.status === 'error') return 'error'
-  if (toolCall.tool_call_result || toolCall.status === 'success') return 'completed'
+  const status = getToolCallStatus(toolCall)
+  if (status) return status
   if (isSubagentToolCall(toolCall)) {
     if (getToolCallId(toolCall) !== 'task') return 'running'
     return activeSubagentToolCallIds?.value?.has(String(toolCall.id)) ? 'running' : 'completed'
@@ -162,6 +163,14 @@ const statusSummary = computed(() => {
   const parts = []
   if (errorCount > 0) parts.push(`${errorCount} 失败`)
   if (runningCount > 0) parts.push(`${runningCount} 进行中`)
+  for (const [state, label] of [
+    ['cancelled', '已取消'],
+    ['interrupted', '已中断'],
+    ['steered', '已让位']
+  ]) {
+    const count = states.filter((item) => item === state).length
+    if (count) parts.push(`${count} ${label}`)
+  }
 
   return parts.join(' · ')
 })

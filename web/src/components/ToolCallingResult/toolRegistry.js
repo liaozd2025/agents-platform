@@ -54,6 +54,7 @@ export const TOOL_ICON_MAP = {
   subagent_events: RefreshCw,
   subagent_start: Bot,
   subagent_status: RefreshCw,
+  submit_artifact: FolderOutput,
   task: Bot,
   web_search: Globe,
   tavily_search: Globe,
@@ -99,6 +100,7 @@ export const TOOL_NAME_MAP = {
   find_kb_document: '查找知识库文档',
   open_kb_document: '打开知识库文档',
   pi_sandbox: 'PI Agent',
+  submit_artifact: '交付文件',
   get_mindmap: '获取思维导图',
   calculator: '计算器',
   web_search: '网络搜索',
@@ -156,6 +158,28 @@ export const SUBAGENT_TOOL_IDS = [
 ]
 
 export const isSubagentToolCall = (toolCall) => SUBAGENT_TOOL_IDS.includes(getToolCallId(toolCall))
+
+/** 工具快照不是完成事实；优先保留子 Run 的明确终态。 */
+export const getToolCallStatus = (toolCall) => {
+  const run = toolCall?.subagent_run
+  if (run?.status === 'failed') return 'error'
+  if (['cancelled', 'interrupted'].includes(run?.status)) return run.status
+  if (run?.status === 'completed') return run.stop_reason === 'steer' ? 'steered' : 'completed'
+  const status = toolCall?.tool_call_result?.status || toolCall?.status
+  if (status === 'error' || status === 'failed') return 'error'
+  if (['running', 'pending', 'cancel_requested'].includes(status)) return 'running'
+  if (['cancelled', 'interrupted'].includes(status)) return status
+  if (
+    status === 'success' ||
+    status === 'completed' ||
+    toolCall?.tool_call_result ||
+    toolCall?.result
+  ) {
+    return 'completed'
+  }
+  if (run?.status) return 'running'
+  return null
+}
 
 export const parseToolCallResult = (toolCall) => {
   const content = toolCall?.tool_call_result?.content ?? toolCall?.result

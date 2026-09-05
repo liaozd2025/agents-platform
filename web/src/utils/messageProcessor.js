@@ -9,6 +9,8 @@ export class MessageProcessor {
    */
   static convertToolResultToMessages(msgs) {
     const toolResponseMap = new Map()
+    const responseKey = (message, toolCallId) =>
+      `${message.run_id || message.extra_metadata?.run_id || ''}:${toolCallId}`
 
     // 构建工具响应映射
     for (const item of msgs) {
@@ -16,7 +18,7 @@ export class MessageProcessor {
         // 使用多种可能的ID字段来匹配工具调用
         const toolCallId = item.tool_call_id || item.id
         if (toolCallId) {
-          toolResponseMap.set(toolCallId, item)
+          toolResponseMap.set(responseKey(item, toolCallId), item)
         }
       }
     }
@@ -27,7 +29,7 @@ export class MessageProcessor {
         return {
           ...item,
           tool_calls: item.tool_calls.map((toolCall) => {
-            const toolResponse = toolResponseMap.get(toolCall.id)
+            const toolResponse = toolResponseMap.get(responseKey(item, toolCall.id))
             return {
               ...toolCall,
               tool_call_result: toolResponse || null
@@ -359,6 +361,7 @@ export class MessageProcessor {
 
     // 深拷贝第一个chunk作为结果
     const result = JSON.parse(JSON.stringify(chunks[0]))
+    if (!result.tool_calls?.length) MessageProcessor._mergeToolCalls(result, chunks[0])
 
     // 处理用户消息的内容格式 - 确保显示纯文本
     if (result.type === 'human' || result.role === 'user') {
