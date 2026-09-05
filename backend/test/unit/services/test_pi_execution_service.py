@@ -56,6 +56,51 @@ class FakeAdapter:
         self.stop_preserve_outputs.append(preserve_outputs)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ack", ["valid", "missing", "wrong", "late"])
+async def test_local_control_is_ready_bounded_and_requires_attempt_ack(ack):
+    """ready前和final后不发控制，让位只能来自本attempt已确认消费。"""
+    queries = []
+
+    async def steer_check():
+        """代表服务端真实队列事实。"""
+        queries.append(True)
+        return True
+
+    async def stream(_command, consume, *, poll_input, **_kwargs):
+        """驱动实际adapter控制协议，不替换其状态判断。"""
+        import json
+
+        async def emit(kind, payload):
+            """送入完整JSONL行。"""
+            await consume(json.dumps({"type": kind, "payload": payload}) + "\n")
+
+        assert await poll_input() is None
+        assert queries == []
+        await emit("ready", {"control": "stdin_comment_v1", "attempt_id": "7"})
+        assert await poll_input() == "# yuxi-pi-yield 7"
+        assert await poll_input() is None
+        if ack in {"valid", "wrong"}:
+            await emit("control_ack", {"command": "yield", "attempt_id": "7" if ack == "valid" else "8"})
+        await emit("final", {} if ack == "late" else {"stop_reason": "steer"})
+        assert await poll_input() is None
+        return SimpleNamespace(exit_code=0, output="", truncated=False)
+
+    adapter = LocalPiAdapter.__new__(LocalPiAdapter)
+    adapter._backend = SimpleNamespace(id="sandbox", aexecute_stream=stream)
+    adapter._stopped = False
+    adapter._output_subdir = "pi-runs/0123456789abcdef01234567"
+    adapter._attempt_id = "7"
+    adapter._steer_check = steer_check
+    if ack in {"missing", "wrong"}:
+        with pytest.raises(ValueError, match="未确认引导控制|控制ACK"):
+            await adapter.execute("sandbox", {"manifest": {"policy": {"timeout_seconds": 1}}})
+    else:
+        events = await adapter.execute("sandbox", {"manifest": {"policy": {"timeout_seconds": 1}}})
+        assert events[-1]["type"] == "final"
+    assert queries == [True]
+
+
 def _model_info(*, api_key: str = "", headers: dict[str, str] | None = None):
     from yuxi.models.providers.cache import ModelInfo
 

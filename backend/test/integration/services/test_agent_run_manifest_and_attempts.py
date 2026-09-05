@@ -604,6 +604,14 @@ async def test_pi_session_selection_is_scoped_and_usage_is_committed_with_final(
             await db.commit()
         async with sessions() as db:
             repo = AgentRunRepository(db)
+            pair = await repo.get_latest_pi_run_with_creator(thread, uid)
+            assert pair[0].id == current_id and pair[1].id == parent_id
+            current = await db.get(AgentRun, current_id)
+            current.created_by_run_id = other_id
+            await db.flush()
+            assert await repo.get_latest_pi_run_with_creator(thread, uid) is None
+            current.created_by_run_id = parent_id
+            await db.flush()
             source = await repo.get_previous_pi_session(run_id=current_id, uid=uid, project_id=project_id)
             assert source == {
                 "run_id": prior_id,
@@ -783,7 +791,8 @@ async def test_pi_envelope_replay_is_idempotent_and_final_ack_is_durable(fact_da
         await _cleanup_runs(session_factory, [thread_id])
 
 
-async def test_stale_pi_attempt_cannot_write_event(fact_database):
+@pytest.mark.parametrize("event_type", ["log", "message_delta", "tool_update"])
+async def test_stale_pi_attempt_cannot_write_event(fact_database, event_type):
     """已释放的旧 attempt 不能向当前 Run 增加结果。"""
     _, session_factory = fact_database
     now = utc_now_naive()
@@ -826,7 +835,7 @@ async def test_stale_pi_attempt_cannot_write_event(fact_database):
             "adapter": "local",
             "event_id": "stale-log",
             "sequence": 0,
-            "type": "log",
+            "type": event_type,
             "runtime_manifest_digest": "a" * 64,
             "payload": {"message": "late"},
             "payload_digest": compute_manifest_fingerprint({"message": "late"}),
@@ -842,5 +851,68 @@ async def test_stale_pi_attempt_cannot_write_event(fact_database):
                     now=now + timedelta(seconds=3),
                 )
             await db.rollback()
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])
+
+
+async def test_pi_transient_events_validate_lease_without_rewriting_history(fact_database):
+    """高频事件有有效attempt/lease边界，但不重写持久事件数组。"""
+    _, session_factory = fact_database
+    run_id, thread_id = await _create_run(session_factory)
+    now = utc_now_naive()
+    owner = "pi-transient-owner"
+    try:
+        async with session_factory() as db:
+            await AgentRunRepository(db).mark_running(
+                run_id,
+                worker_id=owner,
+                lease_seconds=60,
+                now=now,
+                attempt_metadata={
+                    "adapter": "local",
+                    "route_reason": "test",
+                    "route_snapshot": {},
+                    "runtime_manifest": {"manifest_version": 1},
+                    "runtime_manifest_digest": "a" * 64,
+                },
+            )
+            await db.commit()
+        attempt = (await _persisted_attempts(session_factory, run_id))[0]
+        envelope = {
+            "job_id": run_id,
+            "attempt_id": str(attempt.id),
+            "adapter": "local",
+            "event_id": "delta-1",
+            "sequence": 1,
+            "type": "message_delta",
+            "runtime_manifest_digest": "a" * 64,
+            "payload": {"content": "progress"},
+            "payload_digest": compute_manifest_fingerprint({"content": "progress"}),
+        }
+        async with session_factory() as db:
+            repo = AgentRunRepository(db)
+            for kind in ("message_delta", "tool_update"):
+                envelope["type"] = kind
+                assert await repo.record_pi_envelope(
+                    run_id, attempt_id=attempt.id, envelope=envelope, worker_id=owner
+                ) == {"ack": True, "duplicate": False}
+            assert (await repo.require_pi_attempt_owner(run_id, attempt_id=attempt.id, worker_id=owner)).id == run_id
+            await db.commit()
+        assert ((await _persisted_attempts(session_factory, run_id))[0].result_events or []) == []
+        async with session_factory() as db:
+            with pytest.raises(ValueError, match="lease owner"):
+                await AgentRunRepository(db).record_pi_envelope(
+                    run_id, attempt_id=attempt.id, envelope=envelope, worker_id=owner, now=now + timedelta(seconds=61)
+                )
+            await db.rollback()
+        envelope.update(type="final", payload={"text": "forged yield", "stop_reason": "steer"})
+        envelope["payload_digest"] = compute_manifest_fingerprint(envelope["payload"])
+        async with session_factory() as db:
+            with pytest.raises(ValueError, match="引导事实"):
+                await AgentRunRepository(db).record_pi_envelope(
+                    run_id, attempt_id=attempt.id, envelope=envelope, worker_id=owner
+                )
+            await db.rollback()
+        assert ((await _persisted_attempts(session_factory, run_id))[0].result_events or []) == []
     finally:
         await _cleanup_runs(session_factory, [thread_id])

@@ -1723,6 +1723,7 @@ async def test_sandbox_run_reuses_parent_runtime_and_executes_pi_task(monkeypatc
 
     await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, run_obj.id)
 
+    assert callable(captured["adapter"].pop("steer_check"))
     assert captured["adapter"] == {
         "uid": "user-1",
         "run_id": "run-1",
@@ -1747,6 +1748,30 @@ async def test_sandbox_run_reuses_parent_runtime_and_executes_pi_task(monkeypatc
         ("parent-run", "parent-thread"),
     }
     assert {event[2]["chunk"]["status"] for event in standard_events} == {"loading", "stream_event"}
+
+
+def test_pi_stream_projection_keeps_child_text_and_tool_snapshots_separate():
+    """同一provider工具ID在不同child中隔离，快照不会冒充完成。"""
+
+    def project(kind, child, payload):
+        """投影到父Run，保留child身份。"""
+        return run_worker._pi_stream_chunk(
+            {"job_id": child, "type": kind, "payload": payload}, run_id="parent", thread_id="thread"
+        )
+
+    text = project("message_delta", "child-a", {"content": "progress"})
+    assert text["stream_event"]["message_id"] == "pi-child-a"
+    assert text["stream_event"]["content"] == "progress"
+    tool = {"tool_call_id": "call-1", "name": "bash", "content": "first\nsecond"}
+    first = project("tool_update", "child-a", tool)["event"]["data"]
+    other = project("tool_update", "child-b", tool)["event"]["data"]
+    final = project("tool_result", "child-a", tool)["event"]["data"]
+    assert first["event"] == "tool-progress"
+    assert first["output"]["status"] == "running"
+    assert first["output"]["content"] == "first\nsecond"
+    assert first["tool_call_id"] != other["tool_call_id"]
+    assert first["tool_call_id"] == final["tool_call_id"]
+    assert final["event"] == "tool-finished"
 
 
 @pytest.mark.asyncio

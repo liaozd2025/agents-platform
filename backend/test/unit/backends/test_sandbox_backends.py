@@ -10,6 +10,7 @@ import threading
 import weakref
 from contextlib import asynccontextmanager
 from types import MethodType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import yuxi.agents.backends.sandbox.backend as sandbox_backend_module
@@ -1439,6 +1440,43 @@ async def _stream_range_response(content: bytes, request_options: dict):
     yield SimpleNamespace(
         headers={"content-range": f"bytes {start}-{min(end, len(content) - 1)}/{len(content)}"}, data=chunks()
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("control", ["# yuxi-pi-yield 7", '{"type":"yield"}'])
+async def test_stream_stdin_accepts_only_fixed_shell_comment_controls(monkeypatch, control):
+    """原始JSON不能进入交互shell，只有固定注释协议发送给本次session。"""
+    monkeypatch.setattr(sandbox_backend_module, "get_sandbox_provider", object)
+    backend = ProvisionerSandboxBackend(thread_id="thread", uid="user")
+    monkeypatch.setattr(backend, "_get_connection", lambda: SimpleNamespace(sandbox_url="http://sandbox"))
+    shell = SimpleNamespace(
+        exec_command=AsyncMock(
+            side_effect=[
+                SimpleNamespace(data=SimpleNamespace(session_id="actual-session", status="running", exit_code=None)),
+                SimpleNamespace(data=SimpleNamespace(exit_code=0)),
+            ]
+        ),
+        view=AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(status="completed", exit_code=0))),
+        kill_process=AsyncMock(return_value=SimpleNamespace(success=True, data=SimpleNamespace(status="terminated"))),
+        write_to_process=AsyncMock(return_value=SimpleNamespace(success=True)),
+    )
+    file = SimpleNamespace(
+        read_file=AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(content="0"))),
+        with_raw_response=SimpleNamespace(
+            download_file=lambda **kwargs: _stream_range_response(b"ready\n", kwargs["request_options"])
+        ),
+    )
+    monkeypatch.setattr(backend, "_build_async_client", lambda _url, _http: SimpleNamespace(shell=shell, file=file))
+    result = await backend.aexecute_stream("command", AsyncMock(), poll_input=AsyncMock(return_value=control))
+    if control.startswith("#"):
+        assert result.exit_code == 0
+        assert shell.write_to_process.call_args.kwargs["id"] == "actual-session"
+        assert shell.write_to_process.call_args.kwargs["input"] == control
+        assert shell.write_to_process.call_args.kwargs["press_enter"] is True
+    else:
+        assert result.exit_code == 1
+        assert "固定注释协议" in result.output
+        shell.write_to_process.assert_not_called()
 
 
 @pytest.mark.asyncio

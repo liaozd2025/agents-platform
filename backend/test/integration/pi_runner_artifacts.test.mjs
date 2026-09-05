@@ -13,6 +13,7 @@ import {
 import { resolve } from "node:path";
 import { test } from "node:test";
 import { crc32, deflateSync } from "node:zlib";
+import { existsSync } from "node:fs";
 
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -36,7 +37,7 @@ async function runTaskScenario(
     requests.push(JSON.parse(Buffer.concat(chunks)));
     const step = steps[requests.length - 1];
     response.writeHead(200, { "content-type": "text/event-stream" });
-    const toolCalls = (Array.isArray(step) ? step : [step]).map(
+    const toolCalls = (step?.tools || (Array.isArray(step) ? step : [step])).map(
       (tool, index) => ({
         index,
         id: `call-${requests.length}-${index}`,
@@ -45,7 +46,7 @@ async function runTaskScenario(
       }),
     );
     const delta =
-      typeof step === "string" ? { content: step } : { tool_calls: toolCalls };
+      typeof step === "string" ? { content: step } : { ...(step.text ? { content: step.text } : {}), tool_calls: toolCalls };
     for (const chunk of [
       {
         choices: [
@@ -105,15 +106,21 @@ async function runTaskScenario(
         credentials: { api_key: "local-controlled-test-key" },
       }),
     );
-    const child = spawn(
-      process.execPath,
-      ["/opt/yuxi-pi-runner/runner.mjs", "--job", jobPath],
-      { cwd: project },
-    );
+    const child = options.afterRunner
+      ? spawn("bash", ["-c", `${process.execPath} /opt/yuxi-pi-runner/runner.mjs --job ${jobPath}; ${options.afterRunner}`], { cwd: project })
+      : spawn(process.execPath, ["/opt/yuxi-pi-runner/runner.mjs", "--job", jobPath], { cwd: project });
     let stdout = "";
     let stderr = "";
+    let pendingLines = "";
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
+      pendingLines += chunk;
+      while (pendingLines.includes("\n")) {
+        const end = pendingLines.indexOf("\n");
+        const line = pendingLines.slice(0, end);
+        pendingLines = pendingLines.slice(end + 1);
+        if (line) options.onEvent?.({ event: JSON.parse(line), child, suffix, project, output });
+      }
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
@@ -137,6 +144,59 @@ async function runTaskScenario(
 
 const bash = (command) => ({ name: "bash", args: { command } });
 const submit = (path) => ({ name: "submit_artifact", args: { path } });
+
+test("runTask streams text and cumulative tool snapshots, then yields after the complete tool batch", async () => {
+  let sent = false;
+  await runTaskScenario(
+    (project) => [{ text: "开始执行", tools: [
+      bash(`printf 'first\\n'; sleep 1; printf complete > '${project}/first.done'`),
+      bash(`printf complete > '${project}/second.done'`),
+    ] }, "must not request another model turn"],
+    async ({ project, code, stderr, events, requests }) => {
+      assert.equal(code, 0, stderr);
+      assert.equal(sent, true);
+      assert.equal(requests.length, 1);
+      assert.equal(await readFile(resolve(project, "first.done"), "utf8"), "complete");
+      assert.equal(await readFile(resolve(project, "second.done"), "utf8"), "complete");
+      assert.equal(events.filter(e => e.type === "control_ack").length, 1);
+      assert.equal(events.at(-1).payload.stop_reason, "steer");
+      assert.equal(events.at(-1).payload.token_usage.total.total_tokens, 30);
+      assert.equal(events.filter(e => e.type === "message_delta").map(e => e.payload.content).join(""), "开始执行");
+      assert.ok(events.some(e => e.type === "tool_update"));
+    },
+    async () => ({ onEvent({ event, child, suffix, project }) {
+      if (!sent && event.type === "tool_update" && JSON.stringify(event.payload).includes("first")) {
+        assert.equal(existsSync(resolve(project, "first.done")), false);
+        sent = true;
+        child.stdin.write(`# yuxi-pi-yield ${suffix}\n`);
+      }
+    } }),
+  );
+});
+
+test("late control is a shell comment and cannot claim steer after the last turn", async () => {
+  let sent = false;
+  await runTaskScenario(
+    () => ["Already completed."],
+    async ({ project, code, stderr, events }) => {
+      assert.equal(code, 0, stderr);
+      assert.equal(sent, true);
+      assert.equal(events.at(-1).payload.stop_reason, undefined);
+      assert.equal(events.some(e => e.type === "control_ack"), false);
+      assert.equal(existsSync(resolve(project, "shell-side-effect")), false);
+      assert.equal(await readFile(resolve(project, "shell-finished"), "utf8"), "done");
+    },
+    async () => ({
+      afterRunner: "function yuxi-pi-yield() { touch shell-side-effect; }; IFS= read -r control; eval \"$control\"; printf done > shell-finished",
+      onEvent({ event, child, suffix }) {
+        if (!sent && event.type === "artifact") {
+          sent = true;
+          child.stdin.write(`# yuxi-pi-yield ${suffix}\n`);
+        }
+      },
+    }),
+  );
+});
 
 test("runTask forks the verified prior session, keeps original bytes and counts only this Run", async () => {
   await runTaskScenario(

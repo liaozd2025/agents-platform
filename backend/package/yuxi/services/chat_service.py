@@ -1644,6 +1644,30 @@ async def get_agent_state_view(
         if conversation.uid != str(current_uid) or conversation.status == "deleted":
             raise HTTPException(status_code=404, detail="对话线程不存在")
 
+        if (getattr(conversation, "extra_metadata", None) or {}).get("source") == "pi_sandbox":
+            from yuxi.services.agent_run_service import get_agent_run_result
+
+            pair = await run_repo.get_latest_pi_run_with_creator(thread_id, current_uid)
+            if pair is None:
+                raise HTTPException(status_code=404, detail="PI运行关系不存在")
+            pi_run, creator = pair
+            result = await get_agent_run_result(run_id=pi_run.id, current_uid=current_uid, db=db)
+            summary = serialize_subagent_run_state(pi_run)
+            summary.update(subagent_slug="pi_sandbox", subagent_name="PI Agent")
+            stop_reason = (result.get("pi") or {}).get("stop_reason")
+            if stop_reason == "steer":
+                summary["stop_reason"] = stop_reason
+            response = {"agent_state": extract_agent_state({})}
+            if include_relations:
+                response.update(parent_thread_id=creator.conversation_thread_id, subagent_run=summary)
+            if include_messages:
+                response["messages"] = (
+                    [{"id": f"pi-{pi_run.id}", "type": "ai", "content": result["output"]}]
+                    if result.get("output")
+                    else []
+                )
+            return response
+
         agent_item = await agent_repo.get_by_slug(conversation.agent_id)
         if not agent_item:
             raise HTTPException(status_code=404, detail="智能体不存在")

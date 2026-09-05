@@ -113,6 +113,8 @@ class PiSandboxMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 "status": str(result.get("status") or "failed"),
                 **subagent_run_urls(started.run.id),
             }
+            if (result.get("pi") or {}).get("stop_reason") == "steer":
+                subagent_run["stop_reason"] = "steer"
             if error:
                 subagent_run["error"] = str(error.get("message") or "PI 沙箱运行失败")
             update = {

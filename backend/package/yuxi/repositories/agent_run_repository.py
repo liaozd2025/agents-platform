@@ -138,6 +138,46 @@ class AgentRunRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_latest_pi_run_with_creator(self, thread_id: str, uid: str) -> tuple[AgentRun, AgentRun] | None:
+        """仅按当前PI child与真实creator持久关系读取最近一次Run。"""
+        creator = aliased(AgentRun)
+        child_conversation = aliased(Conversation)
+        parent_conversation = aliased(Conversation)
+        latest_id = (
+            select(AgentRun.id)
+            .where(
+                AgentRun.conversation_thread_id == thread_id, AgentRun.uid == str(uid), AgentRun.run_type == "sandbox"
+            )
+            .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        row = (
+            await self.db.execute(
+                select(AgentRun, creator)
+                .join(creator, creator.id == AgentRun.created_by_run_id)
+                .join(child_conversation, child_conversation.id == AgentRun.conversation_id)
+                .join(parent_conversation, parent_conversation.id == creator.conversation_id)
+                .where(
+                    AgentRun.id == latest_id,
+                    AgentRun.conversation_thread_id == thread_id,
+                    AgentRun.uid == str(uid),
+                    AgentRun.run_type == "sandbox",
+                    creator.uid == str(uid),
+                    creator.run_type.in_(["chat", "resume", "subagent"]),
+                    AgentRun.runtime_scope_id == creator.runtime_scope_id,
+                    child_conversation.uid == str(uid),
+                    child_conversation.status == "subagent",
+                    parent_conversation.uid == str(uid),
+                    parent_conversation.status != "deleted",
+                    child_conversation.project_id == parent_conversation.project_id,
+                )
+                .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+                .limit(1)
+            )
+        ).first()
+        return (row[0], row[1]) if row is not None else None
+
     async def get_latest_chat_or_resume_run(
         self,
         *,
@@ -885,6 +925,15 @@ class AgentRunRepository:
 
         return await self._get_open_attempt(run_id, worker_id=worker_id)
 
+    async def require_pi_attempt_owner(self, run_id: str, *, attempt_id: int, worker_id: str) -> AgentRun:
+        """控制输入前确认当前PI attempt仍由有效lease持有。"""
+        run = await self._lock_run(run_id)
+        attempt = await self._get_open_attempt(run_id, worker_id=worker_id)
+        if run is None or attempt is None or attempt.id != attempt_id or attempt.adapter != "local":
+            raise ValueError("PI 控制输入不属于当前attempt")
+        self._require_lease_owner(run, worker_id=worker_id, now=utc_now_naive(), action="发送 PI 控制输入")
+        return run
+
     async def get_previous_pi_session(self, *, run_id: str, uid: str, project_id: str) -> dict | None:
         """仅从同用户、Project、child 会话的已 ACK 历史选取明确 session。"""
         current = await self.db.scalar(
@@ -970,6 +1019,7 @@ class AgentRunRepository:
         envelope: dict,
         worker_id: str,
         now: datetime | None = None,
+        steer_authorized: bool = False,
     ) -> dict[str, bool]:
         """幂等持久化 PI envelope；final 与 Message、Run 终态在同一事务。"""
 
@@ -984,6 +1034,12 @@ class AgentRunRepository:
         if attempt is None:
             raise ValueError("PI attempt 不存在")
         self._validate_pi_envelope(run, attempt, envelope)
+
+        if envelope["type"] in {"message_delta", "tool_update"}:
+            if attempt.finished_at is not None or attempt.worker_id != worker_id:
+                raise ValueError("只有当前 PI attempt 可以发布临时事件")
+            self._require_lease_owner(run, worker_id=worker_id, now=now or utc_now_naive(), action="发布 PI 临时事件")
+            return {"ack": True, "duplicate": False}
 
         events = list(attempt.result_events or [])
         existing = next((item for item in events if item.get("event_id") == envelope["event_id"]), None)
@@ -1009,6 +1065,9 @@ class AgentRunRepository:
             return {"ack": True, "duplicate": False}
 
         payload = envelope["payload"]
+        stop_reason = payload.get("stop_reason")
+        if stop_reason not in {None, "steer"} or (stop_reason == "steer" and not steer_authorized):
+            raise ValueError("PI 让位缺少所属根Run的引导事实")
         text = payload.get("text")
         if not isinstance(text, str) or not text:
             raise ValueError("PI final payload 缺少文本结果")
@@ -1028,6 +1087,7 @@ class AgentRunRepository:
                     "session": payload.get("session"),
                     "output_subdir": output_subdir,
                     "runtime_manifest_digest": envelope["runtime_manifest_digest"],
+                    "stop_reason": stop_reason,
                 }
             },
             run_id=run.id,
