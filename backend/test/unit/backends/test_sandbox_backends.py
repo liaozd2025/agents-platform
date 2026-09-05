@@ -8,6 +8,7 @@ import gc
 import hashlib
 import threading
 import weakref
+from contextlib import asynccontextmanager
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -342,7 +343,6 @@ def test_filesystem_middleware_evicts_large_non_read_file_tool_result() -> None:
 
 
 def test_filesystem_middleware_redirects_direct_sandbox_tools_to_pi() -> None:
-
     class _Backend:
         def __init__(self):
             self.writes: list[tuple[str, str]] = []
@@ -1421,8 +1421,41 @@ def test_provisioner_execute_applies_timeout_to_command_and_http_request(monkeyp
     ]
 
 
+@asynccontextmanager
+async def _stream_range_response(content: bytes, request_options: dict):
+    """复现 FileResponse 的原始字节范围与无新字节时的 416。"""
+    from agent_sandbox.core.api_error import ApiError
+
+    start, end = (
+        int(part) for part in request_options["additional_headers"]["Range"].removeprefix("bytes=").split("-")
+    )
+    if start >= len(content):
+        raise ApiError(status_code=416, headers={"content-range": f"*/{len(content)}"})
+
+    async def chunks():
+        """流式交付一次原始范围。"""
+        yield content[start : end + 1]
+
+    yield SimpleNamespace(
+        headers={"content-range": f"bytes {start}-{min(end, len(content) - 1)}/{len(content)}"}, data=chunks()
+    )
+
+
 @pytest.mark.asyncio
-async def test_provisioner_aexecute_stream_delivers_output_before_command_finishes(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("snapshots", "expected_chunks", "expected_ranges"),
+    [
+        (
+            [b"first\n", b"first\n", b"first\nsecond\n"],
+            ["first\n", "second\n"],
+            ["bytes=0-20", "bytes=6-20", "bytes=6-20"],
+        ),
+        ([b'"\xe4\xb8', '"中"\n'.encode(), '"中"\n'.encode()], ['"中"\n'], ["bytes=0-20", "bytes=3-20", "bytes=6-20"]),
+    ],
+)
+async def test_provisioner_aexecute_stream_delivers_output_before_command_finishes(
+    monkeypatch, snapshots, expected_chunks, expected_ranges
+) -> None:
     monkeypatch.setattr(sandbox_backend_module, "get_sandbox_provider", lambda: object())
     backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
     backend._max_output_bytes = 5
@@ -1431,17 +1464,21 @@ async def test_provisioner_aexecute_stream_delivers_output_before_command_finish
     monkeypatch.setattr(sandbox_backend_module.httpx, "AsyncClient", lambda **_kwargs: http_client)
     views = iter(
         [
-            SimpleNamespace(data=SimpleNamespace(output="first\n", status="running", exit_code=None)),
-            SimpleNamespace(data=SimpleNamespace(output="first\nsecond\n", status="completed", exit_code=0)),
+            SimpleNamespace(data=SimpleNamespace(output="", status="running", exit_code=None)),
+            SimpleNamespace(data=SimpleNamespace(output="", status="completed", exit_code=0)),
         ]
     )
+    exec_calls = []
     shell = SimpleNamespace(
         exec_command=lambda **_kwargs: None,
         view=lambda **_kwargs: None,
         kill_process=lambda **_kwargs: None,
     )
 
-    async def exec_command(**_kwargs):
+    async def exec_command(**kwargs):
+        exec_calls.append(kwargs)
+        if kwargs["command"].startswith("rm -f -- "):
+            return SimpleNamespace(data=SimpleNamespace(output="", status="completed", exit_code=0))
         return SimpleNamespace(
             data=SimpleNamespace(session_id="session-1", output="", status="running", exit_code=None)
         )
@@ -1455,7 +1492,23 @@ async def test_provisioner_aexecute_stream_delivers_output_before_command_finish
     shell.exec_command = exec_command
     shell.view = view
     shell.kill_process = kill_process
-    monkeypatch.setattr(backend, "_build_async_client", lambda _url, _http: SimpleNamespace(shell=shell))
+    range_calls = []
+    snapshots = iter(snapshots)
+
+    async def read_file(**_kwargs):
+        return SimpleNamespace(data=SimpleNamespace(content="0"))
+
+    def download_file(**kwargs):
+        """依次提供增长文件与一次无新输出快照。"""
+        range_calls.append(kwargs["request_options"]["additional_headers"]["Range"])
+        return _stream_range_response(next(snapshots), kwargs["request_options"])
+
+    file = SimpleNamespace(read_file=read_file, with_raw_response=SimpleNamespace(download_file=download_file))
+    monkeypatch.setattr(
+        backend,
+        "_build_async_client",
+        lambda _url, _http: SimpleNamespace(shell=shell, file=file),
+    )
     chunks = []
     first_output = asyncio.Event()
 
@@ -1468,9 +1521,13 @@ async def test_provisioner_aexecute_stream_delivers_output_before_command_finish
 
     assert task.done() is False
     result = await task
-    assert chunks == ["first\n", "second\n"]
-    assert result.output == "first\nsecond\n"
+    assert chunks == expected_chunks
+    assert result.output == "".join(expected_chunks)
     assert result.exit_code == 0
+    assert range_calls == expected_ranges
+    assert exec_calls[0]["async_mode"] is False
+    assert exec_calls[0]["timeout"] == 0.2
+    assert exec_calls[-1]["command"].startswith("rm -f -- ")
     assert http_client.closed is True
 
 
@@ -1481,17 +1538,31 @@ async def test_provisioner_aexecute_stream_propagates_output_callback_failure(mo
     backend._provider = SimpleNamespace(get=lambda *_args, **_kwargs: SimpleNamespace(sandbox_url="http://sandbox"))
     monkeypatch.setattr(sandbox_backend_module.httpx, "AsyncClient", lambda **_kwargs: _OwnedAsyncHttpClient())
     killed = []
+    exec_calls = []
 
-    async def exec_command(**_kwargs):
+    async def exec_command(**kwargs):
+        exec_calls.append(kwargs)
+        if kwargs["command"].startswith("rm -f -- "):
+            return SimpleNamespace(data=SimpleNamespace(output="", status="completed", exit_code=0))
         return SimpleNamespace(
-            data=SimpleNamespace(session_id="session-1", output="event\n", status="running", exit_code=None)
+            data=SimpleNamespace(session_id="session-1", output="", status="running", exit_code=None)
         )
 
     async def kill_process(**kwargs):
         killed.append(kwargs["id"])
+        return SimpleNamespace(success=True, data=SimpleNamespace(status="terminated"))
 
     shell = SimpleNamespace(exec_command=exec_command, kill_process=kill_process)
-    monkeypatch.setattr(backend, "_build_async_client", lambda _url, _http: SimpleNamespace(shell=shell))
+    file = SimpleNamespace(
+        with_raw_response=SimpleNamespace(
+            download_file=lambda **kwargs: _stream_range_response(b"event\n", kwargs["request_options"])
+        )
+    )
+    monkeypatch.setattr(
+        backend,
+        "_build_async_client",
+        lambda _url, _http: SimpleNamespace(shell=shell, file=file),
+    )
 
     async def reject_output(_chunk: str) -> None:
         raise RuntimeError("cancelled by event sink")
@@ -1500,6 +1571,212 @@ async def test_provisioner_aexecute_stream_propagates_output_callback_failure(mo
         await backend.aexecute_stream("slow-command", reject_output)
 
     assert killed == ["session-1"]
+    assert exec_calls[-1]["command"].startswith("rm -f -- ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["overflow", "rollback"])
+async def test_stream_limits_bytes_and_rejects_capture_rollback(monkeypatch, case) -> None:
+    """原始输出超限或文件回退时停止命令，不能返回成功结果。"""
+
+    monkeypatch.setattr(sandbox_backend_module, "get_sandbox_provider", lambda: object())
+    backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
+    backend._provider = SimpleNamespace(get=lambda *_args, **_kwargs: SimpleNamespace(sandbox_url="http://sandbox"))
+    monkeypatch.setattr(sandbox_backend_module.httpx, "AsyncClient", lambda **_kwargs: _OwnedAsyncHttpClient())
+    snapshots = iter([b"abcdef"] if case == "overflow" else [b"first\n", b""])
+    lifecycle = []
+    chunks = []
+
+    async def exec_command(**kwargs):
+        """记录执行和捕获清理顺序。"""
+        if kwargs["command"].startswith("rm -f -- "):
+            lifecycle.append("capture_removed")
+            return SimpleNamespace(data=SimpleNamespace(exit_code=0))
+        return SimpleNamespace(data=SimpleNamespace(session_id="session-1", status="running", exit_code=None))
+
+    async def kill_process(**_kwargs):
+        """确认命令终止。"""
+        lifecycle.append("process_stopped")
+        return SimpleNamespace(success=True, data=SimpleNamespace(status="terminated"))
+
+    async def view(**_kwargs):
+        """文件异常发生时远端命令仍在运行。"""
+        return SimpleNamespace(data=SimpleNamespace(status="running", exit_code=None))
+
+    async def collect(chunk):
+        """保存实际交付给消费者的字节内容。"""
+        chunks.append(chunk)
+
+    monkeypatch.setattr(
+        backend,
+        "_build_async_client",
+        lambda _url, _http: SimpleNamespace(
+            shell=SimpleNamespace(exec_command=exec_command, kill_process=kill_process, view=view),
+            file=SimpleNamespace(
+                with_raw_response=SimpleNamespace(
+                    download_file=lambda **kwargs: _stream_range_response(next(snapshots), kwargs["request_options"])
+                )
+            ),
+        ),
+    )
+    result = await backend.aexecute_stream("long-command", collect, max_output_bytes=4 if case == "overflow" else 20)
+
+    assert result.exit_code == 1
+    assert lifecycle == ["process_stopped", "capture_removed"]
+    if case == "overflow":
+        assert result.truncated is True
+        assert result.output == "abcd"
+        assert chunks == ["abcd"]
+    else:
+        assert "回退" in result.output
+        assert chunks == ["first\n"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kill_failure", ["raised", "rejected", "running", "missing_status"])
+async def test_stream_cancel_retains_capture_when_process_stop_is_unconfirmed(monkeypatch, kill_failure) -> None:
+    """终止请求失败或未证明终态时，不删除捕获文件且显式报告清理失败。"""
+
+    monkeypatch.setattr(sandbox_backend_module, "get_sandbox_provider", lambda: object())
+    backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
+    backend._provider = SimpleNamespace(get=lambda *_args, **_kwargs: SimpleNamespace(sandbox_url="http://sandbox"))
+    monkeypatch.setattr(sandbox_backend_module.httpx, "AsyncClient", lambda **_kwargs: _OwnedAsyncHttpClient())
+    commands = []
+
+    async def exec_command(**kwargs):
+        """记录真实清理分支是否发出文件删除。"""
+        commands.append(kwargs["command"])
+        return SimpleNamespace(data=SimpleNamespace(session_id="session-1", status="running", exit_code=None))
+
+    async def kill_process(**_kwargs):
+        """提供协议失败和传输失败两类负向输入。"""
+        if kill_failure == "raised":
+            raise TimeoutError("kill transport lost")
+        return SimpleNamespace(
+            success=kill_failure != "rejected",
+            data=SimpleNamespace(status="running" if kill_failure == "running" else "terminated")
+            if kill_failure != "missing_status"
+            else None,
+        )
+
+    monkeypatch.setattr(
+        backend,
+        "_build_async_client",
+        lambda _url, _http: SimpleNamespace(
+            shell=SimpleNamespace(exec_command=exec_command, kill_process=kill_process),
+            file=SimpleNamespace(
+                with_raw_response=SimpleNamespace(
+                    download_file=lambda **kwargs: _stream_range_response(b"started\n", kwargs["request_options"])
+                )
+            ),
+        ),
+    )
+
+    async def cancel(_chunk: str) -> None:
+        """触发执行中的真实取消分支。"""
+        raise asyncio.CancelledError("outer cancelled")
+
+    with pytest.raises(sandbox_backend_module.SandboxProcessCleanupError, match="命令终止失败") as failure:
+        await backend.aexecute_stream("slow-command", cancel)
+
+    assert isinstance(failure.value.primary, asyncio.CancelledError)
+    assert len(commands) == 1
+    assert not commands[0].startswith("rm -f -- ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("startup_outcome", ["cancel", "response_lost", "cancel_budget_expired"])
+@pytest.mark.parametrize("kill_fails", [False, True])
+async def test_stream_joins_inflight_start_before_kill_and_preserves_unknown_launch(
+    monkeypatch, tmp_path, startup_outcome, kill_fails
+) -> None:
+    """首个响应返回前已启动的命令仍须终止；启动结局未知时保留文件。"""
+
+    monkeypatch.setattr(sandbox_backend_module, "get_sandbox_provider", lambda: object())
+    backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
+    if startup_outcome == "cancel_budget_expired":
+        backend._command_timeout_seconds = 0.05
+    backend._provider = SimpleNamespace(get=lambda *_args, **_kwargs: SimpleNamespace(sandbox_url="http://sandbox"))
+    monkeypatch.setattr(sandbox_backend_module.httpx, "AsyncClient", lambda **_kwargs: _OwnedAsyncHttpClient())
+    remote_started = asyncio.Event()
+    reply_ready = asyncio.Event()
+    capture = tmp_path / "capture.log"
+    launch_options = {}
+    lifecycle = []
+    running = False
+
+    async def exec_command(**kwargs):
+        """命令先产生远端副作用，响应稍后才交付。"""
+        nonlocal running
+        if kwargs["command"].startswith("rm -f -- "):
+            capture.unlink()
+            lifecycle.append("capture_removed")
+            return SimpleNamespace(data=SimpleNamespace(exit_code=0))
+        launch_options.update(kwargs)
+        running = True
+        capture.write_text("running", encoding="utf-8")
+        lifecycle.append("remote_started")
+        remote_started.set()
+        await reply_ready.wait()
+        if startup_outcome == "response_lost":
+            raise TimeoutError("startup response lost")
+        lifecycle.append("startup_replied")
+        return SimpleNamespace(data=SimpleNamespace(session_id="server-id", status="running", exit_code=None))
+
+    async def kill_process(**kwargs):
+        """只终止本次响应已确认的命令。"""
+        nonlocal running
+        assert kwargs["id"] == "server-id"
+        if kill_fails:
+            raise TimeoutError("kill unavailable")
+        running = False
+        lifecycle.append("process_stopped")
+        return SimpleNamespace(success=True, data=SimpleNamespace(status="terminated"))
+
+    async def reject_output(_chunk):
+        """本用例在首段输出之前取消。"""
+        pytest.fail("startup must settle before consuming stdout")
+
+    monkeypatch.setattr(
+        backend,
+        "_build_async_client",
+        lambda _url, _http: SimpleNamespace(
+            shell=SimpleNamespace(exec_command=exec_command, kill_process=kill_process)
+        ),
+    )
+    task = asyncio.create_task(backend.aexecute_stream("silent-command", reject_output))
+    try:
+        await asyncio.wait_for(remote_started.wait(), timeout=1)
+        if startup_outcome.startswith("cancel"):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert capture.exists(), "启动请求仍在途时不能删除捕获文件"
+        if startup_outcome != "cancel_budget_expired":
+            reply_ready.set()
+        error = (
+            asyncio.CancelledError
+            if startup_outcome == "cancel" and not kill_fails
+            else sandbox_backend_module.SandboxProcessCleanupError
+        )
+        with pytest.raises(error):
+            await asyncio.wait_for(task, timeout=1)
+
+        assert launch_options["request_options"] == {
+            "timeout_in_seconds": backend._command_timeout_seconds,
+            "max_retries": 0,
+        }
+        if startup_outcome == "cancel" and not kill_fails:
+            assert lifecycle == ["remote_started", "startup_replied", "process_stopped", "capture_removed"]
+            assert running is False
+            assert not capture.exists()
+        else:
+            assert capture.read_text(encoding="utf-8") == "running"
+            assert "capture_removed" not in lifecycle
+    finally:
+        reply_ready.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def test_provisioner_delete_ephemeral_secret_rejects_path_outside_tmpfs(monkeypatch) -> None:
