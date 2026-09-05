@@ -14,6 +14,15 @@ class SandboxRecord:
     workdir_path: str | None = None
 
 
+class SandboxCapacityError(RuntimeError):
+    """供给层没有可用实例容量，允许运行准备阶段有界等待。"""
+
+    def __init__(self, detail: dict):
+        """保留供给层返回的容量范围与限制。"""
+        self.detail = detail
+        super().__init__("sandbox_capacity_exhausted")
+
+
 class ProvisionerClient:
     def __init__(
         self,
@@ -65,6 +74,13 @@ class ProvisionerClient:
                 "inherit_env": inherit_env,
             },
         )
+        if response.status_code == 503:
+            try:
+                detail = response.json().get("detail")
+            except (ValueError, AttributeError):
+                detail = None
+            if isinstance(detail, dict) and detail.get("code") == "sandbox_capacity_exhausted":
+                raise SandboxCapacityError(detail)
         if response.status_code >= 400:
             raise RuntimeError(f"failed to create sandbox {sandbox_id}: {response.status_code} {response.text}")
         return self._record_from_payload(response.json())

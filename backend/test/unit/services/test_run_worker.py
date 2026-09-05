@@ -1387,6 +1387,28 @@ def test_worker_settings_publish_short_ttl_versioned_health_contract():
     assert 0 < run_worker.WorkerSettings.health_check_interval <= 10
 
 
+@pytest.mark.parametrize("value", [None, "2", "0"])
+def test_worker_settings_limit_concurrency_and_reject_zero(value):
+    """实际导入 WorkerSettings，验证配置不会退回 ARQ 的隐式并发。"""
+    env = os.environ.copy()
+    env.pop("YUXI_WORKER_MAX_JOBS", None)
+    if value is not None:
+        env["YUXI_WORKER_MAX_JOBS"] = value
+    completed = subprocess.run(
+        [sys.executable, "-c", "from yuxi.services.run_worker import WorkerSettings; print(WorkerSettings.max_jobs)"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if value == "0":
+        assert completed.returncode != 0
+        assert "YUXI_WORKER_MAX_JOBS must be positive" in completed.stderr
+    else:
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip().splitlines()[-1] == (value or "4")
+
+
 def test_worker_settings_reject_invalid_redis_dsn_instead_of_using_arq_default():
     env = os.environ.copy()
     env["REDIS_URL"] = "http://configured-redis.invalid:6379/0"

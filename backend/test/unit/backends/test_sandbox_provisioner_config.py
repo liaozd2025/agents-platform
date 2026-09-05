@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -45,6 +46,7 @@ def _load_module():
 def _docker_backend(module, tmp_path, run_container):
     backend = object.__new__(module.LocalContainerProvisionerBackend)
     backend._lock = threading.RLock()
+    backend._limits = module.SandboxResourceLimits()
     backend._container_port = 8080
     backend._network_prefix = "yuxi-know-sandbox"
     backend._sandbox_image = "sandbox-image"
@@ -57,7 +59,7 @@ def _docker_backend(module, tmp_path, run_container):
     backend._skill_projections_container_path = tmp_path.parent / "skill-projections"
     backend._user_data_container_path.mkdir(exist_ok=True)
     backend._skill_projections_container_path.mkdir(exist_ok=True)
-    backend._client = SimpleNamespace(containers=SimpleNamespace(run=run_container))
+    backend._client = SimpleNamespace(containers=SimpleNamespace(run=run_container, list=lambda **_kwargs: []))
     return backend
 
 
@@ -120,6 +122,170 @@ def test_merged_sandbox_env_user_values_override_global(monkeypatch):
         "GLOBAL_ONLY": "value",
         "USER_ONLY": "value",
     }
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("MEMORY_MB", "0"),
+        ("MEMORY_MB", "4"),
+        ("MEMORY_MB", "4GiB"),
+        ("CPUS", "0"),
+        ("CPUS", "0.0001"),
+        ("CPUS", "nan"),
+        ("CPUS", "inf"),
+        ("DOCKER_PIDS_LIMIT", "-1"),
+        ("TMPFS_MB", "0"),
+        ("TMPFS_MB", "4097"),
+        ("MAX_INSTANCES", "0"),
+        ("MAX_INSTANCES_PER_USER", "0"),
+        ("MAX_INSTANCES_PER_USER", "7"),
+    ],
+)
+def test_resource_limits_reject_invalid_environment(monkeypatch, variable, value):
+    module = _load_module()
+    monkeypatch.setenv(f"SANDBOX_{variable}", value)
+
+    with pytest.raises(ValueError):
+        module.SandboxResourceLimits.from_env()
+
+
+def test_docker_creation_applies_resource_budget(monkeypatch, tmp_path):
+    module, backend, captured = _docker_backend_with_running_container(monkeypatch, tmp_path)
+    backend._limits = module.SandboxResourceLimits(memory_mb=6144, cpus=1.5, docker_pids_limit=300, tmpfs_mb=2048)
+
+    backend.create("sandbox-1", "thread-1", "user-1")
+
+    config = captured[0][1]
+    assert config["mem_limit"] == config["memswap_limit"] == 6 * 1024**3
+    assert config["nano_cpus"] == 1_500_000_000
+    assert config["pids_limit"] == 300
+    assert "size=2048m" in config["tmpfs"]["/home/gem"].split(",")
+
+
+def _capacity_backend(monkeypatch, tmp_path, *, total=2, per_user=2):
+    """用有状态容器集合验证准入后的真实 inventory 与复用行为。"""
+    module = _load_module()
+    inventory = {}
+
+    class Container:
+        def __init__(self, kwargs):
+            self.name = kwargs["name"]
+            self.id = self.name
+            self.labels = kwargs["labels"]
+            self.status = "running"
+            self.attrs = {"State": {"Status": "running"}, "NetworkSettings": {"Networks": {kwargs["network"]: {}}}}
+            self.attrs["HostConfig"] = {
+                "Memory": kwargs["mem_limit"],
+                "MemorySwap": kwargs["memswap_limit"],
+                "NanoCpus": kwargs["nano_cpus"],
+                "PidsLimit": kwargs["pids_limit"],
+                "Tmpfs": kwargs["tmpfs"],
+            }
+
+        def reload(self):
+            pass
+
+    def run(_image, **kwargs):
+        container = Container(kwargs)
+        inventory[container.labels["sandbox-id"]] = container
+        return container
+
+    backend = _docker_backend(module, tmp_path, run)
+    backend._limits = module.SandboxResourceLimits(max_instances=total, max_instances_per_user=per_user)
+    backend._client.containers.list = lambda **_kwargs: list(inventory.values())
+    monkeypatch.setattr(backend, "_get_container", inventory.get)
+    monkeypatch.setattr(backend, "_ensure_network", backend._network_name)
+    monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+    return module, backend, inventory
+
+
+def test_concurrent_creation_never_exceeds_capacity_and_reuses_identity(monkeypatch, tmp_path):
+    module, backend, inventory = _capacity_backend(monkeypatch, tmp_path)
+
+    def create(index):
+        try:
+            return backend.create(f"sandbox-{index}", f"thread-{index}", "user-1", inherit_env=False)
+        except module.SandboxCapacityError as exc:
+            return exc.detail
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(create, range(8)))
+
+    assert len(inventory) == 2
+    assert sum(isinstance(result, dict) and result["code"] == "sandbox_capacity_exhausted" for result in results) == 6
+    first_id, first = next(iter(inventory.items()))
+    reused = backend.create(first_id, first.labels["thread-id"], "user-1", inherit_env=False)
+    assert reused.generation == first.id
+    assert len(inventory) == 2
+    with pytest.raises(ValueError, match="user identity"):
+        backend.create(first_id, first.labels["thread-id"], "user-2", inherit_env=False)
+
+
+def test_user_capacity_does_not_block_other_users(monkeypatch, tmp_path):
+    module, backend, inventory = _capacity_backend(monkeypatch, tmp_path, total=3, per_user=1)
+    backend.create("first", "thread-first", "user-1", inherit_env=False)
+
+    with pytest.raises(module.SandboxCapacityError) as error:
+        backend.create("second", "thread-second", "user-1", inherit_env=False)
+    assert error.value.detail == {"code": "sandbox_capacity_exhausted", "scope": "user", "limit": 1}
+    backend.create("third", "thread-third", "user-2", inherit_env=False)
+    assert set(inventory) == {"first", "third"}
+
+
+def test_docker_inventory_does_not_include_another_compose_slot(monkeypatch, tmp_path):
+    module, backend, inventory = _capacity_backend(monkeypatch, tmp_path)
+    backend.create("owned", "thread-owned", "user-1", inherit_env=False)
+    foreign = SimpleNamespace(name="another-slot-sandbox-foreign", labels={"sandbox-id": "foreign", "uid": "user-1"})
+    inventory["foreign"] = foreign
+
+    assert [record.sandbox_id for record in backend.list()] == ["owned"]
+    backend.create("second", "thread-second", "user-1", inherit_env=False)
+    assert set(inventory) == {"owned", "foreign", "second"}
+
+
+@pytest.mark.parametrize("field", ["Memory", "MemorySwap", "NanoCpus", "PidsLimit", "Tmpfs"])
+def test_reuse_and_discovery_reject_old_resource_policy_without_deleting(monkeypatch, tmp_path, field):
+    module, backend, inventory = _capacity_backend(monkeypatch, tmp_path)
+    record = backend.create("existing", "thread", "user", inherit_env=False)
+    inventory["existing"].attrs["HostConfig"][field] = {} if field == "Tmpfs" else 0
+
+    with pytest.raises(module.SandboxResourcePolicyMismatchError, match="sandbox_resource_policy_mismatch"):
+        backend.create("existing", "thread", "user", inherit_env=False)
+    with pytest.raises(module.SandboxResourcePolicyMismatchError):
+        backend.discover("existing")
+
+    assert inventory["existing"].id == record.generation
+    assert inventory["existing"].status == "running"
+
+
+def test_docker_refuses_container_name_collision_with_foreign_ownership(monkeypatch, tmp_path):
+    monkeypatch.setitem(sys.modules, "docker.errors", SimpleNamespace(NotFound=LookupError))
+    module, backend, _captured = _docker_backend_with_running_container(monkeypatch, tmp_path)
+    foreign = SimpleNamespace(labels={"sandbox-id": "different-id", "managed-by": "yuxi-sandbox-provisioner"})
+    backend._client.containers.get = lambda _name: foreign
+
+    with pytest.raises(ValueError, match="unexpected ownership"):
+        module.LocalContainerProvisionerBackend._get_container(backend, "expected-id")
+
+
+def test_capacity_http_response_exposes_retryable_reason(monkeypatch):
+    module = _load_module()
+    monkeypatch.setenv("SANDBOX_PROVISIONER_TOKEN", "x" * 32)
+
+    def create(*_args, **_kwargs):
+        raise module.SandboxCapacityError("global", 6)
+
+    monkeypatch.setattr(module, "backend_impl", SimpleNamespace(create=create))
+    response = TestClient(module.app).post(
+        "/api/sandboxes",
+        headers={"Authorization": "Bearer " + "x" * 32},
+        json={"sandbox_id": "sandbox", "thread_id": "thread", "uid": "user"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": "sandbox_capacity_exhausted", "scope": "global", "limit": 6}}
+    assert response.headers["Retry-After"] == "5"
 
 
 def test_normalize_env_converts_values_to_strings(monkeypatch):
@@ -408,7 +574,11 @@ def test_docker_rejects_rebinding_existing_runtime_to_another_workdir(monkeypatc
 
     class FakeContainer:
         status = "running"
-        labels = {"thread-id": "root-thread", "workdir-path": "projects/11111111-1111-4111-8111-111111111111"}
+        labels = {
+            "uid": "user-1",
+            "thread-id": "root-thread",
+            "workdir-path": "projects/11111111-1111-4111-8111-111111111111",
+        }
         attrs = {"State": {"Status": "running"}}
 
         def reload(self):
@@ -612,7 +782,8 @@ def test_create_sandbox_forwards_environment_policy(monkeypatch):
     assert calls[0]["inherit_env"] is False
 
 
-def test_authenticated_proxy_forwards_request_without_management_token(monkeypatch):
+@pytest.mark.parametrize(("status_code", "content_range"), [(200, None), (206, "bytes 2-7/8"), (416, "bytes */8")])
+def test_authenticated_proxy_forwards_request_without_management_token(monkeypatch, status_code, content_range):
     token = "test-provisioner-token-that-is-long-enough"
     monkeypatch.setenv("PROVISIONER_BACKEND", "memory")
     monkeypatch.setenv("SANDBOX_PROVISIONER_TOKEN", token)
@@ -622,7 +793,10 @@ def test_authenticated_proxy_forwards_request_without_management_token(monkeypat
 
     def upstream(request: httpx.Request) -> httpx.Response:
         captured.append(request)
-        return httpx.Response(200, json={"ok": True}, headers={"X-Ignored": "value"})
+        response_headers = {"X-Ignored": "value", "Accept-Ranges": "bytes"}
+        if content_range is not None:
+            response_headers["Content-Range"] = content_range
+        return httpx.Response(status_code, json={"ok": True}, headers=response_headers)
 
     real_async_client = httpx.AsyncClient
     transport = httpx.MockTransport(upstream)
@@ -660,9 +834,11 @@ def test_authenticated_proxy_forwards_request_without_management_token(monkeypat
             headers=headers,
         )
 
-    assert response.status_code == 200
+    assert response.status_code == status_code
     assert response.json() == {"ok": True}
-    assert second_response.status_code == 200
+    assert second_response.status_code == status_code
+    assert response.headers.get("content-range") == content_range
+    assert response.headers["accept-ranges"] == "bytes"
     assert len(clients) == 1
     assert clients[0].is_closed
     assert str(captured[0].url) == "http://agent-sandbox:8000/v1/sandbox?detail=full"
@@ -760,6 +936,7 @@ def test_kubernetes_ephemeral_sandbox_uses_only_empty_home(monkeypatch):
     backend = object.__new__(module.KubernetesProvisionerBackend)
     backend._client = FakeKubernetesClient()
     backend._sandbox_image = "sandbox-image"
+    backend._limits = module.SandboxResourceLimits()
     backend._container_port = 8080
     backend._user_data_pvc = "threads"
     backend._skill_pvc = "skills"
@@ -810,6 +987,7 @@ def test_kubernetes_workdir_contract_uses_user_workspace_subpath(monkeypatch):
     backend = object.__new__(module.KubernetesProvisionerBackend)
     backend._client = FakeKubernetesClient()
     backend._sandbox_image = "sandbox-image"
+    backend._limits = module.SandboxResourceLimits()
     backend._container_port = 8080
     backend._user_data_pvc = "threads-rwx"
     backend._skill_pvc = "skills-rwx"
@@ -827,6 +1005,10 @@ def test_kubernetes_workdir_contract_uses_user_workspace_subpath(monkeypatch):
     sandbox = pod.spec.containers[0]
     mounts = {mount.mount_path: getattr(mount, "sub_path", None) for mount in sandbox.volume_mounts}
     assert sandbox.working_dir == "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111"
+    assert sandbox.resources.limits == {"memory": "4096Mi", "cpu": "2.0"}
+    assert sandbox.resources.requests == sandbox.resources.limits
+    home = next(volume for volume in pod.spec.volumes if volume.name == "home-dir")
+    assert (home.empty_dir.medium, home.empty_dir.size_limit) == ("Memory", "1024Mi")
     assert mounts["/home/gem/user-data"] == "shared/user-1/workspace"
     assert mounts["/home/gem/skills"] == "skill-projections/user-1"
     skills_mount = next(mount for mount in sandbox.volume_mounts if mount.mount_path == "/home/gem/skills")
@@ -849,6 +1031,7 @@ def test_kubernetes_workdir_contract_uses_user_workspace_subpath(monkeypatch):
         "USER_GID": "1000",
     }
     init = pod.spec.init_containers[0]
+    assert init.resources.limits == sandbox.resources.limits
     assert init.command == ["python", "-c"]
     assert "os.O_NOFOLLOW" in init.args[0]
     assert "('projects', '11111111-1111-4111-8111-111111111111')" in init.args[0]
@@ -949,6 +1132,70 @@ def test_kubernetes_rejects_rebinding_existing_runtime_to_another_workdir(monkey
         )
 
 
+@pytest.mark.parametrize("changed", ["limits", "requests", "init_limits", "home_size", "home_medium"])
+def test_kubernetes_resource_policy_reads_pod_and_preserves_running_generation(monkeypatch, changed):
+    module = _load_module()
+    # SDK 是 provisioner 独立镜像的依赖；unit 固定外部 quantity oracle，真实 SDK 另在该镜像验证。
+    quantities = {"0": 0, "2.0": 2, "2000m": 2, "4Gi": 4294967296, "1Gi": 1073741824}
+    monkeypatch.setitem(sys.modules, "kubernetes.client.rest", SimpleNamespace(ApiException=RuntimeError))
+    monkeypatch.setitem(
+        sys.modules, "kubernetes.utils.quantity", SimpleNamespace(parse_quantity=lambda v: Decimal(quantities[str(v)]))
+    )
+
+    class Client:
+        def __getattr__(self, _name):
+            return lambda **kwargs: SimpleNamespace(**kwargs)
+
+    backend = object.__new__(module.KubernetesProvisionerBackend)
+    backend._client = Client()
+    backend._lock = threading.RLock()
+    backend._limits = module.SandboxResourceLimits()
+    backend._namespace = "isolated-slot"
+    backend._node_host = "node"
+    backend._sandbox_image = "sandbox-image"
+    backend._sandbox_env = {}
+    backend._container_port = 8080
+    backend._user_data_pvc = "users"
+    backend._skill_pvc = "skills"
+    pod = backend._build_pod_spec("existing", "thread", "user", {}, inherit_env=True)
+    pod.metadata.uid = "original-generation"
+    pod.status = SimpleNamespace(phase="Running")
+    for container in pod.spec.containers + pod.spec.init_containers:
+        container.resources = SimpleNamespace(
+            limits={"memory": "4Gi", "cpu": "2000m"}, requests={"memory": "4Gi", "cpu": "2000m"}
+        )
+    home = next(volume.empty_dir for volume in pod.spec.volumes if volume.name == "home-dir")
+    home.size_limit = "1Gi"
+    backend._core_api = SimpleNamespace(
+        read_namespaced_pod=lambda **_kwargs: pod,
+        read_namespaced_service=lambda **_kwargs: SimpleNamespace(
+            spec=SimpleNamespace(ports=[SimpleNamespace(node_port=8080)])
+        ),
+    )
+    before = backend.create("existing", "thread", "user")
+    assert before.generation == pod.metadata.uid
+
+    if changed in {"limits", "requests"}:
+        setattr(pod.spec.containers[0].resources, changed, {})
+    elif changed == "init_limits":
+        pod.spec.init_containers[0].resources.limits = {}
+    elif changed == "home_size":
+        home.size_limit = None
+    else:
+        home.medium = ""
+
+    with pytest.raises(module.SandboxResourcePolicyMismatchError):
+        backend.discover("existing")
+    with pytest.raises(module.SandboxResourcePolicyMismatchError):
+        backend.create("existing", "thread", "user")
+    with pytest.raises(module.SandboxResourcePolicyMismatchError):
+        backend._discovered_matches_request(
+            "existing", thread_id="thread", uid="user", workdir_path=None, ephemeral_storage=False
+        )
+    assert pod.metadata.uid == before.generation
+    assert pod.status.phase == "Running"
+
+
 def test_kubernetes_pod_conflict_is_revalidated_before_creating_service(monkeypatch):
     monkeypatch.setenv("PROVISIONER_BACKEND", "memory")
     module = _load_module()
@@ -968,6 +1215,9 @@ def test_kubernetes_pod_conflict_is_revalidated_before_creating_service(monkeypa
     monkeypatch.setitem(sys.modules, "kubernetes.client.rest", rest_module)
 
     class FakeCoreApi:
+        def list_namespaced_pod(self, **_kwargs):
+            return SimpleNamespace(items=[])
+
         def create_namespaced_pod(self, **_kwargs):
             raise ApiException(status=409)
 
@@ -977,6 +1227,7 @@ def test_kubernetes_pod_conflict_is_revalidated_before_creating_service(monkeypa
     backend = object.__new__(module.KubernetesProvisionerBackend)
     backend._lock = threading.RLock()
     backend._core_api = FakeCoreApi()
+    backend._limits = module.SandboxResourceLimits()
     backend._namespace = "yuxi"
     backend._pod_name = lambda _sandbox_id: "pod-1"
     backend._service_name = lambda _sandbox_id: "service-1"
@@ -1140,8 +1391,17 @@ def test_docker_backend_reconnects_provisioner_before_reusing_sandbox(monkeypatc
     class FakeContainer:
         name = "yuxi-sandbox-sandbox-1"
         status = "running"
-        labels = {"thread-id": "thread-1"}
-        attrs = {"State": {"Status": "running"}}
+        labels = {"thread-id": "thread-1", "uid": "user-1"}
+        attrs = {
+            "State": {"Status": "running"},
+            "HostConfig": {
+                "Memory": 4 * 1024**3,
+                "MemorySwap": 4 * 1024**3,
+                "NanoCpus": 2_000_000_000,
+                "PidsLimit": 512,
+                "Tmpfs": {"/home/gem": "rw,exec,mode=777,size=1024m"},
+            },
+        }
 
         def reload(self):
             return None
