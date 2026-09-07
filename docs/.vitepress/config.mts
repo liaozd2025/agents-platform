@@ -98,6 +98,7 @@ export default defineConfig({
           { text: '网页搜索', link: '/advanced/web-search' },
           { text: '服务端口', link: '/advanced/ports' },
           { text: '生产部署', link: '/advanced/deployment' },
+          { text: '部署故障排查', link: '/advanced/deployment-troubleshooting' },
           { text: '旧 OA 用户与部门同步', link: '/advanced/oa-user-department-sync' },
           { text: '旧 OA 用户独立登录', link: '/advanced/oa-standalone-login' },
           { text: 'API Key 外部集成', link: '/advanced/api-key-integration' },

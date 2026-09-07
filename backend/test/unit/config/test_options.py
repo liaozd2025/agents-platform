@@ -70,6 +70,17 @@ async def test_system_options_preserve_boolean_values(db_session, monkeypatch):
     assert values["default_model"] == "test-provider:model"
 
 
+def test_system_option_defaults_use_dashscope_models():
+    """空配置解析时应使用 DashScope 的聊天、向量和重排模型。"""
+    values = options.system_options.resolve({})
+
+    assert values["default_model"] == "alibaba-cn:qwen3.7-max"
+    assert values["fast_model"] == "alibaba-cn:qwen3.7-max"
+    assert values["embed_model"] == "alibaba-cn:text-embedding-v4"
+    assert values["reranker"] == "alibaba-cn:qwen3-rerank"
+    assert values["content_guard_llm_model"] == "alibaba-cn:qwen3.7-max"
+
+
 @pytest.mark.asyncio
 async def test_explicit_session_reads_database_instead_of_shared_cache(db_session, monkeypatch):
     fake_redis = FakeRedis()

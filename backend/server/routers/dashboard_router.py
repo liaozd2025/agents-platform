@@ -86,6 +86,7 @@ class ConversationListItem(BaseModel):
     thread_id: str
     uid: str
     username: str | None = None
+    display_name: str | None = None
     user_avatar: str | None = None
     user_deleted: bool = False
     agent_id: str
@@ -116,6 +117,7 @@ class ConversationFilterOption(BaseModel):
 
     uid: str | None = None
     username: str | None = None
+    display_name: str | None = None
     agent_id: str | None = None
     agent_name: str | None = None
     avatar: str | None = None
@@ -135,6 +137,7 @@ class ConversationDetailResponse(BaseModel):
     thread_id: str
     uid: str
     username: str | None = None
+    display_name: str | None = None
     user_avatar: str | None = None
     user_deleted: bool = False
     agent_id: str
@@ -604,6 +607,7 @@ class ThreadUserStat(BaseModel):
 
     uid: str
     username: str | None
+    display_name: str | None = None
     avatar: str | None
     thread_count: int
     message_count: int

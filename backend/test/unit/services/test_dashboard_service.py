@@ -47,12 +47,14 @@ async def dashboard_db():
         )
         user1 = User(
             username="Alice",
+            display_name="爱丽丝",
             uid="uid-alice",
             password_hash="$argon2id$placeholder",
             department=dept,
         )
         user2 = User(
             username="Bob",
+            display_name="鲍勃",
             uid="uid-bob",
             password_hash="$argon2id$placeholder",
             department=dept,
@@ -398,6 +400,7 @@ async def test_dashboard_service_thread_analytics(dashboard_db):
     assert len(top_users) >= 2
     alice_stat = next(u for u in top_users if u["uid"] == "uid-alice")
     assert alice_stat["username"] == "Alice"
+    assert alice_stat["display_name"] == "爱丽丝"
     assert alice_stat["thread_count"] == 3
     assert next(u for u in top_users if u["uid"] == "uid-deleted")["username"] == "Deleted User"
 
@@ -410,6 +413,39 @@ async def test_dashboard_service_thread_analytics(dashboard_db):
     assert [item["agent_id"] for item in coder_only["agent_distribution"]] == ["agent-coder"]
     assert coder_only["status_distribution"] == {"active": 1, "archived": 1}
     assert {item["uid"] for item in coder_only["top_users"]} == {"uid-alice", "uid-bob"}
+
+
+async def test_dashboard_resolves_legacy_account_to_display_name(dashboard_db):
+    """历史会话仍使用 OA 原始账号时，Dashboard 也应关联到当前用户姓名。"""
+    legacy_user = User(
+        username="2024102811",
+        display_name="吴轩",
+        uid="oa:ZD:2024102811",
+        password_hash="$argon2id$placeholder",
+    )
+    legacy_conversation = Conversation(
+        thread_id="thread-legacy-oa",
+        project_id="p-legacy-oa",
+        uid="2024102811",
+        agent_id="agent-helper",
+        title="Legacy OA conversation",
+        status="active",
+        created_at=utc_now_naive(),
+        updated_at=utc_now_naive(),
+    )
+    dashboard_db.add_all([legacy_user, legacy_conversation])
+    await dashboard_db.commit()
+
+    service = DashboardService(dashboard_db)
+    result = await service.list_conversations(limit=20)
+
+    item = next(item for item in result["items"] if item["thread_id"] == "thread-legacy-oa")
+    assert item["username"] == "2024102811"
+    assert item["display_name"] == "吴轩"
+
+    analytics = await service.get_thread_analytics(time_range="7days")
+    top_user = next(user for user in analytics["top_users"] if user["uid"] == "2024102811")
+    assert top_user["display_name"] == "吴轩"
 
 
 async def test_thread_analytics_groups_daily_trends_by_shanghai_date(dashboard_db):
@@ -488,7 +524,12 @@ async def test_dashboard_service_list_conversations_search(dashboard_db):
     assert search_result["total"] == 1
     assert search_result["items"][0]["thread_id"] == "thread-103"
     assert search_result["items"][0]["username"] == "Alice"
+    assert search_result["items"][0]["display_name"] == "爱丽丝"
     assert search_result["items"][0]["agent_name"] == "Coder Agent"
+
+    display_name_search = await service.list_conversations(search="爱丽丝")
+    assert display_name_search["total"] == 4
+    assert all(item["display_name"] == "爱丽丝" for item in display_name_search["items"])
 
     completed_item = next(item for item in all_convs["items"] if item["thread_id"] == "thread-102")
     assert completed_item["status"] == "active"
@@ -501,6 +542,7 @@ async def test_dashboard_service_list_conversations_search(dashboard_db):
     assert len(active_only["items"]) == 4
 
     options = await service.get_conversation_filter_options()
+    assert next(item for item in options["users"] if item["uid"] == "uid-alice")["display_name"] == "爱丽丝"
     assert next(item for item in options["users"] if item["uid"] == "uid-deleted")["is_deleted"] is True
     assert next(item for item in options["agents"] if item["agent_id"] == "removed-agent")["is_deleted"] is True
 
@@ -513,6 +555,7 @@ async def test_dashboard_service_conversation_detail(dashboard_db):
     assert detail["thread_id"] == "thread-102"
     assert detail["total_tokens"] == 3500
     assert detail["user_deleted"] is False
+    assert detail["display_name"] == "鲍勃"
     assert detail["agent_deleted"] is False
     assert detail["status"] == "active"
     assert detail["run_status"] == "completed"

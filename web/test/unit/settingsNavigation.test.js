@@ -52,10 +52,7 @@ test('设置导航按权限分组并支持搜索', () => {
   )
   assert.deepEqual(
     userGroups.map((group) => [group.label, group.items.map((item) => item.id)]),
-    [
-      ['个人', ['account', 'agentEnv']],
-      ['平台能力', ['apiKeys']]
-    ]
+    [['个人', ['account']]]
   )
 
   const managementGroups = getSettingsNavigationGroups(
@@ -123,16 +120,8 @@ test('设置导航按权限分组并支持搜索', () => {
   )
 
   assert.deepEqual(
-    getSettingsNavigationGroups(
-      { isLoggedIn: true, effectivePermissions: [] },
-      'env'
-    ),
-    [
-      {
-        label: '个人',
-        items: [{ id: 'agentEnv', label: '环境变量', path: '/settings/agent-env' }]
-      }
-    ]
+    getSettingsNavigationGroups({ isLoggedIn: true, effectivePermissions: [] }, 'env'),
+    []
   )
 })
 
@@ -145,9 +134,8 @@ test('角色入口只依赖服务端有效权限', () => {
   assert.deepEqual(
     groups.map((group) => [group.label, group.items.map((item) => item.id)]),
     [
-      ['个人', ['account', 'agentEnv']],
-      ['系统', ['role']],
-      ['平台能力', ['apiKeys']]
+      ['个人', ['account']],
+      ['系统', ['role']]
     ]
   )
 })
@@ -161,9 +149,8 @@ test('用户管理入口只依赖服务端有效权限', () => {
   assert.deepEqual(
     groups.map((group) => [group.label, group.items.map((item) => item.id)]),
     [
-      ['个人', ['account', 'agentEnv']],
-      ['系统', ['user']],
-      ['平台能力', ['apiKeys']]
+      ['个人', ['account']],
+      ['系统', ['user']]
     ]
   )
 })

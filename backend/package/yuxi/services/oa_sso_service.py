@@ -76,9 +76,9 @@ class OAAccountLoginConfig(BaseModel):
         )
 
     def is_configured(self) -> bool:
-        """仅允许非生产环境启用 account 换票。"""
+        """校验账号换票配置。"""
         environment = os.environ.get("YUXI_ENV", "development").strip().lower()
-        if environment in {"prod", "production"} or not self.enabled or not self.company_code:
+        if not self.enabled or not self.company_code:
             return False
         try:
             parsed = urllib.parse.urlsplit(self.login_url)
@@ -215,6 +215,10 @@ async def _complete_oa_login(
 
     if user:
         user.last_login = utc_now_naive()
+        # OA 返回的姓名是用户展示信息的唯一来源，不参与账号和 UID 身份匹配。
+        if user.display_name != identity.full_name:
+            user.display_name = identity.full_name
+            logger.info("OA 登录已同步用户展示姓名：user_id=%s", user.id)
         if department:
             user.department_id = department.id
         await db.commit()
@@ -225,6 +229,7 @@ async def _complete_oa_login(
             db,
             {
                 "username": username,
+                "display_name": identity.full_name,
                 "uid": identity.uid,
                 "phone_number": None,
                 "avatar": None,

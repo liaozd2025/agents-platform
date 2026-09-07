@@ -42,7 +42,7 @@
           <div class="meta-item">
             <span class="meta-label">所属用户</span>
             <span class="meta-value" :title="detail.uid">
-              {{ detail.username || detail.uid }}
+              {{ detail.display_name || detail.username || detail.uid }}
               <a-tag v-if="detail.user_deleted" class="history-tag">已注销</a-tag>
             </span>
           </div>

@@ -4,6 +4,21 @@ import test from 'node:test'
 
 import { buildProjectConversationGroups } from '../../src/utils/projectConversationGroups.js'
 
+test('未展示的迁移项目会话进入时间历史分组数据', () => {
+  const now = Date.parse('2026-09-04T12:00:00Z')
+  const conversations = [
+    { id: 'recent', project_id: 'migration-project', created_at: '2026-09-03T12:00:00Z' },
+    { id: 'week', project_id: 'migration-project', created_at: '2026-08-28T12:00:00Z' },
+    { id: 'month', project_id: 'migration-project', created_at: '2026-08-01T12:00:00Z' }
+  ]
+
+  const result = buildProjectConversationGroups([], conversations, now)
+
+  assert.equal(result.recentGroups.recent.length, 1)
+  assert.equal(result.recentGroups.week.length, 1)
+  assert.equal(result.recentGroups.month.length, 1)
+})
+
 test('项目视图按项目顺序分组并把 implicit 对话放在最后', () => {
   const projects = [
     { id: 'project-a', name: 'Yuxi', selection_status: 'selectable', status: 'active' },
@@ -93,7 +108,8 @@ test('侧边栏同时展示项目和最近分组，最近只展示其他对话',
   assert.ok(recentSectionStart >= 0)
   assert.match(recentSection, /v-if="projectsLoading"[^>]*>正在加载对话/)
   assert.match(recentSection, /v-else-if="projectsError"[^>]*>项目加载失败，暂时无法分类对话/)
-  assert.match(recentSection, /v-for="chat in otherConversations"/)
+  assert.match(recentSection, /v-for="section in recentSections"/)
+  assert.match(recentSection, /v-for="chat in section\.conversations"/)
   assert.match(source, /<FolderOpen v-if="isProjectExpanded\(group\.project\.id\)"/)
   assert.match(source, /<FolderClosed v-else/)
   assert.equal(source.match(/<CollapseTransition>/g)?.length, 3)

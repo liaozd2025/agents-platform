@@ -31,6 +31,17 @@ def issue_oa_token(first_account: str = "oa-user-1", second_account: str | None 
     return f"{first}|{second}"
 
 
+async def test_production_account_login_accepts_account_only_config(monkeypatch):
+    """生产环境只配置账号换票参数时，父项目可仅传账号发起登录。"""
+    config = oa_sso_service.OAAccountLoginConfig(
+        enabled=True,
+        login_url="https://oa.example.test/login",
+        company_code="TEST",
+    )
+    monkeypatch.setenv("YUXI_ENV", "production")
+    assert config.is_configured() is True
+
+
 @pytest_asyncio.fixture
 async def oa_session():
     """创建 OA SSO 用户映射所需的最小数据库。"""
@@ -193,15 +204,21 @@ async def test_oa_exchange_creates_one_local_user_and_issues_yuxi_token(monkeypa
     token = issue_oa_token()
 
     first = await oa_sso_service.exchange_oa_token_handler(token, oa_session)
+    user = await oa_session.scalar(select(User).where(User.uid == "oa:TEST:oa-user-1"))
+    user.display_name = "旧姓名"
+    await oa_session.commit()
     second = await oa_sso_service.exchange_oa_token_handler(token, oa_session)
 
     assert first["access_token"] == second["access_token"]
     assert first["uid"] == "oa:TEST:oa-user-1"
+    assert first["display_name"] == "测试用户"
+    assert second["display_name"] == "测试用户"
     assert [role["code"] for role in first["roles"]] == ["user"]
     assert first["effective_permissions"] == ["agent:use"]
     assert first["phone_number"] is None
     assert first["department_name"] == "主部门"
     assert await oa_session.scalar(select(func.count(User.id))) == 1
+    assert user.display_name == "测试用户"
 
 
 async def test_oa_account_exchange_creates_user_without_persisting_external_tokens(monkeypatch, oa_session):
@@ -232,6 +249,7 @@ async def test_oa_account_exchange_creates_user_without_persisting_external_toke
             return httpx.Response(200, json=response_payloads.pop(0))
 
     monkeypatch.setattr(oa_sso_service.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setenv("YUXI_ENV", "production")
     monkeypatch.setattr(oa_sso_service.oa_account_login_config, "enabled", True)
     monkeypatch.setattr(oa_sso_service.oa_account_login_config, "login_url", "https://oa.example.test/login")
     monkeypatch.setattr(oa_sso_service.oa_account_login_config, "company_code", "TEST")

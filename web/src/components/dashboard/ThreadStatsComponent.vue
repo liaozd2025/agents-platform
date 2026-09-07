@@ -131,7 +131,7 @@
                   <FallbackAvatar
                     :src="record.avatar"
                     :default-src="generatePixelAvatar(record.uid)"
-                    :name="record.username"
+                    :name="record.display_name || record.username || record.uid"
                     :seed="record.uid"
                     kind="user"
                     :size="24"
@@ -139,7 +139,8 @@
                     decorative
                   />
                   <div class="user-cell-meta">
-                    <span class="user-cell-name">{{ record.username || record.uid }}</span>
+                    <!-- 优先展示中文姓名，未维护时回退到账号和 UID。 -->
+                    <span class="user-cell-name">{{ record.display_name || record.username || record.uid }}</span>
                     <span class="user-cell-uid" :title="record.uid">{{ record.uid }}</span>
                   </div>
                 </div>
@@ -230,10 +231,10 @@
               v-for="user in filterOptions.users"
               :key="user.uid"
               :value="user.uid"
-              :label="`${user.username} ${user.uid}`"
+              :label="`${user.display_name || user.username} ${user.uid}`"
             >
               <span class="filter-option-label">
-                <span class="option-name">{{ user.username }}</span>
+                <span class="option-name">{{ user.display_name || user.username }}</span>
                 <span v-if="user.is_deleted" class="deleted-text">已注销</span>
               </span>
             </a-select-option>
@@ -306,7 +307,7 @@
                 <FallbackAvatar
                   :src="record.user_avatar"
                   :default-src="generatePixelAvatar(record.uid)"
-                  :name="record.user_deleted ? '已注销用户' : record.username || record.uid"
+                  :name="record.user_deleted ? '已注销用户' : record.display_name || record.username || record.uid"
                   :seed="record.uid"
                   kind="user"
                   :size="24"
@@ -314,8 +315,11 @@
                   decorative
                 />
                 <div class="entity-meta">
-                  <span class="entity-name" :title="record.username || record.uid">
-                    {{ record.username || record.uid }}
+                  <span
+                    class="entity-name"
+                    :title="record.user_deleted ? '已注销用户' : record.display_name || record.username || record.uid"
+                  >
+                    {{ record.user_deleted ? '已注销用户' : record.display_name || record.username || record.uid }}
                   </span>
                   <span class="entity-id" :title="record.uid">{{
                     truncateIdentifier(record.uid)

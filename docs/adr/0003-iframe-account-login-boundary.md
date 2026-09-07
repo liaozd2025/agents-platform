@@ -12,7 +12,7 @@ OA 助手以 iframe 嵌入父项目时，父项目只能向页面提供 OA 账�
 
 iframe 只从 `VITE_YUXI_EMBED_ALLOWED_ORIGINS` 中声明的父页面接收 `login-params` 消息，并以 `request-login-params` 请求首次授权或续期。消息中的账号仅作为 OA 换票和查询用户信息的线索。
 
-服务端仅在非生产环境启用 `OA_ACCOUNT_LOGIN_*` 时使用账号调用 OA 换票接口；换得 `oaToken` 后，服务端使用 `OA_SSO_*` 用户信息接口校验返回账号、公司编码和在职状态。两个配置的公司编码必须一致。校验通过后，服务端按 OA 身份创建或复用 Yuxi 用户、解析部门并签发 Yuxi access token。OA token 和 `saToken` 不写入本地用户数据，也不返回给 iframe。
+服务端在配置完整的生产或开发环境中使用 OA 账号调用 OA 换票接口；换得 `oaToken` 后，服务端使用 `OA_SSO_*` 用户信息接口校验返回账号、公司编码和在职状态。两个配置的公司编码必须一致。校验通过后，服务端按 OA 身份创建或复用 Yuxi 用户、解析部门并签发 Yuxi access token。OA token 和 `saToken` 不写入本地用户数据，也不返回给 iframe。
 
 嵌入模式的登录态由父页面重新下发账号驱动；应用隐藏退出登录入口，避免 iframe 用户注销本地登录态后脱离父项目认证上下文。
 

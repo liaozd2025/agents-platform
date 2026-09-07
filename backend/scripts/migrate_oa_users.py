@@ -179,6 +179,20 @@ def normalize_oa_department_id(value: object) -> int | None:
     return int(decimal_value)
 
 
+def filter_display_name_only_actions(actions: list[MigrationAction]) -> list[MigrationAction]:
+    """筛出仅补齐已有用户展示姓名的动作，避免历史修复误创建或改动身份字段。"""
+
+    return [
+        MigrationAction(
+            action="update_identity",
+            account=action.account,
+            display_name=action.display_name,
+        )
+        for action in actions
+        if action.action == "update_identity" and action.display_name is not None
+    ]
+
+
 def fetch_oa_access_code(user_page_url: str, license_file: str, timeout: float) -> str:
     """从本地授权文件临时换取本次旧 OA 查询所需的 Code。"""
     suffix = "/DrugDevp/QueryUserPage"
@@ -280,6 +294,11 @@ def parse_args() -> argparse.Namespace:
         help="与 iframe SSO 一致的 OA 公司编码，默认读取 OA_USER_MIGRATION_COMPANY_CODE 或使用 ZD",
     )
     parser.add_argument("--apply", action="store_true", help="提交数据库变更；默认仅 dry-run")
+    parser.add_argument(
+        "--display-name-only",
+        action="store_true",
+        help="仅补齐已有 OA 用户的 display_name，不创建用户或修改部门、UID",
+    )
     return parser.parse_args()
 
 
@@ -300,6 +319,10 @@ async def run(args: argparse.Namespace) -> int:
         oa_users = fetch_oa_users(args.url, code, args.timeout)
         departments, existing_users = await load_database_inputs()
         actions = build_migration_actions(oa_users, departments, existing_users, args.company_code)
+        if args.display_name_only:
+            # 历史姓名补齐必须限制在已有用户，避免把全量同步中的新建、部门或 UID 变更带入本次操作。
+            actions = filter_display_name_only_actions(actions)
+            LOGGER.info("已启用仅展示姓名模式，只保留已有用户的 display_name 更新")
         counts: dict[str, int] = {}
         for action in actions:
             counts[action.action] = counts.get(action.action, 0) + 1
