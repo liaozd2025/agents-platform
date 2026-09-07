@@ -3,6 +3,13 @@ const SUBAGENT_LAUNCH_TOOL_NAMES = new Set(['task', 'subagent_start', 'pi_sandbo
 /** 判断工具调用是否会启动或继续子智能体运行。 */
 export const isSubagentLaunchToolName = (name) => SUBAGENT_LAUNCH_TOOL_NAMES.has(name)
 
+/** 只读取当前子线程指定 Run 的用量，旧会话与缺失上报保持未知。 */
+export const getSubagentRunTokenUsage = (run, runId, threadId) => {
+  if (!runId || run?.id !== runId || run.conversation_thread_id !== threadId) return null
+  const usage = run.token_usage
+  return usage?.schema_version === 2 && usage.usage_reported_call_count > 0 ? usage : null
+}
+
 /** 补全任务描述并把同一子线程收敛为一个展示项。 */
 export const mergeSubagentRunsForDisplay = (runs, descriptionByToolCallId = new Map()) => {
   if (!Array.isArray(runs)) return []

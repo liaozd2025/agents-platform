@@ -543,6 +543,73 @@ async def test_pi_cleanup_reconciler_retries_persisted_orphan(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("root_status", "cleanup_pending", "expected_cleaned"),
+    [("running", False, []), ("completed", True, []), ("completed", False, [7])],
+)
+async def test_pi_child_orphan_waits_for_root_runtime_cleanup(
+    monkeypatch: pytest.MonkeyPatch, root_status, cleanup_pending, expected_cleaned
+):
+    """新建 adapter 不能凭关闭空句柄清除仍可能运行的 child 命令。"""
+    root = _build_run()
+    root.id = "root-run"
+    root.run_type = "resume"
+    root.created_by_run_id = "historical-chat"
+    root.status = root_status
+    root.runtime_cleanup_pending = cleanup_pending
+    historical = _build_run()
+    historical.id = "historical-chat"
+    historical.status = "completed"
+    child = _build_run()
+    child.run_type = "sandbox"
+    child.created_by_run_id = root.id
+    cleared = []
+
+    @asynccontextmanager
+    async def session_context():
+        yield object()
+
+    class Repo:
+        def __init__(self, _db):
+            pass
+
+        async def list_pi_cleanup_failures(self):
+            return [
+                {
+                    "attempt_id": 7,
+                    "run_id": child.id,
+                    "uid": child.uid,
+                    "run_type": "sandbox",
+                    "runtime_scope_id": child.runtime_scope_id,
+                    "cleanup_failed_at": "failed-at",
+                    "final_acked_at": None,
+                    "error_type": "execution_unknown",
+                    "instance_id": "sandbox-1",
+                }
+            ]
+
+        async def lock_pi_cleanup_failure(self, *_args, **_kwargs):
+            return True
+
+        async def get_run_for_user(self, run_id, uid):
+            assert uid == child.uid
+            return {child.id: child, root.id: root, historical.id: historical}.get(run_id)
+
+        async def clear_pi_cleanup_failure(self, attempt_id, **_kwargs):
+            cleared.append(attempt_id)
+            return True
+
+    stop = AsyncMock()
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", session_context)
+    monkeypatch.setattr(run_worker, "AgentRunRepository", Repo)
+    monkeypatch.setattr(run_worker, "LocalPiAdapter", lambda **_kwargs: SimpleNamespace(stop=stop))
+    assert await run_worker.reconcile_pi_cleanup_failures() == expected_cleaned
+    assert cleared == expected_cleaned
+    if not expected_cleaned:
+        stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_process_agent_run_persists_usage_from_canonical_state(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1387,6 +1454,28 @@ def test_worker_settings_publish_short_ttl_versioned_health_contract():
     assert 0 < run_worker.WorkerSettings.health_check_interval <= 10
 
 
+@pytest.mark.parametrize("value", [None, "2", "0"])
+def test_worker_settings_limit_concurrency_and_reject_zero(value):
+    """实际导入 WorkerSettings，验证配置不会退回 ARQ 的隐式并发。"""
+    env = os.environ.copy()
+    env.pop("YUXI_WORKER_MAX_JOBS", None)
+    if value is not None:
+        env["YUXI_WORKER_MAX_JOBS"] = value
+    completed = subprocess.run(
+        [sys.executable, "-c", "from yuxi.services.run_worker import WorkerSettings; print(WorkerSettings.max_jobs)"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if value == "0":
+        assert completed.returncode != 0
+        assert "YUXI_WORKER_MAX_JOBS must be positive" in completed.stderr
+    else:
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip().splitlines()[-1] == (value or "4")
+
+
 def test_worker_settings_reject_invalid_redis_dsn_instead_of_using_arq_default():
     env = os.environ.copy()
     env["REDIS_URL"] = "http://configured-redis.invalid:6379/0"
@@ -1685,6 +1774,9 @@ async def test_sandbox_run_reuses_parent_runtime_and_executes_pi_task(monkeypatc
     monkeypatch.setattr(run_worker, "get_user_skills_root_dir", lambda _uid: Path("/projection"))
     monkeypatch.setattr(run_worker, "compute_skill_dir_hash", lambda path: "d" * 64 if path.name == "report" else "")
     monkeypatch.setattr(run_worker, "build_pi_runtime_manifest", fake_build_manifest)
+    monkeypatch.setattr(
+        run_worker, "_snapshot_pi_run_context", AsyncMock(return_value=({"project_instructions": []}, None))
+    )
     monkeypatch.setattr(run_worker, "mark_run_running", fake_mark_running)
     monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
     monkeypatch.setattr(run_worker, "bind_pi_instance", AsyncMock(return_value=True))
@@ -1698,6 +1790,7 @@ async def test_sandbox_run_reuses_parent_runtime_and_executes_pi_task(monkeypatc
 
     await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, run_obj.id)
 
+    assert callable(captured["adapter"].pop("steer_check"))
     assert captured["adapter"] == {
         "uid": "user-1",
         "run_id": "run-1",
@@ -1722,6 +1815,30 @@ async def test_sandbox_run_reuses_parent_runtime_and_executes_pi_task(monkeypatc
         ("parent-run", "parent-thread"),
     }
     assert {event[2]["chunk"]["status"] for event in standard_events} == {"loading", "stream_event"}
+
+
+def test_pi_stream_projection_keeps_child_text_and_tool_snapshots_separate():
+    """同一provider工具ID在不同child中隔离，快照不会冒充完成。"""
+
+    def project(kind, child, payload):
+        """投影到父Run，保留child身份。"""
+        return run_worker._pi_stream_chunk(
+            {"job_id": child, "type": kind, "payload": payload}, run_id="parent", thread_id="thread"
+        )
+
+    text = project("message_delta", "child-a", {"content": "progress"})
+    assert text["stream_event"]["message_id"] == "pi-child-a"
+    assert text["stream_event"]["content"] == "progress"
+    tool = {"tool_call_id": "call-1", "name": "bash", "content": "first\nsecond"}
+    first = project("tool_update", "child-a", tool)["event"]["data"]
+    other = project("tool_update", "child-b", tool)["event"]["data"]
+    final = project("tool_result", "child-a", tool)["event"]["data"]
+    assert first["event"] == "tool-progress"
+    assert first["output"]["status"] == "running"
+    assert first["output"]["content"] == "first\nsecond"
+    assert first["tool_call_id"] != other["tool_call_id"]
+    assert first["tool_call_id"] == final["tool_call_id"]
+    assert final["event"] == "tool-finished"
 
 
 @pytest.mark.asyncio

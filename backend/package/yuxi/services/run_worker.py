@@ -49,6 +49,7 @@ from yuxi.services.pi_execution_service import (
     build_pi_runtime_manifest,
     execute_pi_attempt,
     resolve_pi_model_runtime,
+    snapshot_pi_context,
 )
 from yuxi.services.run_queue_service import (
     RUN_RECONCILIATION_SECONDS,
@@ -483,7 +484,9 @@ async def bind_pi_instance(run_id: str, attempt_id: int, instance_id: str, worke
         )
 
 
-async def record_pi_envelope(run_id: str, attempt_id: int, envelope: dict, worker_id: str) -> dict[str, bool]:
+async def record_pi_envelope(
+    run_id: str, attempt_id: int, envelope: dict, worker_id: str, *, steer_authorized: bool = False
+) -> dict[str, bool]:
     """持久化 PI envelope，并只在 durable commit 后返回 ACK。"""
 
     async with pg_manager.get_async_session_context() as db:
@@ -492,7 +495,29 @@ async def record_pi_envelope(run_id: str, attempt_id: int, envelope: dict, worke
             attempt_id=attempt_id,
             envelope=envelope,
             worker_id=worker_id,
+            steer_authorized=steer_authorized,
         )
+
+
+async def _pi_steer_pending(run_id: str, attempt_id: int, worker_id: str) -> bool:
+    """只读取当前PI所属根Run的原队列引导事实，不消费用户输入。"""
+    from yuxi.services.agent_request_queue_service import should_end_run_for_steer
+
+    async with pg_manager.get_async_session_context() as db:
+        repo = AgentRunRepository(db)
+        run = await repo.require_pi_attempt_owner(run_id, attempt_id=attempt_id, worker_id=worker_id)
+        root = run
+        if root.run_type == "sandbox":
+            root = await repo.get_run_for_user(str(root.created_by_run_id), str(run.uid))
+        if root is not None and root.run_type == "subagent":
+            pair = await repo.get_subagent_run_with_creator(
+                uid=str(run.uid), created_by_run_id=str(root.created_by_run_id), run_id=root.id
+            )
+            root = pair[0] if pair is not None else None
+        if root is None or root.run_type not in {"chat", "resume"} or root.runtime_scope_id != run.runtime_scope_id:
+            raise ValueError("PI 引导目标不属于当前执行树")
+        root_id = root.id
+    return await should_end_run_for_steer(root_id)
 
 
 async def record_pi_cleanup_failure(run_id: str, attempt_id: int, worker_id: str, error_message: str) -> None:
@@ -617,6 +642,23 @@ async def reconcile_pi_cleanup_failures() -> list[int]:
                 input_payload = attempt.get("input_payload") if isinstance(attempt.get("input_payload"), dict) else {}
                 runtime = input_payload.get("runtime") if isinstance(input_payload.get("runtime"), dict) else {}
                 reuse_sandbox = attempt.get("run_type") == "sandbox"
+                if reuse_sandbox:
+                    # 重建的 adapter 不持有原命令句柄；根执行树确认回收后才能清除 child orphan。
+                    owner = await repo.get_run_for_user(str(attempt["run_id"]), str(attempt["uid"]))
+                    ancestors = set()
+                    while owner is not None and owner.run_type in {"sandbox", "subagent"} and owner.created_by_run_id:
+                        if owner.id in ancestors or owner.runtime_scope_id != attempt.get("runtime_scope_id"):
+                            raise ValueError("PI cleanup 的执行树归属不一致")
+                        ancestors.add(owner.id)
+                        owner = await repo.get_run_for_user(str(owner.created_by_run_id), str(attempt["uid"]))
+                    if (
+                        owner is None
+                        or owner.run_type not in {"chat", "resume"}
+                        or owner.runtime_scope_id != attempt.get("runtime_scope_id")
+                        or owner.status not in TERMINAL_RUN_STATUSES
+                        or owner.runtime_cleanup_pending
+                    ):
+                        continue
                 adapter_kwargs = {
                     "uid": str(attempt["uid"]),
                     "run_id": str(attempt["run_id"]),
@@ -808,16 +850,30 @@ def _map_chunk_to_run_event(chunk: dict) -> tuple[str, dict]:
     return "custom", {"name": f"yuxi.{status}", "chunk": chunk}
 
 
-def _pi_tool_stream_chunk(envelope: dict, *, run_id: str, thread_id: str) -> dict | None:
-    """把 PI 内部工具轨迹映射到前端既有的通用工具事件协议。"""
+def _pi_stream_chunk(envelope: dict, *, run_id: str, thread_id: str) -> dict | None:
+    """按child Run隔离PI正文和工具，复用既有SSE协议。"""
 
     event_type = envelope.get("type")
     payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
-    tool_call_id = str(payload.get("tool_call_id") or "").strip()
-    name = str(payload.get("name") or "").strip()
-    if event_type not in {"tool_call", "tool_result"} or not tool_call_id or not name:
-        return None
     message_id = f"pi-{envelope.get('job_id') or run_id}"
+    if event_type == "message_delta":
+        return {
+            "status": "loading",
+            "run_id": run_id,
+            "thread_id": thread_id,
+            "stream_event": {
+                "type": "message_delta",
+                "message_id": message_id,
+                "content": str(payload.get("content") or ""),
+                "thread_id": thread_id,
+                "namespace": [],
+            },
+        }
+    original_id = str(payload.get("tool_call_id") or "").strip()
+    tool_call_id = f"{message_id}:{original_id}"
+    name = str(payload.get("name") or "").strip()
+    if event_type not in {"tool_call", "tool_result", "tool_update"} or not original_id or not name:
+        return None
     if event_type == "tool_call":
         return {
             "status": "loading",
@@ -847,7 +903,7 @@ def _pi_tool_stream_chunk(envelope: dict, *, run_id: str, thread_id: str) -> dic
             "namespace": [],
             "thread_id": thread_id,
             "data": {
-                "event": "tool-finished",
+                "event": "tool-progress" if event_type == "tool_update" else "tool-finished",
                 "tool_call_id": tool_call_id,
                 "output": {
                     "type": "tool",
@@ -855,7 +911,11 @@ def _pi_tool_stream_chunk(envelope: dict, *, run_id: str, thread_id: str) -> dic
                     "tool_call_id": tool_call_id,
                     "name": name,
                     "content": content,
-                    "status": "error" if payload.get("is_error") else "success",
+                    "status": "running"
+                    if event_type == "tool_update"
+                    else "error"
+                    if payload.get("is_error")
+                    else "success",
                 },
             },
         },
@@ -968,6 +1028,16 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
             return
 
 
+async def _snapshot_pi_run_context(run: AgentRun) -> tuple[dict, dict | None]:
+    """按已授权 child 身份选择历史，再从 Workdir 固化本次模型上下文。"""
+    binding = await _validate_run_workdir_binding(run)
+    async with pg_manager.get_async_session_context() as db:
+        previous = await AgentRunRepository(db).get_previous_pi_session(
+            run_id=run.id, uid=str(run.uid), project_id=binding.project_id
+        )
+    return await asyncio.to_thread(snapshot_pi_context, binding.workdir, previous)
+
+
 async def process_agent_run(ctx, run_id: str):
     """执行队列中的 AgentRun，并只从 run 列和输入消息恢复运行参数。"""
     run = await _get_run(run_id)
@@ -1001,6 +1071,7 @@ async def process_agent_run(ctx, run_id: str):
     pi_runtime: tuple[dict, str] | None = None
     pi_credentials: dict | None = None
     pi_skill_sources: dict[str, Path] = {}
+    pi_previous_session = None
     reuse_pi_sandbox = False
     runtime_payload = run.input_payload.get("runtime") if isinstance(run.input_payload, dict) else None
     pi_requested = isinstance(runtime_payload, dict) and runtime_payload.get("executor") == "pi"
@@ -1048,11 +1119,13 @@ async def process_agent_run(ctx, run_id: str):
                     if compute_skill_dir_hash(source) != raw_digests[slug]:
                         raise ValueError(f"PI sandbox runtime Skill 已变化: {slug}")
                     pi_skill_sources[slug] = source
+                pi_context, pi_previous_session = await _snapshot_pi_run_context(run)
                 pi_runtime = build_pi_runtime_manifest(
                     runner_path=PI_RUNNER_PATH,
                     skill_sources=pi_skill_sources,
                     skill_runtime_paths={slug: str(raw_paths[slug]) for slug in skill_slugs},
                     model=pi_model,
+                    context=pi_context,
                 )
                 reuse_pi_sandbox = True
             else:
@@ -1219,6 +1292,21 @@ async def process_agent_run(ctx, run_id: str):
                 "run_id": run_id,
                 "attempt_id": str(attempt.id),
             }
+            steer_observed = False
+            last_steer_check = 0.0
+
+            async def check_steer() -> bool:
+                """限频查询原队列；记录真实观测以校验final让位原因。"""
+                nonlocal steer_observed, last_steer_check
+                if steer_observed:
+                    return True
+                now = asyncio.get_running_loop().time()
+                if now - last_steer_check < 0.5:
+                    return False
+                last_steer_check = now
+                steer_observed = await _pi_steer_pending(run_id, attempt.id, worker_id)
+                return steer_observed
+
             if reuse_pi_sandbox:
                 adapter_kwargs.update(
                     runtime_scope_id=str(run.runtime_scope_id),
@@ -1226,21 +1314,27 @@ async def process_agent_run(ctx, run_id: str):
                     skill_sources=pi_skill_sources,
                     reuse_sandbox=True,
                     credentials=pi_credentials,
+                    steer_check=check_steer,
                 )
             adapter = LocalPiAdapter(
                 **adapter_kwargs,
             )
 
             async def persist_pi_result(envelope: dict) -> dict[str, bool]:
-                ack = await record_pi_envelope(run_id, attempt.id, envelope, worker_id)
+                authorization = {}
+                if envelope["type"] == "final" and envelope.get("payload", {}).get("stop_reason") == "steer":
+                    if not steer_observed:
+                        raise ValueError("PI 未观测到所属根Run的引导请求")
+                    authorization["steer_authorized"] = True
+                ack = await record_pi_envelope(run_id, attempt.id, envelope, worker_id, **authorization)
                 if ack.get("duplicate"):
                     return ack
-                if envelope["type"] in {"tool_call", "tool_result"}:
+                if envelope["type"] in {"tool_call", "tool_result", "tool_update", "message_delta"}:
                     targets = [(run_id, thread_id)]
                     if parent_event_target is not None:
                         targets.append(parent_event_target)
                     for target_run_id, target_thread_id in targets:
-                        chunk = _pi_tool_stream_chunk(
+                        chunk = _pi_stream_chunk(
                             envelope,
                             run_id=target_run_id,
                             thread_id=target_thread_id,
@@ -1271,6 +1365,8 @@ async def process_agent_run(ctx, run_id: str):
                 }
                 if reuse_pi_sandbox:
                     pi_attempt["task"] = normalized_input_message.content
+                    if pi_previous_session is not None:
+                        pi_attempt["previous_session"] = pi_previous_session
                 await execute_pi_attempt(
                     attempt=pi_attempt,
                     adapter=adapter,
@@ -1913,6 +2009,9 @@ async def _worker_shutdown(ctx):
 
 class WorkerSettings:
     functions = [process_agent_run]
+    max_jobs = int(os.getenv("YUXI_WORKER_MAX_JOBS", "4"))
+    if max_jobs < 1:
+        raise ValueError("YUXI_WORKER_MAX_JOBS must be positive")
     max_tries = 2
     retry_jobs = True
     # 单任务最长执行时间（秒），可配置：超长图谱构建/深度检索场景需调大，

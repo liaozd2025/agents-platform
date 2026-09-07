@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import uuid
 from contextlib import aclosing, suppress
 from collections.abc import Awaitable, Callable
@@ -50,6 +51,15 @@ _DOCUMENT_READ_ERROR = (
 )
 _BINARY_READ_ERROR = "read_file only supports UTF-8 text and image files. This file type is not supported."
 _EPHEMERAL_SECRET_NAME = re.compile(r"yuxi-secret-[a-f0-9]{24}\.json")
+
+
+class SandboxProcessCleanupError(RuntimeError):
+    """未能确认远端命令终止，保留执行文件供 runtime 清理。"""
+
+    def __init__(self, message: str, *, primary: BaseException | None = None):
+        """保留触发终止的取消或执行错误。"""
+        super().__init__(message)
+        self.primary = primary
 
 
 def _read_file_kind(path: str) -> str:
@@ -598,13 +608,24 @@ class ProvisionerSandboxBackend(BaseSandbox):
         *,
         timeout: int | None = None,
         max_output_bytes: int | None = None,
+        poll_input: Callable[[], Awaitable[str | None]] | None = None,
     ) -> ExecuteResponse:
         """异步执行命令，并把新增 stdout 片段实时交给调用方。"""
+
+        from agent_sandbox.core.api_error import ApiError
 
         output_limit = self._max_output_bytes if max_output_bytes is None else int(max_output_bytes)
         client = None
         session_id = ""
+        status = "running"
         output_callback_failed = False
+        capture_path = f"/home/gem/.yuxi-stream-{uuid.uuid4().hex}.log"
+        status_path = f"{capture_path}.status"
+        wrapped_command = (
+            f"umask 077; bash -c {shlex.quote(command)} > {shlex.quote(capture_path)} 2>&1; "
+            f"code=$?; printf '%s' \"$code\" > {shlex.quote(status_path)}"
+        )
+        primary_error: BaseException | None = None
         try:
             if self._closed:
                 raise RuntimeError("sandbox backend 已关闭")
@@ -614,49 +635,120 @@ class ProvisionerSandboxBackend(BaseSandbox):
                 follow_redirects=True,
             ) as http_client:
                 client = self._build_async_client(connection.sandbox_url, http_client)
-                kwargs: dict[str, Any] = {"command": command, "async_mode": True, "truncate": False}
-                if self._workdir_path:
-                    kwargs.update(exec_dir=runtime_workdir_path(self._workdir_path), strict=True)
-                if timeout is not None:
-                    kwargs.update(
-                        timeout=timeout,
-                        no_change_timeout=timeout,
-                        hard_timeout=timeout,
-                        request_options={"timeout_in_seconds": self._command_timeout_seconds},
-                    )
-                started = await client.shell.exec_command(**kwargs)
-                data = started.data
-                if data is None or not data.session_id:
-                    raise RuntimeError("sandbox 未返回命令 session_id")
-                session_id = data.session_id
-                output = ""
-                status = str(data.status or "running")
-                exit_code = data.exit_code
-
                 try:
+                    kwargs: dict[str, Any] = {
+                        "command": wrapped_command,
+                        "async_mode": False,
+                        "timeout": 0.2,
+                        "truncate": False,
+                        "request_options": {
+                            "timeout_in_seconds": self._command_timeout_seconds,
+                            "max_retries": 0,
+                        },
+                    }
+                    if self._workdir_path:
+                        kwargs.update(exec_dir=runtime_workdir_path(self._workdir_path), strict=True)
+                    if timeout is not None:
+                        kwargs.update(
+                            no_change_timeout=timeout,
+                            hard_timeout=timeout,
+                        )
+                    # 启动请求发出后先在既有预算内收拢响应，再终止；不能让 kill 跑在启动前面。
+                    startup_task = asyncio.create_task(
+                        asyncio.wait_for(client.shell.exec_command(**kwargs), timeout=self._command_timeout_seconds)
+                    )
+                    try:
+                        started = await asyncio.shield(startup_task)
+                    except asyncio.CancelledError as exc:
+                        primary_error = exc
+                        try:
+                            started = await startup_task
+                        except BaseException as startup_exc:
+                            raise SandboxProcessCleanupError("sandbox 命令启动结果未确认", primary=exc) from startup_exc
+                    except Exception as exc:
+                        raise SandboxProcessCleanupError("sandbox 命令启动结果未确认", primary=exc) from exc
+                    data = started.data
+                    if data is None or not data.session_id:
+                        raise SandboxProcessCleanupError("sandbox 未确认命令 session_id", primary=primary_error)
+                    session_id = data.session_id
+                    status = str(data.status or "running")
+                    if primary_error is not None:
+                        raise primary_error
+                    output = ""
+                    output_size = 0
+                    capture_offset = 0
+                    pending_output = bytearray()
+                    exit_code = data.exit_code
+
                     while True:
-                        snapshot = data.output or ""
-                        if not snapshot.startswith(output):
-                            raise RuntimeError("sandbox 命令输出在轮询期间发生回退")
-                        encoded = snapshot.encode("utf-8", errors="ignore")
-                        truncated = len(encoded) > output_limit
-                        if truncated:
-                            snapshot = encoded[:output_limit].decode("utf-8", errors="ignore")
-                        if len(snapshot) > len(output):
+                        terminal = status != "running"
+                        try:
+                            # file.read 会去掉末尾换行；按原始字节读取才能辨别完整 JSONL 行。
+                            async with client.file.with_raw_response.download_file(
+                                path=capture_path,
+                                request_options={
+                                    "timeout_in_seconds": self._command_timeout_seconds,
+                                    "additional_headers": {"Range": f"bytes={capture_offset}-{output_limit}"},
+                                },
+                            ) as captured:
+                                if not captured.headers.get("content-range", "").startswith(f"bytes {capture_offset}-"):
+                                    raise RuntimeError("sandbox 未按字节范围返回命令输出")
+                                async for part in captured.data:
+                                    pending_output.extend(part)
+                                    capture_offset += len(part)
+                                    if capture_offset > output_limit:
+                                        break
+                        except ApiError as exc:
+                            if exc.status_code != 416:
+                                raise
+                            content_range = (exc.headers or {}).get("content-range", "").removeprefix("bytes ")
+                            if content_range != f"*/{capture_offset}":
+                                raise RuntimeError("sandbox 命令输出在轮询期间发生回退") from exc
+                        truncated = capture_offset > output_limit
+                        available = pending_output[: max(0, output_limit - output_size)]
+                        complete_end = len(available) if terminal or truncated else available.rfind(b"\n") + 1
+                        encoded = bytes(available[:complete_end])
+                        chunk = encoded.decode("utf-8", errors="replace")
+                        if chunk:
                             try:
-                                await on_output(snapshot[len(output) :])
+                                await on_output(chunk)
                             except BaseException:
                                 output_callback_failed = True
                                 raise
-                        output = snapshot
-                        if truncated or status != "running":
-                            if truncated and status == "running":
-                                await client.shell.kill_process(id=session_id)
+                            output += chunk
+                            output_size += len(encoded)
+                            del pending_output[:complete_end]
+                        if truncated or terminal:
+                            if terminal and status == "completed":
+                                captured_status = await client.file.read_file(
+                                    file=status_path,
+                                    request_options={"timeout_in_seconds": self._command_timeout_seconds},
+                                )
+                                try:
+                                    exit_code = int(captured_status.data.content.strip())
+                                except (AttributeError, TypeError, ValueError) as exc:
+                                    raise RuntimeError("sandbox 命令退出码无效") from exc
                             return ExecuteResponse(
                                 output=output,
                                 exit_code=exit_code if status == "completed" and isinstance(exit_code, int) else 1,
                                 truncated=truncated,
                             )
+                        if poll_input is not None:
+                            control = await poll_input()
+                            if control is not None:
+                                if not re.fullmatch(r"# yuxi-pi-yield [A-Za-z0-9_-]{1,128}", control):
+                                    raise ValueError("sandbox 控制输入不是固定注释协议")
+                                written = await client.shell.write_to_process(
+                                    id=session_id,
+                                    input=control,
+                                    press_enter=True,
+                                    request_options={
+                                        "timeout_in_seconds": self._command_timeout_seconds,
+                                        "max_retries": 0,
+                                    },
+                                )
+                                if written.success is not True:
+                                    raise RuntimeError("sandbox 控制输入发送失败")
                         await asyncio.sleep(0.2)
                         viewed = await client.shell.view(
                             id=session_id,
@@ -667,12 +759,44 @@ class ProvisionerSandboxBackend(BaseSandbox):
                         data = viewed.data
                         status = str(data.status or "running")
                         exit_code = data.exit_code
-                except BaseException:
-                    with suppress(Exception):
-                        await client.shell.kill_process(id=session_id)
-                    session_id = ""
+                except BaseException as exc:
+                    primary_error = exc
                     raise
-        except asyncio.CancelledError:
+                finally:
+                    if session_id and status == "running":
+                        try:
+                            killed = await client.shell.kill_process(id=session_id)
+                            if (
+                                killed.success is not True
+                                or killed.data is None
+                                or killed.data.status
+                                not in {"completed", "terminated", "hard_timeout", "no_change_timeout"}
+                            ):
+                                raise RuntimeError("sandbox 未确认命令已终止")
+                        except Exception as exc:
+                            # 进程仍可能写入时保留捕获文件，由上层记录并收敛 runtime 清理。
+                            raise SandboxProcessCleanupError(
+                                f"sandbox 命令终止失败: {exc}", primary=primary_error
+                            ) from exc
+                    if client is not None and not isinstance(primary_error, SandboxProcessCleanupError):
+                        try:
+                            cleanup = await client.shell.exec_command(
+                                command=(f"rm -f -- {shlex.quote(capture_path)} {shlex.quote(status_path)}"),
+                                timeout=10,
+                                truncate=False,
+                                request_options={"timeout_in_seconds": self._command_timeout_seconds},
+                            )
+                            if cleanup.data is None or cleanup.data.exit_code not in {0, None}:
+                                raise RuntimeError("删除 sandbox 流式输出临时文件失败")
+                        except Exception as cleanup_exc:
+                            if primary_error is None:
+                                raise
+                            logger.error(
+                                "Sandbox stream capture cleanup failed for thread %s: %s",
+                                self._thread_id,
+                                cleanup_exc,
+                            )
+        except (asyncio.CancelledError, SandboxProcessCleanupError):
             raise
         except Exception as exc:  # noqa: BLE001
             if output_callback_failed:

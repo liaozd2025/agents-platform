@@ -113,3 +113,43 @@ def test_model_cache_save_writes_redis_json(monkeypatch: pytest.MonkeyPatch):
     payload = json.loads(redis.data[REDIS_CACHE_KEY])
     assert payload[info.spec]["base_url"] == "https://example.com/v1"
     assert payload[info.spec]["request_body_overrides"] == {"enable_thinking": True}
+
+
+def test_model_cache_roundtrips_exact_model_capabilities(monkeypatch):
+    """供应商级字段不能覆盖逐模型字段，也不能泄漏到兄弟模型。"""
+    from types import SimpleNamespace
+
+    redis = _FakeRedis()
+    _patch_redis(monkeypatch, redis)
+    provider = SimpleNamespace(
+        is_enabled=True,
+        provider_id="p",
+        api_key="test",
+        api_key_env=None,
+        provider_type="openai",
+        base_url="http://127.0.0.1",
+        headers_json={},
+        extra_json={"reasoning": True},
+        enabled_models=[
+            {
+                "id": "explicit",
+                "type": "chat",
+                "context_length": 32768,
+                "max_completion_tokens": 4096,
+                "input_modalities": ["text", "image"],
+                "reasoning": False,
+            },
+            {"id": "unknown", "type": "chat"},
+        ],
+    )
+    ModelCache().rebuild([provider])
+    cache = ModelCache()
+    actual = cache.get_model_info("p:explicit")
+    assert (actual.context_length, actual.max_completion_tokens, actual.input_modalities, actual.reasoning) == (
+        32768,
+        4096,
+        ["text", "image"],
+        False,
+    )
+    unknown = cache.get_model_info("p:unknown")
+    assert unknown.reasoning is None and unknown.input_modalities is None

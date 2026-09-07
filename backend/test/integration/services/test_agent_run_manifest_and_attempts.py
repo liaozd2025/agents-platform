@@ -490,6 +490,185 @@ async def test_pi_attempt_freezes_route_and_runtime_manifest_at_claim(fact_datab
         await _cleanup_runs(session_factory, [thread_id])
 
 
+async def test_pi_session_selection_is_scoped_and_usage_is_committed_with_final(fact_database):
+    """真实 PostgreSQL 回读同 child 已 ACK session 和当前 Run 用量。"""
+    _, sessions = fact_database
+    parent_id, parent_thread = await _create_run(sessions)
+    prior_id, thread = str(uuid.uuid4()), f"pytest-pi-context-{uuid.uuid4()}"
+    sibling_thread = f"pytest-pi-unrelated-{uuid.uuid4()}"
+    other_id, other_thread = await _create_run(sessions)
+    now = utc_now_naive()
+    owner = "pi-context-owner"
+    manifest = {"model": {"spec": "provider:model", "model_id": "model"}}
+    usage = {
+        "schema_version": 2,
+        "model_call_count": 1,
+        "usage_reported_call_count": 1,
+        "usage_unavailable_call_count": 0,
+        "complete": True,
+        "total": {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+        "models": {
+            "provider:model": {
+                "model": {"model_id": "model", "provider_id": "provider"},
+                "model_call_count": 1,
+                "usage_reported_call_count": 1,
+                "usage": {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+            }
+        },
+    }
+    try:
+        async with sessions() as db:
+            parent = await db.get(AgentRun, parent_id)
+            parent_conversation = await db.get(Conversation, parent.conversation_id)
+            conversation = Conversation(
+                thread_id=thread,
+                uid=parent.uid,
+                project_id=parent_conversation.project_id,
+                agent_id=parent.agent_slug,
+                status="subagent",
+            )
+            db.add(conversation)
+            await db.flush()
+            input_message = Message(conversation_id=conversation.id, role="user", content="continue PI")
+            db.add(input_message)
+            await db.flush()
+            prior = AgentRun(
+                id=prior_id,
+                uid=parent.uid,
+                conversation_id=conversation.id,
+                conversation_thread_id=thread,
+                runtime_scope_id=parent.runtime_scope_id,
+                agent_slug=parent.agent_slug,
+                run_type="sandbox",
+                status="pending",
+                created_by_run_id=parent_id,
+                input_message_id=input_message.id,
+                request_id=f"prior-{uuid.uuid4()}",
+                input_payload={},
+            )
+            db.add(prior)
+            await db.flush()
+            uid, project_id, conversation_id = prior.uid, conversation.project_id, conversation.id
+            repo = AgentRunRepository(db)
+            await repo.mark_running(
+                prior_id,
+                worker_id=owner,
+                lease_seconds=60,
+                now=now,
+                attempt_metadata={
+                    "adapter": "local",
+                    "route_reason": "local",
+                    "route_snapshot": {},
+                    "runtime_manifest": manifest,
+                    "runtime_manifest_digest": "a" * 64,
+                },
+            )
+            attempt = await repo.get_current_run_attempt(prior_id, worker_id=owner)
+            subdir = f"pi-runs/{hashlib.sha256(f'{prior_id}:{attempt.id}'.encode()).hexdigest()[:24]}"
+            payload = {
+                "text": "done",
+                "output_subdir": subdir,
+                "session": {"path": "pi-session/prior.jsonl", "sha256": "b" * 64},
+                "token_usage": usage,
+            }
+            envelope = {
+                "job_id": prior_id,
+                "attempt_id": str(attempt.id),
+                "adapter": "local",
+                "event_id": "final",
+                "sequence": 0,
+                "type": "final",
+                "runtime_manifest_digest": "a" * 64,
+                "payload": payload,
+                "payload_digest": compute_manifest_fingerprint(payload),
+            }
+            await repo.record_pi_envelope(prior_id, attempt_id=attempt.id, envelope=envelope, worker_id=owner, now=now)
+            current_id = str(uuid.uuid4())
+            db.add(
+                AgentRun(
+                    id=current_id,
+                    conversation_id=conversation_id,
+                    conversation_thread_id=thread,
+                    runtime_scope_id=parent.runtime_scope_id,
+                    agent_slug=prior.agent_slug,
+                    uid=uid,
+                    request_id=f"next-{uuid.uuid4()}",
+                    input_message_id=prior.input_message_id,
+                    input_payload={},
+                    status="pending",
+                    run_type="sandbox",
+                    created_by_run_id=parent_id,
+                    created_at=now + timedelta(seconds=1),
+                )
+            )
+            await db.commit()
+        async with sessions() as db:
+            repo = AgentRunRepository(db)
+            pair = await repo.get_latest_pi_run_with_creator(thread, uid)
+            assert pair[0].id == current_id and pair[1].id == parent_id
+            current = await db.get(AgentRun, current_id)
+            current.created_by_run_id = other_id
+            await db.flush()
+            assert await repo.get_latest_pi_run_with_creator(thread, uid) is None
+            current.created_by_run_id = parent_id
+            await db.flush()
+            source = await repo.get_previous_pi_session(run_id=current_id, uid=uid, project_id=project_id)
+            assert source == {
+                "run_id": prior_id,
+                "attempt_id": attempt.id,
+                "output_subdir": subdir,
+                "ref": payload["session"],
+            }
+            persisted = await db.get(AgentRun, prior_id)
+            assert persisted.token_usage == usage and persisted.status == "completed"
+            assert (await db.get(AgentRunAttempt, attempt.id)).final_acked_at == now
+            for wrong_uid, wrong_project in (("another-user", project_id), (uid, str(uuid.uuid4()))):
+                with pytest.raises(ValueError, match="不匹配"):
+                    await repo.get_previous_pi_session(run_id=current_id, uid=wrong_uid, project_id=wrong_project)
+            other = await db.get(AgentRun, other_id)
+            other_conv = await db.get(Conversation, other.conversation_id)
+            other_conv.status = "subagent"
+            other.status = "failed"
+            other.run_type = "sandbox"
+            await db.flush()
+            assert (
+                await repo.get_previous_pi_session(run_id=other_id, uid=other.uid, project_id=other_conv.project_id)
+                is None
+            )
+            sibling = Conversation(
+                thread_id=sibling_thread, uid=uid, project_id=project_id, agent_id=parent.agent_slug, status="subagent"
+            )
+            db.add(sibling)
+            await db.flush()
+            sibling_input = Message(conversation_id=sibling.id, role="user", content="independent PI")
+            db.add(sibling_input)
+            await db.flush()
+            sibling_id = str(uuid.uuid4())
+            db.add(
+                AgentRun(
+                    id=sibling_id,
+                    uid=uid,
+                    conversation_id=sibling.id,
+                    conversation_thread_id=sibling_thread,
+                    runtime_scope_id=parent.runtime_scope_id,
+                    agent_slug=parent.agent_slug,
+                    run_type="sandbox",
+                    status="pending",
+                    created_by_run_id=parent_id,
+                    input_message_id=sibling_input.id,
+                    request_id=f"sibling-{uuid.uuid4()}",
+                    input_payload={},
+                )
+            )
+            await db.flush()
+            assert await repo.get_previous_pi_session(run_id=sibling_id, uid=uid, project_id=project_id) is None
+            (await db.get(AgentRunAttempt, attempt.id)).final_acked_at = None
+            await db.flush()
+            assert await repo.get_previous_pi_session(run_id=current_id, uid=uid, project_id=project_id) is None
+    finally:
+        await _cleanup_runs(sessions, [thread, parent_thread, other_thread, sibling_thread])
+
+
 async def test_pi_envelope_replay_is_idempotent_and_final_ack_is_durable(fact_database):
     """final 重放只生成一个 Message，ACK 后 PostgreSQL 结果仍可回读。"""
     _, session_factory = fact_database
@@ -612,7 +791,8 @@ async def test_pi_envelope_replay_is_idempotent_and_final_ack_is_durable(fact_da
         await _cleanup_runs(session_factory, [thread_id])
 
 
-async def test_stale_pi_attempt_cannot_write_event(fact_database):
+@pytest.mark.parametrize("event_type", ["log", "message_delta", "tool_update"])
+async def test_stale_pi_attempt_cannot_write_event(fact_database, event_type):
     """已释放的旧 attempt 不能向当前 Run 增加结果。"""
     _, session_factory = fact_database
     now = utc_now_naive()
@@ -655,7 +835,7 @@ async def test_stale_pi_attempt_cannot_write_event(fact_database):
             "adapter": "local",
             "event_id": "stale-log",
             "sequence": 0,
-            "type": "log",
+            "type": event_type,
             "runtime_manifest_digest": "a" * 64,
             "payload": {"message": "late"},
             "payload_digest": compute_manifest_fingerprint({"message": "late"}),
@@ -671,5 +851,68 @@ async def test_stale_pi_attempt_cannot_write_event(fact_database):
                     now=now + timedelta(seconds=3),
                 )
             await db.rollback()
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])
+
+
+async def test_pi_transient_events_validate_lease_without_rewriting_history(fact_database):
+    """高频事件有有效attempt/lease边界，但不重写持久事件数组。"""
+    _, session_factory = fact_database
+    run_id, thread_id = await _create_run(session_factory)
+    now = utc_now_naive()
+    owner = "pi-transient-owner"
+    try:
+        async with session_factory() as db:
+            await AgentRunRepository(db).mark_running(
+                run_id,
+                worker_id=owner,
+                lease_seconds=60,
+                now=now,
+                attempt_metadata={
+                    "adapter": "local",
+                    "route_reason": "test",
+                    "route_snapshot": {},
+                    "runtime_manifest": {"manifest_version": 1},
+                    "runtime_manifest_digest": "a" * 64,
+                },
+            )
+            await db.commit()
+        attempt = (await _persisted_attempts(session_factory, run_id))[0]
+        envelope = {
+            "job_id": run_id,
+            "attempt_id": str(attempt.id),
+            "adapter": "local",
+            "event_id": "delta-1",
+            "sequence": 1,
+            "type": "message_delta",
+            "runtime_manifest_digest": "a" * 64,
+            "payload": {"content": "progress"},
+            "payload_digest": compute_manifest_fingerprint({"content": "progress"}),
+        }
+        async with session_factory() as db:
+            repo = AgentRunRepository(db)
+            for kind in ("message_delta", "tool_update"):
+                envelope["type"] = kind
+                assert await repo.record_pi_envelope(
+                    run_id, attempt_id=attempt.id, envelope=envelope, worker_id=owner
+                ) == {"ack": True, "duplicate": False}
+            assert (await repo.require_pi_attempt_owner(run_id, attempt_id=attempt.id, worker_id=owner)).id == run_id
+            await db.commit()
+        assert ((await _persisted_attempts(session_factory, run_id))[0].result_events or []) == []
+        async with session_factory() as db:
+            with pytest.raises(ValueError, match="lease owner"):
+                await AgentRunRepository(db).record_pi_envelope(
+                    run_id, attempt_id=attempt.id, envelope=envelope, worker_id=owner, now=now + timedelta(seconds=61)
+                )
+            await db.rollback()
+        envelope.update(type="final", payload={"text": "forged yield", "stop_reason": "steer"})
+        envelope["payload_digest"] = compute_manifest_fingerprint(envelope["payload"])
+        async with session_factory() as db:
+            with pytest.raises(ValueError, match="引导事实"):
+                await AgentRunRepository(db).record_pi_envelope(
+                    run_id, attempt_id=attempt.id, envelope=envelope, worker_id=owner
+                )
+            await db.rollback()
+        assert ((await _persisted_attempts(session_factory, run_id))[0].result_events or []) == []
     finally:
         await _cleanup_runs(session_factory, [thread_id])

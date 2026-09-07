@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { constants } from "node:fs";
 import {
   mkdir,
   open,
@@ -10,6 +11,8 @@ import {
 } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
+import { Type } from "typebox";
 
 import {
   createAgentSession,
@@ -32,10 +35,10 @@ const SKILL_VERSION = "1.0.0";
 const GOLDEN = "YUXI_PI_GOLDEN_V1";
 const PATCH =
   "--- /dev/null\n+++ b/pi-golden.txt\n@@ -0,0 +1 @@\n+YUXI_PI_GOLDEN_V1\n\\ No newline at end of file\n";
-const MAX_OUTPUT_ENTRIES = 1000;
 const MAX_OUTPUT_FILES = 200;
-const MAX_OUTPUT_FILE_BYTES = 8 * 1024 * 1024;
-const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+const MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
+const MAX_PATCH_FILE_BYTES = 256 * 1024;
 const MAX_PATCH_BYTES = 16 * 1024 * 1024;
 const MAX_EVENT_BYTES = 16 * 1024;
 const MAX_TRUNCATION_CONTINUATIONS = 3;
@@ -59,7 +62,12 @@ function buildTaskPrompt(task, projectRoot, outputRoot) {
     `\n\nUser task:\n${task}\n\nExecution requirement: ` +
     `Put every generated deliverable under ${outputRoot}. ` +
     "This assigned directory overrides any conflicting output path in the user task. " +
-    "Do not put generated deliverables elsewhere."
+    "Do not put generated deliverables elsewhere. " +
+    "After creating a deliverable, call submit_artifact with its path relative to this assigned directory. " +
+    "Only explicitly submitted files are delivered; do not submit dependencies, caches or temporary files. " +
+    "Submit again after editing a submitted file. Tasks without deliverable files need not submit anything. " +
+    "Limits: 200 files, 64 MiB per file, 256 MiB total. Project edits remain in the Project workspace; " +
+    "the delivery patch describes added deliverable files only, not the Project source diff."
   );
 }
 
@@ -134,41 +142,8 @@ async function inspectRuntime() {
   };
 }
 
-async function collectOutputFiles(root) {
-  const files = [];
-  let entries = 0;
-  async function walk(path) {
-    for (const entry of await readdir(path, { withFileTypes: true })) {
-      if (
-        [
-          ".pi-agent",
-          "pi-session",
-          ".pi-artifacts.json",
-          ".pi-output.patch",
-        ].includes(entry.name)
-      )
-        continue;
-      if (++entries > MAX_OUTPUT_ENTRIES)
-        throw new Error("PI output contains too many entries");
-      const child = resolve(path, entry.name);
-      if (entry.isDirectory()) await walk(child);
-      else if (entry.isFile()) {
-        if (files.length >= MAX_OUTPUT_FILES)
-          throw new Error("PI output contains too many files");
-        files.push(child);
-      } else {
-        throw new Error("PI output contains an unsupported entry");
-      }
-    }
-  }
-  await walk(root);
-  return files.sort();
-}
-
-function newFilePatch(root, path, content) {
-  const relativePath = relative(root, path).replaceAll("\\", "/");
-  if (/[\r\n]/.test(relativePath))
-    throw new Error("PI output path contains a line break");
+function newFilePatch(relativePath, content) {
+  if (content.includes(0)) return `Binary file b/${relativePath} added\n`;
   if (content.length === 0) {
     return `diff --git a/${relativePath} b/${relativePath}\nnew file mode 100644\nindex 0000000..e69de29\n`;
   }
@@ -188,66 +163,168 @@ function newFilePatch(root, path, content) {
   return `--- /dev/null\n+++ b/${relativePath}\n@@ -0,0 +1,${lines.length} @@\n${lines.map((line) => `+${line}`).join("\n")}\n${noNewlineMarker}`;
 }
 
-async function readOutputFile(path) {
-  const handle = await open(path, "r");
+/** Linux 沙箱逐级固定目录 fd，避免中间目录符号链接和检查后替换。 */
+async function openOutputFile(root, path, flags = constants.O_RDONLY) {
+  const parts = path.split("/");
+  if (
+    !path ||
+    Buffer.byteLength(path) > 1024 ||
+    /[\\\x00-\x1f\x7f]/.test(path) ||
+    parts.some((part) => !part || part === "." || part === "..")
+  )
+    throw new Error("PI output path must be a safe relative path");
+  let directory = await open("/", constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    for (const part of [
+      ...resolve(root).split("/").filter(Boolean),
+      ...parts.slice(0, -1),
+    ]) {
+      const next = await open(
+        `/proc/self/fd/${directory.fd}/${part}`,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      await directory.close();
+      directory = next;
+    }
+    return await open(
+      `/proc/self/fd/${directory.fd}/${parts.at(-1)}`,
+      flags | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      0o600,
+    );
+  } finally {
+    await directory.close();
+  }
+}
+
+/** 流式摘要仅保留小文本补丁所需字节，大文件不整块加载。 */
+async function inspectOutputFile(root, path) {
+  const handle = await openOutputFile(root, path);
   try {
     const before = await handle.stat();
-    if (!before.isFile() || before.size > MAX_OUTPUT_FILE_BYTES)
-      throw new Error("PI output file exceeds size limit");
-    const content = Buffer.alloc(before.size);
-    let offset = 0;
-    while (offset < content.length) {
-      const { bytesRead } = await handle.read(
-        content,
-        offset,
-        content.length - offset,
-        offset,
-      );
+    if (!before.isFile()) throw new Error("PI output must be a regular file");
+    if (before.size > MAX_OUTPUT_FILE_BYTES)
+      throw new Error("PI output file exceeds 64 MiB size limit");
+    const hash = createHash("sha256");
+    const buffer = Buffer.alloc(64 * 1024);
+    const smallContent = [];
+    let size = 0;
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
       if (!bytesRead) break;
-      offset += bytesRead;
+      size += bytesRead;
+      if (size > MAX_OUTPUT_FILE_BYTES)
+        throw new Error("PI output file exceeds 64 MiB size limit");
+      hash.update(buffer.subarray(0, bytesRead));
+      if (before.size <= MAX_PATCH_FILE_BYTES && size <= MAX_PATCH_FILE_BYTES)
+        smallContent.push(Buffer.from(buffer.subarray(0, bytesRead)));
     }
     const after = await handle.stat();
     if (
-      offset !== before.size ||
+      size !== before.size ||
       after.size !== before.size ||
-      after.mtimeMs !== before.mtimeMs
+      after.mtimeMs !== before.mtimeMs ||
+      after.ctimeMs !== before.ctimeMs
     ) {
       throw new Error("PI output changed while collecting results");
     }
-    return content;
+    return {
+      path,
+      sha256: hash.digest("hex"),
+      size,
+      content:
+        size <= MAX_PATCH_FILE_BYTES ? Buffer.concat(smallContent) : null,
+    };
   } finally {
     await handle.close();
   }
 }
 
-async function createOutputRefs(root) {
-  const files = await collectOutputFiles(root);
+/** 登记当前 attempt 的明确交付物，历史会话工具消息不重放登记。 */
+function createArtifactTool(root, artifacts) {
+  return {
+    name: "submit_artifact",
+    label: "交付文件",
+    description:
+      "登记当前交付目录内的普通文件。path 是相对路径；修改后须重新登记。",
+    parameters: Type.Object({ path: Type.String() }),
+    executionMode: "sequential",
+    async execute(_id, { path }) {
+      if (
+        [
+          ".pi-agent",
+          "pi-session",
+          ".pi-artifacts.json",
+          ".pi-output.patch",
+        ].includes(path.split("/")[0])
+      )
+        throw new Error("PI internal files cannot be submitted");
+      if (!artifacts.has(path) && artifacts.size >= MAX_OUTPUT_FILES)
+        throw new Error("PI output exceeds 200 submitted files");
+      const { content: _content, ...item } = await inspectOutputFile(
+        root,
+        path,
+      );
+      const total =
+        [...artifacts.values()].reduce((sum, file) => sum + file.size, 0) -
+        (artifacts.get(path)?.size || 0) +
+        item.size;
+      if (total > MAX_OUTPUT_BYTES)
+        throw new Error("PI output exceeds 256 MiB total size limit");
+      artifacts.set(path, item);
+      return {
+        content: [
+          { type: "text", text: `已登记 ${path} (${item.size} bytes)` },
+        ],
+        details: item,
+      };
+    },
+  };
+}
+
+async function createOutputRefs(root, artifacts) {
   const items = [];
   const patches = [];
   let outputBytes = 0;
   let patchBytes = 0;
-  for (const path of files) {
-    const content = await readOutputFile(path);
-    outputBytes += content.length;
+  for (const [path, submitted] of [...artifacts].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    const { content, ...item } = await inspectOutputFile(root, path);
+    if (item.sha256 !== submitted.sha256 || item.size !== submitted.size)
+      throw new Error(`PI submitted artifact changed; submit again: ${path}`);
+    outputBytes += item.size;
     if (outputBytes > MAX_OUTPUT_BYTES)
       throw new Error("PI output exceeds total size limit");
-    items.push({
-      path: relative(root, path).replaceAll("\\", "/"),
-      sha256: sha256(content),
-      size: content.length,
-    });
-    const filePatch = newFilePatch(root, path, content);
-    patchBytes += Buffer.byteLength(filePatch);
+    items.push(item);
+    const summary = `Deliverable b/${path} added (${item.size} bytes, sha256 ${item.sha256}); content omitted from delivery patch\n`;
+    let filePatch = content === null ? summary : newFilePatch(path, content);
+    if (patchBytes + Buffer.byteLength(filePatch) + 1 > MAX_PATCH_BYTES)
+      filePatch = summary;
+    patchBytes += Buffer.byteLength(filePatch) + 1;
     if (patchBytes > MAX_PATCH_BYTES)
       throw new Error("PI output patch exceeds size limit");
     patches.push(filePatch);
   }
-  const artifactPath = resolve(root, ".pi-artifacts.json");
-  const patchPath = resolve(root, ".pi-output.patch");
   const artifact = `${JSON.stringify({ files: items }, null, 2)}\n`;
   const patch = patches.join("\n");
-  await writeFile(artifactPath, artifact, "utf8");
-  await writeFile(patchPath, patch, "utf8");
+  for (const [path, content] of [
+    [".pi-artifacts.json", artifact],
+    [".pi-output.patch", patch],
+  ]) {
+    const handle = await openOutputFile(
+      root,
+      path,
+      constants.O_WRONLY | constants.O_CREAT,
+    );
+    try {
+      if (!(await handle.stat()).isFile())
+        throw new Error("PI metadata must be a regular file");
+      await handle.truncate(0);
+      await handle.writeFile(content, "utf8");
+    } finally {
+      await handle.close();
+    }
+  }
   return {
     artifact: {
       path: ".pi-artifacts.json",
@@ -258,23 +335,44 @@ async function createOutputRefs(root) {
   };
 }
 
-async function createResources(root, manifest) {
+async function createResources(root, manifest, outputRoot) {
   const skillPaths = (manifest?.skill_bundle?.items || []).map(
     (item) => item.path,
   );
   const settingsManager = SettingsManager.inMemory(
-    { retry: { enabled: false } },
+    {
+      retry: { enabled: false },
+      images: { blockImages: !manifest?.model?.input?.includes("image") },
+    },
     { projectTrusted: false },
   );
   const resourceLoader = new DefaultResourceLoader({
     cwd: root,
-    agentDir: resolve(root, ".pi-agent"),
+    agentDir: resolve(outputRoot, ".pi-agent"),
     settingsManager,
     additionalSkillPaths: skillPaths,
+    // SDK 的 noSkills 保留 additionalSkillPaths；空 prompt 显式关闭 SYSTEM 文件发现。
+    noSkills: true,
+    systemPrompt: "",
+    appendSystemPrompt: [],
     noExtensions: true,
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
+    agentsFilesOverride: () => ({
+      agentsFiles: (manifest?.context?.project_instructions || []).map(
+        (item) => {
+          if (
+            item.path !== "AGENTS.md" ||
+            typeof item.content !== "string" ||
+            Buffer.byteLength(item.content) > 64 * 1024 ||
+            sha256(item.content) !== item.sha256
+          )
+            throw new Error("PI Project instructions snapshot is invalid");
+          return { path: resolve(root, item.path), content: item.content };
+        },
+      ),
+    }),
   });
   await resourceLoader.reload();
   const skills = resourceLoader.getSkills();
@@ -313,14 +411,41 @@ function boundedEventValue(value) {
 }
 
 function subscribeToolEvents(session, emitEvent) {
-  return session.subscribe((event) => {
+  let text = "";
+  const snapshots = new Map();
+  const flush = () => {
+    while (text) {
+      const content = text.slice(0, MAX_EVENT_BYTES / 4);
+      text = text.slice(content.length);
+      emitEvent("message_delta", { content });
+    }
+    for (const value of snapshots.values()) emitEvent("tool_update", value);
+    snapshots.clear();
+  };
+  const timer = setInterval(flush, 250);
+  timer.unref();
+  const unsubscribe = session.subscribe((event) => {
+    if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+      text += event.assistantMessageEvent.delta;
+      if (text.length >= MAX_EVENT_BYTES / 4) flush();
+    } else if (event.type === "message_end") {
+      flush();
+    } else if (event.type === "tool_execution_update") {
+      snapshots.set(event.toolCallId, {
+        tool_call_id: event.toolCallId,
+        name: event.toolName,
+        content: boundedEventValue(event.partialResult),
+      });
+    }
     if (event.type === "tool_execution_start") {
+      flush();
       emitEvent("tool_call", {
         tool_call_id: event.toolCallId,
         name: event.toolName,
         args: boundedEventValue(event.args),
       });
     } else if (event.type === "tool_execution_end") {
+      snapshots.delete(event.toolCallId);
       emitEvent("tool_result", {
         tool_call_id: event.toolCallId,
         name: event.toolName,
@@ -329,6 +454,42 @@ function subscribeToolEvents(session, emitEvent) {
       });
     }
   });
+  return {
+    flush,
+    close() {
+      clearInterval(timer);
+      unsubscribe();
+    },
+  };
+}
+
+/** 只接收固定注释控制；真正到达完整工具批次边界才记录让位。 */
+function installYieldControl(session, job, emitEvent) {
+  let requested = false;
+  let didYield = false;
+  const previous = session.agent.shouldStopAfterTurn;
+  const reader = createInterface({ input: process.stdin, terminal: false });
+  reader.on("line", (line) => {
+    if (!requested && line === `# yuxi-pi-yield ${job.attempt_id}`) {
+      requested = true;
+      emitEvent("control_ack", { command: "yield", attempt_id: String(job.attempt_id) });
+    }
+  });
+  session.agent.shouldStopAfterTurn = async (...args) => {
+    if (requested) {
+      didYield = true;
+      return true;
+    }
+    return Boolean(await previous?.(...args));
+  };
+  emitEvent("ready", { control: "stdin_comment_v1", attempt_id: String(job.attempt_id) });
+  return {
+    get didYield() { return didYield; },
+    close() {
+      reader.close();
+      session.agent.shouldStopAfterTurn = previous;
+    },
+  };
 }
 
 function assistantText(message) {
@@ -338,7 +499,7 @@ function assistantText(message) {
     .join("");
 }
 
-async function promptUntilComplete(session, prompt) {
+async function promptUntilComplete(session, prompt, didYield = () => false) {
   const parts = [];
   let lastAssistant;
   const unsubscribe = session.subscribe((event) => {
@@ -353,6 +514,7 @@ async function promptUntilComplete(session, prompt) {
           ? prompt
           : `${CONTINUE_TRUNCATED_RESPONSE}\n\nPartial response so far:\n${parts.join("")}`;
       await session.prompt(continuationPrompt);
+      if (didYield()) return parts.join("").trim();
       if (!lastAssistant)
         throw new Error("PI completed without a final assistant message");
       parts.push(assistantText(lastAssistant));
@@ -418,6 +580,7 @@ async function runGolden(job, outputRoot) {
   const { settingsManager, resourceLoader } = await createResources(
     outputRoot,
     job.manifest,
+    outputRoot,
   );
   const { session } = await createAgentSession({
     cwd: outputRoot,
@@ -430,7 +593,7 @@ async function runGolden(job, outputRoot) {
   });
   let sequence = 0;
   const emitEvent = (type, value) => emit(type, sequence++, value, job);
-  const unsubscribe = subscribeToolEvents(session, emitEvent);
+  const stream = subscribeToolEvents(session, emitEvent);
   try {
     emitEvent("log", { message: "pi_started" });
     const task =
@@ -441,6 +604,7 @@ async function runGolden(job, outputRoot) {
       session,
       buildTaskPrompt(task, process.cwd(), outputRoot),
     );
+    stream.flush();
     const artifact = await readFile(outputPath);
     if (
       artifact.toString("utf8") !== GOLDEN ||
@@ -473,9 +637,109 @@ async function runGolden(job, outputRoot) {
       },
     );
   } finally {
-    unsubscribe();
+    stream.close();
     session.dispose();
   }
+}
+
+/** 只从已验证的字节副本 fork，原 session 路径永不打开写入。 */
+async function createTaskSessionManager(job, projectRoot, sessionDir) {
+  const source = job.manifest?.context?.session_source;
+  const previous = job.previous_session;
+  if (!source && !previous)
+    return SessionManager.create(projectRoot, sessionDir);
+  if (
+    !source ||
+    typeof previous?.content !== "string" ||
+    Buffer.byteLength(previous.content) > 16 * 1024 * 1024 ||
+    previous.sha256 !== source.ref?.sha256 ||
+    sha256(previous.content) !== previous.sha256
+  )
+    throw new Error("PI previous session snapshot is invalid");
+  const path = `/home/gem/yuxi-session-${randomBytes(12).toString("hex")}.jsonl`;
+  const file = await open(
+    path,
+    constants.O_RDWR |
+      constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    // 先 unlink 再写入；fork 的同步读取只依赖当前进程 fd，不暴露可替换的来源路径。
+    await unlink(path);
+    await file.writeFile(previous.content, "utf8");
+    return SessionManager.forkFrom(
+      `/proc/self/fd/${file.fd}`,
+      projectRoot,
+      sessionDir,
+    );
+  } finally {
+    await file.close();
+  }
+}
+
+/** 全 session 差额归属当前 Run；SDK 全零缺省 usage 保守标为未知。 */
+function taskTokenUsage(session, manager, before, firstEntry, model) {
+  const after = session.getSessionStats().tokens;
+  const delta = Object.fromEntries(
+    Object.keys(before).map((key) => [key, after[key] - before[key]]),
+  );
+  if (
+    Object.values(delta).some(
+      (value) => !Number.isSafeInteger(value) || value < 0,
+    )
+  )
+    throw new Error("PI token usage delta is invalid");
+  const usages = manager
+    .getEntries()
+    .slice(firstEntry)
+    .flatMap((entry) => {
+      if (entry.type === "message" && entry.message?.role === "assistant")
+        return [entry.message.usage];
+      if (["compaction", "branch_summary"].includes(entry.type))
+        return [entry.usage];
+      return [];
+    });
+  const reported = usages.filter((usage) =>
+    ["input", "output", "cacheRead", "cacheWrite"].some(
+      (key) => Number.isFinite(usage?.[key]) && usage[key] > 0,
+    ),
+  ).length;
+  const total = {
+    input_tokens: delta.input + delta.cacheRead + delta.cacheWrite,
+    output_tokens: delta.output,
+    total_tokens: delta.total,
+  };
+  const spec = model.spec || `yuxi:${model.model_id}`;
+  return {
+    schema_version: 2,
+    model_call_count: usages.length,
+    usage_reported_call_count: reported,
+    usage_unavailable_call_count: usages.length - reported,
+    complete: usages.length > 0 && reported === usages.length,
+    models: {
+      [spec]: {
+        model: {
+          model_id: model.model_id,
+          provider_id: spec.split(":")[0],
+          identity_source: "configured_spec",
+        },
+        model_call_count: usages.length,
+        usage_reported_call_count: reported,
+        usage: reported
+          ? {
+              ...total,
+              input_token_details: {
+                cache_read: delta.cacheRead,
+                cache_creation: delta.cacheWrite,
+              },
+            }
+          : {},
+      },
+    },
+    total,
+  };
 }
 
 async function runTask(job, outputRoot) {
@@ -536,8 +800,8 @@ async function runTask(job, outputRoot) {
         id: model.model_id,
         name: model.display_name || model.model_id,
         api: model.api,
-        reasoning: false,
-        input: ["text"],
+        reasoning: model.reasoning === true,
+        input: model.input || ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: model.context_window,
         maxTokens: model.max_tokens,
@@ -547,34 +811,50 @@ async function runTask(job, outputRoot) {
   });
   const piModel = modelRuntime.getModel("yuxi", model.model_id);
   if (!piModel) throw new Error("PI model registration failed");
+  const projectRoot = process.cwd();
+  const artifacts = new Map();
   const { settingsManager, resourceLoader } = await createResources(
-    outputRoot,
+    projectRoot,
     job.manifest,
+    outputRoot,
+  );
+  const sessionManager = await createTaskSessionManager(
+    job,
+    projectRoot,
+    sessionDir,
   );
   const { session } = await createAgentSession({
-    cwd: outputRoot,
+    cwd: projectRoot,
     modelRuntime,
     model: piModel,
     tools: job.manifest.policy.tools,
+    customTools: [createArtifactTool(outputRoot, artifacts)],
     resourceLoader,
     settingsManager,
-    sessionManager: SessionManager.create(outputRoot, sessionDir),
+    sessionManager,
   });
+  const beforeTokens = session.getSessionStats().tokens;
+  const firstEntry = sessionManager.getEntries().length;
   let sequence = 0;
   const emitEvent = (type, value) => emit(type, sequence++, value, job);
-  const unsubscribe = subscribeToolEvents(session, emitEvent);
+  const stream = subscribeToolEvents(session, emitEvent);
+  const control = installYieldControl(session, job, emitEvent);
   try {
     emitEvent("log", { message: "pi_started", model: model.model_id });
-    const text = await promptUntilComplete(
+    let text = await promptUntilComplete(
       session,
       buildTaskPrompt(job.task, process.cwd(), outputRoot),
+      () => control.didYield,
     );
+    control.close();
+    stream.flush();
+    if (control.didYield) text = "已完成当前工具批次，已让位给待处理的引导请求。";
     if (!text)
       throw new Error("PI completed without a final assistant message");
     const sessionPath = session.sessionFile;
     if (!sessionPath || !(await stat(sessionPath)).isFile())
       throw new Error("PI session was not persisted");
-    const refs = await createOutputRefs(outputRoot);
+    const refs = await createOutputRefs(outputRoot, artifacts);
     const sessionRef = {
       path: relative(outputRoot, sessionPath).replaceAll("\\", "/"),
       sha256: sha256(await readFile(sessionPath)),
@@ -582,18 +862,24 @@ async function runTask(job, outputRoot) {
     emitEvent("artifact", refs.artifact);
     emitEvent("patch", refs.patch);
     emitEvent("session", sessionRef);
-    emitEvent(
-      "final",
-      {
+    emitEvent("final", {
         text,
-        output_subdir: job.output_subdir,
-        artifact: refs.artifact,
-        patch: refs.patch,
-        session: sessionRef,
-      },
-    );
+        ...(control.didYield ? { stop_reason: "steer" } : {}),
+      output_subdir: job.output_subdir,
+      artifact: refs.artifact,
+      patch: refs.patch,
+      session: sessionRef,
+      token_usage: taskTokenUsage(
+        session,
+        sessionManager,
+        beforeTokens,
+        firstEntry,
+        model,
+      ),
+    });
   } finally {
-    unsubscribe();
+    control.close();
+    stream.close();
     session.dispose();
   }
 }

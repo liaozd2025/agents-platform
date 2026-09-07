@@ -1,8 +1,14 @@
 
-.PHONY: up up-lite down logs lint format seed reset test verify-trust audit-dependencies audit-licenses
+.PHONY: up up-lite down logs lint format seed reset test verify-trust audit-dependencies audit-licenses build-pi-sandbox
+.DEFAULT_GOAL := up
 
 PYTEST_ARGS ?=
 BACKEND_PYTHON ?= $(shell cat backend/.python-version)
+COMPOSE ?= docker compose
+
+build-pi-sandbox:
+	$(COMPOSE) build pi-sandbox-image
+	$(COMPOSE) run --rm --no-deps pi-sandbox-image
 
 up:
 	@if [ ! -f .env ]; then \

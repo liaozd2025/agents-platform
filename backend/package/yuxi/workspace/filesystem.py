@@ -147,6 +147,28 @@ class Workspace:
                 chunks.append(chunk)
             return b"".join(chunks)
 
+    def iter_authorized_file_chunks(self, path: str, max_bytes: int):
+        """通过 no-follow fd 有界读取，耗尽迭代时验证文件未变化。"""
+        if max_bytes < 0:
+            raise ValueError("file read limit must be non-negative")
+        with self._open_regular_file(path, writable=False) as (source_fd, before):
+            if before.st_size > max_bytes:
+                raise FileTransferLimitError("file exceeds transfer limit")
+            total = 0
+            while chunk := os.read(source_fd, 1024 * 1024):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise FileTransferLimitError("file exceeds transfer limit")
+                yield chunk
+            after = os.fstat(source_fd)
+            if (
+                total != before.st_size
+                or after.st_size != before.st_size
+                or after.st_mtime_ns != before.st_mtime_ns
+                or after.st_ctime_ns != before.st_ctime_ns
+            ):
+                raise ValueError("file changed while reading")
+
     def read_authorized_file_prefix(self, path: str, max_bytes: int) -> tuple[bytes, bool]:
         """有界读取普通文件前缀，并报告内容是否被截断。"""
         if max_bytes < 0:

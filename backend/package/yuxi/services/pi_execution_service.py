@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend
+from yuxi.agents.backends.sandbox.backend import SandboxProcessCleanupError
 from yuxi.agents.backends.sandbox.provider import get_sandbox_provider
 from yuxi.agents.skills.service import compute_skill_dir_hash, is_valid_skill_slug, sync_user_accessible_skills
 from yuxi.models.providers.cache import model_cache
@@ -39,6 +40,9 @@ PI_MODEL_APIS = {
 }
 PI_AUTH_HEADERS = frozenset({"authorization", "x-api-key", "api-key", "x-goog-api-key"})
 PI_MAX_OUTPUT_FILES = 200
+PI_MAX_OUTPUT_FILE_BYTES = 64 * 1024 * 1024
+PI_MAX_OUTPUT_BYTES = 256 * 1024 * 1024
+PI_MAX_REF_BYTES = 16 * 1024 * 1024
 PI_MAX_EVENT_STREAM_BYTES = 32 * 1024 * 1024
 
 
@@ -81,10 +85,15 @@ def resolve_pi_model_runtime(model_spec: str | None) -> tuple[dict, dict]:
         "display_name": info.display_name,
         "api": api,
         "base_url": get_docker_safe_url(info.base_url).rstrip("/"),
-        "context_window": int(info.extra.get("context_window") or 128_000),
-        "max_tokens": int(info.extra.get("max_tokens") or 32_768),
+        "spec": info.spec,
+        "context_window": info.context_length or int(info.extra.get("context_window") or 128_000),
+        "max_tokens": info.max_completion_tokens or int(info.extra.get("max_tokens") or 32_768),
+        "input": [value for value in (info.input_modalities or ["text"]) if value in {"text", "image"}],
+        "reasoning": info.reasoning,
         "sampling_params": dict(info.request_body_overrides),
     }
+    if not descriptor["input"]:
+        raise ValueError("PI 模型未声明支持文本或图片输入")
     api_key = info.api_key.strip() if isinstance(info.api_key, str) else ""
     headers = dict(info.headers)
     has_header_auth = any(
@@ -108,6 +117,7 @@ def build_pi_runtime_manifest(
     skill_sources: dict[str, Path] | None = None,
     skill_runtime_paths: dict[str, str] | None = None,
     model: dict | None = None,
+    context: dict | None = None,
 ) -> tuple[dict, str]:
     """为 Local PI Task 构建不可变 Runtime Manifest。"""
 
@@ -155,12 +165,45 @@ def build_pi_runtime_manifest(
         },
         "policy": {
             "timeout_seconds": 600 if model else 60,
-            "tools": ["read", "bash", "edit", "write"] if model else ["read", "write"],
+            "tools": ["read", "bash", "edit", "write", "submit_artifact"] if model else ["read", "write"],
         },
     }
     if model:
         manifest["model"] = dict(model)
+    if context:
+        manifest["context"] = context
     return manifest, compute_manifest_fingerprint(manifest)
+
+
+def snapshot_pi_context(workdir: Workdir, previous_session: dict | None) -> tuple[dict, dict | None]:
+    """在 owning 文件边界固定 Project 指令与已授权 session 内容。"""
+    instructions = []
+    try:
+        content = b"".join(workdir.iter_file_chunks("/AGENTS.md", 64 * 1024))
+    except FileNotFoundError:
+        pass
+    else:
+        instructions.append(
+            {"path": "AGENTS.md", "content": content.decode("utf-8"), "sha256": hashlib.sha256(content).hexdigest()}
+        )
+    context = {"project_instructions": instructions, "session_source": previous_session}
+    if previous_session is None:
+        return context, None
+    ref = previous_session["ref"]
+    path = str(ref.get("path") or "")
+    if (
+        not path.startswith("pi-session/")
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or "\\" in path
+        or any(ord(char) < 32 for char in path)
+    ):
+        raise ValueError("PI 历史 session 路径无效")
+    content = b"".join(
+        workdir.iter_file_chunks(f"/outputs/{previous_session['output_subdir']}/{path}", PI_MAX_REF_BYTES)
+    )
+    if hashlib.sha256(content).hexdigest() != ref.get("sha256"):
+        raise ValueError("PI 历史 session 摘要不匹配")
+    return context, {"content": content.decode("utf-8"), "sha256": ref["sha256"]}
 
 
 def build_default_pi_runtime_manifest(*, model: dict | None = None) -> tuple[dict, str]:
@@ -226,27 +269,39 @@ async def _execute_until_cancelled(
     final_acked_event: asyncio.Event,
     event_sink,
 ):
+    """执行与取消监听由当前协程持有，退出前等待二者清理完成。"""
+
     execute_kwargs = {"event_sink": event_sink} if getattr(adapter, "streams_events", False) else {}
     if cancel_event is None:
         return await adapter.execute(instance_id, attempt, **execute_kwargs)
     execute_task = asyncio.create_task(adapter.execute(instance_id, attempt, **execute_kwargs))
     cancel_task = asyncio.create_task(cancel_event.wait())
-    done, _ = await asyncio.wait({execute_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
-    if execute_task in done and (cancel_task not in done or final_acked_event.is_set()):
-        cancel_task.cancel()
-        await asyncio.gather(cancel_task, return_exceptions=True)
-        return execute_task.result()
-    if final_acked_event.is_set():
-        cancel_task.cancel()
-        await asyncio.gather(cancel_task, return_exceptions=True)
+    cancellation = None
+    try:
+        done, _ = await asyncio.wait({execute_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+        if cancel_task in done and not final_acked_event.is_set():
+            raise PiExecutionCancelled("PI attempt cancelled")
         return await execute_task
-    if cancel_task in done:
-        execute_task.cancel()
-        await asyncio.gather(execute_task, return_exceptions=True)
-        raise PiExecutionCancelled("PI attempt cancelled")
-    cancel_task.cancel()
-    await asyncio.gather(cancel_task, return_exceptions=True)
-    return execute_task.result()
+    except asyncio.CancelledError as exc:
+        cancellation = exc
+        raise
+    finally:
+        # 外层取消同样必须先停止执行，随后 execute_pi_attempt 才能删除本次产物。
+        for task in (execute_task, cancel_task):
+            if not task.done():
+                task.cancel()
+        joined = asyncio.gather(execute_task, cancel_task, return_exceptions=True)
+        # 复用同一个join；重复取消不能再次打断backend已有的有界清理。
+        while True:
+            try:
+                await asyncio.shield(joined)
+                break
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+        if not execute_task.cancelled() and isinstance(error := execute_task.exception(), SandboxProcessCleanupError):
+            raise error
+        if cancellation is not None:
+            raise cancellation
 
 
 async def execute_pi_attempt(
@@ -281,6 +336,8 @@ async def execute_pi_attempt(
                 if ref != refs.get(ref_type):
                     raise ValueError(f"PI final {ref_type} 与已回传 ref 不一致")
                 await adapter.validate_ref(ref)
+            # commit 可能成功而 ACK 响应被取消；提交开始后不能据未收到响应删除产物。
+            preserve_outputs = True
         for sink_try in range(2):
             try:
                 response = await _call_sink(result_sink, envelope)
@@ -316,6 +373,9 @@ async def execute_pi_attempt(
             return events
         except PiExecutionCancelled:
             raise
+        except SandboxProcessCleanupError as exc:
+            preserve_outputs = True
+            raise PiCleanupFailed(f"PI cleanup_failed: {exc}", primary=exc.primary or exc) from exc
         except Exception as exc:
             preserve_outputs = True
             raise PiExecutionUnknown(f"PI execution_unknown: {exc}") from exc
@@ -346,6 +406,7 @@ class LocalPiAdapter:
         skill_sources: dict[str, Path] | None = None,
         reuse_sandbox: bool = False,
         credentials: dict | None = None,
+        steer_check=None,
     ):
         self._uid = str(uid)
         self._run_id = run_id
@@ -365,6 +426,7 @@ class LocalPiAdapter:
         self._output_subdir = f"pi-runs/{output_identity}"
         self._skill_sources = dict(skill_sources or {})
         self._credentials = dict(credentials or {})
+        self._steer_check = steer_check
         self._workdir: Workdir | None = None
         self._provider = get_sandbox_provider()
         self._backend: ProvisionerSandboxBackend | None = None
@@ -450,9 +512,13 @@ class LocalPiAdapter:
             events: list[dict] = []
             invalid_lines: list[str] = []
             pending = ""
+            ready = False
+            final_seen = False
+            yield_sent = False
+            yield_acked = False
 
             async def consume_output(chunk: str) -> None:
-                nonlocal pending
+                nonlocal pending, ready, final_seen, yield_acked
                 pending += chunk
                 while "\n" in pending:
                     line, pending = pending.split("\n", 1)
@@ -463,15 +529,38 @@ class LocalPiAdapter:
                     except json.JSONDecodeError:
                         invalid_lines.append(line)
                         continue
+                    payload = event.get("payload") or {}
+                    if event.get("type") == "control_ack":
+                        if not yield_sent or payload != {"command": "yield", "attempt_id": self._attempt_id}:
+                            raise ValueError("PI 控制ACK与当前attempt不一致")
+                        yield_acked = True
+                    if event.get("type") == "final":
+                        final_seen = True
+                        if payload.get("stop_reason") == "steer" and not yield_acked:
+                            raise ValueError("PI 未确认引导控制，不能声明已让位")
                     events.append(event)
                     if event_sink is not None:
                         await _call_sink(event_sink, event)
+                    if event.get("type") == "ready":
+                        if payload != {"control": "stdin_comment_v1", "attempt_id": self._attempt_id}:
+                            raise ValueError("PI ready 控制协议与当前attempt不一致")
+                        ready = True
 
+            async def poll_control() -> str | None:
+                """仅向已ready且未final的本attempt发送一次固定让位请求。"""
+                nonlocal yield_sent
+                if ready and not final_seen and not yield_sent and await self._steer_check():
+                    yield_sent = True
+                    return f"# yuxi-pi-yield {self._attempt_id}"
+                return None
+
+            control_kwargs = {"poll_input": poll_control} if getattr(self, "_steer_check", None) is not None else {}
             result = await backend.aexecute_stream(
                 command,
                 consume_output,
                 timeout=timeout,
                 max_output_bytes=PI_MAX_EVENT_STREAM_BYTES,
+                **control_kwargs,
             )
             if result.exit_code not in {0, None}:
                 raise RuntimeError(result.output or "Local PI Runner 执行失败")
@@ -502,21 +591,41 @@ class LocalPiAdapter:
             return
         if not isinstance(files, list) or len(files) > PI_MAX_OUTPUT_FILES:
             raise ValueError("PI artifact 文件清单无效")
+        if json.loads(content) != {"files": files}:
+            raise ValueError("PI artifact 文件清单与持久 manifest 不匹配")
+        seen = set()
+        output_bytes = 0
         for item in files:
             if not isinstance(item, dict):
                 raise ValueError("PI artifact 文件项无效")
-            item_content = self.read_output(str(item.get("path") or ""))
             item_digest = item.get("sha256")
             item_size = item.get("size")
             if (
                 not isinstance(item_digest, str)
                 or len(item_digest) != 64
-                or not isinstance(item_size, int)
-                or len(item_content) != item_size
-                or hashlib.sha256(item_content).hexdigest() != item_digest
+                or type(item_size) is not int
+                or not 0 <= item_size <= PI_MAX_OUTPUT_FILE_BYTES
             ):
                 raise ValueError("PI artifact 文件缺失、大小或摘要不匹配")
-            self._reject_persisted_credentials(item_content)
+            path = self._output_path(str(item.get("path") or ""))
+            if path in seen:
+                raise ValueError("PI artifact 文件清单含重复路径")
+            seen.add(path)
+            output_bytes += item_size
+            if output_bytes > PI_MAX_OUTPUT_BYTES:
+                raise ValueError("PI artifact 总大小超过 256 MiB")
+            digest = hashlib.sha256()
+            size = 0
+            secrets = [self._credentials.get("api_key"), *(self._credentials.get("headers") or {}).values()]
+            overlap = max((len(value.encode()) for value in secrets if isinstance(value, str)), default=0)
+            tail = b""
+            for chunk in self._workdir.iter_file_chunks(path, PI_MAX_OUTPUT_FILE_BYTES):
+                size += len(chunk)
+                digest.update(chunk)
+                self._reject_persisted_credentials(tail + chunk)
+                tail = (tail + chunk)[-(overlap - 1) :] if overlap > 1 else b""
+            if size != item_size or digest.hexdigest() != item_digest:
+                raise ValueError("PI artifact 文件缺失、大小或摘要不匹配")
 
     def _reject_persisted_credentials(self, content: bytes) -> None:
         """拒绝把本次模型凭据写入持久结果引用。"""
@@ -593,19 +702,31 @@ class LocalPiAdapter:
         )
         return connection is not None
 
-    def read_output(self, relative_path: str) -> bytes:
-        """通过 Workdir capability 回读服务器持久 outputs。"""
-
+    def _output_path(self, relative_path: str) -> str:
+        """把安全相对路径绑定到当前 attempt 交付目录。"""
         relative = PurePosixPath(relative_path)
-        if not relative.parts or relative.is_absolute() or ".." in relative.parts or "\\" in relative_path:
+        if (
+            not relative.parts
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+            or "\\" in relative_path
+            or any(ord(char) < 32 or ord(char) == 127 for char in relative_path)
+            or len(relative_path.encode()) > 1024
+        ):
             raise ValueError("PI output ref 不是安全相对路径")
         if self._workdir is None:
             raise ValueError("Local PI Workdir 未初始化")
-        output_path = f"/outputs/{self._output_subdir}/{relative.as_posix()}"
+        return f"/outputs/{self._output_subdir}/{relative.as_posix()}"
+
+    def read_output(self, relative_path: str) -> bytes:
+        """有界读取小型 ref 文档；交付文件通过分块 capability 验证。"""
+        output_path = self._output_path(relative_path)
         metadata = self._workdir.stat(output_path)
         if metadata["is_dir"]:
             raise ValueError("PI output ref 必须指向普通文件")
-        return self._workdir.read_file(output_path, int(metadata["size"]))
+        if int(metadata["size"]) > PI_MAX_REF_BYTES:
+            raise ValueError("PI output ref 超过 16 MiB")
+        return b"".join(self._workdir.iter_file_chunks(output_path, PI_MAX_REF_BYTES))
 
     def workdir_exists(self) -> bool:
         """判断 attempt 的持久 Workdir 是否仍是有效目录。"""
