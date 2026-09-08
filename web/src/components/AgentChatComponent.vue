@@ -6,7 +6,8 @@
         'has-file-panel': isFilePanelOpen,
         'has-maximized-panel': isFilePanelOpen && isAgentPanelMaximized,
         'is-resizing-file-panel': isResizing,
-        'is-narrow-layout': isNarrowLayout
+        'is-narrow-layout': isNarrowLayout,
+        'is-embedded': props.embedMode
       }"
       :style="{ '--file-panel-width': filePanelWidthStyle }"
     >
@@ -4505,6 +4506,18 @@ watch(currentChatId, (threadId, oldThreadId) => {
     border-top: none;
     z-index: 100; /* Ensure it's above other elements */
   }
+}
+
+// iframe 初始页的输入区固定在底部，独立页面继续保持居中欢迎态。
+.chat.is-embedded .bottom.start-screen {
+  position: absolute;
+  top: auto;
+  bottom: 0;
+  left: 0;
+  transform: none;
+  width: 100%;
+  max-width: none;
+  padding: 14px 14px 0;
 }
 
 .loading-dots {
