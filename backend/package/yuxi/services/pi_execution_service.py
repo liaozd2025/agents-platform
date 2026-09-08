@@ -433,7 +433,7 @@ class LocalPiAdapter:
         self._stopped = False
 
     async def create(self, attempt: dict) -> str:
-        """投影 golden Skill，或复用父 Run 已创建的 Project Sandbox。"""
+        """投影 golden Skill，或按需创建并复用执行树的 Project Sandbox。"""
 
         if str(attempt.get("run_id")) != self._run_id or str(attempt.get("attempt_id")) != self._attempt_id:
             raise ValueError("Local PI adapter 与 attempt 归属不一致")
@@ -456,11 +456,10 @@ class LocalPiAdapter:
                 thread_id=self._scope,
                 uid=self._runtime_uid,
                 inherit_env=self._reuse_sandbox,
-                create_if_missing=not self._reuse_sandbox,
                 workdir_path=self._workdir_path,
             )
             if self._reuse_sandbox:
-                await asyncio.to_thread(self._backend.ensure_available)
+                await self._backend.aensure_available()
             return self._backend.id
         except BaseException as exc:
             if self._backend is not None:

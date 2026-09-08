@@ -14,7 +14,6 @@ share the same runtime behavior once they reach the worker.
 
 import asyncio
 import json
-import os
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Literal
@@ -22,12 +21,9 @@ from typing import Any, Literal
 from langchain.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.types import Command
 from yuxi.agents.backends.paths import runtime_workdir_path
-from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend
-from yuxi.agents.backends.sandbox.provisioner_client import SandboxCapacityError
 from yuxi.agents.base import _json_safe
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.context import build_agent_input_context, normalize_agent_context_config
-from yuxi.agents.skills.service import get_user_skills_root_dir
 from yuxi.agents.state import AgentStatePayload
 from yuxi.config.options import system_options
 from yuxi.repositories.agent_repository import AgentRepository
@@ -414,37 +410,6 @@ async def _stream_agent_events(agent, messages, *, input_context=None, **kwargs)
         **kwargs,
     ):
         yield mode, payload
-
-
-class SandboxCapacityTimeoutError(RuntimeError):
-    """运行准备等待容量超时，保留可观察的失败原因。"""
-
-    code = "sandbox_capacity_timeout"
-
-
-async def _ensure_persistent_sandbox(*, runtime_scope_id: str, uid: str, workdir_path: str) -> None:
-    """物化 Sandbox 的用户级挂载根并确认持久 runtime 可用。"""
-    # Workdir 已在 ARQ 发布前物化；这里只补齐首次构图前缺失的 Skill 投影根。
-    await asyncio.to_thread(get_user_skills_root_dir, uid)
-    backend = ProvisionerSandboxBackend(
-        thread_id=runtime_scope_id,
-        uid=uid,
-        workdir_path=workdir_path,
-    )
-    wait_seconds = int(os.getenv("SANDBOX_CAPACITY_WAIT_SECONDS", "60"))
-    if wait_seconds < 0:
-        raise ValueError("SANDBOX_CAPACITY_WAIT_SECONDS must not be negative")
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + wait_seconds
-    while True:
-        try:
-            await asyncio.to_thread(backend.ensure_available)
-            return
-        except SandboxCapacityError as exc:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise SandboxCapacityTimeoutError("sandbox_capacity_timeout: 沙箱容量等待超时，请稍后重试") from exc
-            await asyncio.sleep(min(5, remaining))
 
 
 async def _get_existing_message_ids(conv_repo: ConversationRepository, thread_id: str) -> set[str]:
@@ -1130,11 +1095,6 @@ async def stream_agent_chat(
 
         # 智能体流式执行期间不访问业务数据库，先结束预处理事务并归还连接池。
         await db.commit()
-        await _ensure_persistent_sandbox(
-            runtime_scope_id=runtime_scope_id,
-            uid=uid,
-            workdir_path=workdir_path,
-        )
 
         # 先构建 langgraph_config
         langgraph_config = {"configurable": {"thread_id": thread_id, "uid": uid}}
@@ -1336,7 +1296,7 @@ async def stream_agent_chat(
         logger.exception(f"Error streaming messages: {e}")
 
         error_msg = f"Error streaming messages: {e}"
-        error_type = e.code if isinstance(e, SandboxCapacityTimeoutError) else "unexpected_error"
+        error_type = "unexpected_error"
 
         full_msg = _ensure_full_msg(full_msg, accumulated_content)
 
@@ -1409,15 +1369,6 @@ async def stream_agent_resume(
     meta["runtime_scope_id"] = runtime_scope_id
     meta["workdir_relative_path"] = workdir_path
     meta["workdir_path"] = runtime_workdir_path(workdir_path)
-    try:
-        await _ensure_persistent_sandbox(
-            runtime_scope_id=runtime_scope_id,
-            uid=uid,
-            workdir_path=workdir_path,
-        )
-    except SandboxCapacityTimeoutError as exc:
-        yield make_resume_chunk(status="error", error_type=exc.code, error_message=str(exc), meta=meta)
-        return
     input_context = await build_agent_input_context(
         _runtime_agent_config(agent_config, execution_snapshot),
         thread_id=thread_id,

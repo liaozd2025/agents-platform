@@ -120,7 +120,6 @@ class _BackendScope:
                 thread_id=self.runtime_scope_id,
                 uid=self.uid,
                 workdir_path=self.workdir_relative_path,
-                create_if_missing=False,
             ),
             routes={},
             artifacts_root=f"{self.workdir_path.rstrip('/')}/outputs",

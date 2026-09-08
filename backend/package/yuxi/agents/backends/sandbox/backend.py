@@ -40,6 +40,7 @@ from yuxi.utils.logging_config import logger
 from yuxi.workspace.errors import FileTransferLimitError
 
 from .provider import get_sandbox_provider, sandbox_id_for_thread, sandbox_provisioner_token
+from .provisioner_client import SandboxCapacityError
 
 _USER_DATA_ROOT = "/" + VIRTUAL_PATH_PREFIX.strip("/")
 _SKILLS_ROOT = "/" + VIRTUAL_SKILLS_PATH.strip("/")
@@ -51,6 +52,12 @@ _DOCUMENT_READ_ERROR = (
 )
 _BINARY_READ_ERROR = "read_file only supports UTF-8 text and image files. This file type is not supported."
 _EPHEMERAL_SECRET_NAME = re.compile(r"yuxi-secret-[a-f0-9]{24}\.json")
+
+
+class SandboxCapacityTimeoutError(RuntimeError):
+    """实际使用沙盒时等待容量超时。"""
+
+    code = "sandbox_capacity_timeout"
 
 
 class SandboxProcessCleanupError(RuntimeError):
@@ -295,6 +302,22 @@ class ProvisionerSandboxBackend(BaseSandbox):
             timeout=self._command_timeout_seconds,
             httpx_client=http_client,
         )
+
+    async def aensure_available(self) -> str:
+        """按需创建沙盒，容量等待可取消且不阻塞事件循环。"""
+        wait_seconds = int(os.getenv("SANDBOX_CAPACITY_WAIT_SECONDS", "60"))
+        if wait_seconds < 0:
+            raise ValueError("SANDBOX_CAPACITY_WAIT_SECONDS must not be negative")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_seconds
+        while True:
+            try:
+                return await asyncio.to_thread(self.ensure_available)
+            except SandboxCapacityError as exc:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise SandboxCapacityTimeoutError("sandbox_capacity_timeout: 沙箱容量等待超时，请稍后重试") from exc
+                await asyncio.sleep(min(5, remaining))
 
     def _get_connection(self) -> Any:
         """发现当前 runtime scope 对应的 sandbox 连接。"""
@@ -597,6 +620,8 @@ class ProvisionerSandboxBackend(BaseSandbox):
                 exit_code=exit_code if isinstance(exit_code, int) else None,
                 truncated=truncated,
             )
+        except SandboxCapacityError:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Sandbox execute failed for thread {self._thread_id}: {exc}")
             return ExecuteResponse(output=f"Error: {exc}", exit_code=1, truncated=False)
@@ -900,6 +925,8 @@ finally:
             return WriteResult(error="Error: write() only supports text content; use upload_files() for binary data")
         try:
             self._read_binary(normalized_path)
+        except SandboxCapacityError:
+            raise
         except Exception:  # noqa: BLE001
             pass
         else:
@@ -937,6 +964,8 @@ finally:
         # Check if old_string exists
         try:
             text = self._read_binary(normalized_path).decode("utf-8", errors="replace")
+        except SandboxCapacityError:
+            raise
         except Exception:  # noqa: BLE001
             return EditResult(error=f"Error: File '{file_path}' not found")
 
@@ -1057,6 +1086,8 @@ finally:
                 if not result.success:
                     raise Exception(result.message or "Upload failed")
                 responses.append(FileUploadResponse(path=normalized_path, error=None))
+            except SandboxCapacityError:
+                raise
             except PermissionError:
                 normalized_path = str(path)
                 responses.append(FileUploadResponse(path=normalized_path, error="permission_denied"))
