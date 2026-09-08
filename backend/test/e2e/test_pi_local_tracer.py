@@ -403,7 +403,13 @@ async def test_pi_sandbox_assembled_path_prioritizes_run_output_directory(
             create_if_missing=True,
             workdir_path=workdir_path,
         )
-        await asyncio.to_thread(parent_backend.ensure_available)
+        assert await asyncio.to_thread(
+            get_sandbox_provider().get,
+            thread_id,
+            uid=uid,
+            create_if_missing=False,
+            workdir_path=workdir_path,
+        ) is None
         agent_manager.auto_discover_agents()
         monkeypatch.setattr(run_worker, "resolve_pi_model_runtime", lambda _model_spec: (None, {}))
 

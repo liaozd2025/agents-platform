@@ -843,7 +843,6 @@ async def test_local_create_uses_attempt_isolated_workdir_and_skill_projection(m
         {
             "uid": runtime_uid,
             "inherit_env": False,
-            "create_if_missing": True,
             "workdir_path": workdir_path,
         },
     )
@@ -1080,7 +1079,7 @@ async def test_local_child_adapter_reuses_parent_sandbox_without_releasing_it(mo
         def __init__(self, thread_id: str, **kwargs):
             calls["backend"] = (thread_id, kwargs)
 
-        def ensure_available(self):
+        async def aensure_available(self):
             calls["ensured"] = True
 
         def close(self):
@@ -1125,7 +1124,6 @@ async def test_local_child_adapter_reuses_parent_sandbox_without_releasing_it(mo
         {
             "uid": "user-1",
             "inherit_env": True,
-            "create_if_missing": False,
             "workdir_path": "projects/11111111-1111-4111-8111-111111111111",
         },
     )

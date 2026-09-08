@@ -99,13 +99,38 @@ def _make_provider(client) -> ProvisionerSandboxProvider:
 
 
 def test_create_agent_composite_backend_uses_sandbox_filesystem(monkeypatch):
-    monkeypatch.setattr("yuxi.agents.backends.sandbox.backend.get_sandbox_provider", lambda: object())
+    connections = []
+
+    def get_connection(_thread_id, **kwargs):
+        if not kwargs["create_if_missing"]:
+            return None
+        connections.append(kwargs)
+        return SimpleNamespace(sandbox_url="http://sandbox")
+
+    monkeypatch.setattr(
+        "yuxi.agents.backends.sandbox.backend.get_sandbox_provider",
+        lambda: SimpleNamespace(get=get_connection),
+    )
 
     backend = create_agent_composite_backend(_runtime().context)
 
     assert isinstance(backend.default, ProvisionerSandboxBackend)
     assert backend.routes == {}
     assert backend.artifacts_root == f"{WORKDIR_PATH}/outputs"
+    assert connections == []
+    monkeypatch.setattr(
+        backend.default,
+        "_build_client",
+        lambda _url: SimpleNamespace(
+            shell=SimpleNamespace(
+                exec_command=lambda **_kwargs: SimpleNamespace(data=SimpleNamespace(output="ready", exit_code=0))
+            )
+        ),
+    )
+    result = backend.default.execute("echo ready")
+    assert result.exit_code == 0 and result.output == "ready"
+    assert connections[0]["uid"] == "user-1"
+    assert connections[0]["workdir_path"] == WORKDIR_RELATIVE_PATH
 
 
 def test_create_agent_composite_backend_derives_virtual_workdir_from_relative_path(monkeypatch):

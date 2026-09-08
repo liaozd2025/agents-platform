@@ -124,16 +124,7 @@ def _patch_stream_scaffolding(
     monkeypatch.setattr(svc.content_guard, "check", _fake_guard_check)
     monkeypatch.setattr(svc.content_guard, "check_with_keywords", _fake_guard_check_with_keywords)
     monkeypatch.setattr(svc, "check_and_handle_interrupts", _fake_interrupts)
-    monkeypatch.setattr(svc, "get_user_skills_root_dir", lambda _uid: None)
 
-    class FakeSandboxBackend:
-        def __init__(self, **_kwargs):
-            pass
-
-        def ensure_available(self):
-            return "sandbox-1"
-
-    monkeypatch.setattr(svc, "ProvisionerSandboxBackend", FakeSandboxBackend)
     monkeypatch.setattr(
         svc,
         "_build_langfuse_run_context",
@@ -520,7 +511,7 @@ async def test_stream_agent_chat_creates_conversation_before_reading_workdir(
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_chat_sandbox_bootstrap_failure_prevents_agent_execution(
+async def test_stream_agent_chat_finishes_without_sandbox_creation(
     stub_system_options,
     stub_content_guard,
     monkeypatch: pytest.MonkeyPatch,
@@ -534,7 +525,7 @@ async def test_stream_agent_chat_sandbox_bootstrap_failure_prevents_agent_execut
             nonlocal agent_started
             del messages, input_context, kwargs
             agent_started = True
-            yield "messages", (AIMessageChunk(content="must not run"), {"node": "llm"})
+            yield "messages", (AIMessageChunk(content="你好"), {"node": "llm"})
 
     @asynccontextmanager
     async def fake_session_context():
@@ -562,7 +553,9 @@ async def test_stream_agent_chat_sandbox_bootstrap_failure_prevents_agent_execut
         def ensure_available(self):
             raise RuntimeError("sandbox bootstrap failed")
 
-    monkeypatch.setattr(svc, "ProvisionerSandboxBackend", FailingSandboxBackend)
+    from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend
+
+    monkeypatch.setattr(ProvisionerSandboxBackend, "ensure_available", FailingSandboxBackend.ensure_available)
     monkeypatch.setattr(svc.pg_manager, "get_async_session_context", fake_session_context)
     monkeypatch.setattr(svc, "save_partial_message", fake_save_partial_message)
 
@@ -577,10 +570,9 @@ async def test_stream_agent_chat_sandbox_bootstrap_failure_prevents_agent_execut
     ):
         chunks.append(json.loads(chunk.decode("utf-8")))
 
-    assert agent_started is False
-    assert chunks[-1]["status"] == "error"
-    assert "sandbox bootstrap failed" in chunks[-1]["error_message"]
-    assert all(chunk.get("status") != "finished" for chunk in chunks)
+    assert agent_started is True
+    assert chunks[-1]["status"] == "finished"
+    assert any(chunk.get("response") == "你好" for chunk in chunks)
 
 
 @pytest.mark.asyncio

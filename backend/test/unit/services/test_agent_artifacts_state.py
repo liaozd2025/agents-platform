@@ -25,7 +25,7 @@ def _runtime_with_thread(thread_id: str, uid: str = "user-1"):
 def _stub_output_exists(monkeypatch: pytest.MonkeyPatch, exists: bool = True) -> None:
     class FakeBackend:
         def __init__(self, **_kwargs):
-            pass
+            assert _kwargs["create_if_missing"] is True
 
         def regular_file_exists(self, _path: str) -> bool:
             return exists

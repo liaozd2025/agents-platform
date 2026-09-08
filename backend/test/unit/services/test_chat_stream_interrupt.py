@@ -242,6 +242,12 @@ async def test_stream_agent_resume_init_does_not_render_resume_input():
 
 @pytest.mark.asyncio
 async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chunks(monkeypatch):
+    from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend
+
+    def reject_sandbox_creation(self):
+        raise AssertionError("纯文本恢复不得创建沙盒")
+
+    monkeypatch.setattr(ProvisionerSandboxBackend, "ensure_available", reject_sandbox_creation)
     db = _FakeSession()
 
     class FakeContext:
@@ -329,14 +335,6 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
 
     monkeypatch.setattr(svc, "ConversationRepository", FakeConversationRepository)
 
-    class FakeSandboxBackend:
-        def __init__(self, **_kwargs):
-            pass
-
-        def ensure_available(self):
-            return "sandbox-1"
-
-    monkeypatch.setattr(svc, "ProvisionerSandboxBackend", FakeSandboxBackend)
     monkeypatch.setattr(svc, "flush_langfuse", lambda: None)
 
     stream = stream_agent_resume(
