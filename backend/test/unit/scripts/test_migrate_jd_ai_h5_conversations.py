@@ -5,10 +5,21 @@ import pytest
 from scripts.migrate_jd_ai_h5_conversations import (
     H5SourceReader,
     MigrationStats,
+    build_migration_project,
     build_message_payload,
     build_yuxi_uid,
     prepare_records,
 )
+
+
+def test_build_migration_project_binds_uid_and_managed_workdir() -> None:
+    project = build_migration_project(uid="oa:ZD:1001", project_id="project-1")
+
+    assert project.uid == "oa:ZD:1001"
+    assert project.selection_status == "selectable"
+    assert project.directory_mode == "managed"
+    assert project.workdir_path == "projects/project-1"
+    assert project.idempotency_key == "migration:jd-ai-h5:v1"
 
 
 class _FakeCursor:

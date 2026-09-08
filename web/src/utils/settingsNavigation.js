@@ -12,9 +12,11 @@ const SETTINGS_NAVIGATION_GROUPS = [
       {
         id: 'agentEnv',
         label: '环境变量',
-        access: 'loggedIn',
+        // 当前仅允许管理员维护沙盒环境变量，避免普通用户误配置执行环境。
+        access: 'systemConfig',
         path: '/settings/agent-env',
-        routeName: 'SettingsAgentEnv'
+        routeName: 'SettingsAgentEnv',
+        requiredPermission: 'system_config:manage'
       }
     ]
   },
@@ -61,9 +63,11 @@ const SETTINGS_NAVIGATION_GROUPS = [
       {
         id: 'apiKeys',
         label: 'API Keys',
-        access: 'loggedIn',
+        // 当前仅允许管理员创建和管理 API Key。
+        access: 'systemConfig',
         path: '/settings/api-keys',
-        routeName: 'SettingsApiKeys'
+        routeName: 'SettingsApiKeys',
+        requiredPermission: 'system_config:manage'
       },
       {
         id: 'ocr',

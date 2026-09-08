@@ -6,6 +6,7 @@ from scripts.migrate_oa_users import (
     build_migration_actions,
     fetch_oa_access_code,
     fetch_oa_users,
+    filter_display_name_only_actions,
     normalize_oa_department_id,
     parse_args,
 )
@@ -67,6 +68,28 @@ def test_existing_user_updates_changed_display_name_without_changing_identity():
     assert actions[0].department_id is None
     assert actions[0].uid is None
     assert actions[0].display_name == "Alice New"
+
+
+def test_display_name_only_filter_drops_creates_and_identity_changes():
+    """历史姓名补齐只保留已有用户的姓名更新，不得带入创建或身份字段变更。"""
+    actions = build_migration_actions(
+        [
+            OaUser("alice", "Alice New", "研发部", 200004),
+            OaUser("new-user", "New User", "研发部", 200004),
+        ],
+        [(3, 200004)],
+        [(8, "alice", 2, "oa:ZD:alice", "Alice Old")],
+    )
+
+    filtered = filter_display_name_only_actions(actions)
+
+    assert filtered == [
+        type(actions[0])(
+            action="update_identity",
+            account="alice",
+            display_name="Alice New",
+        )
+    ]
 
 
 def test_empty_and_duplicate_accounts_are_skipped():
@@ -137,3 +160,11 @@ def test_parse_args_does_not_accept_or_read_runtime_code(monkeypatch):
     args = parse_args()
 
     assert not hasattr(args, "code")
+
+
+def test_parse_args_supports_display_name_only(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["migrate_oa_users.py", "--display-name-only"])
+
+    args = parse_args()
+
+    assert args.display_name_only is True

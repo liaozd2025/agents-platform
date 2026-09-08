@@ -105,6 +105,8 @@ test('会话分析保持紧凑摘要、彩色排行、无刷新 loading 与统�
   assert.equal(refreshButton.includes(':loading'), false)
   assert.match(source, /:default-src="generatePixelAvatar\(record\.agent_id\)"/)
   assert.match(source, /:default-src="generatePixelAvatar\(record\.uid\)"/)
+  assert.match(source, /record\.display_name \|\| record\.username \|\| record\.uid/)
+  assert.match(source, /user\.display_name \|\| user\.username/)
   assert.match(source, /role="switch"/)
   assert.match(source, /:aria-checked="includeSubagents"/)
   assert.match(source, /includeSubagents \? '包含' : '不含'/)

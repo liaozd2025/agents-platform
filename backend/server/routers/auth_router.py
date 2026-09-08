@@ -1,6 +1,17 @@
 import re
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, ConfigDict, Field
@@ -1114,7 +1125,7 @@ async def exchange_oa_token(data: OASSOTokenRequest, request: Request, db: Async
 
 @auth.post("/oa/exchange-account", response_model=Token)
 async def exchange_oa_account(data: OAAccountLoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    """使用父项目账号换取仅限内网试用的 Yuxi 登录凭证。"""
+    """使用父项目提供的 OA 账号换取 Yuxi 登录凭证。"""
     return await exchange_oa_account_handler(data.account, db, request)
 
 

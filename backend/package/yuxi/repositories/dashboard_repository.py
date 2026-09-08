@@ -35,6 +35,13 @@ def _latest_run_status_query() -> Any:
     )
 
 
+def _conversation_user_join() -> Any:
+    """兼容稳定 UID 与历史账号两种会话归属键，确保旧会话也能关联用户资料。"""
+
+    # OA 用户迁移后 users.uid 为 oa:公司:账号，但历史 Conversation.uid 仍保存原始账号。
+    return or_(Conversation.uid == User.uid, Conversation.uid == User.username)
+
+
 class DashboardRepository:
     """集中封装 Dashboard 的跨表统计查询与读模型聚合。"""
 
@@ -88,13 +95,14 @@ class DashboardRepository:
                     Conversation.thread_id.ilike(search_term),
                     Conversation.uid.ilike(search_term),
                     User.username.ilike(search_term),
+                    User.display_name.ilike(search_term),
                 )
             )
 
         total_result = await self.db_session.execute(
             select(func.count(Conversation.id))
             .select_from(Conversation)
-            .outerjoin(User, Conversation.uid == User.uid)
+            .outerjoin(User, _conversation_user_join())
             .where(*filters)
         )
         latest_run_status = _latest_run_status_query().label("run_status")
@@ -102,7 +110,7 @@ class DashboardRepository:
             await self.db_session.execute(
                 select(Conversation, ConversationStats, User, latest_run_status)
                 .outerjoin(ConversationStats, Conversation.id == ConversationStats.conversation_id)
-                .outerjoin(User, Conversation.uid == User.uid)
+                .outerjoin(User, _conversation_user_join())
                 .where(*filters)
                 .order_by(Conversation.updated_at.desc())
                 .limit(limit)
@@ -124,6 +132,7 @@ class DashboardRepository:
                     "thread_id": conversation.thread_id,
                     "uid": conversation.uid,
                     "username": user.username if user else conversation.uid,
+                    "display_name": user.display_name if user else None,
                     "user_avatar": normalize_public_minio_url(user.avatar) if user and user.avatar else None,
                     "user_deleted": user is None or bool(user.is_deleted),
                     "agent_id": conversation.agent_id,
@@ -154,9 +163,9 @@ class DashboardRepository:
     ) -> dict[str, list[dict[str, Any]]]:
         """读取当前历史组织范围内的用户与 Agent 筛选项。"""
         user_query = (
-            select(Conversation.uid, User.username, User.avatar, User.is_deleted)
+            select(Conversation.uid, User.username, User.display_name, User.avatar, User.is_deleted)
             .select_from(Conversation)
-            .outerjoin(User, Conversation.uid == User.uid)
+            .outerjoin(User, _conversation_user_join())
         )
         agent_query = (
             select(Conversation.agent_id, Agent.name, Agent.icon)
@@ -173,6 +182,7 @@ class DashboardRepository:
             {
                 "uid": row.uid,
                 "username": row.username or row.uid,
+                "display_name": row.display_name,
                 "avatar": normalize_public_minio_url(row.avatar) if row.avatar else None,
                 "is_deleted": row.username is None or bool(row.is_deleted),
             }
@@ -197,7 +207,7 @@ class DashboardRepository:
             await self.db_session.execute(
                 select(User, Agent, _latest_run_status_query().label("run_status"))
                 .select_from(Conversation)
-                .outerjoin(User, Conversation.uid == User.uid)
+                .outerjoin(User, _conversation_user_join())
                 .outerjoin(Agent, Conversation.agent_id == Agent.slug)
                 .where(Conversation.id == conversation.id)
             )
@@ -205,6 +215,7 @@ class DashboardRepository:
         user, agent, run_status = row
         return {
             "username": user.username if user else conversation.uid,
+            "display_name": user.display_name if user else None,
             "user_avatar": normalize_public_minio_url(user.avatar) if user and user.avatar else None,
             "user_deleted": user is None or bool(user.is_deleted),
             "agent_name": agent.name if agent else conversation.agent_id,
@@ -231,7 +242,7 @@ class DashboardRepository:
         active_24h_result = await self.db_session.execute(
             select(func.count(distinct(User.id)))
             .select_from(Conversation)
-            .join(User, Conversation.uid == User.uid)
+            .join(User, _conversation_user_join())
             .where(
                 Conversation.updated_at >= query_now - timedelta(days=1),
                 valid_conversation,
@@ -242,7 +253,7 @@ class DashboardRepository:
         active_30d_result = await self.db_session.execute(
             select(func.count(distinct(User.id)))
             .select_from(Conversation)
-            .join(User, Conversation.uid == User.uid)
+            .join(User, _conversation_user_join())
             .where(
                 Conversation.updated_at >= query_now - timedelta(days=30),
                 valid_conversation,
@@ -255,7 +266,7 @@ class DashboardRepository:
         daily_active_result = await self.db_session.execute(
             select(active_date.label("date"), func.count(distinct(User.id)).label("active_users"))
             .select_from(Conversation)
-            .join(User, Conversation.uid == User.uid)
+            .join(User, _conversation_user_join())
             .where(
                 Conversation.updated_at >= query_now - timedelta(days=120),
                 Conversation.updated_at < query_now,
@@ -960,16 +971,17 @@ class DashboardRepository:
             select(
                 Conversation.uid,
                 User.username,
+                User.display_name,
                 User.avatar,
                 func.count(Conversation.id).label("thread_count"),
                 func.coalesce(func.sum(ConversationStats.message_count), 0).label("message_count"),
                 func.max(Conversation.updated_at).label("last_active_at"),
             )
             .select_from(Conversation)
-            .outerjoin(User, Conversation.uid == User.uid)
+            .outerjoin(User, _conversation_user_join())
             .outerjoin(ConversationStats, Conversation.id == ConversationStats.conversation_id)
             .where(*conversation_filters)
-            .group_by(Conversation.uid, User.username, User.avatar)
+            .group_by(Conversation.uid, User.username, User.display_name, User.avatar)
             .order_by(func.count(Conversation.id).desc())
             .limit(10)
         )
@@ -978,6 +990,7 @@ class DashboardRepository:
             {
                 "uid": row.uid,
                 "username": row.username or row.uid,
+                "display_name": row.display_name,
                 "avatar": normalize_public_minio_url(row.avatar) if row.avatar else None,
                 "thread_count": int(row.thread_count or 0),
                 "message_count": int(row.message_count or 0),

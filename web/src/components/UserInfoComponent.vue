@@ -15,7 +15,11 @@
             class="avatar-image"
           />
         </div>
-        <div v-if="showRole" class="user-name">{{ userStore.username }}</div>
+        <div v-if="showRole" class="user-identity">
+          <!-- 优先展示中文姓名；历史账号没有姓名时回退到登录账号。 -->
+          <div class="user-name">{{ userStore.displayName || userStore.username }}</div>
+          <div class="user-department">{{ userStore.departmentName || '未分配部门' }}</div>
+        </div>
         <div v-if="slots.actions" class="user-info-actions">
           <slot name="actions" />
         </div>
@@ -178,6 +182,20 @@ const openProfile = () => {
 .user-name {
   min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-identity {
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.user-department {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gray-500);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

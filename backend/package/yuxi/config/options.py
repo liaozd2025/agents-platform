@@ -107,33 +107,36 @@ system_options = Option(
                 "key": "default_model",
                 "label": "默认对话模型",
                 "type": "model",
-                # 默认对话模型使用 SiliconFlow 的 DeepSeek V4 Flash。
-                "default": "siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash",
+                # 新会话默认使用 DashScope Qwen；数据库中已有的会话模型不受影响。
+                "default": "alibaba-cn:qwen3.7-max",
             },
             {
                 "key": "fast_model",
                 "label": "快速响应模型",
                 "type": "model",
-                # 快速响应模型与默认对话模型保持一致，避免同一会话切换模型。
-                "default": "siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash",
+                # 快速响应与默认对话共用 DashScope，避免回退到已停用的旧供应商。
+                "default": "alibaba-cn:qwen3.7-max",
             },
             {
                 "key": "embed_model",
                 "label": "默认 Embedding 模型",
                 "type": "model",
-                "default": "siliconflow-cn:Pro/BAAI/bge-m3",
+                # 向量模型使用同一 DashScope API Key，保证知识库链路一致。
+                "default": "alibaba-cn:text-embedding-v4",
             },
             {
                 "key": "reranker",
                 "label": "默认 Re-Ranker 模型",
                 "type": "model",
-                "default": "siliconflow-cn:Pro/BAAI/bge-reranker-v2-m3",
+                # 重排模型使用同一 DashScope API Key，避免旧凭据导致请求失败。
+                "default": "alibaba-cn:qwen3-rerank",
             },
             {
                 "key": "content_guard_llm_model",
                 "label": "内容审查 LLM 模型",
                 "type": "model",
-                "default": "siliconflow-cn:Pro/MiniMaxAI/MiniMax-M2.5",
+                # 内容审核启用时也沿用 DashScope，避免保留不可用的旧模型。
+                "default": "alibaba-cn:qwen3.7-max",
             },
             {
                 "key": "default_ocr_engine",

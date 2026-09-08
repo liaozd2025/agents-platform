@@ -18,7 +18,8 @@ export const brandIcons = {
 export const getKbTypeLabel = (type) => {
   const normalized = String(type || '').toLowerCase()
   const labels = {
-    milvus: 'Yuxi',
+    // 后端仍使用 milvus 作为存储类型，界面统一展示为九典知识库。
+    milvus: '九典知识库',
     dify: 'Dify',
     notion: 'Notion'
   }

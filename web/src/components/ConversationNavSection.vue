@@ -109,16 +109,21 @@
               <div v-if="projectsLoading" class="list-state">正在加载对话...</div>
               <div v-else-if="projectsError" class="list-state">项目加载失败，暂时无法分类对话</div>
               <template v-else>
-                <ConversationNavItem
-                  v-for="chat in otherConversations"
-                  :key="chat.id"
-                  :chat="chat"
-                  :current-chat-id="currentChatId"
-                  @select-chat="$emit('select-chat', $event)"
-                  @delete-chat="$emit('delete-chat', $event)"
-                  @rename-chat="$emit('rename-chat', $event)"
-                  @toggle-pin="$emit('toggle-pin', $event)"
-                />
+                <template v-for="section in recentSections" :key="section.key">
+                  <section v-if="section.conversations.length" class="recent-subgroup">
+                    <div class="recent-subgroup-label">{{ section.label }}</div>
+                    <ConversationNavItem
+                      v-for="chat in section.conversations"
+                      :key="chat.id"
+                      :chat="chat"
+                      :current-chat-id="currentChatId"
+                      @select-chat="$emit('select-chat', $event)"
+                      @delete-chat="$emit('delete-chat', $event)"
+                      @rename-chat="$emit('rename-chat', $event)"
+                      @toggle-pin="$emit('toggle-pin', $event)"
+                    />
+                  </section>
+                </template>
                 <div v-if="!otherConversations.length" class="list-state">暂无对话历史</div>
               </template>
             </div>
@@ -178,6 +183,11 @@ const groupedNavigation = computed(() =>
 )
 const projectGroups = computed(() => groupedNavigation.value.groups)
 const otherConversations = computed(() => groupedNavigation.value.otherConversations)
+const recentSections = computed(() => [
+  { key: 'recent', label: '最近', conversations: groupedNavigation.value.recentGroups.recent },
+  { key: 'week', label: '一周前', conversations: groupedNavigation.value.recentGroups.week },
+  { key: 'month', label: '一月前', conversations: groupedNavigation.value.recentGroups.month }
+])
 
 const isProjectExpanded = (projectId) => !collapsedProjects.value.has(projectId)
 const toggleProject = (projectId) => {
@@ -361,6 +371,15 @@ const confirmDeleteProject = (project) => {
   color: var(--gray-500);
   font-size: 12px;
   text-align: center;
+}
+.recent-subgroup + .recent-subgroup {
+  margin-top: 8px;
+}
+.recent-subgroup-label {
+  padding: 2px 8px 3px;
+  color: var(--gray-400);
+  font-size: 11px;
+  line-height: 18px;
 }
 .list-error {
   display: flex;

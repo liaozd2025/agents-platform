@@ -42,51 +42,18 @@
         </nav>
 
         <div class="settings-sider-footer">
-          <div v-if="showStarCard" class="settings-star-card">
-            <div class="star-card-header">
-              <div class="star-card-badge">
-                <Star :size="12" />
-                <span>支持项目</span>
-              </div>
-              <button
-                type="button"
-                class="star-card-close lucide-icon-btn"
-                aria-label="关闭 Star 提示"
-                @click="dismissStarCard"
-              >
-                <X :size="14" />
-              </button>
-            </div>
-            <p class="star-card-title">给 Yuxi 点个 Star</p>
-            <p class="star-card-description">
-              如果这个项目帮到了你，欢迎去 GitHub 点亮一个 Star，让更多人看到它。
-            </p>
-            <a
-              class="star-card-link"
-              :href="projectRepoUrl"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <img
-                class="star-card-link-image"
-                src="https://img.shields.io/github/stars/xerrors/Yuxi?label=Yuxi&style=social"
-                alt="GitHub stars for Yuxi"
-              />
-              <ExternalLink :size="13" />
-            </a>
-          </div>
-
           <div v-if="userStore.isLoggedIn" class="settings-user-summary">
             <FallbackAvatar
               :src="userStore.avatar"
-              :name="userStore.username"
+              :name="userStore.displayName || userStore.username"
               :seed="userStore.uid || userStore.username"
               kind="user"
               :size="28"
               shape="circle"
-              :alt="userStore.username"
+              :alt="userStore.displayName || userStore.username"
             />
-            <span class="summary-name">{{ userStore.username || userStore.uid }}</span>
+            <!-- 优先展示中文姓名，未维护姓名时回退到登录账号。 -->
+            <span class="summary-name">{{ userStore.displayName || userStore.username || userStore.uid }}</span>
             <span class="summary-role">{{ assignedRolesText }}</span>
           </div>
         </div>
@@ -122,11 +89,13 @@
             <AccountSettingsComponent />
           </div>
 
-          <div v-if="activeTab === 'apiKeys' && userStore.isLoggedIn">
+          <!-- 菜单隐藏之外，内容区也仅为管理员挂载，防止直接访问路径加载页面。 -->
+          <div v-if="activeTab === 'apiKeys' && userStore.hasPermission('system_config:manage')">
             <ApiKeyManagementComponent />
           </div>
 
-          <div v-if="activeTab === 'agentEnv' && userStore.isLoggedIn">
+          <!-- 与菜单保持一致，普通用户不能加载环境变量设置。 -->
+          <div v-if="activeTab === 'agentEnv' && userStore.hasPermission('system_config:manage')">
             <AgentEnvSettingsCard />
           </div>
 
@@ -177,17 +146,14 @@ import { useUserStore } from '@/stores/user'
 import {
   ArrowLeft,
   CircleUser,
-  ExternalLink,
   Key,
   ScanText,
   Search,
   Settings,
   ShieldCheck,
   SquareTerminal,
-  Star,
   User,
-  Users,
-  X
+  Users
 } from '@lucide/vue'
 import AccountSettingsComponent from '@/components/AccountSettingsComponent.vue'
 import AgentEnvSettingsCard from '@/components/AgentEnvSettingsCard.vue'
@@ -217,10 +183,6 @@ const route = useRoute()
 const router = useRouter()
 const activeTab = computed(() => route.meta.settingsTab)
 const settingsSearch = ref('')
-const showStarCard = ref(true)
-
-const STAR_CARD_STORAGE_KEY = 'yuxi-settings-star-card-dismissed'
-const projectRepoUrl = 'https://github.com/xerrors/Yuxi'
 
 const permissions = computed(() => ({
   isLoggedIn: userStore.isLoggedIn,
@@ -241,13 +203,7 @@ const handleClose = () => {
   router.push(sanitizeRedirect(route.query.returnTo || '/workspace'))
 }
 
-const dismissStarCard = () => {
-  showStarCard.value = false
-  localStorage.setItem(STAR_CARD_STORAGE_KEY, 'true')
-}
-
 onMounted(async () => {
-  showStarCard.value = localStorage.getItem(STAR_CARD_STORAGE_KEY) !== 'true'
   if (!userStore.hasPermission('system_config:manage') || Object.keys(configStore.config).length) {
     return
   }
@@ -397,82 +353,6 @@ onMounted(async () => {
 .settings-modal .settings-sider-footer {
   margin-top: auto;
   padding-top: 12px;
-}
-
-.settings-modal .settings-star-card {
-  padding: 12px;
-  overflow: hidden;
-  border: 1px solid var(--gray-150);
-  border-radius: 10px;
-  background: var(--gray-0);
-
-  .star-card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  .star-card-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--main-700);
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  .star-card-close {
-    display: inline-flex;
-    flex-shrink: 0;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    border: none;
-    border-radius: 50%;
-    background: transparent;
-    color: var(--gray-600);
-    cursor: pointer;
-
-    &:hover {
-      background: var(--gray-150);
-      color: var(--gray-900);
-    }
-
-    &:focus-visible {
-      outline: 2px solid var(--main-400);
-      outline-offset: 1px;
-    }
-  }
-
-  .star-card-title {
-    margin: 9px 0 4px;
-    color: var(--gray-900);
-    font-size: 14px;
-    font-weight: 600;
-  }
-
-  .star-card-description {
-    margin: 0;
-    color: var(--gray-600);
-    font-size: 12px;
-    line-height: 1.5;
-  }
-
-  .star-card-link {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 10px;
-    color: var(--gray-600);
-    text-decoration: none;
-  }
-
-  .star-card-link-image {
-    display: block;
-    height: 20px;
-  }
 }
 
 .settings-modal .settings-user-summary {

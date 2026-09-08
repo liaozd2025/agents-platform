@@ -157,7 +157,7 @@
                 <span>正在加载消息...</span>
               </div>
 
-              <!-- 打招呼区域 - 在输入框上方 -->
+              <!-- 新对话时显示不含品牌名称的通用欢迎语。 -->
               <div v-if="!conversations.length" class="chat-greeting-input">
                 <h1>{{ randomGreeting }}</h1>
               </div>
@@ -931,16 +931,8 @@ const sendCooldownActive = ref(false)
 const cancellingRequestIds = reactive(new Set())
 const steeringRequestIds = reactive(new Set())
 let sendCooldownTimer = null
-// 预设的打招呼文本
-const greetingMessages = [
-  '语析，析万物之语',
-  '语析，与知识对话',
-  '答案藏在知识里，我来找',
-  '与知识对话，与答案相遇',
-  '你负责提问，我负责寻找'
-]
-
-// 随机选择一个打招呼文本
+// 仅保留通用欢迎语，不展示“语析”等品牌名称。
+const greetingMessages = ['答案藏在知识里，我来找', '与知识对话，与答案相遇', '你负责提问，我负责寻找']
 const randomGreeting = greetingMessages[Math.floor(Math.random() * greetingMessages.length)]
 
 // 业务状态（保留在组件本地）
@@ -4092,13 +4084,13 @@ watch(currentChatId, (threadId, oldThreadId) => {
 
 .chat-greeting-input {
   padding: 10px 0;
-  text-align: center;
   margin-bottom: 7vh;
+  text-align: center;
 
   h1 {
-    font-size: 1.4rem;
-    color: var(--gray-1000);
     margin: 0;
+    color: var(--gray-1000);
+    font-size: 1.4rem;
   }
 }
 

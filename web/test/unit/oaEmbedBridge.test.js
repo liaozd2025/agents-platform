@@ -109,12 +109,15 @@ test('OA bridge completes the formal parent login handshake with an allowed acco
   await harness.dispatchMessage({
     source: harness.browserWindow.parent,
     origin: 'https://oa.example.test',
-    data: { type: 'login-params', data: { userInfo: { account: ' oa-user-1 ' } } }
+    data: {
+      type: 'login-params',
+      data: { userInfo: { account: ' oa-user-1 ' } }
+    }
   })
 
   assert.deepEqual(acceptedAccounts, ['oa-user-1'])
   assert.deepEqual(harness.messages.map(({ message }) => message.type), ['ready', 'request-login-params'])
-  assert.equal(typeof harness.messages[1].message.data.timestamp, 'number')
+  assert.deepEqual(harness.messages[1].message.data, {})
   assert.equal(harness.messages[1].targetOrigin, 'https://oa.example.test')
   assert.equal(
     harness.messages.some(({ targetOrigin }) => targetOrigin === '*'),
@@ -148,7 +151,7 @@ test('OA bridge rejects missing accounts and asks the authenticated parent to re
   assert.deepEqual(harness.messages.at(-1), {
     message: {
       type: 'request-login-params',
-      data: { timestamp: harness.messages.at(-1).message.data.timestamp }
+      data: {}
     },
     targetOrigin: 'https://oa.example.test'
   })

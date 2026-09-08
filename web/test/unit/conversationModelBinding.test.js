@@ -11,12 +11,12 @@ const source = readFileSync(
   'utf8'
 )
 
-test('OA iframe 新会话使用指定的 DeepSeek 默认模型', () => {
-  assert.equal(DEFAULT_CHAT_MODEL, 'siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash')
+test('OA iframe 新会话使用指定的 DashScope 默认模型', () => {
+  assert.equal(DEFAULT_CHAT_MODEL, 'alibaba-cn:qwen3.7-max')
   assert.equal(resolveConversationModel({}), DEFAULT_CHAT_MODEL)
 })
 
-test('独立登录新会话固定使用 DeepSeek，不受异步配置加载影响', () => {
+test('独立登录新会话使用 DashScope 默认模型，不受异步配置加载影响', () => {
   const selectorStart = source.indexOf('<ModelSelectorComponent')
   const modelBlock = source.slice(
     source.indexOf('const currentModelSpec = computed'),
@@ -39,7 +39,7 @@ test('独立登录新会话固定使用 DeepSeek，不受异步配置加载影�
   assert.doesNotMatch(selectorBlock, /auto-select-first/)
 })
 
-test('模型选择按当前选择、Conversation、DeepSeek 默认的顺序解析', () => {
+test('模型选择按当前选择、Conversation、DashScope 默认的顺序解析', () => {
   assert.equal(
     resolveConversationModel({
       selectedModel: 'manual:model',
