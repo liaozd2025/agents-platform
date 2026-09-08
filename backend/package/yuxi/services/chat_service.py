@@ -36,6 +36,11 @@ from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.subagent_thread_repository import SubagentThreadRepository
 from yuxi.services.attachment_service import serialize_attachment
 from yuxi.services.input_message_service import AgentRunInputMessage
+from yuxi.services.knowledge_retrieval_policy import (
+    decide_knowledge_retrieval,
+    format_retrieval_context,
+    retrieve_for_decision,
+)
 from yuxi.services.langfuse_service import (
     LangfuseRunContext,
     build_run_context,
@@ -1095,6 +1100,26 @@ async def stream_agent_chat(
         thread_attachments = [
             serialize_attachment(attachment, thread_id=thread_id) for attachment in thread_attachment_records
         ]
+        persisted_human_message = human_message
+        retrieval_decision = await decide_knowledge_retrieval(query, current_user)
+        if retrieval_decision.kb_ids:
+            retrieval_chunks = await retrieve_for_decision(query, retrieval_decision)
+            retrieval_context = format_retrieval_context(retrieval_chunks)
+            if isinstance(human_message.content, str):
+                human_message = human_message.model_copy(
+                    update={
+                        "content": (
+                            f"{human_message.content}\n\n<knowledge_context>\n"
+                            f"{retrieval_context}\n</knowledge_context>"
+                        )
+                    }
+                )
+            meta["knowledge_retrieval"] = {
+                "intent": retrieval_decision.intent,
+                "kb_ids": list(retrieval_decision.kb_ids),
+                "mentioned": retrieval_decision.mentioned,
+                "result_count": len(retrieval_chunks),
+            }
         messages = [_with_attachment_context(human_message, thread_attachments)]
 
         init_msg = {
@@ -1120,7 +1145,7 @@ async def stream_agent_chat(
                     message_type=message_type,
                     image_content=image_content,
                     extra_metadata={
-                        "raw_message": human_message.model_dump(),
+                        "raw_message": persisted_human_message.model_dump(),
                         "request_id": meta.get("request_id"),
                         "attachments": request_attachments,
                     },
