@@ -60,6 +60,21 @@
       </template>
     </PageShoulder>
 
+    <nav v-if="skillCategoryTabs.length > 1" class="skill-category-tabs" aria-label="Skill 分类">
+      <button
+        v-for="tab in skillCategoryTabs"
+        :key="tab.key"
+        type="button"
+        class="skill-category-tab"
+        :class="{ active: activeSkillCategory === tab.key }"
+        :aria-current="activeSkillCategory === tab.key ? 'page' : undefined"
+        @click="activeSkillCategory = tab.key"
+      >
+        <span>{{ tab.label }}</span>
+        <span class="skill-category-count">{{ tab.count }}</span>
+      </button>
+    </nav>
+
     <div
       v-if="visibleSkillGroups.length === 0"
       class="extension-card-grid-empty-state skill-empty-state"
@@ -692,33 +707,68 @@ const recommendedSuiteCards = computed(() =>
 )
 
 const filteredInstalledSkills = computed(() => installedSkillCards.value.filter(matchesSearch))
-const skillGroups = computed(() => [
-  {
-    key: 'recommended',
-    title: '推荐',
-    skills: isBatchDeleteMode.value ? [] : recommendedSuiteCards.value.filter(matchesSearch)
-  },
-  {
-    key: 'personal',
-    title: '个人技能',
-    skills: isBatchDeleteMode.value
-      ? []
-      : filteredInstalledSkills.value.filter((skill) => skill.sourceScope === 'personal')
-  },
-  {
-    key: 'builtin',
-    title: '内置',
-    skills: filteredInstalledSkills.value.filter((skill) => skill.sourceType === 'builtin')
-  },
-  {
-    key: 'uploaded',
-    title: '共享',
-    skills: filteredInstalledSkills.value.filter(
-      (skill) => skill.sourceType !== 'builtin' && skill.sourceScope !== 'personal'
-    )
+const activeSkillCategory = ref('')
+const skillGroups = computed(() => {
+  const installed = filteredInstalledSkills.value
+  return [
+    {
+      key: 'all',
+      title: '全部 Skill',
+      label: '全部',
+      skills: isBatchDeleteMode.value
+        ? installed.filter((skill) => skill.sourceScope !== 'personal')
+        : installed
+    },
+    {
+      key: 'personal',
+      title: '个人 Skill',
+      label: '个人',
+      skills: isBatchDeleteMode.value
+        ? []
+        : installed.filter((skill) => skill.sourceScope === 'personal')
+    },
+    {
+      key: 'shared',
+      title: '共享 Skill',
+      label: '共享',
+      skills: installed.filter(
+        (skill) => skill.sourceType !== 'builtin' && skill.sourceScope !== 'personal'
+      )
+    },
+    {
+      key: 'builtin',
+      title: '内置 Skill',
+      label: '内置',
+      skills: installed.filter((skill) => skill.sourceType === 'builtin')
+    },
+    {
+      key: 'recommended',
+      title: '推荐套件',
+      label: '推荐',
+      skills: isBatchDeleteMode.value ? [] : recommendedSuiteCards.value.filter(matchesSearch)
+    }
+  ]
+})
+const skillCategoryTabs = computed(() =>
+  skillGroups.value
+    .filter((group) => group.key === 'all' || group.skills.length > 0)
+    .map((group) => ({ key: group.key, label: group.label, count: group.skills.length }))
+)
+const visibleSkillGroups = computed(() => {
+  const group = skillGroups.value.find((item) => item.key === activeSkillCategory.value)
+  return group && group.skills.length ? [group] : []
+})
+
+watch(skillCategoryTabs, (tabs) => {
+  const activeExists = tabs.some((tab) => tab.key === activeSkillCategory.value)
+  if (!activeExists || !activeSkillCategory.value) {
+    activeSkillCategory.value =
+      tabs.find((tab) => tab.key === 'shared')?.key ||
+      tabs.find((tab) => tab.key !== 'all')?.key ||
+      tabs[0]?.key ||
+      'all'
   }
-])
-const visibleSkillGroups = computed(() => skillGroups.value.filter((group) => group.skills.length))
+})
 const filteredDeletableSkills = computed(() =>
   filteredInstalledSkills.value.filter(
     (skill) =>
@@ -1313,6 +1363,64 @@ defineExpose({
 </style>
 
 <style lang="less" scoped>
+.skill-category-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 14px var(--page-padding) 4px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.skill-category-tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 15px;
+  border: 1px solid transparent;
+  border-radius: 17px;
+  background: transparent;
+  color: var(--gray-500);
+  font-size: 14px;
+  line-height: 20px;
+  cursor: pointer;
+  transition:
+    color 0.18s ease,
+    background-color 0.18s ease,
+    border-color 0.18s ease;
+
+  &:hover {
+    border-color: var(--gray-150);
+    background: var(--gray-25);
+    color: var(--gray-800);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--main-color);
+    outline-offset: 2px;
+  }
+
+  &.active {
+    border-color: color-mix(in srgb, var(--main-color) 12%, var(--gray-0));
+    background: color-mix(in srgb, var(--main-color) 10%, var(--gray-0));
+    color: var(--main-color);
+    font-weight: 600;
+  }
+}
+
+.skill-category-count {
+  color: var(--gray-400);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+
+  .active & {
+    color: color-mix(in srgb, var(--main-color) 70%, var(--gray-500));
+  }
+}
+
 .skill-empty-state {
   width: 100%;
   min-height: 280px;
