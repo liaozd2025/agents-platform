@@ -1,7 +1,7 @@
 <template>
   <section class="conversation-nav-section" :class="{ collapsed }">
     <div v-if="showHistory && !collapsed" class="history-panel">
-      <div class="conversation-list">
+      <div class="conversation-list" @scroll="handleConversationScroll">
         <section
           v-if="projectsLoading || projectsError || projectGroups.length"
           class="history-group project-history-group"
@@ -111,7 +111,7 @@
               <template v-else>
                 <template v-for="section in recentSections" :key="section.key">
                   <section v-if="section.conversations.length" class="recent-subgroup">
-                    <div class="recent-subgroup-label">{{ section.label }}</div>
+                    <div v-if="section.label" class="recent-subgroup-label">{{ section.label }}</div>
                     <ConversationNavItem
                       v-for="chat in section.conversations"
                       :key="chat.id"
@@ -151,6 +151,7 @@ import { ChevronDown, FolderClosed, FolderOpen, MoreVertical, SquarePen, Trash2 
 import ConversationNavItem from '@/components/ConversationNavItem.vue'
 import CollapseTransition from '@/components/common/CollapseTransition.vue'
 import { buildProjectConversationGroups } from '@/utils/projectConversationGroups'
+import { shouldLoadMoreConversations } from '@/utils/conversationListScroll'
 
 const props = defineProps({
   currentChatId: { type: String, default: null },
@@ -184,10 +185,28 @@ const groupedNavigation = computed(() =>
 const projectGroups = computed(() => groupedNavigation.value.groups)
 const otherConversations = computed(() => groupedNavigation.value.otherConversations)
 const recentSections = computed(() => [
-  { key: 'recent', label: '最近', conversations: groupedNavigation.value.recentGroups.recent },
+  // 顶部已经有“最近”总标题，当前时间段不再重复显示同名子标题。
+  { key: 'recent', label: '', conversations: groupedNavigation.value.recentGroups.recent },
   { key: 'week', label: '一周前', conversations: groupedNavigation.value.recentGroups.week },
   { key: 'month', label: '一月前', conversations: groupedNavigation.value.recentGroups.month }
 ])
+
+// 列表接近底部时自动加载下一页，按钮仍保留作为手动兜底。
+const handleConversationScroll = (event) => {
+  const list = event.currentTarget
+  if (
+    !shouldLoadMoreConversations({
+      list,
+      isLoadingMore: props.isLoadingMore,
+      hasMoreChats: props.hasMoreChats
+    })
+  ) {
+    return
+  }
+
+  console.debug('[会话侧栏] 触底，加载更多会话')
+  emit('load-more-chats')
+}
 
 const isProjectExpanded = (projectId) => !collapsedProjects.value.has(projectId)
 const toggleProject = (projectId) => {
