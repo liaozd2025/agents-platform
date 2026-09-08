@@ -130,8 +130,9 @@
           </CollapseTransition>
         </section>
 
+        <!-- 最近会话折叠时同步隐藏分页按钮，避免列表收起后留下孤立操作。 -->
         <button
-          v-if="hasMoreChats"
+          v-if="recentExpanded && hasMoreChats"
           type="button"
           class="load-more-btn"
           :disabled="isLoadingMore"
