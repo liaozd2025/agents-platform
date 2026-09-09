@@ -7,10 +7,25 @@
           ref="chatComponentRef"
           :single-mode="false"
           :embed-mode="embedMode"
+          :embed-display-mode="embedDisplayMode"
           @thread-change="handleThreadChange"
           @request-fullscreen="requestEmbedFullscreen"
         >
           <template #header-left>
+            <!-- iframe 顶部固定展示 OA 产品标题，避免无会话时左上角留白。 -->
+            <span v-if="embedMode && embedDisplayMode !== 'fullscreen'" class="embed-title">
+              OA智能助手
+            </span>
+            <button
+              v-if="embedMode && embedDisplayMode !== 'fullscreen'"
+              type="button"
+              class="embed-new-chat-btn agent-nav-btn"
+              title="新建会话"
+              aria-label="新建会话"
+              @click="handleCreateNewChat"
+            >
+              <Plus :size="16" />
+            </button>
             <button
               v-if="embedMode"
               type="button"
@@ -156,6 +171,7 @@
     <a-drawer
       v-if="embedMode"
       v-model:open="historyDrawerOpen"
+      class="embed-history-drawer"
       title="对话历史"
       placement="left"
       :width="320"
@@ -474,6 +490,11 @@ const openAgentManagement = async () => {
   }
 }
 
+const handleCreateNewChat = async () => {
+  await chatComponentRef.value?.selectThreadFromRoute?.('')
+  await router.replace({ name: 'EmbedAgent' })
+}
+
 useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdownPanelRef])
 </script>
 
@@ -511,6 +532,28 @@ useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdown
 
 .embed-history-btn {
   display: none;
+}
+
+.embed-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// Drawer 内容通过 Teleport 挂到 body，必须使用全局选择器才能命中传送后的节点。
+:global(.embed-history-drawer .ant-drawer-body) {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
+:global(.embed-history-drawer .conversation-nav-section) {
+  height: 100%;
 }
 
 .embed-mode-controls {

@@ -1,22 +1,18 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
-import {
-  DEFAULT_CHAT_MODEL,
-  resolveConversationModel
-} from '../../src/utils/conversationModel.js'
+import { resolveConversationModel } from '../../src/utils/conversationModel.js'
 
 const source = readFileSync(
   new URL('../../src/components/AgentChatComponent.vue', import.meta.url),
   'utf8'
 )
 
-test('OA iframe 新会话使用指定的 DashScope 默认模型', () => {
-  assert.equal(DEFAULT_CHAT_MODEL, 'alibaba-cn:qwen3.7-max')
-  assert.equal(resolveConversationModel({}), DEFAULT_CHAT_MODEL)
+test('新会话不再硬编码未配置模型，等待选择器提供已配置模型', () => {
+  assert.equal(resolveConversationModel({}), '')
 })
 
-test('独立登录新会话使用 DashScope 默认模型，不受异步配置加载影响', () => {
+test('新会话开启已配置模型首项自动选择，已有会话不受影响', () => {
   const selectorStart = source.indexOf('<ModelSelectorComponent')
   const modelBlock = source.slice(
     source.indexOf('const currentModelSpec = computed'),
@@ -27,19 +23,13 @@ test('独立登录新会话使用 DashScope 默认模型，不受异步配置加
     source.indexOf('@select-model', selectorStart)
   )
 
-  assert.equal(
-    resolveConversationModel({
-      agentModel: 'alibaba-cn:qwen3.7-max',
-      systemDefaultModel: 'alibaba-cn:qwen3.7-max'
-    }),
-    DEFAULT_CHAT_MODEL
-  )
   assert.match(modelBlock, /resolveConversationModel\(\{/)
   assert.doesNotMatch(modelBlock, /agentConfig|currentAgent|configStore/)
-  assert.doesNotMatch(selectorBlock, /auto-select-first/)
+  assert.match(selectorBlock, /:auto-select-first="!currentModelSpec"/)
+  assert.match(source, /!isProcessing\.value && !currentModelSpec\.value/)
 })
 
-test('模型选择按当前选择、Conversation、DashScope 默认的顺序解析', () => {
+test('模型选择按当前选择、Conversation、空值的顺序解析', () => {
   assert.equal(
     resolveConversationModel({
       selectedModel: 'manual:model',
@@ -51,9 +41,10 @@ test('模型选择按当前选择、Conversation、DashScope 默认的顺序解�
     resolveConversationModel({ conversationModel: 'conversation:model' }),
     'conversation:model'
   )
+  assert.equal(resolveConversationModel({}), '')
 })
 
-test('发送当前展示模型并在请求被接受后同步 Conversation metadata', () => {
+test('发送请求使用当前展示模型并同步 Conversation metadata', () => {
   const sendBlock = source.slice(
     source.indexOf('const handleSendMessage'),
     source.indexOf('const handleDirectSteer')
