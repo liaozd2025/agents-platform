@@ -211,6 +211,9 @@
       <template v-else-if="file?.previewType === 'pdf' && file?.previewUrl">
         <PdfPreview :url="file.previewUrl" class="pdf-preview" />
       </template>
+      <template v-else-if="file?.previewType === 'spreadsheet'">
+        <SpreadsheetPreview :workbook="file.content" />
+      </template>
       <template v-else-if="isHtmlFile && htmlPreviewMode === 'render'">
         <iframe
           :key="`embedded-${htmlPreviewRenderKey}`"
@@ -326,6 +329,9 @@
             <template v-else-if="file?.previewType === 'pdf' && file?.previewUrl">
               <PdfPreview :url="file.previewUrl" class="pdf-preview fullscreen-embed-preview" />
             </template>
+            <template v-else-if="file?.previewType === 'spreadsheet'">
+              <SpreadsheetPreview :workbook="file.content" />
+            </template>
             <template v-else-if="isHtmlFile && htmlPreviewMode === 'render'">
               <iframe
                 :key="`fullscreen-${htmlPreviewRenderKey}`"
@@ -377,6 +383,7 @@ import {
 import hljs from 'highlight.js/lib/common'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import PdfPreview from '@/components/common/PdfPreview.vue'
+import SpreadsheetPreview from '@/components/common/SpreadsheetPreview.vue'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { useThemeStore } from '@/stores/theme'
 import { escapeHtml } from '@/utils/html'
