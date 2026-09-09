@@ -7,7 +7,8 @@
         'has-maximized-panel': isFilePanelOpen && isAgentPanelMaximized,
         'is-resizing-file-panel': isResizing,
         'is-narrow-layout': isNarrowLayout,
-        'is-embedded': props.embedMode
+        'is-embedded': props.embedMode,
+        'is-embed-fullscreen': props.embedMode && props.embedDisplayMode === 'fullscreen'
       }"
       :style="{ '--file-panel-width': filePanelWidthStyle }"
     >
@@ -36,6 +37,7 @@
             v-if="showStateEntry"
             type="button"
             class="agent-nav-btn agent-state-btn state-entry-btn"
+            ref="statePanelTriggerRef"
             :class="{ active: statePanelOpen }"
             title="查看状态"
             :aria-expanded="statePanelOpen"
@@ -79,6 +81,17 @@
       >
         <!-- Main Chat Area -->
         <div class="chat-main" ref="chatMainRef">
+          <!-- iframe 初始态欢迎区固定在顶部，避免与底部输入框的定位相互影响。 -->
+          <div v-if="props.embedMode && !conversations.length" class="embed-welcome">
+            <img
+              class="embed-welcome-logo"
+              src="/jiudian-pharma-logo.png"
+              alt=""
+              aria-hidden="true"
+            />
+            <h1>九典AI助手</h1>
+            <p>基于九典内部知识库检索，同时支持联网搜索，辅助文案编写等功能。</p>
+          </div>
           <div class="chat-box">
             <template v-for="row in conversationRows" :key="row.key">
               <div v-if="row.type === 'conversation'" class="conv-box">
@@ -159,7 +172,7 @@
               </div>
 
               <!-- 新对话时显示不含品牌名称的通用欢迎语。 -->
-              <div v-if="!conversations.length" class="chat-greeting-input">
+              <div v-if="!conversations.length && !props.embedMode" class="chat-greeting-input">
                 <h1>{{ randomGreeting }}</h1>
               </div>
 
@@ -290,13 +303,14 @@
                         <CornerDownRight :size="14" aria-hidden="true" />
                         引导
                       </button>
-                      <ContextUsageRing
-                        v-if="showStateEntry"
-                        :used-tokens="tokenUsageStackTotal"
-                        :limit-tokens="tokenUsageStackLimit"
-                        :ratio="tokenUsageContextRatio"
-                        @click="toggleStatePanel"
-                      />
+                      <span v-if="showStateEntry" ref="contextUsageTriggerRef">
+                        <ContextUsageRing
+                          :used-tokens="tokenUsageStackTotal"
+                          :limit-tokens="tokenUsageStackLimit"
+                          :ratio="tokenUsageContextRatio"
+                          @click="toggleStatePanel"
+                        />
+                      </span>
                       <div class="input-model-selector">
                         <ModelSelectorComponent
                           :model_spec="currentModelSpec"
@@ -330,6 +344,7 @@
 
         <div
           id="agent-state-panel"
+          ref="statePanelRef"
           class="side-panel side-panel--state"
           :class="{
             'is-visible': statePanelOpen,
@@ -864,6 +879,7 @@ import { useAgentStreamHandler } from '@/composables/useAgentStreamHandler'
 import { useStreamSmoother } from '@/composables/useStreamSmoother'
 import { useAgentRequestQueue } from '@/composables/useAgentRequestQueue'
 import { useAgentMentionConfig } from '@/composables/useAgentMentionConfig'
+import { useOutsidePointerdown } from '@/composables/useOutsidePointerdown'
 import AgentArtifactsCard from '@/components/AgentArtifactsCard.vue'
 import AgentPanel from '@/components/AgentPanel.vue'
 import AttachmentTmpUploadModal from '@/components/AttachmentTmpUploadModal.vue'
@@ -902,7 +918,8 @@ const props = defineProps({
   agentId: { type: String, default: '' },
   singleMode: { type: Boolean, default: true },
   sendDisabled: { type: Boolean, default: false },
-  embedMode: { type: Boolean, default: false }
+  embedMode: { type: Boolean, default: false },
+  embedDisplayMode: { type: String, default: '' }
 })
 const emit = defineEmits(['thread-change', 'request-fullscreen'])
 
@@ -1000,6 +1017,10 @@ const localUIState = reactive({
 // Agent Panel State
 const isFilePanelOpen = ref(false)
 const statePanelOpen = ref(false)
+const statePanelRef = ref(null)
+const statePanelTriggerRef = ref(null)
+const contextUsageTriggerRef = ref(null)
+useOutsidePointerdown(statePanelOpen, [statePanelRef, statePanelTriggerRef, contextUsageTriggerRef])
 const sideActive = computed(() => {
   if (isFilePanelOpen.value) return 'file'
   if (statePanelOpen.value) return 'state'
@@ -3872,11 +3893,21 @@ watch(currentChatId, (threadId, oldThreadId) => {
       border-bottom: 1px solid var(--gray-150);
     }
 
-    .header__left,
-    .header__right {
+    .header__left {
       display: flex;
       align-items: center;
-      gap: 8px;
+      min-width: 0;
+      flex: 1 1 auto;
+      gap: 4px;
+      overflow: hidden;
+    }
+
+    .header__right {
+      display: flex;
+      flex: 0 0 auto;
+      align-items: center;
+      gap: 4px;
+      min-width: max-content;
     }
 
     .switch-icon {
@@ -4508,6 +4539,47 @@ watch(currentChatId, (threadId, oldThreadId) => {
   }
 }
 
+.embed-welcome {
+  position: absolute;
+  top: 40px;
+  left: 16px;
+  right: 16px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  pointer-events: none;
+}
+
+// 全屏 iframe 初始态把欢迎区和输入区作为一组上下排列，避免输入框贴底或与欢迎文案距离过远。
+.chat.is-embed-fullscreen .embed-welcome {
+  top: calc(50% - 150px);
+}
+
+.embed-welcome-logo {
+  display: block;
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+}
+
+.embed-welcome h1 {
+  margin: 14px 0 0;
+  color: var(--gray-1000);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 28px;
+}
+
+.embed-welcome p {
+  max-width: 460px;
+  margin: 18px 0 0;
+  color: var(--gray-600);
+  font-size: 14px;
+  line-height: 22px;
+}
+
 // iframe 初始页的输入区固定在底部，独立页面继续保持居中欢迎态。
 .chat.is-embedded .bottom.start-screen {
   position: absolute;
@@ -4517,7 +4589,23 @@ watch(currentChatId, (threadId, oldThreadId) => {
   transform: none;
   width: 100%;
   max-width: none;
-  padding: 14px 14px 0;
+  padding: 14px;
+}
+
+.chat.is-embed-fullscreen .bottom.start-screen {
+  top: calc(50% + 42px);
+  bottom: auto;
+  left: 50%;
+  right: auto;
+  width: min(800px, calc(100% - 28px));
+  padding: 0 14px;
+  transform: translateX(-50%);
+  background: transparent;
+
+  .message-input-wrapper {
+    width: 100%;
+    max-width: none;
+  }
 }
 
 .loading-dots {
@@ -4601,6 +4689,15 @@ watch(currentChatId, (threadId, oldThreadId) => {
 }
 
 @media (max-width: 768px) {
+  .chat-header {
+    padding-inline: 4px;
+
+    .header__left,
+    .header__right {
+      gap: 2px;
+    }
+  }
+
   .chat.has-file-panel .chat-header {
     padding-right: 8px;
   }
