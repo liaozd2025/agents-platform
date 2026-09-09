@@ -17,7 +17,7 @@ MAX_TEXT_PREVIEW_CHARS = 250_000
 _MARKDOWN_EXTENSIONS = frozenset({".md", ".markdown", ".mdx"})
 _PDF_EXTENSIONS = frozenset({".pdf"})
 _HTML_EXTENSIONS = frozenset({".html", ".htm"})
-_OFFICE_PDF_PREVIEW_EXTENSIONS = frozenset({".docx", ".pptx"})
+_OFFICE_PDF_PREVIEW_EXTENSIONS = frozenset({".doc", ".docx", ".ppt", ".pptx"})
 _OFFICE_MEDIA_TYPES = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -94,7 +94,7 @@ class OfficePreviewConversionError(RuntimeError):
 class PreviewResult:
     """与存储和 HTTP 无关的文件预览结果。"""
 
-    content: str | bytes | None
+    content: str | bytes | dict | None
     preview_type: str
     supported: bool
     media_type: str | None = None
@@ -106,7 +106,7 @@ class PreviewResult:
     def payload(self) -> dict:
         """返回文本或不支持预览使用的数据。"""
         return {
-            "content": self.content if isinstance(self.content, str) else None,
+            "content": self.content if isinstance(self.content, (str, dict)) else None,
             "preview_type": self.preview_type,
             "supported": self.supported,
             "message": self.message,
@@ -232,6 +232,16 @@ def detect_preview_type(path: str, raw_content: bytes) -> tuple[str, bool, str |
 
 def render_preview(path: str, raw_content: bytes) -> PreviewResult:
     """把文件字节渲染为中立 Preview 结果。"""
+    if PurePosixPath(path).suffix.lower() in {".xls", ".xlsx"}:
+        if len(raw_content) > MAX_BINARY_PREVIEW_SIZE_BYTES:
+            return preview_too_large()
+        from yuxi.utils.spreadsheet_preview import preview_spreadsheet
+
+        workbook = preview_spreadsheet(PurePosixPath(path).suffix.lower(), raw_content)
+        if "error" in workbook:
+            return PreviewResult(content=None, preview_type="unsupported", supported=False, message=workbook["error"])
+        return PreviewResult(content=workbook, preview_type="spreadsheet", supported=True)
+
     preview_type, supported, message = detect_preview_type(path, raw_content)
     if preview_type in {"image", "pdf"}:
         return PreviewResult(

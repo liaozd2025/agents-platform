@@ -12,7 +12,7 @@ const IMAGE_EXTENSIONS = new Set([
 ])
 const PDF_EXTENSIONS = new Set(['.pdf'])
 const HTML_EXTENSIONS = new Set(['.html', '.htm'])
-const OFFICE_EXTENSIONS = new Set(['.docx', '.pptx'])
+const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.ppt', '.pptx'])
 const TEXT_EXTENSIONS = new Set([
   '.txt',
   '.text',
@@ -135,6 +135,7 @@ export const getPreviewTypeByPath = (path) => {
   if (MARKDOWN_EXTENSIONS.has(extension)) return 'markdown'
   if (HTML_EXTENSIONS.has(extension)) return 'html'
   if (OFFICE_EXTENSIONS.has(extension)) return 'office'
+  if (extension === '.xls' || extension === '.xlsx') return 'spreadsheet'
   if (TEXT_EXTENSIONS.has(extension)) return 'text'
   return 'unsupported'
 }

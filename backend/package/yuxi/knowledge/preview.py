@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from yuxi.knowledge.utils.kb_utils import is_minio_url, parse_minio_url
 from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
 from yuxi.storage.minio import get_minio_client
@@ -63,7 +65,7 @@ async def read_knowledge_file_preview(kb_id: str, file_id: str) -> dict:
     raw_content = await _read_minio_bytes(original_path)
     if len(raw_content) > MAX_BINARY_PREVIEW_SIZE_BYTES:
         return {**response, **preview_too_large().payload()}
-    result = render_preview(filename, raw_content)
+    result = await asyncio.to_thread(render_preview, filename, raw_content)
     if isinstance(result.content, bytes):
         return {
             **response,

@@ -32,7 +32,7 @@ async def preview_workspace_file(
             filename=f"{PurePosixPath(path).stem or 'preview'}.pdf",
         )
 
-    return render_preview(path, raw_content)
+    return await asyncio.to_thread(render_preview, path, raw_content)
 
 
 async def _convert_office_to_pdf_cached(path: str, content: bytes, cache_key: str) -> bytes:
