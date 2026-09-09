@@ -314,6 +314,7 @@
                       <div class="input-model-selector">
                         <ModelSelectorComponent
                           :model_spec="currentModelSpec"
+                          :auto-select-first="!currentModelSpec"
                           size="nano"
                           display-name="mini"
                           placeholder="选择模型"
@@ -1372,7 +1373,7 @@ const currentAgent = computed(() => {
 const currentChatId = computed(() => currentThreadId.value)
 
 // ==================== 对话级模型覆盖 ====================
-// 用户手动选择和已有会话绑定优先；新会话固定使用当前可用的 DeepSeek 默认模型。
+// 用户手动选择和已有会话绑定优先；新会话由模型选择器选择已配置列表首项。
 const DRAFT_MODEL_KEY = '__draft__'
 const selectedModelByThread = reactive({})
 const savedToolApprovalMode = ref(readToolApprovalModePreference())
@@ -2424,7 +2425,9 @@ const isSendButtonDisabled = computed(() => {
     props.sendDisabled ||
     isWaitingForUserAction.value ||
     (!userInput.value && !isProcessing.value) ||
-    !currentAgent.value
+    !currentAgent.value ||
+    // 仅限制新消息发送；运行中的回答仍必须保留停止能力，即使模型信息暂未加载。
+    (!isProcessing.value && !currentModelSpec.value)
   )
 })
 
