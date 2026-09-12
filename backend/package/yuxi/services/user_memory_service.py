@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.workspace.filesystem import Workspace
 from yuxi.workspace.paths import ensure_user_workspace
