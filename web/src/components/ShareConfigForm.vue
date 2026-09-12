@@ -84,7 +84,9 @@
                           size="small"
                           allow-clear
                           class="selection-search"
-                          :placeholder="option.value === 'department' ? '搜索组织节点' : '搜索用户'"
+                          :placeholder="
+                            option.value === 'department' ? '搜索组织节点' : '搜索用户名，支持远程查找'
+                          "
                           @mousedown.stop
                           @click.stop
                         />
@@ -138,13 +140,11 @@
                           <a-button type="link" size="small" @click="loadUsers">重试</a-button>
                         </div>
                         <div
-                          v-else-if="
-                            option.value === 'user' && getSelectionOptions(scope.key).length
-                          "
+                          v-else-if="option.value === 'user' && userSelectionOptions.length"
                           class="selection-list"
                         >
                           <div
-                            v-for="item in getSelectionOptions(scope.key)"
+                            v-for="item in userSelectionOptions"
                             :key="item.value"
                             role="checkbox"
                             :aria-checked="isSelected(scope.key, option.value, item.value)"
@@ -192,6 +192,9 @@
                               />
                               <span class="selection-label">{{ item.label }}</span>
                             </span>
+                          </div>
+                          <div v-if="userSearchHasMore" class="selection-more-hint">
+                            结果过多，请输入用户名进一步筛选
                           </div>
                         </div>
                         <div v-else class="selection-empty">暂无可选项</div>
@@ -395,6 +398,27 @@ const userOptions = computed(() =>
   }))
 )
 
+// 远程搜索结果与已选项合并：已选中但不在当前结果里的用户仍需展示，
+// 否则切换搜索词后“已选”会凭空消失，用户无法取消勾选。
+const userSelectionOptions = computed(() => {
+  const merged = new Map()
+  for (const option of userOptions.value) merged.set(option.value, option)
+  const selectedUids = [
+    ...(scopes.read_scope?.user_uids || []),
+    ...(scopes.manage_scope?.user_uids || [])
+  ]
+  for (const uid of selectedUids) {
+    if (!merged.has(uid)) merged.set(uid, { label: uid, value: uid, department_id: null })
+  }
+  return Array.from(merged.values()).sort(
+    (a, b) => Number(isUserSelected(b.value)) - Number(isUserSelected(a.value))
+  )
+})
+
+const isUserSelected = (uid) =>
+  (scopes.read_scope?.user_uids || []).includes(String(uid)) ||
+  (scopes.manage_scope?.user_uids || []).includes(String(uid))
+
 const getAccessCount = (scopeKey, accessLevel) => {
   const scope = scopes[scopeKey]
   if (accessLevel === 'department') return scope?.department_ids.length || 0
@@ -408,12 +432,6 @@ const getAccessSummary = (scopeKey, accessLevel) => {
     return getDepartmentSelectionSummary(departments.value, scope?.department_ids || [])
   }
   return `${scope?.user_uids.length || 0} 个用户可访问`
-}
-const getSelectionOptions = (scopeKey) => {
-  const query = selectionSearch[scopeKey].user.trim().toLowerCase()
-  return query
-    ? userOptions.value.filter((item) => item.label.toLowerCase().includes(query))
-    : userOptions.value
 }
 const isSelected = (scopeKey, accessLevel, value) => {
   const scope = scopes[scopeKey]
@@ -477,18 +495,53 @@ const loadDepartments = async () => {
     departmentsLoading.value = false
   }
 }
-const loadUsers = async () => {
+// 远程搜索并发控制：仅接受最后一次请求的结果，避免慢响应覆盖新结果。
+let userSearchSeq = 0
+let userSearchTimer = null
+// 远端返回总数大于已加载条数时，提示用户继续输入关键字缩小范围
+const userSearchHasMore = ref(false)
+
+/**
+ * 按关键字拉取候选用户。
+ * @param {string} keyword 搜索关键字，空串表示取默认前若干条
+ */
+const fetchUsers = async (keyword = '') => {
+  const seq = ++userSearchSeq
   usersLoading.value = true
   userLoadError.value = ''
   try {
-    users.value = await authApi.getUserAccessOptions()
+    const { users: rows, total } = await authApi.getUserAccessOptions({ keyword, limit: 100 })
+    // 丢弃过期响应：期间已有更新的搜索发起
+    if (seq !== userSearchSeq) return
+    users.value = rows
+    userSearchHasMore.value = total > rows.length
   } catch (error) {
+    if (seq !== userSearchSeq) return
     console.error('加载用户列表失败:', error)
     userLoadError.value = '用户列表加载失败'
+    users.value = []
   } finally {
-    usersLoading.value = false
+    if (seq === userSearchSeq) usersLoading.value = false
   }
 }
+
+/** 首次加载 / 出错重试：清空关键字后重新拉取。 */
+const loadUsers = () => {
+  selectionSearch.read_scope.user = ''
+  selectionSearch.manage_scope.user = ''
+  return fetchUsers('')
+}
+
+// 搜索框输入防抖 300ms，避免每个字符都打一次接口
+watch(
+  () => [selectionSearch.read_scope.user, selectionSearch.manage_scope.user],
+  ([readKeyword, manageKeyword]) => {
+    window.clearTimeout(userSearchTimer)
+    // 两个浮层共用一个结果集，取当前非空的关键字即可
+    const keyword = (readKeyword || manageKeyword || '').trim()
+    userSearchTimer = window.setTimeout(() => fetchUsers(keyword), 300)
+  }
+)
 
 watch(() => props.modelValue, initConfig, { deep: true })
 watch(normalizedAllowedAccessLevels, initConfig)
@@ -684,6 +737,14 @@ defineExpose({ scopes, validate })
 .selection-list {
   max-height: 240px;
   overflow-y: auto;
+}
+
+.selection-more-hint {
+  padding: 6px 4px;
+  border-top: 1px solid var(--gray-150);
+  color: var(--gray-500);
+  font-size: 12px;
+  text-align: center;
 }
 
 .selection-tree {
