@@ -5,6 +5,7 @@ import uuid
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Any, get_origin
 
+from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.backends.sandbox.paths import sandbox_workspace_agent_context_file
 from yuxi.agents.tool_approval import DEFAULT_TOOL_APPROVAL_MODE
 from yuxi.utils.logging_config import logger
@@ -90,10 +91,20 @@ async def build_agent_input_context(
     *,
     thread_id: str,
     uid: str,
+    db: AsyncSession | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
 ) -> dict:
+    """构建 Agent 输入上下文，并在可用时先同步用户资料记忆。"""
     input_context = dict(agent_config or {})
+    if db is not None:
+        from yuxi.services.user_memory_service import sync_user_profile_to_memory
+
+        # 用户和部门以数据库为准；同步失败不应阻断本次 Agent 运行，但必须留下日志。
+        try:
+            await sync_user_profile_to_memory(db=db, uid=uid, thread_id=thread_id)
+        except Exception:
+            logger.exception("用户记忆同步失败，继续使用现有工作区内容：uid=%s, thread_id=%s", uid, thread_id)
     agent_context = await asyncio.to_thread(_load_workspace_agent_context, thread_id, uid)
 
     if agent_context:

@@ -6,6 +6,8 @@
 
 ## v0.7.2 (current)
 
+- 接入用户记忆资料同步：Memory 开启时在 Agent 运行前将用户名、UID、部门和角色同步到 `agents/USER.md` 的机器维护区块，保留用户手工内容；用户或部门信息变化后下次运行自动校正，关闭 Memory 时清理旧资料。
+
 ::: warning 升级提醒
 1. 升级到 v0.7.2 后，管理员此前创建的 stdio MCP 会被禁用，也无法重新启用。请在详情页迁移为 SSE 或 Streamable HTTP，或直接删除；代码内置的系统 stdio MCP 不受影响。
 :::

@@ -863,6 +863,7 @@ async def stream_agent_chat(
         agent_config,
         thread_id=thread_id,
         uid=uid,
+        db=db,
         run_id=meta.get("run_id"),
         request_id=meta.get("request_id"),
     )
@@ -1175,6 +1176,7 @@ async def stream_agent_resume(
         agent_config or {},
         thread_id=thread_id,
         uid=uid,
+        db=db,
         run_id=meta.get("run_id"),
         request_id=meta.get("request_id"),
     )
@@ -1398,6 +1400,7 @@ async def get_agent_state_view(
             agent_config,
             thread_id=thread_id,
             uid=current_uid,
+            db=db,
         )
         latest_run = await run_repo.get_latest_run_by_thread_for_user(thread_id, current_uid)
         if latest_run and isinstance(latest_run.input_payload, dict):
