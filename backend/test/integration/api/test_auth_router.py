@@ -436,6 +436,28 @@ async def test_admin_can_create_and_delete_user(test_client, admin_headers):
     assert created_user["id"] not in {user["id"] for user in list_response.json()}
 
 
+async def test_admin_can_create_user_with_explicit_default_role(test_client, admin_headers):
+    """显式提交默认普通用户角色时，创建流程不能触发异步懒加载异常。"""
+
+    overview_response = await test_client.get("/api/roles/overview", headers=admin_headers)
+    assert overview_response.status_code == 200, overview_response.text
+    user_role = next(item for item in overview_response.json()["roles"] if item["code"] == "user")
+    suffix = uuid.uuid4().hex[:8]
+    payload = {
+        "username": f"explicit_user_{suffix}",
+        "password": "routerTest123!",
+        "role_assignments": [{"role_id": user_role["id"], "scope_mode": "inherit"}],
+    }
+
+    create_response = await test_client.post("/api/auth/users", json=payload, headers=admin_headers)
+    assert create_response.status_code == 200, create_response.text
+    created_user = create_response.json()
+    assert [role["code"] for role in created_user["roles"]] == ["user"]
+
+    delete_response = await test_client.delete(f"/api/auth/users/{created_user['id']}", headers=admin_headers)
+    assert delete_response.status_code == 200, delete_response.text
+
+
 async def test_admin_user_page_filters_before_pagination_and_excludes_deleted(test_client, admin_headers):
     suffix = uuid.uuid4().hex[:8]
     created_users = []
