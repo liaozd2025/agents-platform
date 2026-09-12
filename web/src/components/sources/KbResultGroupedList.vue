@@ -13,6 +13,7 @@
           target="_blank"
           rel="noopener noreferrer"
           :aria-label="`打开 ${fileGroup.filename} 的 OA 原文`"
+          @click="handleSourceClick(fileGroup.url, $event)"
         >
           <span class="source-index">{{ index + 1 }}</span>
           <span class="file-copy">
@@ -20,7 +21,8 @@
             <span v-if="fileGroup.author" class="file-author">知识库 · 作者：{{ fileGroup.author }}</span>
             <span v-else class="file-author">知识库</span>
           </span>
-          <ExternalLink :size="14" class="external-icon" />
+          <ArrowUpRight v-if="isOAInternalUrl(fileGroup.url)" :size="14" class="external-icon" />
+          <ExternalLink v-else :size="14" class="external-icon" />
         </a>
         <button v-else class="file-info" :aria-label="`查看 ${fileGroup.filename} 的检索片段`" @click="openFileChunksModal(fileGroup)">
           <span class="source-index">{{ index + 1 }}</span>
@@ -45,10 +47,11 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { ExternalLink, Eye } from '@lucide/vue'
+import { ArrowUpRight, ExternalLink, Eye } from '@lucide/vue'
 import KbFileChunksModal from './KbFileChunksModal.vue'
 import FileDetailModal from '@/components/FileDetailModal.vue'
 import { groupKnowledgeChunks } from '@/utils/kbResultGroups.js'
+import { isOAInternalUrl, navigateSource } from '@/utils/sourceNavigation.js'
 
 const props = defineProps({
   chunks: {
@@ -79,6 +82,19 @@ const openFileDetail = (fileGroup) => {
   fileDetailKbId.value = fileGroup.kb_id
   fileDetailFileId.value = fileGroup.file_id
   fileDetailOpen.value = true
+}
+
+/**
+ * 接管来源条目的左键点击。
+ * 保留 href 以便右键菜单、中键新标签与无障碍访问；仅接管不带修饰键的左键点击，
+ * 交给统一的 sourceNavigation 分发（内嵌态父页跳转 / 其余新标签打开）。
+ */
+const handleSourceClick = (url, event) => {
+  // 修饰键或非左键：保持浏览器原生行为，不接管
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  // 已由分发逻辑决定落点，阻止默认导航避免二次打开
+  event.preventDefault()
+  navigateSource({ sourceType: 'knowledge_base', url })
 }
 
 const resolveChunks = (input) => {
