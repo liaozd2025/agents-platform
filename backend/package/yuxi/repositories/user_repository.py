@@ -311,7 +311,8 @@ class UserRepository:
 
         user = User(
             **data,
-            role_assignments=[UserRoleAssignment(role=role, scope_mode="inherit")],
+            # 显式初始化空范围集合，避免后续替换角色时触发异步关系懒加载。
+            role_assignments=[UserRoleAssignment(role=role, scope_mode="inherit", scope_departments=[])],
         )
         db.add(user)
         await db.flush()
