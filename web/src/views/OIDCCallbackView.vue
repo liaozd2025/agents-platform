@@ -71,8 +71,13 @@ const handleCallback = async () => {
     // 更新用户状态
     userStore.token = tokenData.access_token
 
-    // 保存 token 到 localStorage
-    localStorage.setItem('user_token', tokenData.access_token)
+    // 根据登录页选择保存范围，未勾选时仅保留在当前浏览器会话。
+    const rememberLogin = sessionStorage.getItem('oidc_remember_login') === 'true'
+    sessionStorage.removeItem('oidc_remember_login')
+    localStorage.removeItem('user_token')
+    sessionStorage.removeItem('user_token')
+    const tokenStorage = rememberLogin ? localStorage : sessionStorage
+    tokenStorage.setItem('user_token', tokenData.access_token)
     await userStore.getCurrentUser()
 
     // 显示成功消息
