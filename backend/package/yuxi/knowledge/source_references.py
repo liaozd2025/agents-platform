@@ -37,9 +37,11 @@ def build_knowledge_source_reference(content: str, *, fallback_title: str = "") 
             else "3"
         )
         oa_title = title if page_type == "1" else f"新闻详细-{task_id}"
+        # ecType 与 page_type 同源：1=好文共享，3=新闻详细。
+        # OA 父插件按 ecType 决定文章详情页的渲染分支，前端内嵌跳转协议同样依赖该参数。
         source_ref["url"] = (
             f"{OA_ARTICLE_BASE_URL}/{page_type}?"
-            f"{urlencode([('title', oa_title), ('taskID', task_id)], quote_via=quote)}"
+            f"{urlencode([('title', oa_title), ('taskID', task_id), ('ecType', page_type)], quote_via=quote)}"
         )
     return source_ref
 

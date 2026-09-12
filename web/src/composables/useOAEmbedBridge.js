@@ -15,7 +15,7 @@ import {
   getOAEmbedRenewalDelay,
   parseOAEmbedAllowedOrigins
 } from '@/utils/oaEmbedBridge'
-import { setOAEmbedAuthRequiredHandler } from '@/utils/oaEmbedSession'
+import { setOAEmbedAuthRequiredHandler, setOAEmbedNavigateHandler } from '@/utils/oaEmbedSession'
 
 /** 在嵌入路由中将父项目下发的 OA 账号交换为 Yuxi 登录态。 */
 export function useOAEmbedBridge(enabled) {
@@ -28,6 +28,7 @@ export function useOAEmbedBridge(enabled) {
   const statusMessage = ref('等待 OA 授权')
   let bridge = null
   let clearAuthRequiredHandler = null
+  let clearNavigateHandler = null
   let renewalTimer = null
 
   const clearRenewalTimer = () => {
@@ -96,6 +97,11 @@ export function useOAEmbedBridge(enabled) {
       onModeChanged: confirmEmbedDisplayMode
     })
     clearAuthRequiredHandler = setOAEmbedAuthRequiredHandler(requestAuthRequired)
+    // 来源列表等深层组件通过该通道请求父页面做 OA 内部跳转；返回 false 时由调用方降级为新标签。
+    clearNavigateHandler = setOAEmbedNavigateHandler((params) => {
+      if (!bridge) return false
+      return bridge.requestNavigate(params)
+    })
     bridge.start()
   }
 
@@ -105,6 +111,8 @@ export function useOAEmbedBridge(enabled) {
     bridge = null
     clearAuthRequiredHandler?.()
     clearAuthRequiredHandler = null
+    clearNavigateHandler?.()
+    clearNavigateHandler = null
     if (unref(enabled)) {
       clearAuthorization('等待 OA 授权')
     }

@@ -228,7 +228,7 @@ async def test_query_kb_attaches_oa_source_reference_for_matched_file(monkeypatc
         "type_name": "新闻动态",
         "url": (
             "https://hnjiudian.cn/web/index.html#/corporate-culture/view-page/3?"
-            "title=%E6%96%B0%E9%97%BB%E8%AF%A6%E7%BB%86-2191146&taskID=2191146"
+            "title=%E6%96%B0%E9%97%BB%E8%AF%A6%E7%BB%86-2191146&taskID=2191146&ecType=3"
         ),
     }
 
