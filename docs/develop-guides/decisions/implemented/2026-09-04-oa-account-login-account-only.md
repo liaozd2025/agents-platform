@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：simplification
-Owner：`backend/package/yuxi/services/oa_sso_service.py`、`web/src/utils/oaEmbedBridge.js`
+Owner：backend/package/yuxi/services/oa_sso_service.py
 
 ## 问题
 
@@ -23,3 +23,7 @@ Owner：`backend/package/yuxi/services/oa_sso_service.py`、`web/src/utils/oaEmb
 ## 验证
 
 后端单元测试验证生产环境在只配置账号换票参数时可用，并验证账号换票仍通过 OA 返回凭证和用户信息校验。前端单元测试验证 iframe 只向允许来源请求并传递账号，不再传递签名或时间戳。
+
+旧能力不存在：账号换票入口不再接收共享密钥、签名或时间戳。
+
+重新引入条件：OA 父项目能提供可信的服务端签名并完成接入契约调整。

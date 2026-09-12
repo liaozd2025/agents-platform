@@ -229,7 +229,12 @@ async def lifespan(app: FastAPI):
     lite_mode = lite_mode_enabled()
     try:
         await _startup(app)
-        yield
+        mcp_server = getattr(app.state, "knowledge_mcp", None)
+        if mcp_server is not None:
+            async with mcp_server.session_manager.run():
+                yield
+        else:
+            yield
     finally:
         app.state.startup_complete = False
         await _shutdown_component("tasker", tasker.shutdown)

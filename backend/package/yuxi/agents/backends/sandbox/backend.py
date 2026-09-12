@@ -704,8 +704,27 @@ class ProvisionerSandboxBackend(BaseSandbox):
                     capture_offset = 0
                     pending_output = bytearray()
                     exit_code = data.exit_code
+                    deadline = asyncio.get_running_loop().time() + (timeout or self._command_timeout_seconds)
 
                     while True:
+                        if status == "completed":
+                            try:
+                                captured_status = await client.file.read_file(
+                                    file=status_path,
+                                    request_options={"timeout_in_seconds": self._command_timeout_seconds},
+                                )
+                            except ApiError as exc:
+                                if exc.status_code != 404:
+                                    raise
+                                # 固定沙盒可能在进程仍执行时报告 completed，退出码文件才是包装命令的终态。
+                                status = "running"
+                                if asyncio.get_running_loop().time() >= deadline:
+                                    raise TimeoutError("sandbox 命令退出码未在执行期限内生成") from exc
+                            else:
+                                try:
+                                    exit_code = int(captured_status.data.content.strip())
+                                except (AttributeError, TypeError, ValueError) as exc:
+                                    raise RuntimeError("sandbox 命令退出码无效") from exc
                         terminal = status != "running"
                         try:
                             # file.read 会去掉末尾换行；按原始字节读取才能辨别完整 JSONL 行。
@@ -744,15 +763,6 @@ class ProvisionerSandboxBackend(BaseSandbox):
                             output_size += len(encoded)
                             del pending_output[:complete_end]
                         if truncated or terminal:
-                            if terminal and status == "completed":
-                                captured_status = await client.file.read_file(
-                                    file=status_path,
-                                    request_options={"timeout_in_seconds": self._command_timeout_seconds},
-                                )
-                                try:
-                                    exit_code = int(captured_status.data.content.strip())
-                                except (AttributeError, TypeError, ValueError) as exc:
-                                    raise RuntimeError("sandbox 命令退出码无效") from exc
                             return ExecuteResponse(
                                 output=output,
                                 exit_code=exit_code if status == "completed" and isinstance(exit_code, int) else 1,

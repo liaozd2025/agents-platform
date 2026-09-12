@@ -109,6 +109,11 @@ def _patch_stream_scaffolding(
     async def fake_resolve_workdir(**_kwargs):
         return "projects/11111111-1111-4111-8111-111111111111"
 
+    async def fake_retrieval_decision(*_args):
+        """聊天流单测不访问知识库持久化，检索策略由独立测试覆盖。"""
+        return SimpleNamespace(kb_ids=())
+
+    monkeypatch.setattr(svc, "decide_knowledge_retrieval", fake_retrieval_decision)
     monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
     monkeypatch.setattr(svc, "resolve_conversation_workdir_path", fake_resolve_workdir)
     monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)

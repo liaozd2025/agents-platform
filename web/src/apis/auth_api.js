@@ -166,6 +166,8 @@ async function approveCLIAuthSession(userCode) {
 }
 
 export const authApi = {
+  getMCPConsent: (id) => apiGet(`/api/mcp/consent/${encodeURIComponent(id)}`),
+  approveMCPConsent: (id) => apiPost(`/api/mcp/consent/${encodeURIComponent(id)}`, {}),
   login,
   initialize,
   checkFirstRun,

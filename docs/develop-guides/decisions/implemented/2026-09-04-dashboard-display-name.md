@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/repositories/dashboard_repository.py 与 web/src/components/dashboard/ThreadStatsComponent.vue
+Owner：backend/package/yuxi/repositories/dashboard_repository.py
 
 ## 问题
 

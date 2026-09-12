@@ -4,6 +4,8 @@ MCP（Model Context Protocol）让智能体调用外部服务提供的工具。�
 
 ## 支持的传输方式
 
+如果要让 Codex 等外部客户端读取 Yuxi 知识库，使用 [外部知识库 MCP](./knowledge-mcp.md)。
+
 | 传输方式 | 适用场景 |
 | --- | --- |
 | `streamable_http` | 新的远程 MCP 服务 |
