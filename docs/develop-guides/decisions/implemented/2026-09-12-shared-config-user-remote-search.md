@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：`backend/server/routers/auth_router.py`、`web/src/apis/auth_api.js`、`web/src/components/ShareConfigForm.vue`
+Owner：backend/server/routers/auth_router.py
 
 ## 问题
 
