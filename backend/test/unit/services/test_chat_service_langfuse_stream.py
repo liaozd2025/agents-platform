@@ -56,6 +56,7 @@ async def _fake_save_messages_from_langgraph_state(
     interrupt_error_type=None,
     interrupt_error_message=None,
     token_usage=None,
+    assistant_additional_metadata=None,
 ):
     del agent_instance, thread_id, conv_repo, config_dict, context, trace_info
     del run_id, request_id, worker_id, interrupt_error_type, interrupt_error_message, token_usage
@@ -322,6 +323,7 @@ async def test_stream_agent_chat_commits_before_stream_and_persists_langfuse_con
         interrupt_error_type=None,
         interrupt_error_message=None,
         token_usage=None,
+        assistant_additional_metadata=None,
     ):
         calls["saved_state"] = {
             "thread_id": thread_id,

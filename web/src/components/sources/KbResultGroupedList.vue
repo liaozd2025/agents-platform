@@ -5,47 +5,47 @@
     </div>
 
     <div class="kb-results" v-if="normalizedChunks.length > 0">
-      <div v-for="fileGroup in fileGroupList" :key="fileGroup.key" class="file-group-item">
-        <button
+      <div v-for="(fileGroup, index) in fileGroupList" :key="fileGroup.key" class="file-group-item">
+        <a
+          v-if="fileGroup.url"
           class="file-info"
-          :aria-label="`查看 ${fileGroup.filename} 的检索片段`"
-          @click="openFileChunksModal(fileGroup)"
+          :href="fileGroup.url"
+          target="_blank"
+          rel="noopener noreferrer"
+          :aria-label="`打开 ${fileGroup.filename} 的 OA 原文`"
         >
-          <FileText :size="15" class="file-icon" />
-          <span class="file-name" :title="fileGroup.filename">{{ fileGroup.filename }}</span>
-          <span class="chunk-count">{{ fileGroup.chunks.length }} 个片段</span>
+          <span class="source-index">{{ index + 1 }}</span>
+          <span class="file-copy">
+            <span class="file-name" :title="fileGroup.filename">{{ fileGroup.filename }}</span>
+            <span v-if="fileGroup.author" class="file-author">知识库 · 作者：{{ fileGroup.author }}</span>
+            <span v-else class="file-author">知识库</span>
+          </span>
+          <ExternalLink :size="14" class="external-icon" />
+        </a>
+        <button v-else class="file-info" :aria-label="`查看 ${fileGroup.filename} 的检索片段`" @click="openFileChunksModal(fileGroup)">
+          <span class="source-index">{{ index + 1 }}</span>
+          <span class="file-copy">
+            <span class="file-name" :title="fileGroup.filename">{{ fileGroup.filename }}</span>
+            <span class="file-author">知识库 · {{ fileGroup.chunks.length }} 个片段</span>
+          </span>
         </button>
-        <div class="file-actions">
-          <button
-            v-if="fileGroup.kb_id && fileGroup.file_id"
-            class="view-file-btn"
-            @click.stop="openFileDetail(fileGroup)"
-            title="查看完整文件"
-            aria-label="查看完整文件"
-          >
-            <Eye :size="14" />
-          </button>
-        </div>
+        <button v-if="fileGroup.kb_id && fileGroup.file_id" class="view-file-btn" title="查看完整文件" aria-label="查看完整文件" @click="openFileDetail(fileGroup)">
+          <Eye :size="14" />
+        </button>
       </div>
     </div>
 
     <div v-else class="no-results">
       <p>{{ emptyText }}</p>
     </div>
-
     <KbFileChunksModal v-model:open="chunksModalVisible" :file-group="selectedFileGroup" />
-
-    <FileDetailModal
-      v-model:open="fileDetailOpen"
-      :kb-id="fileDetailKbId"
-      :file-id="fileDetailFileId"
-    />
+    <FileDetailModal v-model:open="fileDetailOpen" :kb-id="fileDetailKbId" :file-id="fileDetailFileId" />
   </div>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue'
-import { FileText, Eye } from '@lucide/vue'
+import { ExternalLink, Eye } from '@lucide/vue'
 import KbFileChunksModal from './KbFileChunksModal.vue'
 import FileDetailModal from '@/components/FileDetailModal.vue'
 import { groupKnowledgeChunks } from '@/utils/kbResultGroups.js'
@@ -70,6 +70,16 @@ const selectedFileGroup = ref(null)
 const fileDetailOpen = ref(false)
 const fileDetailKbId = ref('')
 const fileDetailFileId = ref('')
+
+const openFileChunksModal = (fileGroup) => {
+  selectedFileGroup.value = fileGroup
+  chunksModalVisible.value = true
+}
+const openFileDetail = (fileGroup) => {
+  fileDetailKbId.value = fileGroup.kb_id
+  fileDetailFileId.value = fileGroup.file_id
+  fileDetailOpen.value = true
+}
 
 const resolveChunks = (input) => {
   if (Array.isArray(input)) return input
@@ -115,16 +125,6 @@ const fileGroupList = computed(() => {
   return groupKnowledgeChunks(normalizedChunks.value)
 })
 
-const openFileChunksModal = (fileGroup) => {
-  selectedFileGroup.value = fileGroup
-  chunksModalVisible.value = true
-}
-
-const openFileDetail = (fileGroup) => {
-  fileDetailKbId.value = fileGroup.kb_id || ''
-  fileDetailFileId.value = fileGroup.file_id || ''
-  fileDetailOpen.value = Boolean(fileDetailKbId.value && fileDetailFileId.value)
-}
 </script>
 
 <style scoped lang="less">
@@ -138,6 +138,15 @@ const openFileDetail = (fileGroup) => {
     border: 1px solid var(--gray-150);
     border-radius: 8px;
     margin-bottom: 6px;
+  }
+
+  .view-file-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--gray-600);
+    cursor: pointer;
+    padding: 6px;
   }
 
   .kb-results {
@@ -180,57 +189,41 @@ const openFileDetail = (fileGroup) => {
         border-radius: 4px;
       }
 
-      .file-icon {
+      .source-index {
         flex-shrink: 0;
+        width: 20px;
         color: var(--gray-600);
+        font-size: 13px;
+        text-align: center;
       }
 
       .file-name {
         font-size: 13px;
         color: var(--gray-800);
         font-weight: 500;
-        flex: 1;
         min-width: 0;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
 
-      .chunk-count {
+      .file-copy {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        gap: 1px;
+        min-width: 0;
+      }
+
+      .file-author {
+        overflow: hidden;
+        color: var(--gray-500);
         font-size: 11px;
-        color: var(--gray-600);
-        background: var(--gray-50);
-        border: 1px solid var(--gray-150);
-        padding: 1px 6px;
-        border-radius: 10px;
+        line-height: 15px;
+        text-overflow: ellipsis;
         white-space: nowrap;
       }
-    }
-
-    .file-actions {
-      display: flex;
-      align-items: center;
-      margin-left: 8px;
-
-      .view-file-btn {
-        flex-shrink: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 24px;
-        height: 24px;
-        border: none;
-        background: transparent;
-        border-radius: 4px;
-        cursor: pointer;
-        color: var(--gray-500);
-        transition: all 0.15s;
-
-        &:hover {
-          background: var(--gray-100);
-          color: var(--gray-700);
-        }
-      }
+      .external-icon { flex-shrink: 0; color: var(--gray-500); }
     }
   }
 

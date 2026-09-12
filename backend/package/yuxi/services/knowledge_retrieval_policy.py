@@ -44,6 +44,7 @@ class KnowledgeRetrievalDecision:
     intent: str
     kb_ids: tuple[str, ...]
     mentioned: bool
+    kb_names: tuple[tuple[str, str], ...] = ()
 
 
 def parse_knowledge_mentions(query: str) -> tuple[str, ...]:
@@ -85,7 +86,9 @@ async def decide_knowledge_retrieval(query: str, user: Any) -> KnowledgeRetrieva
             for value in mentions
             if value in visible or any(summary.name == value for summary in visible.values())
         )
-        return KnowledgeRetrievalDecision("SEARCH_KB", kb_ids, True)
+        return KnowledgeRetrievalDecision(
+            "SEARCH_KB", kb_ids, True, tuple((kb_id, str(visible[kb_id].name)) for kb_id in kb_ids)
+        )
 
     global_ids = tuple(
         kb_id
@@ -94,7 +97,9 @@ async def decide_knowledge_retrieval(query: str, user: Any) -> KnowledgeRetrieva
         and isinstance(summary.share_config.get("read_scope"), dict)
         and summary.share_config["read_scope"].get("access_level") == "global"
     )
-    return KnowledgeRetrievalDecision("SEARCH_KB", global_ids, False)
+    return KnowledgeRetrievalDecision(
+        "SEARCH_KB", global_ids, False, tuple((kb_id, str(visible[kb_id].name)) for kb_id in global_ids)
+    )
 
 
 async def retrieve_for_decision(query: str, decision: KnowledgeRetrievalDecision) -> list[dict[str, Any]]:
@@ -102,7 +107,9 @@ async def retrieve_for_decision(query: str, decision: KnowledgeRetrievalDecision
     if not decision.kb_ids:
         return []
     from yuxi.knowledge.runtime import knowledge_base
+    from yuxi.knowledge.source_references import attach_knowledge_source_references
 
+    kb_names = dict(decision.kb_names)
     clean_query = _MENTION_RE.sub("", query).strip()
     results = await asyncio.gather(
         *(knowledge_base.retrieve(kb_id, clean_query) for kb_id in decision.kb_ids),
@@ -112,6 +119,7 @@ async def retrieve_for_decision(query: str, decision: KnowledgeRetrievalDecision
     for kb_id, result in zip(decision.kb_ids, results, strict=True):
         if isinstance(result, Exception):
             continue
+        result = await attach_knowledge_source_references(knowledge_base, kb_id, kb_names.get(kb_id, ""), result)
         for item in result.get("results", []) if isinstance(result, dict) else []:
             if isinstance(item, dict):
                 chunks.append({**item, "kb_id": item.get("kb_id") or kb_id})

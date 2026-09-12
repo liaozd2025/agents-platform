@@ -147,17 +147,16 @@ export class MessageProcessor {
   static extractKnowledgeChunksFromConversation(conv, databases = []) {
     if (!conv || !Array.isArray(conv.messages) || conv.messages.length === 0) return []
 
-    const databaseNames = new Set(
+    const databaseNamesById = new Map(
       (databases || [])
-        .map((db) => db?.name)
-        .filter((name) => typeof name === 'string' && name.trim())
+        .filter((db) => typeof db?.kb_id === 'string' && typeof db?.name === 'string')
+        .map((db) => [db.kb_id, db.name])
     )
-    if (databaseNames.size === 0) return []
 
     const normalizedChunks = []
     const dedupSet = new Set()
 
-    const appendChunk = (chunk, kbName) => {
+    const appendChunk = (chunk, kbName, kbId = '') => {
       if (!chunk || typeof chunk !== 'object') return
       const content = typeof chunk.content === 'string' ? chunk.content.trim() : ''
       if (!content) return
@@ -173,13 +172,16 @@ export class MessageProcessor {
       const score = typeof chunk.score === 'number' ? chunk.score : null
       normalizedChunks.push({
         kb_name: kbName,
+        kb_id: kbId || chunk.kb_id || '',
+        file_id: chunk.file_id || metadata.file_id || '',
         content,
         score,
         metadata: {
           source: metadata.source || '',
           file_id: metadata.file_id || '',
           chunk_id: metadata.chunk_id || '',
-          chunk_index: metadata.chunk_index
+          chunk_index: metadata.chunk_index,
+          source_ref: metadata.source_ref || { source_type: 'knowledge_base', title: metadata.source || '' }
         }
       })
     }
@@ -198,11 +200,31 @@ export class MessageProcessor {
     }
 
     for (const msg of conv.messages) {
+      if (!msg || msg.type !== 'ai') continue
+      const persistedChunks = msg.extra_metadata?.knowledge_sources
+      if (!Array.isArray(persistedChunks)) continue
+      for (const chunk of persistedChunks) {
+        const kbId = chunk?.kb_id || ''
+        appendChunk(chunk, databaseNamesById.get(kbId) || chunk?.metadata?.source_ref?.kb_name || '知识库', kbId)
+      }
+    }
+
+    for (const msg of conv.messages) {
       if (!msg || msg.type !== 'ai' || !Array.isArray(msg.tool_calls)) continue
 
       for (const toolCall of msg.tool_calls) {
-        const kbName = toolCall?.name || toolCall?.function?.name
-        if (!databaseNames.has(kbName)) continue
+        const toolName = toolCall?.name || toolCall?.function?.name || ''
+        let args = toolCall?.args || {}
+        if (typeof args === 'string') {
+          try {
+            args = JSON.parse(args)
+          } catch {
+            args = {}
+          }
+        }
+        const kbId = args.kb_id || ''
+        const kbName = databaseNamesById.get(kbId) || toolName
+        if (toolName !== 'query_kb' && !databaseNamesById.has(kbId)) continue
 
         const content = toolCall?.tool_call_result?.content
         const parsed = parseToolResultContent(content)
@@ -210,13 +232,18 @@ export class MessageProcessor {
 
         // Milvus / Dify: 直接是 chunks 数组
         if (Array.isArray(parsed)) {
-          for (const chunk of parsed) appendChunk(chunk, kbName)
+          for (const chunk of parsed) appendChunk(chunk, kbName, kbId)
+          continue
+        }
+
+        if (Array.isArray(parsed?.results)) {
+          for (const chunk of parsed.results) appendChunk(chunk, kbName, parsed.kb_id || kbId)
           continue
         }
 
         const wrappedChunks = parsed?.data?.chunks
         if (Array.isArray(wrappedChunks)) {
-          for (const chunk of wrappedChunks) appendChunk(chunk, kbName)
+          for (const chunk of wrappedChunks) appendChunk(chunk, kbName, kbId)
         }
       }
     }
@@ -279,6 +306,7 @@ export class MessageProcessor {
           dedupSet.add(url)
 
           webSources.push({
+            source_type: 'web_search',
             tool_name: toolCall?.name || toolCall?.function?.name || '网络搜索',
             title,
             url,

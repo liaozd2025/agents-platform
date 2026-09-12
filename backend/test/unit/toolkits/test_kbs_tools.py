@@ -109,6 +109,7 @@ def _patch_retrievers(monkeypatch, *, kb_type: str = "milvus", retriever=None):
     manager = SimpleNamespace(
         find_file_content=_not_configured,
         open_file_content=_not_configured,
+        get_file_info=_not_configured,
         get_database_document_support=_fake_get_database_document_support,
     )
 
@@ -199,6 +200,40 @@ async def test_query_kb_returns_search_schema_without_sandbox_paths(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_query_kb_attaches_oa_source_reference_for_matched_file(monkeypatch) -> None:
+    async def _fake_retriever(query_text: str, **kwargs):
+        del query_text, kwargs
+        return KnowledgeBase.build_search_output(
+            "db-1",
+            [{"content": "命中片段", "metadata": {"file_id": "file-1", "source": "导入文件.md"}}],
+        )
+
+    manager = _patch_retrievers(monkeypatch, retriever=_fake_retriever)
+
+    async def _get_file_info(kb_id: str, file_id: str):
+        assert (kb_id, file_id) == ("db-1", "file-1")
+        return {"content": "task_id  2191146\ntitle  新闻详细-2191146\nauthor  刘从新\ntype_name  新闻动态\n"}
+
+    manager.get_file_info = _get_file_info
+    monkeypatch.setattr(tools, "_resolve_visible_knowledge_bases_for_query", _fake_visible_kbs)
+
+    result = await _run_query_kb(kb_id="db-1", query_text="新闻", runtime=SimpleNamespace(context=SimpleNamespace()))
+
+    assert result["results"][0]["metadata"]["source_ref"] == {
+        "source_type": "knowledge_base",
+        "kb_id": "db-1",
+        "kb_name": "FAQ",
+        "title": "新闻详细-2191146",
+        "author": "刘从新",
+        "type_name": "新闻动态",
+        "url": (
+            "https://hnjiudian.cn/web/index.html#/corporate-culture/view-page/3?"
+            "title=%E6%96%B0%E9%97%BB%E8%AF%A6%E7%BB%86-2191146&taskID=2191146"
+        ),
+    }
+
+
+@pytest.mark.asyncio
 async def test_query_kb_allows_dify_knowledge_base(monkeypatch) -> None:
     async def _fake_retriever(query_text: str, **kwargs):
         assert query_text == "auth"
@@ -236,6 +271,12 @@ async def test_query_kb_allows_dify_knowledge_base(monkeypatch) -> None:
                     "chunk_id": "dify-segment-1",
                     "source": "Dify Doc",
                     "score": 0.98,
+                    "source_ref": {
+                        "source_type": "knowledge_base",
+                        "kb_id": "db-1",
+                        "kb_name": "FAQ",
+                        "title": "Dify Doc",
+                    },
                 },
             }
         ],
@@ -284,7 +325,10 @@ async def test_query_kb_maps_full_doc_id_and_chunk_metadata(monkeypatch) -> None
         "kb_id": "db-1",
         "file_id": "file-1",
         "content": "auth guide",
-        "metadata": {"chunk_index": 3},
+        "metadata": {
+            "chunk_index": 3,
+            "source_ref": {"source_type": "knowledge_base", "kb_id": "db-1", "kb_name": "FAQ", "title": ""},
+        },
     }
 
 

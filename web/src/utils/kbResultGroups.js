@@ -9,16 +9,20 @@ export function groupKnowledgeChunks(chunks) {
     const key = `${kbId}\u0000${fileId}\u0000${filename}`
 
     if (!groups.has(key)) {
+      const sourceRef = item?.metadata?.source_ref || {}
       groups.set(key, {
         key,
-        filename,
+        filename: sourceRef.title || filename,
         kb_id: kbId,
         file_id: fileId,
+        source_type: sourceRef.source_type || 'knowledge_base',
+        url: sourceRef.url || '',
+        author: sourceRef.author || sourceRef.author_name || '',
         chunks: []
       })
     }
     groups.get(key).chunks.push(item)
   }
 
-  return Array.from(groups.values()).sort((a, b) => a.filename.localeCompare(b.filename))
+  return Array.from(groups.values())
 }

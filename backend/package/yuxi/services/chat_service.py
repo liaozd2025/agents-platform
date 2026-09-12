@@ -433,6 +433,7 @@ async def _save_ai_message(
     trace_info: dict[str, Any] | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
+    additional_metadata: dict[str, Any] | None = None,
     commit: bool = True,
 ):
     content = msg_dict.get("content", "")
@@ -452,6 +453,8 @@ async def _save_ai_message(
     extra_metadata = dict(msg_dict)
     if trace_info:
         extra_metadata.update(trace_info)
+    if additional_metadata:
+        extra_metadata.update(additional_metadata)
 
     ai_msg = await conv_repo.add_message_by_thread_id(
         thread_id=thread_id,
@@ -608,6 +611,7 @@ async def save_messages_from_langgraph_state(
     interrupt_error_type: str | None = None,
     interrupt_error_message: str | None = None,
     token_usage: dict[str, Any] | None = None,
+    assistant_additional_metadata: dict[str, Any] | None = None,
 ) -> bool:
     """在有效 lease 锁内原子写入消息与完成或中断终态。"""
 
@@ -662,6 +666,7 @@ async def save_messages_from_langgraph_state(
                     trace_info=trace_info,
                     run_id=run_id,
                     request_id=request_id,
+                    additional_metadata=assistant_additional_metadata,
                     commit=run_id is None,
                 )
             elif msg_type == "tool":
@@ -1067,6 +1072,7 @@ async def stream_agent_chat(
             serialize_attachment(attachment, thread_id=thread_id) for attachment in thread_attachment_records
         ]
         persisted_human_message = human_message
+        retrieval_chunks: list[dict[str, Any]] = []
         retrieval_decision = await decide_knowledge_retrieval(query, current_user)
         if retrieval_decision.kb_ids:
             retrieval_chunks = await retrieve_for_decision(query, retrieval_decision)
@@ -1282,6 +1288,7 @@ async def stream_agent_chat(
                 interrupt_error_type=interrupt_error_type,
                 interrupt_error_message=interrupt_error_message,
                 token_usage=_current_run_token_usage(agent_state, meta.get("run_id")),
+                assistant_additional_metadata={"knowledge_sources": retrieval_chunks} if retrieval_chunks else None,
             )
         except Exception as e:
             logger.exception(f"Error saving messages from LangGraph state: {e}")

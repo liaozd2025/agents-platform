@@ -125,6 +125,7 @@ import { agentApi } from '@/apis'
 import { formatChatTime, parseToShanghai } from '@/utils/time'
 import KnowledgeSourceSection from '@/components/KnowledgeSourceSection.vue'
 import WebSearchSourceSection from '@/components/WebSearchSourceSection.vue'
+import { groupKnowledgeChunks } from '@/utils/kbResultGroups.js'
 
 const emit = defineEmits(['retry', 'openRefs'])
 const props = defineProps({
@@ -157,7 +158,8 @@ const webSources = computed(() =>
 
 const hasSources = computed(() => knowledgeChunks.value.length > 0 || webSources.value.length > 0)
 
-const sourceCount = computed(() => knowledgeChunks.value.length + webSources.value.length)
+const knowledgeArticleCount = computed(() => groupKnowledgeChunks(knowledgeChunks.value).length)
+const sourceCount = computed(() => knowledgeArticleCount.value + webSources.value.length)
 
 const toggleSources = () => {
   isSourcesExpanded.value = !isSourcesExpanded.value

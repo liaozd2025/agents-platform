@@ -296,8 +296,12 @@ async def test_save_messages_from_langgraph_state_handles_dict_tool_call_blocks(
         config_dict={"configurable": {"thread_id": "thread-1", "uid": "user-1"}},
         context=fake_context,
         trace_info=None,
+        assistant_additional_metadata={"knowledge_sources": [{"kb_id": "kb-1", "content": "检索证据"}]},
     )
 
+    assert conv_repo.saved_messages[0]["extra_metadata"]["knowledge_sources"] == [
+        {"kb_id": "kb-1", "content": "检索证据"}
+    ]
     assert conv_repo.saved_messages[0]["content"] == ""
     assert conv_repo.saved_messages[0]["extra_metadata"]["content"][0]["id"] == "call-task-1"
     assert conv_repo.saved_messages[0]["commit"] is True

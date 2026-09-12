@@ -4,7 +4,7 @@
       <template #actions>
         <template v-if="!isBatchDeleteMode">
           <a-button
-            v-if="canManageSkills"
+            v-if="canManageSkills && activeSkillArea === 'mine'"
             @click="isBatchDeleteMode = true"
             :disabled="loading || importing || filteredDeletableSkills.length === 0"
             class="lucide-icon-btn"
@@ -60,15 +60,42 @@
       </template>
     </PageShoulder>
 
-    <nav v-if="skillCategoryTabs.length > 1" class="skill-category-tabs" aria-label="Skill 分类">
+    <nav class="skill-area-tabs" aria-label="技能区域">
       <button
-        v-for="tab in skillCategoryTabs"
+        v-for="tab in skillAreaTabs"
+        :key="tab.key"
+        type="button"
+        class="skill-area-tab"
+        :class="{ active: activeSkillArea === tab.key }"
+        @click="activeSkillArea = tab.key"
+      >
+        {{ tab.label }}
+      </button>
+    </nav>
+
+    <nav v-if="activeSkillArea === 'mine'" class="skill-scope-tabs" aria-label="我的技能范围">
+      <button
+        v-for="tab in mineScopeTabsWithCount"
+        :key="tab.key"
+        type="button"
+        class="skill-scope-tab"
+        :class="{ active: activeMineScope === tab.key }"
+        @click="activeMineScope = tab.key"
+      >
+        <span>{{ tab.label }}</span>
+        <span class="skill-category-count">{{ tab.count }}</span>
+      </button>
+    </nav>
+
+    <nav v-if="activeSkillArea === 'plaza'" class="skill-category-tabs" aria-label="Skill 分类">
+      <button
+        v-for="tab in currentCategoryTabs"
         :key="tab.key"
         type="button"
         class="skill-category-tab"
-        :class="{ active: activeSkillCategory === tab.key }"
-        :aria-current="activeSkillCategory === tab.key ? 'page' : undefined"
-        @click="activeSkillCategory = tab.key"
+        :class="{ active: activePlazaCategory === tab.key }"
+        :aria-current="activePlazaCategory === tab.key ? 'page' : undefined"
+        @click="activePlazaCategory = tab.key"
       >
         <span>{{ tab.label }}</span>
         <span class="skill-category-count">{{ tab.count }}</span>
@@ -76,7 +103,7 @@
     </nav>
 
     <div
-      v-if="visibleSkillGroups.length === 0"
+      v-if="currentVisibleGroups.length === 0"
       class="extension-card-grid-empty-state skill-empty-state"
     >
       <div class="skill-empty-card">
@@ -97,7 +124,7 @@
     </div>
 
     <template v-else>
-      <template v-for="group in visibleSkillGroups" :key="group.key">
+      <template v-for="group in currentVisibleGroups" :key="group.key">
         <div class="extension-section-header">{{ group.title }}</div>
         <ExtensionCardGrid :min-width="280">
           <div
@@ -603,7 +630,7 @@ const RECOMMENDED_SUITES = [
         description: '通用自我进化技能，基于多重记忆架构从经验与错误中持续学习并自我迭代。'
       }
     ]
-  }
+  },
 ]
 
 const router = useRouter()
@@ -706,69 +733,88 @@ const recommendedSuiteCards = computed(() =>
   RECOMMENDED_SUITES.map((suite) => ({ ...suite, isSuite: true }))
 )
 
+const SKILL_CATEGORIES = [
+  { key: 'all', label: '全部' },
+  { key: 'creation', label: '内容创作' },
+  { key: 'productivity', label: '效率工具' },
+  { key: 'research', label: '研究分析' }
+]
+
+const skillAreaTabs = [
+  { key: 'plaza', label: '技能广场' },
+  { key: 'mine', label: '我的技能' }
+]
+
+const activeSkillArea = ref('plaza')
+const activePlazaCategory = ref('all')
+const activeMineScope = ref('all')
+
+const categorizeSkill = (skill) => {
+  const text = [skill?.name, skill?.slug, skill?.description].filter(Boolean).join(' ').toLowerCase()
+  if (/ppt|docx|pdf|xlsx|文档|写作|内容|设计|绘图|presentation|document/.test(text)) return 'creation'
+  if (/research|search|find|效率|自动化|工具|办公|文件|表格|代码/.test(text)) return 'productivity'
+  return 'research'
+}
+
+const skillCategory = (skill) => skill?.category || categorizeSkill(skill)
+const isSystemSkill = (skill) => {
+  if (skill?.sourceType === 'builtin' || skill?.sourceScope === 'builtin') return true
+  return skill?.share_config?.read_scope?.access_level === 'global'
+}
+
 const filteredInstalledSkills = computed(() => installedSkillCards.value.filter(matchesSearch))
-const activeSkillCategory = ref('')
-const skillGroups = computed(() => {
-  const installed = filteredInstalledSkills.value
-  return [
-    {
-      key: 'all',
-      title: '全部 Skill',
-      label: '全部',
-      skills: isBatchDeleteMode.value
-        ? installed.filter((skill) => skill.sourceScope !== 'personal')
-        : installed
-    },
-    {
-      key: 'personal',
-      title: '个人 Skill',
-      label: '个人',
-      skills: isBatchDeleteMode.value
-        ? []
-        : installed.filter((skill) => skill.sourceScope === 'personal')
-    },
-    {
-      key: 'shared',
-      title: '共享 Skill',
-      label: '共享',
-      skills: installed.filter(
-        (skill) => skill.sourceType !== 'builtin' && skill.sourceScope !== 'personal'
-      )
-    },
-    {
-      key: 'builtin',
-      title: '内置 Skill',
-      label: '内置',
-      skills: installed.filter((skill) => skill.sourceType === 'builtin')
-    },
-    {
-      key: 'recommended',
-      title: '推荐套件',
-      label: '推荐',
-      skills: isBatchDeleteMode.value ? [] : recommendedSuiteCards.value.filter(matchesSearch)
-    }
-  ]
-})
-const skillCategoryTabs = computed(() =>
-  skillGroups.value
-    .filter((group) => group.key === 'all' || group.skills.length > 0)
-    .map((group) => ({ key: group.key, label: group.label, count: group.skills.length }))
+const plazaGroups = computed(() =>
+  SKILL_CATEGORIES.map((category) => ({
+    key: category.key,
+    title: category.label,
+    skills: recommendedSuiteCards.value.filter(
+      (suite) => matchesSearch(suite) && (category.key === 'all' || skillCategory(suite) === category.key)
+    )
+  })).filter((group) => group.skills.length)
 )
-const visibleSkillGroups = computed(() => {
-  const group = skillGroups.value.find((item) => item.key === activeSkillCategory.value)
-  return group && group.skills.length ? [group] : []
+
+const mineSkills = computed(() => {
+  const installed = filteredInstalledSkills.value.filter((skill) => {
+    if (activeMineScope.value === 'personal') return skill.sourceScope === 'personal'
+    if (activeMineScope.value === 'system') return isSystemSkill(skill)
+    return true
+  })
+  return installed
 })
 
-watch(skillCategoryTabs, (tabs) => {
-  const activeExists = tabs.some((tab) => tab.key === activeSkillCategory.value)
-  if (!activeExists || !activeSkillCategory.value) {
-    activeSkillCategory.value =
-      tabs.find((tab) => tab.key === 'shared')?.key ||
-      tabs.find((tab) => tab.key !== 'all')?.key ||
-      tabs[0]?.key ||
-      'all'
-  }
+const currentCategoryTabs = computed(() => {
+  return SKILL_CATEGORIES.map((category) => {
+    const group = plazaGroups.value.find((item) => item.key === category.key)
+    return { key: category.key, label: category.label, count: group?.skills.length || 0 }
+  })
 })
+const currentVisibleGroups = computed(() => {
+  if (activeSkillArea.value === 'plaza') {
+    return plazaGroups.value.filter((group) => group.key === activePlazaCategory.value)
+  }
+  if (mineSkills.value.length === 0) return []
+  const title = mineScopeTabs.find((tab) => tab.key === activeMineScope.value)?.label || '我的技能'
+  return [{ key: `mine-${activeMineScope.value}`, title, skills: mineSkills.value }]
+})
+
+const mineScopeTabs = [
+  { key: 'all', label: '全部技能' },
+  { key: 'system', label: '系统技能' },
+  { key: 'personal', label: '个人技能' }
+]
+
+const mineScopeTabsWithCount = computed(() =>
+  mineScopeTabs.map((tab) => ({
+    ...tab,
+    count:
+      tab.key === 'all'
+        ? filteredInstalledSkills.value.length
+        : filteredInstalledSkills.value.filter((skill) =>
+            tab.key === 'personal' ? skill.sourceScope === 'personal' : isSystemSkill(skill)
+          ).length
+  }))
+)
+
 const filteredDeletableSkills = computed(() =>
   filteredInstalledSkills.value.filter(
     (skill) =>
@@ -1363,6 +1409,57 @@ defineExpose({
 </style>
 
 <style lang="less" scoped>
+.skill-area-tabs,
+.skill-scope-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 14px var(--page-padding) 4px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.skill-area-tab,
+.skill-scope-tab {
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid transparent;
+  border-radius: 17px;
+  background: transparent;
+  color: var(--gray-500);
+  font-size: 14px;
+  line-height: 20px;
+  cursor: pointer;
+  transition:
+    color 0.18s ease,
+    background-color 0.18s ease,
+    border-color 0.18s ease;
+
+  &:hover {
+    border-color: var(--gray-150);
+    background: var(--gray-25);
+    color: var(--gray-800);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--main-color);
+    outline-offset: 2px;
+  }
+
+  &.active {
+    border-color: color-mix(in srgb, var(--main-color) 12%, var(--gray-0));
+    background: color-mix(in srgb, var(--main-color) 10%, var(--gray-0));
+    color: var(--main-color);
+    font-weight: 600;
+  }
+}
+
+.skill-scope-tabs {
+  padding-top: 6px;
+  padding-bottom: 0;
+}
+
 .skill-category-tabs {
   display: flex;
   flex: 0 0 auto;
