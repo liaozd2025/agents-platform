@@ -5,6 +5,8 @@ import uuid
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Any, get_origin
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from yuxi.agents.tool_approval import DEFAULT_TOOL_APPROVAL_MODE
 from yuxi.config.options import system_options
 from yuxi.config.runtime import lite_mode_enabled
@@ -84,11 +86,22 @@ async def build_agent_input_context(
     *,
     thread_id: str,
     uid: str,
+    db: AsyncSession | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
     worker_id: str | None = None,
 ) -> dict:
+    """构建上下文，读取工作区前同步当前用户资料。"""
     input_context = dict(agent_config or {})
+    if db is not None:
+        from yuxi.services.user_memory_service import sync_user_profile_to_memory
+
+        try:
+            async with db.begin_nested():
+                await sync_user_profile_to_memory(db=db, uid=uid)
+        except Exception:
+            logger.exception("用户资料同步失败，沿用工作区内容：uid={}，thread_id={}", uid, thread_id)
+
     agent_context = await asyncio.to_thread(_load_workspace_agent_context, uid)
 
     if agent_context:

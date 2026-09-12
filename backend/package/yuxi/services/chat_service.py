@@ -1017,6 +1017,7 @@ async def stream_agent_chat(
         input_context = await build_agent_input_context(
             _runtime_agent_config(agent_config, execution_snapshot),
             thread_id=thread_id,
+            db=db,
             uid=uid,
             run_id=meta.get("run_id"),
             request_id=meta.get("request_id"),
@@ -1385,8 +1386,6 @@ async def stream_agent_resume(
     conv_repo = ConversationRepository(db)
     resume_command = Command(resume=resume_input)
 
-    # 恢复流执行期间不访问业务数据库，先结束运行时解析事务并归还连接池。
-    await db.commit()
     meta["agent_slug"] = agent_item.slug
     meta["backend_id"] = agent_item.backend_id
     runtime_scope_id = str(meta.get("runtime_scope_id") or thread_id)
@@ -1397,11 +1396,14 @@ async def stream_agent_resume(
     input_context = await build_agent_input_context(
         _runtime_agent_config(agent_config, execution_snapshot),
         thread_id=thread_id,
+        db=db,
         uid=uid,
         run_id=meta.get("run_id"),
         request_id=meta.get("request_id"),
         worker_id=meta.get("worker_id"),
     )
+    # 用户资料同步查询结束后归还连接，恢复流不持有业务事务。
+    await db.commit()
     _apply_model_override(input_context, meta)
     _apply_input_context_field(input_context, meta, "tool_approval_mode")
     input_context["runtime_scope_id"] = runtime_scope_id
@@ -1659,6 +1661,7 @@ async def get_agent_state_view(
         input_context = await build_agent_input_context(
             agent_config,
             thread_id=thread_id,
+            db=db,
             uid=current_uid,
         )
         latest_run = await run_repo.get_latest_run_by_thread_for_user(thread_id, current_uid)
