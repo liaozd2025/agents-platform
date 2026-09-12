@@ -795,17 +795,19 @@ defineExpose({
   align-items: center;
   gap: 8px 12px;
   padding: 8px 10px;
-  color: #d7eefa;
-  background: rgba(5, 15, 32, 0.78);
-  border: 1px solid rgba(102, 213, 255, 0.32);
+  /* 浅色扁平图例：画布本身是白底，原先的深色科技风（深底 + 青色发光）与背景割裂，
+     统一改为白底 + 深灰字，与 2D 版 GraphCanvas2D.vue 的图例样式保持一致。 */
+  color: #526174;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #dfe5ec;
   border-radius: 6px;
-  box-shadow: 0 0 18px rgba(34, 185, 255, 0.12);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
   font-size: 12px;
   line-height: 1.2;
   pointer-events: none;
 }
 .legend-title {
-  color: #7ee5ff;
+  color: #334155;
   font-weight: 600;
 }
 .legend-item {
@@ -821,7 +823,7 @@ defineExpose({
   width: 16px;
   height: 3px;
   flex: 0 0 auto;
-  box-shadow: 0 0 6px currentColor;
+  border-radius: 1px;
 }
 .graph-stats-wrapper {
   position: absolute;
