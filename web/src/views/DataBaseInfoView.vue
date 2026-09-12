@@ -975,7 +975,9 @@ const loadDepartments = async () => {
 
 const loadUsers = async () => {
   try {
-    users.value = await authApi.getUserAccessOptions()
+    // 该视图仅用于展示候选用户列表，取首屏前 100 条即可
+    const { users: rows } = await authApi.getUserAccessOptions()
+    users.value = rows
   } catch {
     users.value = []
   }
