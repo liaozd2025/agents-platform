@@ -55,11 +55,32 @@ BUILTIN_PROVIDERS: list[dict[str, Any]] = [
         "capabilities": ["chat", "embedding", "rerank"],
         "models_endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/models",
         "enabled_models": [
+            # 该 provider 声明了 chat 能力，且系统默认模型 system_options.default_model
+            # 就是 alibaba-cn:qwen3.7-max，此处必须登记对应 chat 模型，
+            # 否则知识图谱抽取等依赖默认对话模型的链路会报「未找到模型」。
+            {
+                "id": "qwen3.7-max",
+                "type": "chat",
+                "display_name": "qwen3.7-max",
+            },
+            {
+                "id": "qwen3.7-plus",
+                "type": "chat",
+                "display_name": "qwen3.7-plus",
+            },
+            {
+                "id": "qwen3.7-flash",
+                "type": "chat",
+                "display_name": "qwen3.7-flash",
+            },
             {
                 "id": "text-embedding-v4",
                 "type": "embedding",
                 "display_name": "text-embedding-v4",
                 "dimension": 1024,
+                # DashScope 兼容模式单次 input 条数上限为 20，且长文本场景会收紧到 10，
+                # 超过任一条限制都会返回 400 InvalidParameter；这里取最严格值，避免沿用默认 40 导致入库失败。
+                "batch_size": 10,
             },
             {
                 "id": "qwen3-rerank",
