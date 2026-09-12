@@ -69,6 +69,7 @@ export default defineConfig({
           { text: '智能体评估', link: '/agents/agent-evaluation' },
           { text: '沙盒配置与运维', link: '/agents/sandbox-architecture' },
           { text: 'MCP 集成', link: '/agents/mcp-integration' },
+          { text: '外部知识库 MCP', link: '/agents/knowledge-mcp' },
           { text: 'Skills 管理', link: '/agents/skills-management' },
           { text: '子智能体', link: '/agents/subagents-management' }
         ]
@@ -104,6 +105,7 @@ export default defineConfig({
           { text: 'API Key 外部集成', link: '/advanced/api-key-integration' },
           { text: 'OA iframe 集成', link: '/enterprise/oa-embed-integration' },
           { text: 'H5 会话迁移', link: '/enterprise/h5-conversation-migration-guide' },
+          { text: '知识库分片配置', link: '/enterprise/knowledge-chunking-configuration' },
           { text: '第三方认证', link: '/advanced/third-party-auth' }
         ]
       },

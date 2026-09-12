@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from yuxi.config.runtime import knowledge_capability_enabled
 
 from server.routers import router
 from server.utils.access_log_middleware import AccessLogMiddleware
@@ -32,6 +33,9 @@ setup_logging()
 RATE_LIMIT_MAX_ATTEMPTS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_ENDPOINTS = {
+    ("/api/mcp/oauth/register", "POST"),
+    ("/api/mcp/oauth/authorize", "GET"),
+    ("/api/mcp/oauth/authorize", "POST"),
     ("/api/auth/token", "POST"),
     ("/api/auth/oa/exchange-token", "POST"),
     ("/api/auth/oa/exchange-account", "POST"),
@@ -80,6 +84,17 @@ def _build_cors_options(origins: list[str] | None = None) -> dict[str, object]:
 app = FastAPI(lifespan=lifespan)
 # 所有业务接口统一挂载到 /api，具体分组在 server.routers 中集中注册。
 app.include_router(router, prefix="/api")
+
+if knowledge_capability_enabled():
+    from server.routers.knowledge_mcp_router import build_knowledge_mcp, configured_knowledge_mcp_url
+
+    mcp_url = configured_knowledge_mcp_url()
+    if mcp_url:
+        mcp_server, _, mcp_router, oauth_routes, mcp_app = build_knowledge_mcp(mcp_url)
+        app.state.knowledge_mcp = mcp_server
+        app.include_router(mcp_router, prefix="/api")
+        app.router.routes.extend(oauth_routes)
+        app.mount("/", mcp_app)
 
 # CORS 设置
 app.add_middleware(
@@ -131,7 +146,7 @@ class LoginRateLimitMiddleware(BaseHTTPMiddleware):
 
             response = await call_next(request)
 
-            if response.status_code < 400:
+            if response.status_code < 400 and not normalized_path.startswith("/api/mcp/"):
                 async with _attempt_lock:
                     _login_attempts.pop(client_ip, None)
 

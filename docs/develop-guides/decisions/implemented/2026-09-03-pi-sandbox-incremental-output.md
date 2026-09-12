@@ -12,6 +12,8 @@ PI Runner 按行写入工具事件，但固定沙盒镜像的 Shell `async_mode=
 
 `ProvisionerSandboxBackend.aexecute_stream` 使用 Shell 的短同步超时取得运行中 session，把命令 stdout/stderr 合并写入随机、权限为 0600 的沙盒临时文件。后端通过 HTTP Range 按字节偏移读取新增内容，再按完整 JSONL 行交给既有 output sink；终态补齐尾部，并从独立状态文件取得真实退出码。provisioner 保留 Content-Range 与 Accept-Ranges，后端兼容固定服务端的 416 响应格式。
 
+固定沙盒可能在命令进程仍运行时报告 `completed`。此时必须先读取包装命令的退出码文件；404 表示完成尚未确认，继续按完整行消费增量输出，在原执行期限内等待。期限耗尽时先终止同一 session，再清理捕获文件，不能把缺失状态文件解释为成功。
+
 现有 session 继续拥有超时和取消；输出超限、回调失败或取消均需确认同一 session 终止。停止无法确认或启动响应丢失时，保留捕获文件并报告 cleanup orphan；复用父沙箱的 child 由根 runtime 回收事实收敛清理，不能凭新建空 adapter 的关闭动作宣告成功。文件读取接口会剥除末尾换行，因此不能用其文本末尾判断命令是否已有完整输出。
 
 PI 派生镜像将基础镜像的 `/shell/write` 修正为向当前 PTY 写入输入；基础实现会把输入当作新命令并错误终止运行状态。启动 inspector 对源码构建和预构建镜像都验证该补丁，固定注释控制仍须由当前 Runner 返回 ACK，HTTP 200 不作为输入送达的证据。
@@ -29,6 +31,8 @@ PI 派生镜像将基础镜像的 `/shell/write` 修正为向当前 PTY 写入�
 - worker 每 0.2 秒通过 Range 读取新增字节并查询 session 状态；未换行和跨块 UTF-8 字节留在有界缓冲，不重复下载已消费内容。
 
 ## 验证
+
+- 伪完成负控在启动响应报告完成但退出码文件尚不存在时，仍交付后续完整输出及跨块 UTF-8；永久缺失状态文件时验证超时、进程终止和捕获清理。
 
 - 原缺陷负控覆盖外层取消遗留执行、启动响应丢失、重复取消吞掉清理失败和 final 提交响应被取消后的产物误删。
 - backend 与 PI service 聚焦 unit：`131 passed`，覆盖字节偏移、UTF-8、416、输出上限、取消和 ACK 竞态。

@@ -48,6 +48,12 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/auth/mcp/authorize',
+      name: 'MCPAuthAuthorize',
+      component: () => import('@/views/MCPAuthAuthorizeView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/agent',
       name: 'AgentMain',
       component: AppLayout,
