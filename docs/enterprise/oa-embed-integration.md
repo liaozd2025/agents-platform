@@ -24,7 +24,24 @@ OA_SSO_ENABLED=true
 OA_SSO_USERINFO_URL=https://hnjiudian.cn/oa-api/User/GetUserInfo
 OA_SSO_COMPANY_CODE=ZD
 
+OA_ACCOUNT_LOGIN_ENABLED=true
+OA_ACCOUNT_LOGIN_URL=https://hnjiudian.cn/oa-api/User/Login
+OA_ACCOUNT_LOGIN_COMPANY_CODE=ZD
+
 YUXI_EMBED_ALLOWED_ORIGINS=https://hnjiudian.cn
+```
+
+### 账号换票
+
+父项目只需随 `login-params` 传入当前 OA 账号。该账号只作为服务端调用 OA 换票接口和用户信息接口的查询线索，Yuxi 不会直接根据账号建立本地登录态。
+
+父项目发送账号的示例：
+
+```js
+frame.contentWindow.postMessage(
+  { type: 'login-params', data: { userInfo: { account } } },
+  yuxiOrigin
+)
 ```
 
 OA 父页只通过 `postMessage` 与 iframe 通信，iframe 再同源请求 Yuxi API，因此该链路不需要额外开放 CORS。修改 origin 后必须重建 Web 镜像，使前端白名单和 Nginx `frame-ancestors` 同步生效。

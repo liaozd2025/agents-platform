@@ -41,10 +41,12 @@
 
     <div class="modal-content">
       <section v-if="chunks.length > 0" class="chunks-container" aria-label="检索片段列表">
-        <article
+        <button
           v-for="(chunk, index) in chunks"
           :key="getChunkKey(chunk, index)"
           class="chunk-item"
+          type="button"
+          @click="openChunkDetail(chunk)"
         >
           <header class="chunk-header">
             <div class="chunk-heading">
@@ -79,7 +81,7 @@
             />
             <div v-else class="empty-text">暂无内容</div>
           </div>
-        </article>
+        </button>
       </section>
 
       <div v-else class="empty-state" role="status">
@@ -87,13 +89,16 @@
         <span>暂无可展示的文档片段</span>
       </div>
     </div>
+
+    <KbChunkDetailModal v-model:open="chunkDetailVisible" :chunk="selectedChunk" />
   </a-modal>
 </template>
 
 <script setup>
-import { computed, useId } from 'vue'
+import { computed, ref, useId } from 'vue'
 import { FileText, X } from '@lucide/vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
+import KbChunkDetailModal from './KbChunkDetailModal.vue'
 
 const props = defineProps({
   open: {
@@ -108,6 +113,8 @@ const props = defineProps({
 
 const emit = defineEmits(['update:open'])
 const titleId = useId()
+const chunkDetailVisible = ref(false)
+const selectedChunk = ref(null)
 
 const visible = computed({
   get: () => props.open,
@@ -122,6 +129,11 @@ const getChunkKey = (chunk, index) => {
   if (chunk?.metadata?.chunk_id) return `${chunk.metadata.chunk_id}-${index}`
   if (chunk?.id) return `${chunk.id}-${index}`
   return `chunk-${index}`
+}
+
+const openChunkDetail = (chunk) => {
+  selectedChunk.value = chunk
+  chunkDetailVisible.value = true
 }
 
 const hasScore = (value) => typeof value === 'number' && Number.isFinite(value)
@@ -267,6 +279,20 @@ const getLineRange = (chunk) => {
 }
 
 .chunk-item {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  background: var(--gray-0);
+
+  &:focus-visible {
+    outline: 2px solid var(--main-300);
+    outline-offset: -2px;
+  }
+
   &:not(:last-child) {
     border-bottom: 1px solid var(--gray-150);
   }

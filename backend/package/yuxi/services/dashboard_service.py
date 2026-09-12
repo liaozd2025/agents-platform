@@ -213,6 +213,7 @@ class DashboardService:
             "thread_id": conversation.thread_id,
             "uid": conversation.uid,
             "username": audit_metadata["username"],
+            "display_name": audit_metadata["display_name"],
             "user_avatar": audit_metadata["user_avatar"],
             "user_deleted": audit_metadata["user_deleted"],
             "agent_id": conversation.agent_id,

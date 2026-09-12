@@ -22,26 +22,32 @@
           </span>
           <ExternalLink :size="14" class="external-icon" />
         </a>
-        <div v-else class="file-info unavailable" :aria-label="`${fileGroup.filename} 暂无原文链接`">
+        <button v-else class="file-info" :aria-label="`查看 ${fileGroup.filename} 的检索片段`" @click="openFileChunksModal(fileGroup)">
           <span class="source-index">{{ index + 1 }}</span>
           <span class="file-copy">
             <span class="file-name" :title="fileGroup.filename">{{ fileGroup.filename }}</span>
-            <span class="file-author">知识库 · 暂无原文链接</span>
+            <span class="file-author">知识库 · {{ fileGroup.chunks.length }} 个片段</span>
           </span>
-        </div>
+        </button>
+        <button v-if="fileGroup.kb_id && fileGroup.file_id" class="view-file-btn" title="查看完整文件" aria-label="查看完整文件" @click="openFileDetail(fileGroup)">
+          <Eye :size="14" />
+        </button>
       </div>
     </div>
 
     <div v-else class="no-results">
       <p>{{ emptyText }}</p>
     </div>
-
+    <KbFileChunksModal v-model:open="chunksModalVisible" :file-group="selectedFileGroup" />
+    <FileDetailModal v-model:open="fileDetailOpen" :kb-id="fileDetailKbId" :file-id="fileDetailFileId" />
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
-import { ExternalLink } from '@lucide/vue'
+import { computed, ref } from 'vue'
+import { ExternalLink, Eye } from '@lucide/vue'
+import KbFileChunksModal from './KbFileChunksModal.vue'
+import FileDetailModal from '@/components/FileDetailModal.vue'
 import { groupKnowledgeChunks } from '@/utils/kbResultGroups.js'
 
 const props = defineProps({
@@ -58,6 +64,22 @@ const props = defineProps({
     default: '未找到相关知识库内容'
   }
 })
+
+const chunksModalVisible = ref(false)
+const selectedFileGroup = ref(null)
+const fileDetailOpen = ref(false)
+const fileDetailKbId = ref('')
+const fileDetailFileId = ref('')
+
+const openFileChunksModal = (fileGroup) => {
+  selectedFileGroup.value = fileGroup
+  chunksModalVisible.value = true
+}
+const openFileDetail = (fileGroup) => {
+  fileDetailKbId.value = fileGroup.kb_id
+  fileDetailFileId.value = fileGroup.file_id
+  fileDetailOpen.value = true
+}
 
 const resolveChunks = (input) => {
   if (Array.isArray(input)) return input
@@ -116,6 +138,15 @@ const fileGroupList = computed(() => {
     border: 1px solid var(--gray-150);
     border-radius: 8px;
     margin-bottom: 6px;
+  }
+
+  .view-file-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--gray-600);
+    cursor: pointer;
+    padding: 6px;
   }
 
   .kb-results {

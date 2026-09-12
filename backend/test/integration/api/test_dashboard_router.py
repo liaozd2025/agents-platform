@@ -211,6 +211,7 @@ async def test_admin_can_fetch_conversation_filter_options(test_client, admin_he
     assert set(data) == {"users", "agents"}
     assert all("is_deleted" in item for item in data["users"])
     assert all("is_deleted" in item for item in data["agents"])
+    assert all("display_name" in item for item in data["users"])
 
 
 async def test_dashboard_conversation_audit_reports_latest_run_status(test_client, dashboard_scope_users):

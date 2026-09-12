@@ -64,7 +64,7 @@ export function createOAEmbedBridge({
   /** 请求父项目重新下发当前 OA 账号，用于首次登录和 Yuxi 登录态续期。 */
   const requestLoginParams = () => {
     console.info('[OA iframe] 请求父项目登录参数')
-    post({ type: 'request-login-params', data: { timestamp: Date.now() } })
+    post({ type: 'request-login-params', data: {} })
   }
 
   /** 将正式父插件的初始显示模式转换为 Yuxi 嵌入显示模式。 */

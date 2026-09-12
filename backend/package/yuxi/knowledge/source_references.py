@@ -4,7 +4,6 @@ import re
 from typing import Any
 from urllib.parse import quote, urlencode
 
-
 OA_ARTICLE_BASE_URL = "https://hnjiudian.cn/web/index.html#/corporate-culture/view-page"
 _ARTICLE_METADATA_PATTERN = re.compile(
     r"^\s*(task_id|taskid|oa_id|title|author|author_name|type_name|publish_time|publish_date)"
@@ -27,11 +26,16 @@ def build_knowledge_source_reference(content: str, *, fallback_title: str = "") 
             source_ref[key] = fields[key]
 
     if task_id and title:
-        page_type = "1" if fields.get("type_name", "").lower() in {
-            "好文共享",
-            "goodarticles",
-            "good_articles",
-        } else "3"
+        page_type = (
+            "1"
+            if fields.get("type_name", "").lower()
+            in {
+                "好文共享",
+                "goodarticles",
+                "good_articles",
+            }
+            else "3"
+        )
         oa_title = title if page_type == "1" else f"新闻详细-{task_id}"
         source_ref["url"] = (
             f"{OA_ARTICLE_BASE_URL}/{page_type}?"
@@ -40,9 +44,7 @@ def build_knowledge_source_reference(content: str, *, fallback_title: str = "") 
     return source_ref
 
 
-async def attach_knowledge_source_references(
-    manager: Any, kb_id: str, kb_name: str, result: Any
-) -> Any:
+async def attach_knowledge_source_references(manager: Any, kb_id: str, kb_name: str, result: Any) -> Any:
     """为一次检索的命中文件补充文章级来源，保留原检索协议。"""
     if not isinstance(result, dict) or not isinstance(result.get("results"), list):
         return result
@@ -59,7 +61,9 @@ async def attach_knowledge_source_references(
         file_id = str(item.get("file_id") or metadata.get("file_id") or "").strip()
         source_ref = source_refs.get(file_id)
         if source_ref is None:
-            source_ref = await _load_source_reference(manager, kb_id, file_id, str(metadata.get("source") or "").strip())
+            source_ref = await _load_source_reference(
+                manager, kb_id, file_id, str(metadata.get("source") or "").strip()
+            )
             source_ref["kb_id"] = kb_id
             source_ref["kb_name"] = kb_name
             source_refs[file_id] = source_ref
@@ -75,7 +79,7 @@ def _parse_article_metadata(content: str) -> dict[str, str]:
         if not match:
             continue
         key = match.group(1).lower()
-        value = match.group(2).strip().strip('"\'')
+        value = match.group(2).strip().strip("\"'")
         if value:
             fields[key] = value
     return fields
@@ -85,7 +89,7 @@ def _normalize_task_id(value: str | None) -> str:
     """将正文中带引号或浮点格式的 OA 任务号还原为整数标识。"""
     if not value:
         return ""
-    task_id = value.strip().strip('"\'')
+    task_id = value.strip().strip("\"'")
     match = re.fullmatch(r"(\d+)\.0+", task_id)
     return match.group(1) if match else task_id
 

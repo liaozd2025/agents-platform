@@ -24,6 +24,14 @@ export default defineConfig(({ mode }) => {
         'Content-Security-Policy': `frame-ancestors 'self'${embedOrigins.length ? ` ${embedOrigins.join(' ')}` : ''}`
       },
       proxy: {
+        '^/.well-known/oauth-': {
+          target: env.VITE_API_URL || 'http://api:5050',
+          changeOrigin: true
+        },
+        '^/api/mcp(?:/|$)': {
+          target: env.VITE_API_URL || 'http://api:5050',
+          changeOrigin: false
+        },
         '^/api': {
           target: env.VITE_API_URL || 'http://api:5050',
           changeOrigin: true

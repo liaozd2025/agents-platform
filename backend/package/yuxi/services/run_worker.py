@@ -87,6 +87,19 @@ WORKER_ID = f"worker-{uuid.uuid4().hex}"
 _RECONCILIATION_TASK_KEY = "agent_run_reconciliation_task"
 
 
+async def _compute_skill_digest_async(source: Path, slug: str) -> str:
+    """在线程中计算单个 Skill 摘要，避免目录遍历阻塞事件循环。"""
+
+    started_at = time.perf_counter()
+    digest = await asyncio.to_thread(compute_skill_dir_hash, source)
+    logger.info(
+        "PI Runtime Skill 摘要校验完成: slug=%s elapsed=%.2fs",
+        slug,
+        time.perf_counter() - started_at,
+    )
+    return digest
+
+
 class RetryableRunError(RetryJob):
     """Error type that should trigger ARQ retry."""
 
@@ -1116,7 +1129,8 @@ async def process_agent_run(ctx, run_id: str):
                         source = get_personal_skills_root_dir(str(run.uid)) / slug
                     else:
                         raise ValueError(f"PI sandbox runtime Skill 路径无效: {slug}")
-                    if compute_skill_dir_hash(source) != raw_digests[slug]:
+                    digest = await _compute_skill_digest_async(source, slug)
+                    if digest != raw_digests[slug]:
                         raise ValueError(f"PI sandbox runtime Skill 已变化: {slug}")
                     pi_skill_sources[slug] = source
                 pi_context, pi_previous_session = await _snapshot_pi_run_context(run)
@@ -1129,7 +1143,7 @@ async def process_agent_run(ctx, run_id: str):
                 )
                 reuse_pi_sandbox = True
             else:
-                pi_runtime = build_default_pi_runtime_manifest()
+                pi_runtime = await asyncio.to_thread(build_default_pi_runtime_manifest)
         except Exception as exc:
             await mark_run_terminal(
                 run_id,
@@ -1165,6 +1179,8 @@ async def process_agent_run(ctx, run_id: str):
         interval_ms=LOADING_FLUSH_INTERVAL_MS,
         max_chars=LOADING_FLUSH_MAX_CHARS,
     )
+    # Run 已取得 lease 后立即启动心跳，覆盖后续环境校验、Skill 准备等可能耗时的前置流程。
+    await run_ctx.start()
     try:
         if await _is_cancel_requested(run_id):
             run_ctx.cancel_event.set()
@@ -1356,7 +1372,6 @@ async def process_agent_run(ctx, run_id: str):
                 return ack
 
             try:
-                await run_ctx.start()
                 pi_attempt = {
                     "run_id": run_id,
                     "attempt_id": str(attempt.id),
@@ -1500,7 +1515,6 @@ async def process_agent_run(ctx, run_id: str):
         if isinstance(input_metadata.get("agent_invocation_meta"), dict):
             meta["agent_invocation_meta"] = input_metadata.get("agent_invocation_meta") or {}
 
-        await run_ctx.start()
         metadata_event = {
             "request_id": request_id,
             "agent_slug": agent_slug,

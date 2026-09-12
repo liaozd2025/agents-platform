@@ -48,7 +48,7 @@
             <label>知识库类型 <b>*</b></label>
             <div class="type-options" role="radiogroup" aria-label="知识库类型">
               <button
-                v-for="(typeInfo, typeKey) in supportedKbTypes"
+                v-for="(typeInfo, typeKey) in creatableKbTypes"
                 :key="typeKey"
                 type="button"
                 class="type-option"
@@ -251,6 +251,10 @@ const form = reactive(createEmptyDatabaseForm(configStore.config?.embed_model))
 const shareConfig = ref(createDefaultShareConfig())
 const shareConfigFormRef = ref(null)
 const creating = computed(() => databaseStore.state.creating)
+// 当前上线阶段仅开放本地 Milvus 知识库创建，外部连接器保留后端能力但不在界面提供入口。
+const creatableKbTypes = computed(() =>
+  props.supportedKbTypes.milvus ? { milvus: props.supportedKbTypes.milvus } : {}
+)
 const selectedTypeInfo = computed(() => props.supportedKbTypes[form.kb_type] || null)
 const selectedTypeLabel = computed(
   () => getKbTypeLabel(form.kb_type) || selectedTypeInfo.value?.name || form.kb_type
@@ -281,7 +285,7 @@ const footerSummary = computed(() => {
 
 const reset = () => {
   Object.assign(form, createEmptyDatabaseForm(configStore.config?.embed_model))
-  const firstType = Object.keys(props.supportedKbTypes)[0] || ''
+  const firstType = Object.keys(creatableKbTypes.value)[0] || ''
   Object.assign(form, selectDatabaseType(form, firstType, props.supportedKbTypes[firstType]))
   shareConfig.value = createDefaultShareConfig()
   currentStep.value = 0

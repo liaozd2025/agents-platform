@@ -13,12 +13,12 @@ from pydantic import BaseModel, Field
 from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend
 from yuxi.agents.toolkits.registry import tool
 from yuxi.config.runtime import knowledge_capability_enabled
-from yuxi.knowledge.source_references import attach_knowledge_source_references
 from yuxi.knowledge.schemas import (
     FindInputSchema,
     OpenInputSchema,
     SearchInputSchema,
 )
+from yuxi.knowledge.source_references import attach_knowledge_source_references
 from yuxi.utils import logger
 
 # ========== 通用知识库工具 ==========
@@ -377,7 +377,7 @@ async def download_kb_file(
         thread_id=runtime_thread_id,
         uid=uid,
         workdir_path=workdir_relative_path,
-        create_if_missing=False,
+        create_if_missing=True,
     )
 
     output_path = _resolve_download_output_path(backend, workdir_path, data, normalized_file_id, save_as)

@@ -1,8 +1,41 @@
+import asyncio
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 from yuxi.services import pi_sandbox_run_service as svc
 from yuxi.utils.hash_utils import hash_id
+
+
+@pytest.mark.asyncio
+async def test_skill_digest_runs_outside_event_loop(monkeypatch, tmp_path):
+    """目录摘要计算阻塞时，事件循环仍应能够调度心跳任务。"""
+
+    started = threading.Event()
+    def blocking_hash(_path):
+        started.set()
+        time.sleep(0.3)
+        return "d" * 64
+
+    monkeypatch.setattr(svc, "compute_skill_dir_hash", blocking_hash)
+    task = asyncio.create_task(svc._compute_skill_digests({"report": tmp_path}))
+    await asyncio.wait_for(asyncio.to_thread(started.wait, 1), timeout=1)
+    finished = asyncio.Event()
+    ticks = 0
+
+    async def heartbeat_probe():
+        nonlocal ticks
+        while not finished.is_set():
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    probe = asyncio.create_task(heartbeat_probe())
+    assert await task == {"report": "d" * 64}
+    finished.set()
+    await probe
+    assert ticks >= 2
+
 
 
 class Db:

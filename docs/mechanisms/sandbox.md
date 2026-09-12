@@ -26,7 +26,7 @@ flowchart LR
     Workspace --> UserData
 ```
 
-Graph 创建时，Agent backend 取得 `uid`、根运行 scope 和 `workdir_path`。实际沙盒惰性创建；API/worker 只持有 provisioner 代理地址，不直接访问动态容器或 NodePort。
+Graph 创建时，Agent backend 取得 `uid`、根运行 scope 和 `workdir_path`，并同步获授权的 Skill 投影。普通聊天与恢复直接进入模型；只有 PI 工具执行或 backend 实际访问文件时才创建沙盒。PI 首次使用保留容量不足时的有界等待与取消；直接文件操作在容量不足时报告 `sandbox_capacity_exhausted`，由调用方处理失败。API/worker 只持有 provisioner 代理地址，不直接访问动态容器或 NodePort。
 
 ## Identity、Workdir 和生命周期
 

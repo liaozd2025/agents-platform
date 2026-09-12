@@ -1,7 +1,7 @@
 <template>
   <section class="conversation-nav-section" :class="{ collapsed }">
     <div v-if="showHistory && !collapsed" class="history-panel">
-      <div class="conversation-list">
+      <div class="conversation-list" @scroll="handleConversationScroll">
         <section
           v-if="projectsLoading || projectsError || projectGroups.length"
           class="history-group project-history-group"
@@ -109,24 +109,30 @@
               <div v-if="projectsLoading" class="list-state">正在加载对话...</div>
               <div v-else-if="projectsError" class="list-state">项目加载失败，暂时无法分类对话</div>
               <template v-else>
-                <ConversationNavItem
-                  v-for="chat in otherConversations"
-                  :key="chat.id"
-                  :chat="chat"
-                  :current-chat-id="currentChatId"
-                  @select-chat="$emit('select-chat', $event)"
-                  @delete-chat="$emit('delete-chat', $event)"
-                  @rename-chat="$emit('rename-chat', $event)"
-                  @toggle-pin="$emit('toggle-pin', $event)"
-                />
+                <template v-for="section in recentSections" :key="section.key">
+                  <section v-if="section.conversations.length" class="recent-subgroup">
+                    <div v-if="section.label" class="recent-subgroup-label">{{ section.label }}</div>
+                    <ConversationNavItem
+                      v-for="chat in section.conversations"
+                      :key="chat.id"
+                      :chat="chat"
+                      :current-chat-id="currentChatId"
+                      @select-chat="$emit('select-chat', $event)"
+                      @delete-chat="$emit('delete-chat', $event)"
+                      @rename-chat="$emit('rename-chat', $event)"
+                      @toggle-pin="$emit('toggle-pin', $event)"
+                    />
+                  </section>
+                </template>
                 <div v-if="!otherConversations.length" class="list-state">暂无对话历史</div>
               </template>
             </div>
           </CollapseTransition>
         </section>
 
+        <!-- 最近会话折叠时同步隐藏分页按钮，避免列表收起后留下孤立操作。 -->
         <button
-          v-if="hasMoreChats"
+          v-if="recentExpanded && hasMoreChats"
           type="button"
           class="load-more-btn"
           :disabled="isLoadingMore"
@@ -146,6 +152,7 @@ import { ChevronDown, FolderClosed, FolderOpen, MoreVertical, SquarePen, Trash2 
 import ConversationNavItem from '@/components/ConversationNavItem.vue'
 import CollapseTransition from '@/components/common/CollapseTransition.vue'
 import { buildProjectConversationGroups } from '@/utils/projectConversationGroups'
+import { shouldLoadMoreConversations } from '@/utils/conversationListScroll'
 
 const props = defineProps({
   currentChatId: { type: String, default: null },
@@ -178,6 +185,29 @@ const groupedNavigation = computed(() =>
 )
 const projectGroups = computed(() => groupedNavigation.value.groups)
 const otherConversations = computed(() => groupedNavigation.value.otherConversations)
+const recentSections = computed(() => [
+  // 顶部已经有“最近”总标题，当前时间段不再重复显示同名子标题。
+  { key: 'recent', label: '', conversations: groupedNavigation.value.recentGroups.recent },
+  { key: 'week', label: '一周前', conversations: groupedNavigation.value.recentGroups.week },
+  { key: 'month', label: '一月前', conversations: groupedNavigation.value.recentGroups.month }
+])
+
+// 列表接近底部时自动加载下一页，按钮仍保留作为手动兜底。
+const handleConversationScroll = (event) => {
+  const list = event.currentTarget
+  if (
+    !shouldLoadMoreConversations({
+      list,
+      isLoadingMore: props.isLoadingMore,
+      hasMoreChats: props.hasMoreChats
+    })
+  ) {
+    return
+  }
+
+  console.debug('[会话侧栏] 触底，加载更多会话')
+  emit('load-more-chats')
+}
 
 const isProjectExpanded = (projectId) => !collapsedProjects.value.has(projectId)
 const toggleProject = (projectId) => {
@@ -361,6 +391,15 @@ const confirmDeleteProject = (project) => {
   color: var(--gray-500);
   font-size: 12px;
   text-align: center;
+}
+.recent-subgroup + .recent-subgroup {
+  margin-top: 8px;
+}
+.recent-subgroup-label {
+  padding: 2px 8px 3px;
+  color: var(--gray-400);
+  font-size: 11px;
+  line-height: 18px;
 }
 .list-error {
   display: flex;

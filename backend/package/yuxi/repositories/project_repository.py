@@ -2,11 +2,13 @@
 
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.repositories.conversation_repository import INVOCATION_CONVERSATION_SOURCES
 from yuxi.storage.postgres.models_business import Conversation, Project
+
+HIDDEN_SYSTEM_PROJECT_IDEMPOTENCY_KEYS = ("migration:jd-ai-h5:v1",)
 
 
 class ProjectRepository:
@@ -64,6 +66,11 @@ class ProjectRepository:
                 Project.uid == str(uid),
                 Project.selection_status == "selectable",
                 Project.status == "active",
+                # OA 历史迁移项目只用于满足 Conversation.project_id 约束，不应作为用户可选项目展示。
+                or_(
+                    Project.idempotency_key.is_(None),
+                    ~Project.idempotency_key.in_(HIDDEN_SYSTEM_PROJECT_IDEMPOTENCY_KEYS),
+                ),
             )
             .order_by(Project.updated_at.desc(), Project.id.desc())
         )

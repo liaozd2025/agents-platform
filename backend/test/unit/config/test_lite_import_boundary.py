@@ -21,9 +21,15 @@ def test_lite_shipping_surface_excludes_knowledge_runtime_routes_skills_and_tool
     environment["PYTHONPATH"] = os.pathsep.join([str(backend_root), str(backend_root / "package")])
     script = """
 import sys
+import asyncio
+from types import SimpleNamespace
 import server.main
 from yuxi.agents.skills.buildin import BUILTIN_SKILLS
 from yuxi.agents.toolkits.service import get_tool_metadata
+from yuxi.services.knowledge_retrieval_policy import decide_knowledge_retrieval
+
+decision = asyncio.run(decide_knowledge_retrieval('@knowledge:制度库 怎么请假', SimpleNamespace(uid='lite-test')))
+assert decision.intent == 'NO_KB' and not decision.kb_ids
 
 forbidden = (
     "yuxi.knowledge.runtime",

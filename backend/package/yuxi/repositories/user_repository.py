@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from yuxi.permissions.authorization import parse_department_ancestor_ids
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import APIKey, Department, Role, User, UserRoleAssignment
+from yuxi.storage.postgres.models_business import APIKey, Department, Role, User, UserConfig, UserRoleAssignment
 
 
 def _utc_now() -> dt:
@@ -110,6 +110,23 @@ class UserRepository:
     async def get_by_uid_with_db(self, db: AsyncSession, uid: str) -> User | None:
         """使用指定的 db 获取用户"""
         return await _get_user_with_department_ancestors(db, User.uid == uid)
+
+    async def get_memory_profile(self, uid: str):
+        """只投影资料字段与启用角色，不刷新调用方的 ORM 权限关系。"""
+        async with self._session() as session:
+            result = await session.execute(
+                select(User.username, Department.name, UserConfig.enable_memory, Role.name)
+                .select_from(User)
+                .outerjoin(Department, User.department_id == Department.id)
+                .outerjoin(UserConfig, UserConfig.uid == User.uid)
+                .outerjoin(UserRoleAssignment, UserRoleAssignment.user_id == User.id)
+                .outerjoin(Role, (Role.id == UserRoleAssignment.role_id) & Role.is_active)
+                .where(User.uid == uid, User.is_deleted == 0)
+            )
+            rows = result.all()
+            if not rows:
+                return None
+            return (*rows[0][:3], sorted({row[3] for row in rows if row[3]}))
 
     async def list_by_uids(self, uids: list[str]) -> list[User]:
         """批量获取指定 uid 的用户。"""
@@ -311,7 +328,8 @@ class UserRepository:
 
         user = User(
             **data,
-            role_assignments=[UserRoleAssignment(role=role, scope_mode="inherit")],
+            # 显式初始化空范围集合，避免后续替换角色时触发异步关系懒加载。
+            role_assignments=[UserRoleAssignment(role=role, scope_mode="inherit", scope_departments=[])],
         )
         db.add(user)
         await db.flush()

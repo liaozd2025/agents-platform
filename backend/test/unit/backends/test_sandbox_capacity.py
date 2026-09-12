@@ -5,7 +5,7 @@ import httpx
 import pytest
 
 from yuxi.agents.backends.sandbox.provisioner_client import ProvisionerClient, SandboxCapacityError
-from yuxi.services import chat_service
+from yuxi.agents.backends.sandbox import backend as sandbox_backend
 
 
 @pytest.mark.parametrize(
@@ -32,18 +32,37 @@ def test_provisioner_client_retries_only_structured_capacity_failure(monkeypatch
 @pytest.fixture
 def sandbox_bootstrap(monkeypatch):
     """只替换外部文件与容器副作用，保留 async 等待与异常传播。"""
-    monkeypatch.setattr(chat_service, "get_user_skills_root_dir", lambda _uid: None)
     state = SimpleNamespace(available=False, calls=0, error=SandboxCapacityError({"scope": "global"}))
 
-    def ensure_available():
+    def ensure_available(self):
         state.calls += 1
         if not state.available:
             raise state.error
 
-    monkeypatch.setattr(
-        chat_service, "ProvisionerSandboxBackend", lambda **_kwargs: SimpleNamespace(ensure_available=ensure_available)
-    )
+    monkeypatch.setattr(sandbox_backend.ProvisionerSandboxBackend, "ensure_available", ensure_available)
     return state
+
+
+@pytest.mark.parametrize("operation", ["execute", "upload", "edit", "write"])
+def test_file_operation_preserves_capacity_failure(monkeypatch, operation):
+    """容量不足不能被报告为权限错误或文件不存在，也不能尝试写文件。"""
+
+    def exhausted(*_args, **_kwargs):
+        raise SandboxCapacityError({"scope": "global"})
+
+    monkeypatch.setattr(sandbox_backend, "get_sandbox_provider", lambda: SimpleNamespace(get=exhausted))
+    backend = sandbox_backend.ProvisionerSandboxBackend(thread_id="root", uid="user")
+    path = "/home/gem/user-data/report.txt"
+    with pytest.raises(SandboxCapacityError, match="sandbox_capacity_exhausted"):
+        if operation == "execute":
+            backend.execute("echo ready")
+        elif operation == "upload":
+            backend.upload_files([(path, b"content")])
+        elif operation == "edit":
+            backend.edit(path, "old", "new")
+        else:
+            backend.write(path, "content")
+    assert backend._client is None
 
 
 async def test_sandbox_bootstrap_waits_for_capacity_without_blocking_event_loop(monkeypatch, sandbox_bootstrap):
@@ -53,9 +72,11 @@ async def test_sandbox_bootstrap_waits_for_capacity_without_blocking_event_loop(
         waits.append(delay)
         sandbox_bootstrap.available = True
 
-    monkeypatch.setattr(chat_service.asyncio, "sleep", release_capacity)
+    monkeypatch.setattr(sandbox_backend.asyncio, "sleep", release_capacity)
 
-    await chat_service._ensure_persistent_sandbox(runtime_scope_id="root", uid="user", workdir_path="project")
+    await sandbox_backend.ProvisionerSandboxBackend(
+        thread_id="root", uid="user", workdir_path="project"
+    ).aensure_available()
 
     assert sandbox_bootstrap.available
     assert sandbox_bootstrap.calls == 2
@@ -69,9 +90,11 @@ async def test_sandbox_capacity_wait_can_be_cancelled(monkeypatch, sandbox_boots
         waiting.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(chat_service.asyncio, "sleep", wait_for_capacity)
+    monkeypatch.setattr(sandbox_backend.asyncio, "sleep", wait_for_capacity)
     task = asyncio.create_task(
-        chat_service._ensure_persistent_sandbox(runtime_scope_id="root", uid="user", workdir_path="project")
+        sandbox_backend.ProvisionerSandboxBackend(
+            thread_id="root", uid="user", workdir_path="project"
+        ).aensure_available()
     )
     await asyncio.wait_for(waiting.wait(), timeout=1)
     task.cancel()
@@ -85,8 +108,10 @@ async def test_sandbox_capacity_wait_can_be_cancelled(monkeypatch, sandbox_boots
 async def test_sandbox_capacity_wait_has_explicit_timeout(monkeypatch, sandbox_bootstrap):
     monkeypatch.setenv("SANDBOX_CAPACITY_WAIT_SECONDS", "0")
 
-    with pytest.raises(chat_service.SandboxCapacityTimeoutError, match="sandbox_capacity_timeout") as error:
-        await chat_service._ensure_persistent_sandbox(runtime_scope_id="root", uid="user", workdir_path="project")
+    with pytest.raises(sandbox_backend.SandboxCapacityTimeoutError, match="sandbox_capacity_timeout") as error:
+        await sandbox_backend.ProvisionerSandboxBackend(
+            thread_id="root", uid="user", workdir_path="project"
+        ).aensure_available()
 
     assert error.value.code == "sandbox_capacity_timeout"
     assert sandbox_bootstrap.calls == 1
@@ -96,7 +121,9 @@ async def test_sandbox_bootstrap_does_not_retry_other_failures(sandbox_bootstrap
     sandbox_bootstrap.error = RuntimeError("sandbox_resource_policy_mismatch")
 
     with pytest.raises(RuntimeError, match="sandbox_resource_policy_mismatch"):
-        await chat_service._ensure_persistent_sandbox(runtime_scope_id="root", uid="user", workdir_path="project")
+        await sandbox_backend.ProvisionerSandboxBackend(
+            thread_id="root", uid="user", workdir_path="project"
+        ).aensure_available()
 
     assert sandbox_bootstrap.calls == 1
 
@@ -105,6 +132,8 @@ async def test_sandbox_capacity_wait_rejects_negative_timeout(monkeypatch, sandb
     monkeypatch.setenv("SANDBOX_CAPACITY_WAIT_SECONDS", "-1")
 
     with pytest.raises(ValueError, match="must not be negative"):
-        await chat_service._ensure_persistent_sandbox(runtime_scope_id="root", uid="user", workdir_path="project")
+        await sandbox_backend.ProvisionerSandboxBackend(
+            thread_id="root", uid="user", workdir_path="project"
+        ).aensure_available()
 
     assert sandbox_bootstrap.calls == 0

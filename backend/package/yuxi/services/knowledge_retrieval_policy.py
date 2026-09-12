@@ -5,8 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from yuxi.knowledge.runtime import knowledge_base
-from yuxi.knowledge.source_references import attach_knowledge_source_references
+from yuxi.config.runtime import knowledge_capability_enabled
 
 _MENTION_RE = re.compile(r'@knowledge:(?:"((?:\\.|[^"\\])*)"|(\S+))')
 _NO_KB_PATTERNS = (
@@ -71,7 +70,14 @@ def classify_knowledge_intent(query: str) -> str:
 
 async def decide_knowledge_retrieval(query: str, user: Any) -> KnowledgeRetrievalDecision:
     """解析 @ 范围或动态选择当前用户可读的全局知识库。"""
+    if not knowledge_capability_enabled():
+        return KnowledgeRetrievalDecision("NO_KB", (), False)
     mentions = parse_knowledge_mentions(query)
+    if not mentions and classify_knowledge_intent(query) == "NO_KB":
+        return KnowledgeRetrievalDecision("NO_KB", (), False)
+
+    from yuxi.knowledge.runtime import knowledge_base
+
     summaries = await knowledge_base.get_databases_by_uid(str(user.uid))
     visible = {str(summary.kb_id): summary for summary in summaries}
     if mentions:
@@ -83,9 +89,6 @@ async def decide_knowledge_retrieval(query: str, user: Any) -> KnowledgeRetrieva
         return KnowledgeRetrievalDecision(
             "SEARCH_KB", kb_ids, True, tuple((kb_id, str(visible[kb_id].name)) for kb_id in kb_ids)
         )
-
-    if classify_knowledge_intent(query) == "NO_KB":
-        return KnowledgeRetrievalDecision("NO_KB", (), False)
 
     global_ids = tuple(
         kb_id
@@ -103,6 +106,9 @@ async def retrieve_for_decision(query: str, decision: KnowledgeRetrievalDecision
     """并行检索决策范围内的知识库并保留来源。"""
     if not decision.kb_ids:
         return []
+    from yuxi.knowledge.runtime import knowledge_base
+    from yuxi.knowledge.source_references import attach_knowledge_source_references
+
     kb_names = dict(decision.kb_names)
     clean_query = _MENTION_RE.sub("", query).strip()
     results = await asyncio.gather(

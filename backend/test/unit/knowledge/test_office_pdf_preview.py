@@ -144,7 +144,7 @@ async def test_read_office_pdf_preview_converts_and_caches_pdf(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_non_docx_pptx_office_files_do_not_get_pdf_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_corrupt_excel_file_reports_unsupported_preview(monkeypatch: pytest.MonkeyPatch) -> None:
     stub_file_record(monkeypatch, make_file_record(filename="demo.xlsx"))
     minio_client = FakeMinioClient()
     minio_client.objects[("knowledgebases", "db1/upload/demo.docx")] = b"PK\x03\x04excel"

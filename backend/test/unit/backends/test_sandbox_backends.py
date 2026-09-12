@@ -99,13 +99,38 @@ def _make_provider(client) -> ProvisionerSandboxProvider:
 
 
 def test_create_agent_composite_backend_uses_sandbox_filesystem(monkeypatch):
-    monkeypatch.setattr("yuxi.agents.backends.sandbox.backend.get_sandbox_provider", lambda: object())
+    connections = []
+
+    def get_connection(_thread_id, **kwargs):
+        if not kwargs["create_if_missing"]:
+            return None
+        connections.append(kwargs)
+        return SimpleNamespace(sandbox_url="http://sandbox")
+
+    monkeypatch.setattr(
+        "yuxi.agents.backends.sandbox.backend.get_sandbox_provider",
+        lambda: SimpleNamespace(get=get_connection),
+    )
 
     backend = create_agent_composite_backend(_runtime().context)
 
     assert isinstance(backend.default, ProvisionerSandboxBackend)
     assert backend.routes == {}
     assert backend.artifacts_root == f"{WORKDIR_PATH}/outputs"
+    assert connections == []
+    monkeypatch.setattr(
+        backend.default,
+        "_build_client",
+        lambda _url: SimpleNamespace(
+            shell=SimpleNamespace(
+                exec_command=lambda **_kwargs: SimpleNamespace(data=SimpleNamespace(output="ready", exit_code=0))
+            )
+        ),
+    )
+    result = backend.default.execute("echo ready")
+    assert result.exit_code == 0 and result.output == "ready"
+    assert connections[0]["uid"] == "user-1"
+    assert connections[0]["workdir_path"] == WORKDIR_RELATIVE_PATH
 
 
 def test_create_agent_composite_backend_derives_virtual_workdir_from_relative_path(monkeypatch):
@@ -1480,6 +1505,7 @@ async def test_stream_stdin_accepts_only_fixed_shell_comment_controls(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("premature_completion", [False, True])
 @pytest.mark.parametrize(
     ("snapshots", "expected_chunks", "expected_ranges"),
     [
@@ -1492,7 +1518,7 @@ async def test_stream_stdin_accepts_only_fixed_shell_comment_controls(monkeypatc
     ],
 )
 async def test_provisioner_aexecute_stream_delivers_output_before_command_finishes(
-    monkeypatch, snapshots, expected_chunks, expected_ranges
+    monkeypatch, snapshots, expected_chunks, expected_ranges, premature_completion
 ) -> None:
     monkeypatch.setattr(sandbox_backend_module, "get_sandbox_provider", lambda: object())
     backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
@@ -1518,7 +1544,7 @@ async def test_provisioner_aexecute_stream_delivers_output_before_command_finish
         if kwargs["command"].startswith("rm -f -- "):
             return SimpleNamespace(data=SimpleNamespace(output="", status="completed", exit_code=0))
         return SimpleNamespace(
-            data=SimpleNamespace(session_id="session-1", output="", status="running", exit_code=None)
+            data=SimpleNamespace(session_id="session-1", output="", status="completed" if premature_completion else "running", exit_code=None)
         )
 
     async def view(**_kwargs):
@@ -1533,7 +1559,15 @@ async def test_provisioner_aexecute_stream_delivers_output_before_command_finish
     range_calls = []
     snapshots = iter(snapshots)
 
+    status_reads = 0
+
     async def read_file(**_kwargs):
+        nonlocal status_reads
+        status_reads += 1
+        if premature_completion and status_reads == 1:
+            from agent_sandbox.core.api_error import ApiError
+
+            raise ApiError(status_code=404)
         return SimpleNamespace(data=SimpleNamespace(content="0"))
 
     def download_file(**kwargs):
@@ -2068,3 +2102,33 @@ def test_workdir_paths_are_workspace_relative_and_reject_symlinks(monkeypatch, t
     (projects / file_id).write_text("file", encoding="utf-8")
     with pytest.raises(ValueError, match="符号链接或非目录组件"):
         paths.user_workdir_host_dir("user-1", f"projects/{file_id}")
+
+
+@pytest.mark.asyncio
+async def test_stream_missing_exit_status_times_out_and_stops_process(monkeypatch):
+    """伪完成状态不能让缺失退出码的进程无限等待或提前清理。"""
+    from agent_sandbox.core.api_error import ApiError
+
+    monkeypatch.setattr(sandbox_backend_module, "get_sandbox_provider", lambda: object())
+    backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
+    backend._provider = SimpleNamespace(get=lambda *_args, **_kwargs: SimpleNamespace(sandbox_url="http://sandbox"))
+    monkeypatch.setattr(sandbox_backend_module.httpx, "AsyncClient", lambda **_kwargs: _OwnedAsyncHttpClient())
+    shell = SimpleNamespace(
+        exec_command=AsyncMock(return_value=SimpleNamespace(
+            data=SimpleNamespace(session_id="session-1", status="completed", exit_code=0)
+        )),
+        view=AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(status="completed", exit_code=0))),
+        kill_process=AsyncMock(return_value=SimpleNamespace(success=True, data=SimpleNamespace(status="terminated"))),
+    )
+    file = SimpleNamespace(
+        read_file=AsyncMock(side_effect=ApiError(status_code=404)),
+        with_raw_response=SimpleNamespace(
+            download_file=lambda **kwargs: _stream_range_response(b"", kwargs["request_options"])
+        ),
+    )
+    monkeypatch.setattr(backend, "_build_async_client", lambda *_args: SimpleNamespace(shell=shell, file=file))
+    result = await backend.aexecute_stream("never-finished-command", AsyncMock(), timeout=0.01)
+    assert result.exit_code == 1
+    assert "退出码未在执行期限内生成" in result.output
+    shell.kill_process.assert_awaited_once_with(id="session-1")
+    assert shell.exec_command.call_args.kwargs["command"].startswith("rm -f -- ")

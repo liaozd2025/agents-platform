@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from yuxi.repositories.project_repository import ProjectRepository
 from yuxi.services.input_message_service import build_chat_input_message
 from yuxi.storage.postgres.models_business import AgentRun
 from yuxi.utils.hash_utils import hash_id
+from yuxi.utils.logging_config import logger
 
 PI_SANDBOX_NAME = "PI Agent 沙箱"
 
@@ -24,6 +27,22 @@ PI_SANDBOX_NAME = "PI Agent 沙箱"
 class PiSandboxStartResult:
     run: AgentRun
     created: bool
+
+
+async def _compute_skill_digests(sources: dict[str, Path]) -> dict[str, str]:
+    """在线程中计算 Skill 摘要，避免大目录扫描阻塞 worker 心跳。"""
+
+    started_at = time.perf_counter()
+    items = await asyncio.gather(
+        *(asyncio.to_thread(compute_skill_dir_hash, source) for source in sources.values())
+    )
+    digests = dict(zip(sources, items, strict=True))
+    logger.info(
+        "PI 子 Run Skill 摘要计算完成: skills=%d elapsed=%.2fs",
+        len(digests),
+        time.perf_counter() - started_at,
+    )
+    return digests
 
 
 class PiSandboxRunService:
@@ -121,7 +140,8 @@ class PiSandboxRunService:
         model_spec = str(parent_payload.get("model_spec") or "").strip()
         if not model_spec:
             raise ValueError("父运行任务缺少模型快照")
-        skill_digests = {slug: compute_skill_dir_hash(source) for slug, source in sources.items()}
+        # Skill 目录可能包含数千个文件；摘要计算必须离开事件循环，否则会阻塞父 Run 的 lease 心跳。
+        skill_digests = await _compute_skill_digests(sources)
         input_message = build_chat_input_message(description).with_metadata(
             {"request_id": request_id, "source": "pi_sandbox"}
         )

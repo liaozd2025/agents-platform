@@ -568,6 +568,7 @@ import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { formatExtensionCardTitle } from '@/utils/extensionDisplayName'
 import { getShareConfigLabel } from '@/utils/shareConfig'
 import { getSkillIcon } from '@/utils/skill_icon_utils'
+import { useAgentStore } from '@/stores/agent'
 import { useUserStore } from '@/stores/user'
 
 const RECOMMENDED_SUITES = [
@@ -634,6 +635,7 @@ const RECOMMENDED_SUITES = [
 
 const router = useRouter()
 const userStore = useUserStore()
+const agentStore = useAgentStore()
 const canUseSkills = computed(() => userStore.hasPermission('skill:use'))
 const canManageSkills = computed(() => userStore.hasPermission('skill:manage'))
 const canInstallSkills = computed(() => canUseSkills.value || canManageSkills.value)
@@ -766,7 +768,7 @@ const plazaGroups = computed(() =>
     key: category.key,
     title: category.label,
     skills: recommendedSuiteCards.value.filter(
-      (suite) => category.key === 'all' || skillCategory(suite) === category.key
+      (suite) => matchesSearch(suite) && (category.key === 'all' || skillCategory(suite) === category.key)
     )
   })).filter((group) => group.skills.length)
 )
@@ -1206,7 +1208,25 @@ const openRecommendedSuite = (suite) => {
 const handleInstallFlowCompleted = async ({ success, failed }) => {
   if (failed === 0) message.success(`已添加 ${success} 个 Skill`)
   else message.warning(`安装完成：成功 ${success} 个，失败 ${failed} 个`)
-  await fetchSkills()
+  await fetchSkills({ refreshPersonal: true })
+
+  // 安装完成后，强制刷新当前 Agent 详情，更新对话页 Skill 提及选项。
+  const selectedAgentId = agentStore.selectedAgentId
+  if (success > 0 && selectedAgentId) {
+    try {
+      await agentStore.fetchAgentDetail(selectedAgentId, true)
+      console.debug('[Skill] 安装完成，已刷新当前 Agent 的 Skill 选项', {
+        agentId: selectedAgentId,
+        success
+      })
+    } catch (error) {
+      // Skill 已安装成功；详情刷新失败只影响即时展示，避免覆盖安装结果。
+      console.warn('[Skill] 安装完成后刷新 Agent Skill 选项失败', {
+        agentId: selectedAgentId,
+        error
+      })
+    }
+  }
 }
 
 const handleImportUpload = async ({ file, onSuccess, onError }) => {

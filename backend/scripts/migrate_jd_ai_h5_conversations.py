@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "package"))
 
-from yuxi.storage.postgres.models_business import Agent, Conversation, Message
+from yuxi.storage.postgres.models_business import Agent, Conversation, Message, Project
 
 
 LOGGER = logging.getLogger("jd_ai_h5_migration")
@@ -35,6 +36,7 @@ MIGRATION_VERSION = "v1"
 SOURCE_DATABASE = "jd-ai"
 SOURCE_APP_ID = 1859570229117022213
 TARGET_AGENT_SLUG = "default-chatbot"
+MIGRATION_PROJECT_IDEMPOTENCY_KEY = f"migration:{SOURCE_NAME}:{MIGRATION_VERSION}"
 
 
 @dataclass
@@ -448,6 +450,15 @@ async def import_records(
                                 continue
                             raise RuntimeError(f"目标库已有同名 thread_id，但来源不匹配: {thread_id}")
 
+                        project = await _get_or_create_migration_project(
+                            session,
+                            uid=str(conversation_payload["uid"]),
+                        )
+                        # 当前 Conversation.project_id 为非空字段；历史脚本必须在写入前绑定同 UID 的 Project。
+                        conversation_payload = {
+                            **conversation_payload,
+                            "project_id": project.id,
+                        }
                         conversation = Conversation(**conversation_payload)
                         session.add(conversation)
                         await session.flush()
@@ -465,6 +476,41 @@ async def import_records(
                 stats.failures.append({"conversation_id": thread_id, "stage": "target_import", "reason": str(exc)})
     finally:
         await engine.dispose()
+
+
+def build_migration_project(*, uid: str, project_id: str) -> Project:
+    """构造一个可重复使用的 OA 历史会话项目记录。"""
+
+    return Project(
+        id=project_id,
+        uid=str(uid),
+        name="OA历史会话",
+        selection_status="selectable",
+        workdir_path=f"projects/{project_id}",
+        directory_mode="managed",
+        idempotency_key=MIGRATION_PROJECT_IDEMPOTENCY_KEY,
+    )
+
+
+async def _get_or_create_migration_project(session: AsyncSession, *, uid: str) -> Project:
+    """按用户幂等获取历史项目，避免重跑迁移时创建重复项目。"""
+
+    project = await session.scalar(
+        select(Project).where(
+            Project.uid == str(uid),
+            Project.idempotency_key == MIGRATION_PROJECT_IDEMPOTENCY_KEY,
+        )
+    )
+    if project is not None:
+        # 服务器当前运行镜像的 Project 模型没有 status 字段；幂等键查询已足够保证复用同一项目。
+        LOGGER.info("复用 OA 历史会话项目: uid=%s project_id=%s", uid, project.id)
+        return project
+
+    project = build_migration_project(uid=str(uid), project_id=str(uuid.uuid4()))
+    session.add(project)
+    await session.flush()
+    LOGGER.info("创建 OA 历史会话项目: uid=%s project_id=%s", uid, project.id)
+    return project
 
 
 def _parse_cutoff(value: str | None) -> datetime | None:
