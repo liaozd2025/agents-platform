@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：`backend/package/yuxi/utils/auth_utils.py`、`web/src/stores/user.js`、`web/src/views/LoginView.vue`、`web/src/views/OIDCCallbackView.vue`
+Owner：backend/package/yuxi/utils/auth_utils.py
 
 ## 问题
 
