@@ -12,7 +12,6 @@ sys.path.insert(0, os.getcwd())
 from yuxi.services.chat_service import (
     _build_ask_user_question_payload,
     _build_tool_approval_payload,
-    _coerce_interrupt_payload,
     _normalize_interrupt_questions,
     stream_agent_resume,
 )
@@ -27,30 +26,11 @@ class _FakeSession:
     async def commit(self):
         self.commit_count += 1
 
-def test_build_tool_approval_payload_preserves_actions_and_review_configs():
-    payload = _build_tool_approval_payload(
-        {
-            "action_requests": [
-                {"name": "execute", "args": {"command": "pytest -q"}, "description": "approval"}
-            ],
-            "review_configs": [
-                {"action_name": "execute", "allowed_decisions": ["approve", "reject"]}
-            ],
-        },
-        "thread-1",
-    )
 
-    assert payload == {
-        "approval": {
-            "action_requests": [
-                {"name": "execute", "args": {"command": "pytest -q"}, "description": "approval"}
-            ],
-            "review_configs": [
-                {"action_name": "execute", "allowed_decisions": ["approve", "reject"]}
-            ],
-        },
-        "thread_id": "thread-1",
-    }
+async def _resolve_test_workdir(**_kwargs):
+    """返回测试 Conversation 的 Project Workdir。"""
+
+    return "projects/11111111-1111-4111-8111-111111111111"
 
 
 def test_build_tool_approval_payload_rejects_mismatched_lists():
@@ -64,28 +44,33 @@ class TestNormalizeInterruptOptions:
         assert normalize_options(None) == []
         assert normalize_options([]) == []
 
-    def test_dict_options(self):
-        raw = [
-            {"label": "选项1", "value": "option1"},
-            {"label": "选项2", "value": "option2"},
-        ]
-        result = normalize_options(raw)
-        assert len(result) == 2
-        assert result[0] == {"label": "选项1", "value": "option1"}
-        assert result[1] == {"label": "选项2", "value": "option2"}
+    def test_deeply_nested_json_is_rejected(self):
+        raw = "[" * 10_000 + "0" + "]" * 10_000
+        assert normalize_options(raw) == []
 
-    def test_string_options(self):
-        raw = ["选项1", "选项2", "选项3"]
-        result = normalize_options(raw)
-        assert len(result) == 3
-        assert result[0] == {"label": "选项1", "value": "选项1"}
-
-    def test_mixed_options(self):
-        raw = [{"label": "选项1", "value": "option1"}, "选项2"]
-        result = normalize_options(raw)
-        assert len(result) == 2
-        assert result[0] == {"label": "选项1", "value": "option1"}
-        assert result[1] == {"label": "选项2", "value": "选项2"}
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (
+                [{"label": "选项1", "value": "option1"}, {"label": "选项2", "value": "option2"}],
+                [{"label": "选项1", "value": "option1"}, {"label": "选项2", "value": "option2"}],
+            ),
+            (
+                ["选项1", "选项2", "选项3"],
+                [
+                    {"label": "选项1", "value": "选项1"},
+                    {"label": "选项2", "value": "选项2"},
+                    {"label": "选项3", "value": "选项3"},
+                ],
+            ),
+            (
+                [{"label": "选项1", "value": "option1"}, "选项2"],
+                [{"label": "选项1", "value": "option1"}, {"label": "选项2", "value": "选项2"}],
+            ),
+        ],
+    )
+    def test_options_normalized(self, raw, expected):
+        assert normalize_options(raw) == expected
 
     def test_invalid_options(self):
         raw = [{"label": "只有label"}, {}, "  "]
@@ -98,6 +83,42 @@ class TestNormalizeInterruptOptions:
         result = normalize_options(raw)
         assert len(result) == 1
         assert result[0] == {"label": "only_value", "value": "only_value"}
+
+    def test_wrapper_item_dict(self):
+        raw = {
+            "item": [
+                {"label": "选项1 (Recommended)", "value": "v1", "description": "描述1"},
+                {"label": "选项2", "value": "v2", "description": "描述2"},
+            ]
+        }
+        result = normalize_options(raw)
+        assert len(result) == 2
+        assert result[0] == {"label": "选项1 (Recommended)", "value": "v1", "description": "描述1"}
+        assert result[1] == {"label": "选项2", "value": "v2", "description": "描述2"}
+
+    def test_string_bool_questions_normalization(self):
+        info = {
+            "questions": [
+                {
+                    "question": "本次调研分析的最终落点是什么？",
+                    "options": {
+                        "item": [
+                            {"label": "建议", "value": "strategy", "description": "战略描述"},
+                        ]
+                    },
+                    "multi_select": "false",
+                    "allow_other": "false",
+                    "question_id": "final_deliverable",
+                }
+            ]
+        }
+        result = _build_ask_user_question_payload(info, "thread-123")
+        assert len(result["questions"]) == 1
+        q = result["questions"][0]
+        assert q["question_id"] == "final_deliverable"
+        assert q["multi_select"] is False
+        assert q["allow_other"] is False
+        assert q["options"] == [{"label": "建议", "value": "strategy", "description": "战略描述"}]
 
 
 class TestBuildAskUserQuestionPayload:
@@ -135,44 +156,28 @@ class TestBuildAskUserQuestionPayload:
         assert result["source"] == "ask_user_question"
         assert len(result["questions"][0]["options"]) == 3
 
-    def test_multi_select(self):
+    @pytest.mark.parametrize(
+        ("extra", "expected"),
+        [
+            ({"multi_select": True}, {"multi_select": True}),
+            ({"allow_other": False}, {"allow_other": False}),
+            ({"operation": "删除文件"}, {"operation": "删除文件"}),
+        ],
+    )
+    def test_single_field_pass_through(self, extra, expected):
         info = {
             "questions": [
                 {
-                    "question": "选择多个",
-                    "options": ["A", "B", "C"],
-                    "multi_select": True,
+                    "question": "请确认？",
+                    "options": ["A", "B"],
+                    **extra,
                 }
-            ],
+            ]
         }
-        result = _build_ask_user_question_payload(info, "thread-789")
+        result = _build_ask_user_question_payload(info, "thread-param")
 
-        assert result["questions"][0]["multi_select"] is True
-
-    def test_disable_allow_other(self):
-        info = {
-            "questions": [{"question": "只能选择", "options": ["A", "B"], "allow_other": False}],
-        }
-        result = _build_ask_user_question_payload(info, "thread-000")
-
-        assert result["questions"][0]["allow_other"] is False
-
-    def test_with_operation(self):
-        info = {
-            "questions": [
-                {
-                    "question": "是否执行操作？",
-                    "operation": "删除文件",
-                    "options": [
-                        {"label": "批准", "value": "approve"},
-                        {"label": "拒绝", "value": "reject"},
-                    ],
-                }
-            ],
-        }
-        result = _build_ask_user_question_payload(info, "thread-op")
-
-        assert result["questions"][0]["operation"] == "删除文件"
+        for key, value in expected.items():
+            assert result["questions"][0][key] == value
 
     def test_default_question_when_questions_missing(self):
         info = {}
@@ -237,6 +242,12 @@ async def test_stream_agent_resume_init_does_not_render_resume_input():
 
 @pytest.mark.asyncio
 async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chunks(monkeypatch):
+    from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend
+
+    def reject_sandbox_creation(self):
+        raise AssertionError("纯文本恢复不得创建沙盒")
+
+    monkeypatch.setattr(ProvisionerSandboxBackend, "ensure_available", reject_sandbox_creation)
     db = _FakeSession()
 
     class FakeContext:
@@ -272,7 +283,18 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
             return FakeGraph()
 
     async def fake_resolve_agent_runtime(**_kwargs):
-        return SimpleNamespace(slug="main-agent", backend_id="ChatbotAgent"), FakeAgent(), {}
+        return (
+            SimpleNamespace(slug="main-agent", backend_id="ChatbotAgent"),
+            FakeAgent(),
+            {},
+            SimpleNamespace(
+                id=1,
+                uid="user-1",
+                status="active",
+                project_id="11111111-1111-4111-8111-111111111111",
+                extra_metadata={"attachments": []},
+            ),
+        )
 
     async def fake_save_messages_from_langgraph_state(**_kwargs):
         return None
@@ -285,6 +307,7 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
         return {"thread_id": "parent-thread", "uid": "user-1"}
 
     monkeypatch.setattr(svc, "_resolve_agent_runtime", fake_resolve_agent_runtime)
+    monkeypatch.setattr(svc, "resolve_conversation_workdir_path", _resolve_test_workdir)
     monkeypatch.setattr(svc, "build_agent_input_context", fake_build_agent_input_context)
     monkeypatch.setattr(
         svc,
@@ -293,7 +316,25 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
     )
     monkeypatch.setattr(svc, "check_and_handle_interrupts", fake_check_and_handle_interrupts)
     monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fake_save_messages_from_langgraph_state)
-    monkeypatch.setattr(svc, "ConversationRepository", lambda _db: object())
+
+    class FakeConversationRepository:
+        def __init__(self, _db):
+            pass
+
+        async def get_conversation_by_thread_id(self, _thread_id):
+            return SimpleNamespace(
+                id=1,
+                uid="user-1",
+                status="active",
+                project_id="11111111-1111-4111-8111-111111111111",
+                extra_metadata={"attachments": []},
+            )
+
+        async def get_attachments(self, _conversation_id):
+            return []
+
+    monkeypatch.setattr(svc, "ConversationRepository", FakeConversationRepository)
+
     monkeypatch.setattr(svc, "flush_langfuse", lambda: None)
 
     stream = stream_agent_resume(
@@ -324,20 +365,25 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
     assert finished["meta"]["agent_slug"] == "main-agent"
     assert "agent_id" not in finished["meta"]
 
+    async def fail_output_persistence(**_kwargs):
+        raise ValueError("output binding rejected")
 
-class TestCoerceInterruptPayload:
-    """测试 _coerce_interrupt_payload 函数"""
+    db.commit_count = 0
+    monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fail_output_persistence)
+    failing_chunks = []
+    async for raw in stream_agent_resume(
+        thread_id="parent-thread",
+        resume_input={"ok": True},
+        meta={
+            "run_id": "resume-output-error",
+            "request_id": "resume-request-error",
+            "worker_id": "resume-worker:attempt-1",
+        },
+        current_user=SimpleNamespace(uid="user-1"),
+        db=db,
+    ):
+        failing_chunks.append(json.loads(raw.decode("utf-8")))
 
-    def test_dict_input(self):
-        info = {"question": "test?", "options": ["a", "b"]}
-        result = _coerce_interrupt_payload(info)
-        assert result == info
-
-    def test_string_input(self):
-        info = "just a string"
-        result = _coerce_interrupt_payload(info)
-        assert isinstance(result, dict)
-
-    def test_none_input(self):
-        result = _coerce_interrupt_payload(None)
-        assert isinstance(result, dict)
+    assert failing_chunks[-1]["status"] == "error"
+    assert failing_chunks[-1]["error_type"] == "output_persistence_error"
+    assert all(chunk.get("status") not in {"finished", "warning"} for chunk in failing_chunks)

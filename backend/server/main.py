@@ -11,6 +11,7 @@ if sys.platform == "win32":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+import socket
 import time
 from collections import defaultdict, deque
 
@@ -19,11 +20,12 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from yuxi.config.runtime import knowledge_capability_enabled
 
 from server.routers import router
-from server.utils.lifespan import lifespan
-from server.utils.common_utils import setup_logging
 from server.utils.access_log_middleware import AccessLogMiddleware
+from server.utils.common_utils import setup_logging
+from server.utils.lifespan import lifespan
 
 # 设置日志配置
 setup_logging()
@@ -31,8 +33,12 @@ setup_logging()
 RATE_LIMIT_MAX_ATTEMPTS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_ENDPOINTS = {
+    ("/api/mcp/oauth/register", "POST"),
+    ("/api/mcp/oauth/authorize", "GET"),
+    ("/api/mcp/oauth/authorize", "POST"),
     ("/api/auth/token", "POST"),
     ("/api/auth/oa/exchange-token", "POST"),
+    ("/api/auth/oa/exchange-account", "POST"),
 }
 DEFAULT_DEVELOPMENT_CORS_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
 EXPLICIT_CORS_METHODS = ("DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT")
@@ -71,13 +77,24 @@ def _build_cors_options(origins: list[str] | None = None) -> dict[str, object]:
         "allow_credentials": True,
         "allow_methods": list(EXPLICIT_CORS_METHODS),
         "allow_headers": list(EXPLICIT_CORS_HEADERS),
-        "expose_headers": ["Content-Disposition", "X-Lock-Remaining"],
+        "expose_headers": ["Content-Disposition", "X-Lock-Remaining", "X-Total-Count"],
     }
 
 
 app = FastAPI(lifespan=lifespan)
 # 所有业务接口统一挂载到 /api，具体分组在 server.routers 中集中注册。
 app.include_router(router, prefix="/api")
+
+if knowledge_capability_enabled():
+    from server.routers.knowledge_mcp_router import build_knowledge_mcp, configured_knowledge_mcp_url
+
+    mcp_url = configured_knowledge_mcp_url()
+    if mcp_url:
+        mcp_server, _, mcp_router, oauth_routes, mcp_app = build_knowledge_mcp(mcp_url)
+        app.state.knowledge_mcp = mcp_server
+        app.include_router(mcp_router, prefix="/api")
+        app.router.routes.extend(oauth_routes)
+        app.mount("/", mcp_app)
 
 # CORS 设置
 app.add_middleware(
@@ -86,13 +103,20 @@ app.add_middleware(
 )
 
 
+def is_trusted_web_proxy(peer_ip: str) -> bool:
+    """仅信任当前 Compose 中 web 服务解析出的代理地址。"""
+    try:
+        return peer_ip in {address[4][0] for address in socket.getaddrinfo("web", None)}
+    except socket.gaierror:
+        return False
+
+
 def _extract_client_ip(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return "unknown"
+    peer_ip = request.client.host if request.client else ""
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip and peer_ip and is_trusted_web_proxy(peer_ip):
+        return real_ip
+    return peer_ip or "unknown"
 
 
 class LoginRateLimitMiddleware(BaseHTTPMiddleware):
@@ -122,7 +146,7 @@ class LoginRateLimitMiddleware(BaseHTTPMiddleware):
 
             response = await call_next(request)
 
-            if response.status_code < 400:
+            if response.status_code < 400 and not normalized_path.startswith("/api/mcp/"):
                 async with _attempt_lock:
                     _login_attempts.pop(client_ip, None)
 

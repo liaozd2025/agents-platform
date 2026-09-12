@@ -4,26 +4,274 @@ import json
 import os
 from contextlib import asynccontextmanager
 
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import declarative_base
-from yuxi.storage.postgres.models_business import AGENT_RUN_TERMINAL_STATUSES, UNVIEWED_RUN_MARKER
+from yuxi.permissions.role_catalog import BUILTIN_ROLES
+from yuxi.storage.postgres.models_business import (
+    AGENT_RUN_SHAPE_CONSTRAINT_NAME,
+    AGENT_RUN_SHAPE_CONSTRAINT_SQL,
+    AGENT_RUN_TERMINAL_STATUSES,
+    PROJECT_STATUS_CONSTRAINT_NAME,
+    PROJECT_STATUS_CONSTRAINT_SQL,
+    UNVIEWED_RUN_MARKER,
+)
 from yuxi.storage.postgres.models_business import Base as BusinessBase
 from yuxi.storage.postgres.models_knowledge import Base as KnowledgeBase
 from yuxi.utils import logger
 from yuxi.utils.singleton import SingletonMeta
 
-# 合并两个 Base
-CombinedBase = declarative_base()
 AGENT_RUN_TERMINAL_STATUS_SQL = ", ".join(f"'{status}'" for status in AGENT_RUN_TERMINAL_STATUSES)
 
-# 继承所有表
-for module in [KnowledgeBase, BusinessBase]:
-    for table_name in dir(module):
-        table = getattr(module, table_name)
-        if isinstance(table, type) and hasattr(table, "__tablename__"):
-            setattr(CombinedBase, table_name, table)
+
+def _sql_literal(value: str) -> str:
+    """把受代码控制的目录文本转为 PostgreSQL 字符串字面量。"""
+
+    return "'" + value.replace("'", "''") + "'"
+
+
+BUSINESS_SCHEMA_VERSION = 4
+KNOWLEDGE_SCHEMA_VERSION = 1
+SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
+AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS worker_id VARCHAR(128)",
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMP WITHOUT TIME ZONE",
+    "CREATE INDEX IF NOT EXISTS ix_agent_runs_status_lease_expires ON agent_runs(status, lease_expires_at)",
+)
+AGENT_RUN_FACT_SCHEMA_STATEMENTS = (
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS manifest JSONB",
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS manifest_fingerprint VARCHAR(64)",
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS manifest_recorded_at TIMESTAMP WITHOUT TIME ZONE",
+    """
+    CREATE TABLE IF NOT EXISTS agent_run_attempts (
+        id SERIAL PRIMARY KEY,
+        run_id VARCHAR(64) NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        attempt_no INTEGER NOT NULL,
+        worker_id VARCHAR(128) NOT NULL,
+        adapter VARCHAR(32),
+        instance_id VARCHAR(128),
+        route_reason TEXT,
+        route_snapshot JSONB,
+        runtime_manifest JSONB,
+        runtime_manifest_digest VARCHAR(64),
+        result_events JSONB NOT NULL DEFAULT '[]'::jsonb,
+        final_acked_at TIMESTAMP WITHOUT TIME ZONE,
+        cleanup_error TEXT,
+        cleanup_failed_at TIMESTAMP WITHOUT TIME ZONE,
+        started_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+        heartbeat_at TIMESTAMP WITHOUT TIME ZONE,
+        lease_expires_at TIMESTAMP WITHOUT TIME ZONE,
+        finished_at TIMESTAMP WITHOUT TIME ZONE,
+        outcome VARCHAR(32),
+        error_type VARCHAR(64),
+        error_message TEXT,
+        created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+    )
+    """,
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_run_attempts_run_attempt_no "
+        "ON agent_run_attempts(run_id, attempt_no)"
+    ),
+    "CREATE INDEX IF NOT EXISTS ix_agent_run_attempts_open ON agent_run_attempts(run_id, finished_at)",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS adapter VARCHAR(32)",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS instance_id VARCHAR(128)",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS route_reason TEXT",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS route_snapshot JSONB",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS runtime_manifest JSONB",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS runtime_manifest_digest VARCHAR(64)",
+    (
+        "ALTER TABLE IF EXISTS agent_run_attempts "
+        "ADD COLUMN IF NOT EXISTS result_events JSONB NOT NULL DEFAULT '[]'::jsonb"
+    ),
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS final_acked_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS cleanup_error TEXT",
+    "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS cleanup_failed_at TIMESTAMP WITHOUT TIME ZONE",
+)
+WORKDIR_PATH_SCHEMA_STATEMENTS = (
+    f"""
+    CREATE TABLE IF NOT EXISTS projects (
+        id VARCHAR(64) PRIMARY KEY,
+        uid VARCHAR(64) NOT NULL CONSTRAINT fk_projects_uid_users REFERENCES users(uid) ON DELETE CASCADE,
+        name VARCHAR(255),
+        selection_status VARCHAR(20) NOT NULL,
+        workdir_path VARCHAR(512) NOT NULL,
+        directory_mode VARCHAR(20) NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'active',
+        deleted_at TIMESTAMP WITHOUT TIME ZONE,
+        idempotency_key VARCHAR(128),
+        created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+        CONSTRAINT uq_projects_id_uid UNIQUE (id, uid),
+        CONSTRAINT uq_projects_uid_idempotency_key UNIQUE (uid, idempotency_key),
+        CONSTRAINT ck_projects_selection_status CHECK (selection_status IN ('implicit', 'selectable')),
+        CONSTRAINT ck_projects_directory_mode CHECK (directory_mode IN ('managed', 'linked')),
+        CONSTRAINT {PROJECT_STATUS_CONSTRAINT_NAME} CHECK ({PROJECT_STATUS_CONSTRAINT_SQL})
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_projects_uid ON projects(uid)",
+    "CREATE INDEX IF NOT EXISTS ix_projects_selection_status ON projects(selection_status)",
+    "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active'",
+    "ALTER TABLE IF EXISTS projects ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP WITHOUT TIME ZONE",
+    "CREATE INDEX IF NOT EXISTS ix_projects_status ON projects(status)",
+    f"""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = '{PROJECT_STATUS_CONSTRAINT_NAME}'
+              AND conrelid = 'projects'::regclass
+        ) THEN
+            ALTER TABLE projects
+            ADD CONSTRAINT {PROJECT_STATUS_CONSTRAINT_NAME} CHECK ({PROJECT_STATUS_CONSTRAINT_SQL});
+        END IF;
+    END $$
+    """,
+    "ALTER TABLE IF EXISTS projects DROP CONSTRAINT IF EXISTS uq_projects_uid_workdir_path",
+    "ALTER TABLE IF EXISTS projects ALTER COLUMN name DROP NOT NULL",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'fk_projects_uid_users'
+              AND conrelid = 'projects'::regclass
+        ) THEN
+            ALTER TABLE projects
+            ADD CONSTRAINT fk_projects_uid_users
+            FOREIGN KEY (uid) REFERENCES users(uid) ON DELETE CASCADE;
+        END IF;
+    END $$
+    """,
+    "ALTER TABLE IF EXISTS conversations ADD COLUMN IF NOT EXISTS project_id VARCHAR(64)",
+    "ALTER TABLE IF EXISTS conversations ADD COLUMN IF NOT EXISTS creation_request_id VARCHAR(64)",
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_conversations_uid_creation_request_id "
+        "ON conversations(uid, creation_request_id) WHERE creation_request_id IS NOT NULL"
+    ),
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM conversations
+            WHERE project_id IS NULL
+        ) THEN
+            RAISE EXCEPTION 'Conversation project_id requires storage-migrator cutover';
+        END IF;
+    END $$
+    """,
+    "ALTER TABLE IF EXISTS conversations ALTER COLUMN project_id SET NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_conversations_project_id ON conversations(project_id)",
+    "ALTER TABLE IF EXISTS conversations DROP CONSTRAINT IF EXISTS ck_conversations_workdir_binding",
+    "ALTER TABLE IF EXISTS conversations DROP COLUMN IF EXISTS workdir_path",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'fk_conversations_project_uid'
+              AND conrelid = 'conversations'::regclass
+        ) THEN
+            ALTER TABLE conversations
+            ADD CONSTRAINT fk_conversations_project_uid
+            FOREIGN KEY (project_id, uid) REFERENCES projects(id, uid);
+        END IF;
+    END $$
+    """,
+)
+V071_WORKDIR_CUTOVER_STATEMENTS = (
+    "ALTER TABLE IF EXISTS conversations ADD COLUMN IF NOT EXISTS project_id VARCHAR(64)",
+    "ALTER TABLE IF EXISTS conversations ADD COLUMN IF NOT EXISTS creation_request_id VARCHAR(64)",
+    """
+    WITH bindings AS (
+        SELECT
+            child.uid,
+            COALESCE(parent.thread_id, child.thread_id) AS owner_thread_id
+        FROM conversations AS child
+        LEFT JOIN subagent_threads AS relation ON relation.child_conversation_id = child.id
+        LEFT JOIN conversations AS parent ON parent.id = relation.parent_conversation_id
+    )
+    INSERT INTO projects (
+        id, uid, name, selection_status, workdir_path, directory_mode, idempotency_key, created_at, updated_at
+    )
+    SELECT DISTINCT
+        (md5('project:' || uid || ':' || owner_thread_id)::uuid)::text,
+        uid,
+        NULL,
+        'implicit',
+        'projects/' || (md5(uid || ':' || owner_thread_id)::uuid)::text,
+        'managed',
+        NULL,
+        timezone('utc', now()),
+        timezone('utc', now())
+    FROM bindings
+    ON CONFLICT (id) DO NOTHING
+    """,
+    """
+    UPDATE conversations AS child
+    SET project_id = (md5(
+        'project:' || owner.uid || ':' || owner.owner_thread_id
+    )::uuid)::text
+    FROM (
+        SELECT
+            current.id,
+            current.uid,
+            COALESCE(parent.thread_id, current.thread_id) AS owner_thread_id
+        FROM conversations AS current
+        LEFT JOIN subagent_threads AS relation ON relation.child_conversation_id = current.id
+        LEFT JOIN conversations AS parent ON parent.id = relation.parent_conversation_id
+    ) AS owner
+    WHERE child.id = owner.id
+      AND child.project_id IS NULL
+    """,
+    "ALTER TABLE IF EXISTS conversations ALTER COLUMN project_id SET NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_conversations_project_id ON conversations(project_id)",
+)
+RUNTIME_SCOPE_SCHEMA_STATEMENTS = (
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS runtime_scope_id VARCHAR(64)",
+    (
+        "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS "
+        "runtime_cleanup_pending BOOLEAN NOT NULL DEFAULT FALSE"
+    ),
+    """
+    UPDATE agent_runs AS run
+    SET runtime_scope_id = COALESCE(
+        (
+            SELECT parent.thread_id
+            FROM subagent_threads AS relation
+            JOIN conversations AS parent ON parent.id = relation.parent_conversation_id
+            WHERE relation.id = run.subagent_thread_relation_id
+        ),
+        run.conversation_thread_id
+    )
+    WHERE run.runtime_scope_id IS NULL
+    """,
+    "ALTER TABLE IF EXISTS agent_runs ALTER COLUMN runtime_scope_id SET NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_agent_runs_runtime_scope_id ON agent_runs(runtime_scope_id)",
+    ("CREATE INDEX IF NOT EXISTS ix_agent_runs_runtime_cleanup_pending ON agent_runs(runtime_cleanup_pending)"),
+    f"ALTER TABLE IF EXISTS agent_runs DROP CONSTRAINT IF EXISTS {AGENT_RUN_SHAPE_CONSTRAINT_NAME}",
+    f"""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = '{AGENT_RUN_SHAPE_CONSTRAINT_NAME}'
+              AND conrelid = 'agent_runs'::regclass
+        ) THEN
+            BEGIN
+                ALTER TABLE agent_runs
+                ADD CONSTRAINT {AGENT_RUN_SHAPE_CONSTRAINT_NAME}
+                CHECK ({AGENT_RUN_SHAPE_CONSTRAINT_SQL}) NOT VALID;
+            EXCEPTION WHEN duplicate_object THEN
+                NULL;
+            END;
+        END IF;
+    END $$
+    """,
+)
 
 
 class PostgresManager(metaclass=SingletonMeta):
@@ -36,6 +284,8 @@ class PostgresManager(metaclass=SingletonMeta):
         self.async_engine = None
         self.AsyncSession = None
         self.langgraph_pool = None
+        self.langgraph_checkpointer = None
+        self._langgraph_checkpointer_setup = False
         self._initialized = False
 
     def initialize(self):
@@ -83,6 +333,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 conninfo=langgraph_db_url,
                 max_size=10,  # 根据你的 Agent 并发情况设置，通常 5-10 足够了
                 kwargs={"autocommit": True},  # LangGraph Checkpoint 强依赖 autocommit
+                check=AsyncConnectionPool.check_connection,
             )
 
             self._initialized = True
@@ -96,13 +347,123 @@ class PostgresManager(metaclass=SingletonMeta):
         if not self._initialized:
             raise RuntimeError("PostgreSQL manager not initialized. Please check configuration.")
 
-    async def create_tables(self):
-        """创建所有表（知识库和业务表）"""
+    def get_langgraph_checkpointer(self) -> AsyncPostgresSaver:
+        """获取当前进程共享的 PostgreSQL LangGraph checkpointer。"""
+        self._check_initialized()
+        if self.langgraph_pool is None:
+            raise RuntimeError("PostgreSQL LangGraph connection pool is not initialized.")
+        if self.langgraph_checkpointer is None:
+            self.langgraph_checkpointer = AsyncPostgresSaver(self.langgraph_pool)
+        return self.langgraph_checkpointer
+
+    async def setup_langgraph_checkpointer(self) -> AsyncPostgresSaver:
+        """跨进程串行创建 LangGraph checkpoint 表并返回共享 checkpointer。"""
+        checkpointer = self.get_langgraph_checkpointer()
+        if not self._langgraph_checkpointer_setup:
+            async with self.langgraph_pool.connection() as connection:
+                await connection.execute("SELECT pg_advisory_lock(94721802)")
+                try:
+                    await checkpointer.setup()
+                finally:
+                    try:
+                        cursor = await connection.execute("SELECT pg_advisory_unlock(94721802)")
+                        row = await cursor.fetchone()
+                        if not row or row[0] is not True:
+                            raise RuntimeError("Failed to release LangGraph checkpoint advisory lock")
+                    except BaseException:
+                        # Session 级锁不随事务回滚释放，解锁失败时必须销毁物理连接。
+                        await connection.close()
+                        raise
+                self._langgraph_checkpointer_setup = True
+                logger.info("LangGraph checkpoint tables verified/created")
+        return checkpointer
+
+    @asynccontextmanager
+    async def schema_migration_lock(self):
+        """用独立 PostgreSQL session 串行化唯一 Schema migrator。"""
+        self._check_initialized()
+        async with self.async_engine.connect() as conn:
+            params = {"lock_scope": "yuxi:schema-migration"}
+            await conn.execute(text("SELECT pg_advisory_lock(hashtextextended(:lock_scope, 0))"), params)
+            await conn.commit()
+            try:
+                yield
+            finally:
+                unlocked = await conn.scalar(
+                    text("SELECT pg_advisory_unlock(hashtextextended(:lock_scope, 0))"),
+                    params,
+                )
+                await conn.commit()
+                if unlocked is not True:
+                    await conn.close()
+                    raise RuntimeError("Failed to release Yuxi schema migration advisory lock")
+
+    async def create_schema_version_table(self) -> None:
+        """创建轻量 Schema 版本表；仅允许迁移器调用。"""
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {SCHEMA_VERSION_TABLE} (
+                        domain VARCHAR(32) PRIMARY KEY,
+                        version INTEGER NOT NULL CHECK (version > 0),
+                        applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+
+    async def get_schema_versions(self) -> dict[str, int]:
+        """读取当前数据库已完成的 Yuxi Schema 版本。"""
+        self._check_initialized()
+        async with self.async_engine.connect() as conn:
+            exists = await conn.scalar(
+                text("SELECT to_regclass(:table_name) IS NOT NULL"),
+                {"table_name": SCHEMA_VERSION_TABLE},
+            )
+            if not exists:
+                return {}
+            rows = await conn.execute(text(f"SELECT domain, version FROM {SCHEMA_VERSION_TABLE}"))
+            return {str(row.domain): int(row.version) for row in rows}
+
+    async def record_schema_version(self, domain: str, version: int) -> None:
+        """在对应域迁移完整成功后记录当前版本。"""
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {SCHEMA_VERSION_TABLE} (domain, version, applied_at)
+                    VALUES (:domain, :version, CURRENT_TIMESTAMP)
+                    ON CONFLICT (domain) DO UPDATE
+                    SET version = EXCLUDED.version, applied_at = EXCLUDED.applied_at
+                    """
+                ),
+                {"domain": domain, "version": version},
+            )
+
+    async def require_current_schema(self, *, include_knowledge: bool) -> None:
+        """只读校验运行进程需要的 Schema 域均为精确当前版本。"""
+        versions = await self.get_schema_versions()
+        required = {"business": BUSINESS_SCHEMA_VERSION}
+        if include_knowledge:
+            required["knowledge"] = KNOWLEDGE_SCHEMA_VERSION
+        mismatches = [
+            f"{domain}={versions.get(domain, 'missing')} (required {version})"
+            for domain, version in required.items()
+            if versions.get(domain) != version
+        ]
+        if mismatches:
+            detail = ", ".join(mismatches)
+            raise RuntimeError(f"Database schema migration is incomplete or incompatible: {detail}")
+
+    async def create_knowledge_tables(self):
+        """创建完整模式使用的知识与评估表。"""
         self._check_initialized()
         async with self.async_engine.begin() as conn:
             await conn.run_sync(KnowledgeBase.metadata.create_all)
-            await conn.run_sync(BusinessBase.metadata.create_all)
-        logger.info("PostgreSQL tables created/checked (knowledge + business)")
+        logger.info("PostgreSQL knowledge tables created/checked")
 
     async def create_business_tables(self):
         """创建所有业务数据表"""
@@ -495,7 +856,187 @@ class PostgresManager(metaclass=SingletonMeta):
     async def ensure_business_schema(self):
         """确保业务 schema 包含后续新增字段（运行时 schema 演进）。"""
         self._check_initialized()
+        builtin_role_values = ", ".join(
+            "("
+            + ", ".join(
+                (
+                    _sql_literal(role.code),
+                    _sql_literal(role.name),
+                    _sql_literal(role.description),
+                    "TRUE",
+                    "TRUE",
+                    _sql_literal(role.default_scope_type),
+                )
+            )
+            + ")"
+            for role in BUILTIN_ROLES
+        )
+        builtin_permission_values = ", ".join(
+            f"({_sql_literal(role.code)}, {_sql_literal(permission_key)})"
+            for role in BUILTIN_ROLES
+            for permission_key in role.permission_keys
+        )
         stmts = [
+            # 展示姓名与登录账号分离，存量库启动时幂等补列；不回填或改写账号。
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS display_name VARCHAR(100)",
+            """
+            CREATE TABLE IF NOT EXISTS roles (
+                id SERIAL PRIMARY KEY,
+                code VARCHAR(64) NOT NULL UNIQUE,
+                name VARCHAR(100) NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                default_scope_type VARCHAR(48) NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                CONSTRAINT ck_roles_default_scope_type CHECK (
+                    default_scope_type IN (
+                        'none', 'self', 'organization_and_descendants',
+                        'selected_organizations_and_descendants', 'all'
+                    )
+                )
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                permission_key VARCHAR(96) NOT NULL,
+                PRIMARY KEY (role_id, permission_key)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS role_default_departments (
+                role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                PRIMARY KEY (role_id, department_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_role_assignments (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                scope_mode VARCHAR(16) NOT NULL DEFAULT 'inherit',
+                override_scope_type VARCHAR(48),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                CONSTRAINT uq_user_role_assignments_user_role UNIQUE (user_id, role_id),
+                CONSTRAINT ck_user_role_assignments_scope_mode CHECK (scope_mode IN ('inherit', 'override')),
+                CONSTRAINT ck_user_role_assignments_override_scope_type CHECK (
+                    override_scope_type IS NULL OR override_scope_type IN (
+                        'none', 'self', 'organization_and_descendants',
+                        'selected_organizations_and_descendants', 'all'
+                    )
+                )
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS user_role_assignment_departments (
+                assignment_id INTEGER NOT NULL REFERENCES user_role_assignments(id) ON DELETE CASCADE,
+                department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+                PRIMARY KEY (assignment_id, department_id)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS security_audits (
+                id SERIAL PRIMARY KEY,
+                actor_user_id INTEGER NOT NULL REFERENCES users(id),
+                action VARCHAR(64) NOT NULL,
+                target_type VARCHAR(32) NOT NULL,
+                target_id INTEGER NOT NULL,
+                target_code VARCHAR(64) NOT NULL,
+                reason TEXT,
+                before_value JSONB,
+                after_value JSONB,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_roles_is_active ON roles(is_active)",
+            "CREATE INDEX IF NOT EXISTS ix_user_role_assignments_user_id ON user_role_assignments(user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_user_role_assignments_role_id ON user_role_assignments(role_id)",
+            "CREATE INDEX IF NOT EXISTS ix_security_audits_actor_user_id ON security_audits(actor_user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_security_audits_target ON security_audits(target_type, target_id)",
+            "ALTER TABLE security_audits ADD COLUMN IF NOT EXISTS reason TEXT",
+            f"""
+            INSERT INTO roles (code, name, description, is_builtin, is_active, default_scope_type)
+            VALUES {builtin_role_values}
+            ON CONFLICT (code) DO UPDATE SET
+                name = EXCLUDED.name,
+                description = EXCLUDED.description,
+                is_builtin = TRUE,
+                is_active = TRUE,
+                default_scope_type = EXCLUDED.default_scope_type,
+                updated_at = NOW()
+            """,
+            "DELETE FROM role_permissions WHERE role_id IN (SELECT id FROM roles WHERE is_builtin IS TRUE)",
+            "DELETE FROM role_permissions WHERE permission_key = 'agent:use'",
+            f"""
+            INSERT INTO role_permissions (role_id, permission_key)
+            SELECT roles.id, seed.permission_key
+            FROM (VALUES {builtin_permission_values}) AS seed(role_code, permission_key)
+            JOIN roles ON roles.code = seed.role_code
+            ON CONFLICT (role_id, permission_key) DO NOTHING
+            """,
+            """
+            DO $$
+            DECLARE
+                has_unknown_role BOOLEAN;
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'users'
+                      AND column_name = 'role'
+                ) THEN
+                    EXECUTE 'SELECT EXISTS (
+                        SELECT 1 FROM users WHERE role NOT IN (''superadmin'', ''admin'', ''user'')
+                    )' INTO has_unknown_role;
+                    IF has_unknown_role THEN
+                        RAISE EXCEPTION 'users.role 存在未知角色，无法安全回填用户角色分配';
+                    END IF;
+
+                    EXECUTE 'INSERT INTO user_role_assignments (user_id, role_id, scope_mode)
+                        SELECT users.id, roles.id, ''inherit''
+                        FROM users
+                        JOIN roles ON roles.code = users.role
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM user_role_assignments existing
+                            WHERE existing.user_id = users.id
+                        )
+                        ON CONFLICT (user_id, role_id) DO NOTHING';
+                    EXECUTE 'ALTER TABLE users DROP COLUMN role';
+                END IF;
+
+                IF EXISTS (
+                    SELECT 1
+                    FROM users
+                    WHERE users.is_deleted = 0
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM user_role_assignments assignments
+                          JOIN roles ON roles.id = assignments.role_id AND roles.is_active IS TRUE
+                          WHERE assignments.user_id = users.id
+                      )
+                ) THEN
+                    RAISE EXCEPTION '有效用户缺少有效角色分配';
+                END IF;
+
+                IF EXISTS (SELECT 1 FROM users WHERE is_deleted = 0)
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM users
+                       JOIN user_role_assignments assignments ON assignments.user_id = users.id
+                       JOIN roles ON roles.id = assignments.role_id
+                       WHERE users.is_deleted = 0
+                         AND roles.is_active IS TRUE
+                         AND roles.code = 'superadmin'
+                   ) THEN
+                    RAISE EXCEPTION '系统必须至少保留一个有效超级管理员';
+                END IF;
+            END $$;
+            """,
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS tool_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS mcp_dependencies JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE IF EXISTS skills ADD COLUMN IF NOT EXISTS skill_dependencies JSONB DEFAULT '[]'::jsonb",
@@ -581,6 +1122,20 @@ class PostgresManager(metaclass=SingletonMeta):
             """,
             "DELETE FROM api_keys WHERE user_id IS NULL",
             "ALTER TABLE IF EXISTS api_keys ALTER COLUMN user_id SET NOT NULL",
+            "ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS request_id VARCHAR(64)",
+            "ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS intent_hash VARCHAR(64)",
+            "ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMP WITHOUT TIME ZONE",
+            """
+            UPDATE api_keys AS api_key
+            SET is_enabled = FALSE,
+                revoked_at = COALESCE(api_key.revoked_at, users.deleted_at, CURRENT_TIMESTAMP)
+            FROM users
+            WHERE api_key.user_id = users.id
+              AND users.is_deleted <> 0
+              AND api_key.revoked_at IS NULL
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_api_keys_request_id ON api_keys(request_id)",
+            "CREATE INDEX IF NOT EXISTS ix_api_keys_revoked_at ON api_keys(revoked_at)",
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_agents_slug ON agents(slug)",
             "CREATE INDEX IF NOT EXISTS ix_agents_backend_id ON agents(backend_id)",
             "CREATE INDEX IF NOT EXISTS ix_agents_is_subagent ON agents(is_subagent)",
@@ -645,6 +1200,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
             """,
+            *WORKDIR_PATH_SCHEMA_STATEMENTS,
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS agent_slug VARCHAR(64)",
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS conversation_thread_id VARCHAR(64)",
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS created_by_run_id VARCHAR(64)",
@@ -652,6 +1208,8 @@ class PostgresManager(metaclass=SingletonMeta):
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS source VARCHAR(32) NOT NULL DEFAULT 'chat'",
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS channel VARCHAR(32) NOT NULL DEFAULT 'web'",
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS external_id VARCHAR(128)",
+            *AGENT_RUN_LEASE_SCHEMA_STATEMENTS,
+            *AGENT_RUN_FACT_SCHEMA_STATEMENTS,
             (
                 "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS "
                 "origin_metadata JSONB NOT NULL DEFAULT '{}'::jsonb"
@@ -753,6 +1311,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 END IF;
             END $$;
             """,
+            *RUNTIME_SCOPE_SCHEMA_STATEMENTS,
             """
             UPDATE subagent_threads st
             SET subagent_slug = c.agent_id
@@ -911,6 +1470,216 @@ class PostgresManager(metaclass=SingletonMeta):
             ON agent_run_requests(uid, agent_slug, conversation_thread_id, status, created_at, id)
             """,
             "CREATE INDEX IF NOT EXISTS ix_agent_run_requests_dispatched_run_id ON agent_run_requests(dispatched_run_id)",  # noqa: E501
+            # 组织节点由扁平表升级为树：加父节点、展示用节点类型与物化路径
+            "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS parent_id INTEGER REFERENCES departments(id)",
+            (
+                "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS "
+                "node_type VARCHAR(16) NOT NULL DEFAULT 'department'"
+            ),
+            "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS path VARCHAR(512) NOT NULL DEFAULT ''",
+            # 名称允许跨组织重复，旧 OA 用户归属必须使用稳定部门编码匹配。
+            "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS oa_department_code VARCHAR(64)",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_oa_department_code "
+                "ON departments(oa_department_code) WHERE oa_department_code IS NOT NULL"
+            ),
+            "ALTER TABLE IF EXISTS departments ADD COLUMN IF NOT EXISTS oa_department_id INTEGER",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_oa_department_id "
+                "ON departments(oa_department_id) WHERE oa_department_id IS NOT NULL"
+            ),
+            # 集团根原地改造：id=1 升为根，尚未挂靠的存量节点挂到它下面，再回填还没有路径的节点。
+            # 后两条 UPDATE 带幂等条件，重复执行不会覆盖人工调整过的树结构；第一条每次都把根写回
+            # 根形态，因为集团根的层级身份不允许被改动。
+            # 表非空却没有 id=1 时不静默跳过：那意味着树没有根，回填出来的路径全是错的。
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM departments WHERE id = 1) THEN
+                    UPDATE departments
+                    SET parent_id = NULL, node_type = 'group', path = '/1/'
+                    WHERE id = 1;
+
+                    UPDATE departments SET parent_id = 1 WHERE id <> 1 AND parent_id IS NULL;
+
+                    UPDATE departments SET path = '/1/' || id || '/' WHERE id <> 1 AND path = '';
+                ELSIF EXISTS (SELECT 1 FROM departments) THEN
+                    RAISE EXCEPTION
+                        'departments 非空但缺少 id=1 的集团根，组织机构树未完成迁移，祖先链不可用';
+                END IF;
+            END $$;
+            """,
+            # 名称唯一性由全局唯一收敛为同级唯一：不同分子公司可以各有一个「人力资源部」
+            "DROP INDEX IF EXISTS ix_departments_name",
+            "CREATE INDEX IF NOT EXISTS ix_departments_name ON departments(name)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_parent_name ON departments(parent_id, name)",
+            "CREATE INDEX IF NOT EXISTS ix_departments_parent_id ON departments(parent_id)",
+            "CREATE INDEX IF NOT EXISTS ix_departments_path ON departments(path)",
+            # 历史事件保存写入时组织路径；旧记录按当前用户归属回填，并显式标记为推算。
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY[
+                    'conversations', 'tool_calls', 'message_feedbacks', 'operation_logs', 'security_audits'
+                ] LOOP
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_id_snapshot INTEGER', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_path_snapshot VARCHAR(512)', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_snapshot_inferred BOOLEAN', target_table
+                    );
+                END LOOP;
+            END $$;
+            """,
+            """
+            UPDATE conversations AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.uid = users.uid AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE tool_calls AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM messages
+            JOIN conversations ON conversations.id = messages.conversation_id
+            JOIN users ON users.uid = conversations.uid
+            LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.message_id = messages.id AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE message_feedbacks AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.uid = users.uid AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE operation_logs AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.user_id = users.id AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            UPDATE security_audits AS event
+            SET organization_id_snapshot = users.department_id,
+                organization_path_snapshot = departments.path,
+                organization_snapshot_inferred = TRUE
+            FROM users LEFT JOIN departments ON departments.id = users.department_id
+            WHERE event.actor_user_id = users.id AND event.organization_snapshot_inferred IS NULL
+            """,
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY[
+                    'conversations', 'tool_calls', 'message_feedbacks', 'operation_logs', 'security_audits'
+                ] LOOP
+                    EXECUTE format(
+                        'UPDATE %I SET organization_snapshot_inferred = TRUE '
+                        'WHERE organization_snapshot_inferred IS NULL', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET DEFAULT FALSE', target_table
+                    );
+                    EXECUTE format(
+                        'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET NOT NULL', target_table
+                    );
+                END LOOP;
+            END $$;
+            """,
+            # 可共享资源保存创建者的组织快照；共享范围仍由各资源原有 share_config 决定。
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY['knowledge_bases', 'agents', 'skills'] LOOP
+                    -- 这些资源表由知识库 schema 创建；空库初始化时尚未建表，不能提前执行兼容迁移。
+                    IF to_regclass('public.' || target_table) IS NOT NULL THEN
+                        EXECUTE format(
+                            'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_id_snapshot INTEGER', target_table
+                        );
+                        EXECUTE format(
+                            'ALTER TABLE %I ADD COLUMN IF NOT EXISTS
+                            organization_path_snapshot VARCHAR(512)', target_table
+                        );
+                        EXECUTE format(
+                            'ALTER TABLE %I ADD COLUMN IF NOT EXISTS
+                            organization_snapshot_inferred BOOLEAN', target_table
+                        );
+                    END IF;
+                END LOOP;
+            END $$;
+            """,
+            """
+            DO $$
+            BEGIN
+                IF to_regclass('public.knowledge_bases') IS NOT NULL THEN
+                    UPDATE knowledge_bases AS resource
+                    SET organization_id_snapshot = users.department_id,
+                        organization_path_snapshot = departments.path,
+                        organization_snapshot_inferred = TRUE
+                    FROM users LEFT JOIN departments ON departments.id = users.department_id
+                    WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL;
+                END IF;
+            END $$;
+            """,
+            """
+            DO $$
+            BEGIN
+                IF to_regclass('public.agents') IS NOT NULL THEN
+                    UPDATE agents AS resource
+                    SET organization_id_snapshot = users.department_id,
+                        organization_path_snapshot = departments.path,
+                        organization_snapshot_inferred = TRUE
+                    FROM users LEFT JOIN departments ON departments.id = users.department_id
+                    WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL;
+                END IF;
+            END $$;
+            """,
+            """
+            DO $$
+            BEGIN
+                IF to_regclass('public.skills') IS NOT NULL THEN
+                    UPDATE skills AS resource
+                    SET organization_id_snapshot = users.department_id,
+                        organization_path_snapshot = departments.path,
+                        organization_snapshot_inferred = TRUE
+                    FROM users LEFT JOIN departments ON departments.id = users.department_id
+                    WHERE resource.created_by = users.uid AND resource.organization_snapshot_inferred IS NULL;
+                END IF;
+            END $$;
+            """,
+            """
+            DO $$
+            DECLARE target_table TEXT;
+            BEGIN
+                FOREACH target_table IN ARRAY ARRAY['knowledge_bases', 'agents', 'skills'] LOOP
+                    IF to_regclass('public.' || target_table) IS NOT NULL THEN
+                        EXECUTE format(
+                            'UPDATE %I SET organization_snapshot_inferred = TRUE '
+                            'WHERE organization_snapshot_inferred IS NULL', target_table
+                        );
+                        EXECUTE format(
+                            'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET DEFAULT FALSE', target_table
+                        );
+                        EXECUTE format(
+                            'ALTER TABLE %I ALTER COLUMN organization_snapshot_inferred SET NOT NULL', target_table
+                        );
+                    END IF;
+                END LOOP;
+            END $$;
+            """,
         ]
         async with self.async_engine.begin() as conn:
             # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警
@@ -998,6 +1767,13 @@ class PostgresManager(metaclass=SingletonMeta):
 
         if self.langgraph_pool:
             await self.langgraph_pool.close()
+
+        self.async_engine = None
+        self.AsyncSession = None
+        self.langgraph_pool = None
+        self.langgraph_checkpointer = None
+        self._langgraph_checkpointer_setup = False
+        self._initialized = False
 
     async def async_check_first_run(self):
         """检查是否首次运行（异步版本）- 检查用户表是否有数据"""

@@ -3,16 +3,42 @@ from pathlib import Path
 
 import aiofiles
 import yaml
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from yuxi import config, get_version
+from yuxi import get_version
+from yuxi.config.options import invalidate_option_cache, system_options, update_option_value
+from yuxi.config.runtime import knowledge_capability_enabled
+from yuxi.permissions.authorization import AuthorizationContext
+from yuxi.services.readiness_service import get_readiness
 from yuxi.storage.postgres.models_business import User
-from yuxi.utils.logging_config import logger
+from yuxi.utils.logging_config import LOG_FILE, logger
 
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from server.utils.auth_middleware import get_authorization_context, get_db, get_required_user, require_permission
 
 system = APIRouter(prefix="/system", tags=["system"])
+
+OCR_CONFIG_KEYS = frozenset({"default_ocr_engine"})
+OCR_OPTION_KEYS = frozenset(
+    {
+        "mineru_ocr_host_opts",
+        "mineru_official_api_opts",
+        "pp_structure_v3_ocr_host_opts",
+        "paddleocr_api_opts",
+    }
+)
+
+
+def _require_config_permissions(authorization: AuthorizationContext, keys: set[str]) -> None:
+    """按配置项类别检查系统配置或 OCR 管理权限。"""
+
+    required = {"ocr:manage" if key in OCR_CONFIG_KEYS else "system_config:manage" for key in keys}
+    if not required:
+        required.add("system_config:manage")
+    for permission_key in required:
+        if not authorization.has_permission(permission_key):
+            raise HTTPException(status_code=403, detail=f"缺少功能权限: {permission_key}")
 
 # =============================================================================
 # === 健康检查分组 ===
@@ -21,33 +47,50 @@ system = APIRouter(prefix="/system", tags=["system"])
 
 @system.get("/health")
 async def health_check():
-    """系统健康检查接口（公开接口）"""
-    return {"status": "ok", "message": "服务正常运行", "version": get_version()}
+    """返回 API 进程 liveness，不代表依赖或业务链路就绪。"""
+    return {"status": "ok", "message": "进程正常运行", "version": get_version()}
+
+
+@system.get("/ready")
+async def readiness_check(request: Request):
+    """验证 API 接流量所需的启动状态与核心依赖。"""
+
+    result = await get_readiness(
+        startup_complete=bool(getattr(request.app.state, "startup_complete", False)),
+        startup_components=getattr(request.app.state, "startup_components", None),
+    )
+    result["version"] = get_version()
+    return JSONResponse(status_code=200 if result["status"] == "ready" else 503, content=result)
 
 
 @system.get("/discovery")
 async def discovery():
     """系统能力发现接口（公开接口）"""
+    knowledge_enabled = knowledge_capability_enabled()
     return {
         "name": "Yuxi",
         "version": get_version(),
         "api_prefix": "/api",
         "capabilities": {
+            "features": {"knowledge": knowledge_enabled},
             "cli": {
                 "min_cli_version": "0.1.0",
                 "browser_login": True,
                 "api_key_auth": True,
                 "remote_config": True,
-                "kb_upload": True,
-                "kb_list": True,
-                "kb_files": True,
-                "kb_query": True,
-                "kb_open": True,
-                "kb_find": True,
-            }
+                "agent_list": True,
+                "agent_show": True,
+                "kb_upload": knowledge_enabled,
+                "kb_list": knowledge_enabled,
+                "kb_files": knowledge_enabled,
+                "kb_query": knowledge_enabled,
+                "kb_open": knowledge_enabled,
+                "kb_find": knowledge_enabled,
+            },
         },
         "endpoints": {
             "health": "/api/system/health",
+            "readiness": "/api/system/ready",
             "auth_me": "/api/auth/me",
             "cli_auth_sessions": "/api/auth/cli/sessions",
             "cli_auth_authorize": "/auth/cli/authorize",
@@ -60,48 +103,76 @@ async def discovery():
 # =============================================================================
 
 
+def _serialize_system_config(values: dict) -> dict:
+    fields = {
+        field["key"]: {
+            "des": field["label"],
+            "default": field.get("default"),
+            "type": field.get("type", "string"),
+            "exclude": False,
+        }
+        for field in system_options.fields
+    }
+    return {**values, "_config_items": fields}
+
+
 @system.get("/config")
-async def get_config(current_user: User = Depends(get_required_user)):
-    """获取系统配置"""
-    return config.dump_config()
+async def get_config(
+    _authorization: AuthorizationContext = Depends(require_permission("system_config:manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    """返回当前管理员可维护的系统配置。"""
+    return _serialize_system_config(await system_options.get(db))
 
 
 @system.post("/config")
-async def update_config_single(key=Body(...), value=Body(...), current_user: User = Depends(get_admin_user)) -> dict:
+async def update_config_single(
+    key=Body(...),
+    value=Body(...),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """更新单个配置项"""
-    if not isinstance(key, str) or key not in type(config).model_fields:
+    _require_config_permissions(authorization, {key} if isinstance(key, str) else {""})
+    if not isinstance(key, str) or key not in {field["key"] for field in system_options.fields}:
         raise HTTPException(status_code=400, detail=f"未知配置项: {key}")
-    if not config.can_update(key):
-        raise HTTPException(status_code=400, detail=f"配置项不可修改: {key}")
     try:
-        config.set_value(key, value)
+        await update_option_value(db, system_options.key, {key: value}, authorization.user.username)
+        await db.commit()
+        await invalidate_option_cache(system_options.key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    config.save()
-    return config.dump_config()
+    return _serialize_system_config(await system_options.get(db))
 
 
 @system.post("/config/update")
-async def update_config_batch(items: dict = Body(...), current_user: User = Depends(get_admin_user)) -> dict:
+async def update_config_batch(
+    items: dict = Body(...),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """批量更新配置项"""
+    _require_config_permissions(authorization, set(items))
     try:
-        config.update(items)
+        await update_option_value(db, system_options.key, items, authorization.user.username)
+        await db.commit()
+        await invalidate_option_cache(system_options.key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    config.save()
-    return config.dump_config()
+    return _serialize_system_config(await system_options.get(db))
 
 
 @system.get("/logs")
-async def get_system_logs(levels: str | None = None, current_user: User = Depends(get_admin_user)):
-    """获取系统日志
+async def get_system_logs(
+    levels: str | None = None,
+    _authorization: AuthorizationContext = Depends(require_permission("system_log:read")),
+):
+    """获取当前 API 进程日志。
 
     Args:
         levels: 可选的日志级别过滤，多个级别用逗号分隔，如 "INFO,ERROR,DEBUG,WARNING"
     """
     try:
-        from yuxi.utils.logging_config import LOG_FILE
-
         # 解析日志级别过滤条件
         level_filter = None
         if levels:
@@ -129,7 +200,7 @@ async def get_system_logs(levels: str | None = None, current_user: User = Depend
                         lines.pop(0)
 
         log = "".join(lines)
-        return {"log": log, "message": "success", "log_file": LOG_FILE}
+        return {"log": log, "message": "success", "log_file": LOG_FILE, "scope": "api"}
     except Exception as e:
         logger.error(f"获取系统日志失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取系统日志失败: {str(e)}")
@@ -180,7 +251,9 @@ async def get_info_config():
 
 
 @system.post("/info/reload")
-async def reload_info_config(current_user: User = Depends(get_admin_user)):
+async def reload_info_config(
+    _authorization: AuthorizationContext = Depends(require_permission("system_config:manage")),
+):
     """重新加载信息配置"""
     try:
         config = await load_info_config()
@@ -203,32 +276,50 @@ class ConfigOptionValuePayload(BaseModel):
 
 @system.get("/config/options")
 async def get_config_options(
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
     """返回系统定义的通用配置表单和值。"""
 
     from yuxi.config.options import list_options, serialize_option
 
-    return {"options": [serialize_option(record) for record in await list_options(db)]}
+    can_manage_system = authorization.has_permission("system_config:manage")
+    can_manage_ocr = authorization.has_permission("ocr:manage")
+    if not can_manage_system and not can_manage_ocr:
+        raise HTTPException(status_code=403, detail="缺少系统配置或 OCR 管理权限")
+
+    records = await list_options(db)
+    return {
+        "options": [
+            serialize_option(record)
+            for record in records
+            if (record.key in OCR_OPTION_KEYS and can_manage_ocr)
+            or (record.key not in OCR_OPTION_KEYS and can_manage_system)
+        ]
+    }
 
 
 @system.put("/config/options/{key}")
 async def put_config_option(
     key: str,
     payload: ConfigOptionValuePayload,
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
     """保存一个通用配置项的 JSON 值。"""
 
     from yuxi.config.options import serialize_option, update_option_value
 
+    permission_key = "ocr:manage" if key in OCR_OPTION_KEYS else "system_config:manage"
+    if not authorization.has_permission(permission_key):
+        raise HTTPException(status_code=403, detail=f"缺少功能权限: {permission_key}")
+
     try:
-        record = await update_option_value(db, key, payload.value, current_user.username)
+        record = await update_option_value(db, key, payload.value, authorization.user.username)
         if record is None:
             raise HTTPException(status_code=404, detail=f"配置项不存在: {key}")
         await db.commit()
+        await invalidate_option_cache(key)
         await db.refresh(record)
         return {"option": serialize_option(record)}
     except HTTPException:
@@ -240,12 +331,13 @@ async def put_config_option(
 @system.get("/ocr/options")
 async def get_ocr_engine_options(
     current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """返回所有代码支持的 OCR 方法和默认项。"""
 
     from yuxi.services.ocr_service import get_ocr_options
 
-    return get_ocr_options()
+    return await get_ocr_options(db)
 
 
 @system.get("/ocr/health")

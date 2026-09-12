@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.repositories.conversation_repository import (
@@ -11,7 +12,7 @@ from yuxi.repositories.conversation_repository import (
     INVOCATION_CONVERSATION_SOURCES,
     MAX_CONVERSATION_TITLE_LENGTH,
 )
-from yuxi.storage.postgres.models_business import Base, Conversation, Message
+from yuxi.storage.postgres.models_business import Base, Conversation, Department, Message, Project, User
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = pytest.mark.unit
@@ -48,10 +49,89 @@ def test_normalize_title_trims_spaces():
 
 
 @pytest.mark.asyncio
-async def test_list_conversations_excludes_invocation_sources(conversation_session):
+async def test_conversation_and_tool_call_capture_organization_at_each_write(conversation_session):
+    root = Department(name="集团", path="/1/", node_type="group")
+    conversation_session.add(root)
+    await conversation_session.flush()
+    department_a = Department(name="甲组织", parent_id=root.id)
+    department_b = Department(name="乙组织", parent_id=root.id)
+    conversation_session.add_all([department_a, department_b])
+    await conversation_session.flush()
+    department_a.path = f"{root.path}{department_a.id}/"
+    department_b.path = f"{root.path}{department_b.id}/"
+    user = User(username="快照用户", uid="snapshot-user", password_hash="x", department=department_a)
+    conversation_session.add(user)
+    await conversation_session.flush()
+    project = Project(
+        id="snapshot-project",
+        uid=user.uid,
+        selection_status="selectable",
+        workdir_path="projects/snapshot-project",
+        directory_mode="managed",
+    )
+    conversation_session.add(project)
+    await conversation_session.flush()
+
+    repository = ConversationRepository(conversation_session)
+    conversation = await repository.add_conversation(uid=user.uid, agent_id="agent-a", project_id=project.id)
+    user.department = department_b
+    message = Message(conversation=conversation, role="assistant", content="done")
+    conversation_session.add(message)
+    await conversation_session.flush()
+    tool_call = await repository.add_tool_call(message.id, "search", status="success")
+
+    assert conversation.organization_id_snapshot == department_a.id
+    assert conversation.organization_path_snapshot == department_a.path
+    assert conversation.organization_snapshot_inferred is False
+    assert tool_call.organization_id_snapshot == department_b.id
+    assert tool_call.organization_path_snapshot == department_b.path
+    assert tool_call.organization_snapshot_inferred is False
+
+
+@pytest.mark.asyncio
+async def test_lock_conversation_refreshes_cached_lifecycle_state(tmp_path):
+    """加锁读取必须刷新同一 Session 中已缓存的生命周期状态。"""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'conversation-lock.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    try:
+        async with factory() as reader, factory() as writer:
+            conversation = Conversation(
+                thread_id="thread-refresh-lock",
+                project_id="project-refresh-lock",
+                uid="user-a",
+                agent_id="agent-a",
+                title="Refresh lock",
+                status="active",
+            )
+            reader.add(conversation)
+            await reader.commit()
+
+            repository = ConversationRepository(reader)
+            cached = await repository.get_conversation_by_id(conversation.id)
+            assert cached is conversation
+            assert cached.status == "active"
+
+            await writer.execute(
+                update(Conversation).where(Conversation.id == conversation.id).values(status="deleted")
+            )
+            await writer.commit()
+
+            locked = await repository.lock_conversation_by_thread_id(conversation.thread_id)
+
+            assert locked is conversation
+            assert locked.status == "deleted"
+    finally:
+        await engine.dispose()
+
+
+def _seed_invocation_excluding_conversations() -> tuple[Conversation, Conversation, Conversation, datetime]:
     now = utc_now_naive()
     normal = Conversation(
         thread_id="thread-normal",
+        project_id="project-thread-normal",
         uid="user-a",
         agent_id="agent-a",
         title="Normal",
@@ -62,6 +142,7 @@ async def test_list_conversations_excludes_invocation_sources(conversation_sessi
     )
     agent_call = Conversation(
         thread_id="thread-call",
+        project_id="project-thread-call",
         uid="user-a",
         agent_id="agent-a",
         title="Agent Call Run",
@@ -73,6 +154,7 @@ async def test_list_conversations_excludes_invocation_sources(conversation_sessi
     )
     agent_eval = Conversation(
         thread_id="thread-eval",
+        project_id="project-thread-eval",
         uid="user-a",
         agent_id="agent-a",
         title="Agent Evaluation Run",
@@ -81,6 +163,12 @@ async def test_list_conversations_excludes_invocation_sources(conversation_sessi
         updated_at=now + timedelta(minutes=1),
         extra_metadata={"source": "agent_evaluation"},
     )
+    return normal, agent_call, agent_eval, now
+
+
+@pytest.mark.asyncio
+async def test_list_conversations_excludes_invocation_sources(conversation_session):
+    normal, agent_call, agent_eval, _ = _seed_invocation_excluding_conversations()
     conversation_session.add_all([normal, agent_call, agent_eval])
     await conversation_session.commit()
 
@@ -96,10 +184,49 @@ async def test_list_conversations_excludes_invocation_sources(conversation_sessi
 
 
 @pytest.mark.asyncio
+async def test_list_conversations_paginates_only_non_pinned_items(conversation_session):
+    now = utc_now_naive()
+    pinned = Conversation(
+        thread_id="thread-pinned",
+        project_id="project-pinned",
+        uid="user-a",
+        agent_id="agent-a",
+        title="Pinned",
+        status="active",
+        is_pinned=True,
+        created_at=now,
+        updated_at=now + timedelta(minutes=10),
+    )
+    regular = [
+        Conversation(
+            thread_id=f"thread-{index}",
+            project_id=f"project-{index}",
+            uid="user-a",
+            agent_id="agent-a",
+            title=f"Thread {index}",
+            status="active",
+            created_at=now + timedelta(minutes=index // 2),
+            updated_at=now + timedelta(minutes=3 - index),
+        )
+        for index in range(4)
+    ]
+    conversation_session.add_all([pinned, *regular])
+    await conversation_session.commit()
+
+    repository = ConversationRepository(conversation_session)
+    first_page = await repository.list_conversations(uid="user-a", limit=2, offset=0)
+    second_page = await repository.list_conversations(uid="user-a", limit=2, offset=2)
+
+    assert [item.thread_id for item in first_page] == ["thread-pinned", "thread-3", "thread-2"]
+    assert [item.thread_id for item in second_page] == ["thread-pinned", "thread-1", "thread-0"]
+
+
+@pytest.mark.asyncio
 async def test_search_conversations_by_message_content_filters_user_status_and_tool_messages(conversation_session):
     now = utc_now_naive()
     active = Conversation(
         thread_id="thread-active",
+        project_id="project-thread-active",
         uid="user-a",
         agent_id="agent-a",
         title="Active Thread",
@@ -109,6 +236,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     )
     deleted = Conversation(
         thread_id="thread-deleted",
+        project_id="project-thread-deleted",
         uid="user-a",
         agent_id="agent-a",
         title="Deleted Thread",
@@ -118,6 +246,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     )
     other_user = Conversation(
         thread_id="thread-other-user",
+        project_id="project-thread-other-user",
         uid="user-b",
         agent_id="agent-a",
         title="Other User Thread",
@@ -127,6 +256,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
     )
     tool_only = Conversation(
         thread_id="thread-tool-only",
+        project_id="project-thread-tool-only",
         uid="user-a",
         agent_id="agent-a",
         title="Tool Only Thread",
@@ -187,37 +317,7 @@ async def test_search_conversations_by_message_content_filters_user_status_and_t
 
 @pytest.mark.asyncio
 async def test_search_conversations_by_message_content_excludes_invocation_sources(conversation_session):
-    now = utc_now_naive()
-    normal = Conversation(
-        thread_id="thread-normal",
-        uid="user-a",
-        agent_id="agent-a",
-        title="Normal",
-        status="active",
-        created_at=now,
-        updated_at=now,
-        extra_metadata={},
-    )
-    agent_call = Conversation(
-        thread_id="thread-call",
-        uid="user-a",
-        agent_id="agent-a",
-        title="Agent Call Run",
-        status="active",
-        created_at=now,
-        updated_at=now + timedelta(minutes=2),
-        extra_metadata={"source": "agent_call"},
-    )
-    agent_eval = Conversation(
-        thread_id="thread-eval",
-        uid="user-a",
-        agent_id="agent-a",
-        title="Agent Evaluation Run",
-        status="active",
-        created_at=now,
-        updated_at=now + timedelta(minutes=1),
-        extra_metadata={"source": "agent_evaluation"},
-    )
+    normal, agent_call, agent_eval, now = _seed_invocation_excluding_conversations()
     conversation_session.add_all([normal, agent_call, agent_eval])
     await conversation_session.flush()
     conversation_session.add_all(
@@ -260,6 +360,7 @@ async def test_search_conversations_by_message_content_filters_agent_and_paginat
     old = now - timedelta(days=1)
     first = Conversation(
         thread_id="thread-first",
+        project_id="project-thread-first",
         uid="user-a",
         agent_id="agent-a",
         title="First",
@@ -269,6 +370,7 @@ async def test_search_conversations_by_message_content_filters_agent_and_paginat
     )
     second = Conversation(
         thread_id="thread-second",
+        project_id="project-thread-second",
         uid="user-a",
         agent_id="agent-a",
         title="Second",
@@ -278,6 +380,7 @@ async def test_search_conversations_by_message_content_filters_agent_and_paginat
     )
     other_agent = Conversation(
         thread_id="thread-other-agent",
+        project_id="project-thread-other-agent",
         uid="user-a",
         agent_id="agent-b",
         title="Other Agent",

@@ -1,4 +1,4 @@
-import { apiGet, apiAdminGet, apiAdminPost, apiAdminPut, apiAdminDelete } from './base'
+import { apiDelete, apiGet, apiPost, apiPut } from './base'
 
 /**
  * MCP 服务器管理 API 模块
@@ -25,7 +25,7 @@ export const getMcpServers = async () => {
  * @returns {Promise} - 服务器配置
  */
 export const getMcpServer = async (name) => {
-  return apiAdminGet(`${BASE_URL}/${encodeURIComponent(name)}`)
+  return apiGet(`${BASE_URL}/${encodeURIComponent(name)}`)
 }
 
 /**
@@ -34,7 +34,7 @@ export const getMcpServer = async (name) => {
  * @returns {Promise} - 创建结果
  */
 export const createMcpServer = async (data) => {
-  return apiAdminPost(BASE_URL, data)
+  return apiPost(BASE_URL, data)
 }
 
 /**
@@ -44,7 +44,7 @@ export const createMcpServer = async (data) => {
  * @returns {Promise} - 更新结果
  */
 export const updateMcpServer = async (name, data) => {
-  return apiAdminPut(`${BASE_URL}/${encodeURIComponent(name)}`, data)
+  return apiPut(`${BASE_URL}/${encodeURIComponent(name)}`, data)
 }
 
 /**
@@ -53,7 +53,7 @@ export const updateMcpServer = async (name, data) => {
  * @returns {Promise} - 删除结果
  */
 export const deleteMcpServer = async (name) => {
-  return apiAdminDelete(`${BASE_URL}/${encodeURIComponent(name)}`)
+  return apiDelete(`${BASE_URL}/${encodeURIComponent(name)}`)
 }
 
 // =============================================================================
@@ -66,7 +66,7 @@ export const deleteMcpServer = async (name) => {
  * @returns {Promise} - 测试结果
  */
 export const testMcpServer = async (name) => {
-  return apiAdminPost(`${BASE_URL}/${encodeURIComponent(name)}/test`, {})
+  return apiPost(`${BASE_URL}/${encodeURIComponent(name)}/test`, {})
 }
 
 /**
@@ -76,7 +76,7 @@ export const testMcpServer = async (name) => {
  * @returns {Promise} - 切换结果
  */
 export const updateMcpServerStatus = async (name, enabled) => {
-  return apiAdminPut(`${BASE_URL}/${encodeURIComponent(name)}/status`, { enabled })
+  return apiPut(`${BASE_URL}/${encodeURIComponent(name)}/status`, { enabled })
 }
 
 // =============================================================================
@@ -89,7 +89,7 @@ export const updateMcpServerStatus = async (name, enabled) => {
  * @returns {Promise} - 工具列表
  */
 export const getMcpServerTools = async (name) => {
-  return apiAdminGet(`${BASE_URL}/${encodeURIComponent(name)}/tools`)
+  return apiGet(`${BASE_URL}/${encodeURIComponent(name)}/tools`)
 }
 
 /**
@@ -98,7 +98,7 @@ export const getMcpServerTools = async (name) => {
  * @returns {Promise} - 刷新结果
  */
 export const refreshMcpServerTools = async (name) => {
-  return apiAdminPost(`${BASE_URL}/${encodeURIComponent(name)}/tools/refresh`, {})
+  return apiPost(`${BASE_URL}/${encodeURIComponent(name)}/tools/refresh`, {})
 }
 
 /**
@@ -108,7 +108,7 @@ export const refreshMcpServerTools = async (name) => {
  * @returns {Promise} - 切换结果
  */
 export const toggleMcpServerTool = async (serverName, toolName) => {
-  return apiAdminPut(
+  return apiPut(
     `${BASE_URL}/${encodeURIComponent(serverName)}/tools/${encodeURIComponent(toolName)}/toggle`,
     {}
   )

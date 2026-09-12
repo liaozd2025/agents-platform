@@ -1,5 +1,5 @@
 import { h } from 'vue'
-import { Database, DatabaseZap } from 'lucide-vue-next'
+import { Database, DatabaseZap } from '@lucide/vue'
 
 const ICON_BASE = 'https://registry.npmmirror.com/@lobehub/icons-static-svg/latest/files/icons'
 
@@ -16,12 +16,14 @@ export const brandIcons = {
 }
 
 export const getKbTypeLabel = (type) => {
+  const normalized = String(type || '').toLowerCase()
   const labels = {
-    milvus: 'Yuxi',
+    // 后端仍使用 milvus 作为存储类型，界面统一展示为九典知识库。
+    milvus: '九典知识库',
     dify: 'Dify',
     notion: 'Notion'
   }
-  return labels[type] || type
+  return labels[normalized] || type
 }
 
 export const getKbTypeIcon = (type) => {

@@ -1,0 +1,122 @@
+"""Project 持久化 Repository。"""
+
+from datetime import datetime
+
+from sqlalchemy import or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from yuxi.repositories.conversation_repository import INVOCATION_CONVERSATION_SOURCES
+from yuxi.storage.postgres.models_business import Conversation, Project
+
+HIDDEN_SYSTEM_PROJECT_IDEMPOTENCY_KEYS = ("migration:jd-ai-h5:v1",)
+
+
+class ProjectRepository:
+    """读写当前用户的 Project 业务事实。"""
+
+    def __init__(self, db_session: AsyncSession):
+        self.db = db_session
+
+    async def add(self, project: Project) -> Project:
+        """新增 Project 并 flush。"""
+        self.db.add(project)
+        await self.db.flush()
+        return project
+
+    async def get_for_user(self, project_id: str, uid: str) -> Project | None:
+        """按用户读取 Project。"""
+        return await self.db.scalar(select(Project).where(Project.id == project_id, Project.uid == str(uid)))
+
+    async def lock_active_for_user(self, project_id: str, uid: str) -> Project | None:
+        """锁定当前用户的 active Project。"""
+        return await self.db.scalar(
+            select(Project)
+            .where(
+                Project.id == project_id,
+                Project.uid == str(uid),
+                Project.status == "active",
+            )
+            .with_for_update()
+        )
+
+    async def lock_active_selectable_for_user(self, project_id: str, uid: str) -> Project | None:
+        """锁定当前用户可管理的 active selectable Project。"""
+        return await self.db.scalar(
+            select(Project)
+            .where(
+                Project.id == project_id,
+                Project.uid == str(uid),
+                Project.selection_status == "selectable",
+                Project.status == "active",
+            )
+            .with_for_update()
+        )
+
+    async def get_by_idempotency_key(self, idempotency_key: str, uid: str) -> Project | None:
+        """按用户和幂等键读取 Project。"""
+        return await self.db.scalar(
+            select(Project).where(Project.uid == str(uid), Project.idempotency_key == idempotency_key)
+        )
+
+    async def list_selectable_for_user(self, uid: str) -> list[Project]:
+        """列出用户可选择的 Project。"""
+        result = await self.db.execute(
+            select(Project)
+            .where(
+                Project.uid == str(uid),
+                Project.selection_status == "selectable",
+                Project.status == "active",
+                # OA 历史迁移项目只用于满足 Conversation.project_id 约束，不应作为用户可选项目展示。
+                or_(
+                    Project.idempotency_key.is_(None),
+                    ~Project.idempotency_key.in_(HIDDEN_SYSTEM_PROJECT_IDEMPOTENCY_KEYS),
+                ),
+            )
+            .order_by(Project.updated_at.desc(), Project.id.desc())
+        )
+        return list(result.scalars().all())
+
+    async def list_selectable_workdir_paths_for_user(self, uid: str) -> list[str]:
+        """列出用户已选择 Project 的去重 Workdir 路径。"""
+        result = await self.db.execute(
+            select(Project.workdir_path)
+            .where(
+                Project.uid == str(uid),
+                Project.selection_status == "selectable",
+                Project.status == "active",
+            )
+            .distinct()
+        )
+        return list(result.scalars().all())
+
+    async def list_history_candidates(self, uid: str) -> list[tuple[Conversation, str]]:
+        """列出可解析实际 Workdir 的普通历史对话。"""
+        result = await self.db.execute(
+            select(Conversation, Project.workdir_path)
+            .join(Project, (Project.uid == Conversation.uid) & (Project.id == Conversation.project_id))
+            .where(
+                Conversation.uid == str(uid),
+                Conversation.status == "active",
+                Project.status == "active",
+                (
+                    Conversation.extra_metadata.is_(None)
+                    | Conversation.extra_metadata["source"].as_string().is_(None)
+                    | Conversation.extra_metadata["source"].as_string().notin_(INVOCATION_CONVERSATION_SOURCES)
+                ),
+            )
+            .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+        )
+        return list(result.all())
+
+    async def soft_delete_with_conversations(self, project: Project, *, deleted_at: datetime) -> int:
+        """在调用方事务内软删除 Project 及其全部 Conversation。"""
+        result = await self.db.execute(
+            update(Conversation)
+            .where(Conversation.uid == project.uid, Conversation.project_id == project.id)
+            .values(status="deleted", updated_at=deleted_at)
+        )
+        project.status = "deleted"
+        project.deleted_at = deleted_at
+        project.updated_at = deleted_at
+        await self.db.flush()
+        return int(result.rowcount or 0)

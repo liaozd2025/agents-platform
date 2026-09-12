@@ -88,7 +88,9 @@
                 @click="handleSelectV2Model(model.spec)"
               >
                 <div class="model-option">
-                  <span class="model-option-name">{{ model.display_name }}</span>
+                  <span class="model-option-name" :title="model.display_name">{{
+                    model.display_name
+                  }}</span>
                   <div class="model-option-signals">
                     <a-tooltip v-if="getModelInfo(model).vision" title="支持图像输入">
                       <span class="model-signal-icon" role="img" aria-label="支持图像输入">
@@ -108,18 +110,21 @@
           </template>
         </a-menu>
         <div
-          v-if="!modelMetadataNoticeDismissed && (userStore.isAdmin || hasModelMetadata)"
+          v-if="
+            !modelMetadataNoticeDismissed &&
+            (userStore.hasPermission('model_provider:manage') || hasModelMetadata)
+          "
           class="model-metadata-source"
         >
           <div class="model-metadata-source-content">
-            <template v-if="userStore.isAdmin">
+            <template v-if="userStore.hasPermission('model_provider:manage')">
               没有合适的模型？
               <RouterLink :to="{ path: '/agent-manage', query: { tab: 'providers' } }" @click.stop>
                 配置模型
               </RouterLink>
             </template>
             <template v-if="hasModelMetadata">
-              <span v-if="userStore.isAdmin">。 </span>
+              <span v-if="userStore.hasPermission('model_provider:manage')">。 </span>
               部分信息（价格、能力等）来自
               <a href="https://models.dev" target="_blank" rel="noreferrer" @click.stop
                 >models.dev</a
@@ -146,7 +151,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { modelProviderApi } from '@/apis/system_api'
-import { Eye, RefreshCw, X } from 'lucide-vue-next'
+import { Eye, RefreshCw, X } from '@lucide/vue'
 import { useModelStatus } from '@/composables/useModelStatus'
 import { useUserStore } from '@/stores/user'
 import { loadModelMetadataCatalog, resolveModelDisplayMetadata } from '@/utils/modelMetadata'
@@ -177,6 +182,10 @@ const props = defineProps({
     type: String,
     default: 'full',
     validator: (value) => ['full', 'short', 'mini'].includes(value)
+  },
+  autoSelectFirst: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -283,6 +292,29 @@ const buildModelMetadataBySpec = (modelsByProvider, providers) => {
 }
 
 const getModelInfo = (model) => modelMetadataBySpec.value[model.spec] || {}
+
+// 聊天输入框没有任何默认模型时，使用接口返回的第一个可用模型。
+// 该行为由调用方显式开启，避免影响设置页等需要用户手动选择的场景。
+const selectFirstModelIfNeeded = () => {
+  if (!props.autoSelectFirst || props.disabled || props.model_spec) return
+
+  const firstModel = Object.values(v2Models.value)
+    .flatMap((providerData) => providerData.models || [])
+    .find((model) => model?.spec)
+  if (!firstModel?.spec) {
+    console.warn('[模型选择] 未找到可用于聊天的模型')
+    return
+  }
+
+  console.info(`[模型选择] 初始未选择模型，自动选择 ${firstModel.spec}`)
+  emit('select-model', firstModel.spec)
+}
+
+const initializeDefaultModel = async () => {
+  if (!props.autoSelectFirst || props.disabled) return
+  await fetchV2Models()
+  selectFirstModelIfNeeded()
+}
 
 // 下拉展开前先刷新模型列表，避免弹层打开后再因数据加载发生高度跳变。
 const handleOpenChange = async (open) => {
@@ -417,6 +449,21 @@ const handleSelectV2Model = (spec) => {
   dropdownOpen.value = false
 }
 
+watch(
+  () => [props.autoSelectFirst, props.disabled],
+  ([autoSelectFirst, disabled], previousState) => {
+    const [previousAutoSelectFirst, previousDisabled] = previousState || []
+    if (
+      autoSelectFirst &&
+      !disabled &&
+      (!previousAutoSelectFirst || previousDisabled)
+    ) {
+      void initializeDefaultModel()
+    }
+  },
+  { immediate: true }
+)
+
 // 清空选择
 const handleClear = () => {
   if (props.disabled) return
@@ -507,7 +554,7 @@ const handleClear = () => {
 }
 
 .model-dropdown {
-  width: min(360px, calc(100vw - 24px));
+  width: min(300px, calc(100vw - 24px));
   padding: 8px 0;
   overflow: hidden;
   background: var(--gray-0);
@@ -568,7 +615,7 @@ const handleClear = () => {
 }
 
 .model-option-name {
-  display: block;
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   color: var(--gray-1000);

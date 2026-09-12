@@ -13,6 +13,11 @@ from yuxi.storage.postgres.models_business import Base, Department, User
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
+@pytest.fixture(autouse=True)
+def cli_auth_security_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("API_KEY_DERIVATION_SECRET", "test-api-key-derivation-secret-32-chars")
+
+
 @pytest_asyncio.fixture()
 async def app_client():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -25,7 +30,6 @@ async def app_client():
             username="Admin",
             uid="admin",
             password_hash="$argon2id$placeholder",
-            role="superadmin",
             department=dept,
         )
         db.add_all([dept, user])

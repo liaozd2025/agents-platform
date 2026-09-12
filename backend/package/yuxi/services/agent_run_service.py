@@ -26,16 +26,19 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
-from yuxi.agents.models import resolve_chat_model_spec
 from yuxi.agents.tool_approval import DEFAULT_TOOL_APPROVAL_MODE, normalize_tool_approval_mode
+from yuxi.config.options import system_options
 from yuxi.models.providers.cache import model_cache
 from yuxi.repositories.agent_repository import AgentRepository
+from yuxi.repositories.agent_run_output_repository import AgentRunOutputRepository
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.input_message_service import (
     AgentRunInputMessage,
     build_resume_input_message,
 )
+from yuxi.services.langfuse_service import get_trace_url_by_id_async
 from yuxi.services.run_queue_service import (
     build_run_event_envelope,
     get_arq_pool,
@@ -46,7 +49,7 @@ from yuxi.services.run_queue_service import (
     publish_cancel_signal,
 )
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Message, User
+from yuxi.storage.postgres.models_business import Message
 from yuxi.utils.datetime_utils import utc_now_naive
 from yuxi.utils.hash_utils import hash_id
 from yuxi.utils.logging_config import logger
@@ -89,7 +92,7 @@ class AgentRunWaitTimeout(Exception):
         super().__init__(f"agent run {run_id} is still {status} after waiting")
 
 
-def _load_agent_context(agent_item, agent_backend):
+def load_agent_run_context(agent_item, agent_backend):
     """用 Agent 配置的 context 片段实例化并填充运行上下文，供 run 解析器读取配置字段。"""
     context = agent_backend.context_schema()
     config_json = getattr(agent_item, "config_json", None) or {}
@@ -99,41 +102,55 @@ def _load_agent_context(agent_item, agent_backend):
     return context
 
 
-def resolve_agent_run_model_spec(model_spec: str | None, agent_item, agent_backend, context=None) -> str:
-    """解析本次 run 实际使用的模型：显式覆盖优先，否则配置模型，最后系统默认模型。"""
-    normalized = model_spec.strip() if isinstance(model_spec, str) else None
-    if normalized:
-        info = model_cache.get_model_info(normalized)
-        if not info or info.model_type != "chat":
-            raise HTTPException(status_code=422, detail=f"未找到可用聊天模型: '{normalized}'")
-        return normalized
+async def resolve_agent_run_model_spec(
+    requested_model: str | None,
+    configured_model: str | None,
+    db: AsyncSession | None = None,
+) -> str:
+    """按请求、Agent 配置、系统默认的顺序解析并校验聊天模型。"""
+    model_spec = next(
+        (
+            candidate.strip()
+            for candidate in (requested_model, configured_model)
+            if isinstance(candidate, str) and candidate.strip()
+        ),
+        None,
+    )
+    if model_spec is None:
+        model_spec = str((await system_options.get(db))["default_model"]).strip()
 
-    if context is None:
-        context = _load_agent_context(agent_item, agent_backend)
-    return resolve_chat_model_spec(getattr(context, "model", None))
+    info = model_cache.get_model_info(model_spec)
+    if not info or info.model_type != "chat":
+        raise HTTPException(status_code=422, detail=f"未找到可用聊天模型: '{model_spec}'")
+    return model_spec
 
 
-def resolve_agent_run_tool_approval_mode(requested_mode: str | None, agent_item, agent_backend, context=None) -> str:
+def resolve_agent_run_tool_approval_mode(requested_mode: str | None, configured_mode: str | None) -> str:
     """解析本次 run 的工具审批模式：显式覆盖优先，否则使用 Agent 配置与默认值。"""
-    source = requested_mode
-    if source is None:
-        if context is None:
-            context = _load_agent_context(agent_item, agent_backend)
-        source = getattr(context, "tool_approval_mode", DEFAULT_TOOL_APPROVAL_MODE)
+    source = requested_mode if requested_mode is not None else configured_mode or DEFAULT_TOOL_APPROVAL_MODE
     try:
         return normalize_tool_approval_mode(source)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-def resolve_agent_run_config(
-    model_spec: str | None, tool_approval_mode: str | None, agent_item, agent_backend
+async def resolve_agent_run_config(
+    model_spec: str | None,
+    tool_approval_mode: str | None,
+    agent_item,
+    agent_backend,
+    db: AsyncSession | None = None,
 ) -> tuple[str, str]:
     """一次性解析 model_spec 与 tool_approval_mode，共享同一份运行上下文。"""
-    context = _load_agent_context(agent_item, agent_backend)
-    resolved_model_spec = resolve_agent_run_model_spec(model_spec, agent_item, agent_backend, context)
+    context = load_agent_run_context(agent_item, agent_backend)
+    resolved_model_spec = await resolve_agent_run_model_spec(
+        model_spec,
+        getattr(context, "model", None),
+        db,
+    )
     resolved_tool_approval_mode = resolve_agent_run_tool_approval_mode(
-        tool_approval_mode, agent_item, agent_backend, context
+        tool_approval_mode,
+        getattr(context, "tool_approval_mode", None),
     )
     return resolved_model_spec, resolved_tool_approval_mode
 
@@ -447,8 +464,8 @@ async def create_agent_run_view(
             "tool_approval_mode", DEFAULT_TOOL_APPROVAL_MODE
         )
     else:
-        resolved_model_spec, resolved_tool_approval_mode = resolve_agent_run_config(
-            model_spec, tool_approval_mode, scope.agent_item, scope.agent_backend
+        resolved_model_spec, resolved_tool_approval_mode = await resolve_agent_run_config(
+            model_spec, tool_approval_mode, scope.agent_item, scope.agent_backend, db
         )
 
     run_input_message = _prepare_run_input_message(
@@ -616,6 +633,7 @@ async def persist_agent_run_record(
     *,
     agent_slug: str,
     conversation_thread_id: str,
+    runtime_scope_id: str | None = None,
     current_uid: str,
     db: AsyncSession,
     request_id: str,
@@ -637,6 +655,7 @@ async def persist_agent_run_record(
             run = await AgentRunRepository(db).create_run(
                 run_id=run_id,
                 conversation_thread_id=conversation_thread_id,
+                runtime_scope_id=runtime_scope_id,
                 agent_slug=agent_slug,
                 uid=str(current_uid),
                 request_id=request_id,
@@ -691,7 +710,7 @@ async def prepare_agent_run_creation_scope(
     current_uid: str,
     db: AsyncSession,
     request_id: str,
-    run_type: Literal["chat", "resume", "subagent"],
+    run_type: Literal["chat", "resume", "subagent", "sandbox"],
     agent_kind: Literal["main", "subagent"],
     created_by_run_id: str | None = None,
     subagent_thread_relation_id: int | None = None,
@@ -707,8 +726,7 @@ async def prepare_agent_run_creation_scope(
     if conversation.agent_id != agent_slug:
         raise HTTPException(status_code=409, detail="已有线程已绑定智能体，不能切换")
 
-    user_result = await db.execute(select(User).where(User.uid == str(current_uid)))
-    current_user = user_result.scalar_one_or_none()
+    current_user = await UserRepository().get_by_uid_with_db(db, str(current_uid))
     if not current_user:
         raise HTTPException(status_code=404, detail="用户不存在")
 
@@ -797,19 +815,6 @@ async def get_agent_run_view(*, run_id: str, current_uid: str, db: AsyncSession)
     return {"run": run.to_dict()}
 
 
-def _select_output_message(messages: list[Message], *, output_message_id: int | None) -> Message | None:
-    """优先选用运行记录的输出消息，否则回退到最后一条 assistant 消息。"""
-    if output_message_id:
-        for message in messages:
-            if message.id == output_message_id and message.role == "assistant":
-                return message
-
-    for message in reversed(messages):
-        if message.role == "assistant":
-            return message
-    return None
-
-
 async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSession) -> dict:
     """加载某个 run 的最终结果（状态/输出/Langfuse trace/错误），供 chat/eval/cron 等统一复用。"""
     run = await AgentRunRepository(db).get_run_for_user(run_id, str(current_uid))
@@ -821,16 +826,14 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
             "error": {"type": "run_not_found", "message": "运行任务不存在"},
         }
 
-    messages: list[Message] = []
-    if run.conversation_id:
-        result = await db.execute(
-            select(Message)
-            .where(Message.conversation_id == run.conversation_id)
-            .order_by(Message.created_at.asc(), Message.id.asc())
+    output_message = None
+    if run.conversation_id is not None:
+        output_message = await AgentRunOutputRepository(db).get_output_message(
+            run_id=run.id,
+            conversation_id=run.conversation_id,
+            output_message_id=run.output_message_id,
+            allow_legacy_fallback=run.status == "completed",
         )
-        messages = list(result.scalars().unique().all())
-
-    output_message = _select_output_message(messages, output_message_id=run.output_message_id)
     output_metadata = (
         output_message.extra_metadata if output_message and isinstance(output_message.extra_metadata, dict) else {}
     )
@@ -849,7 +852,28 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
     }
     if run.error_type or run.error_message:
         payload["error"] = {"type": run.error_type, "message": run.error_message}
+    if isinstance(output_metadata.get("pi"), dict):
+        payload["pi"] = output_metadata["pi"]
     return payload
+
+
+async def get_agent_run_langfuse_link(*, run_id: str, current_uid: str, db: AsyncSession) -> dict:
+    """按用户可见 Run 的权威输出绑定解析 Langfuse 跳转地址。"""
+    result = await get_agent_run_result(run_id=run_id, current_uid=current_uid, db=db)
+    if result.get("error", {}).get("type") == "run_not_found":
+        raise HTTPException(status_code=404, detail="运行任务不存在")
+
+    trace_id = result.get("langfuse_trace_id")
+    if not isinstance(trace_id, str) or not trace_id.strip():
+        return {"run_id": run_id, "available": False, "reason": "trace_not_available"}
+
+    # 远端项目解析可能等待数秒，先结束只读事务并归还数据库连接。
+    await db.commit()
+    trace_url = await get_trace_url_by_id_async(trace_id)
+    if not trace_url:
+        return {"run_id": run_id, "available": False, "reason": "langfuse_unavailable"}
+
+    return {"run_id": run_id, "available": True, "url": trace_url}
 
 
 async def load_agent_run_result(*, run_id: str, current_uid: str) -> dict:
@@ -882,20 +906,13 @@ async def request_cancel_agent_run(
 ):
     """请求取消一个 run，并可同时向仍活跃的子 run 发布取消信号。"""
     repo = AgentRunRepository(db)
-    run = await repo.get_run_for_user(run_id, str(current_uid))
-    if not run:
+    run, cancelled_ids = await repo.request_cancel_execution_tree(
+        run_id=run_id,
+        uid=str(current_uid),
+        cascade_descendants=cascade_children,
+    )
+    if run is None:
         raise HTTPException(status_code=404, detail="运行任务不存在")
-
-    # FOR UPDATE 写锁在同一会话上必须串行；取消信号之间互不依赖，统一并发发布。
-    cancelled_ids = []
-    if cascade_children:
-        child_runs = await repo.list_active_child_runs_for_user(run_id, str(current_uid))
-        for child_run in child_runs:
-            await repo.request_cancel(child_run.id)
-            cancelled_ids.append(child_run.id)
-
-    run = await repo.request_cancel(run_id)
-    cancelled_ids.append(run_id)
     await db.commit()
     await asyncio.gather(*(publish_cancel_signal(cid) for cid in cancelled_ids))
     return run
@@ -974,7 +991,11 @@ async def stream_agent_run_events(
             if emitted_terminal:
                 return
 
-            if run.status in TERMINAL_RUN_STATUSES and not events:
+            if (
+                run.status in TERMINAL_RUN_STATUSES
+                and not bool(getattr(run, "runtime_cleanup_pending", False))
+                and not events
+            ):
                 terminal_seq = last_seq
                 if terminal_seq in {"", "0-0"}:
                     terminal_seq = await get_last_run_stream_seq(run_id)

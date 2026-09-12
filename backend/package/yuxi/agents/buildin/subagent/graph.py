@@ -6,7 +6,11 @@ from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 
 from yuxi.agents import BaseAgent, BaseState, load_chat_model, resolve_chat_model_spec
-from yuxi.agents.backends import create_agent_filesystem_middleware, sync_agent_context_skills
+from yuxi.agents.backends import (
+    create_agent_composite_backend,
+    create_agent_filesystem_middleware,
+    sync_agent_context_skills,
+)
 from yuxi.agents.buildin.chatbot.prompt import TODO_MID_PROMPT, build_prompt_with_context
 from yuxi.agents.buildin.subagent.context import SubAgentContext
 from yuxi.agents.context import (
@@ -22,15 +26,15 @@ from yuxi.agents.middlewares import (
     ImageInputCompatibilityMiddleware,
     TokenUsageMiddleware,
     create_summary_middleware,
-    save_attachments_to_fs,
 )
 from yuxi.agents.middlewares.skills import SkillsMiddleware
-from yuxi.agents.tool_approval import SENSITIVE_BACKEND_TOOLS, normalize_tool_approval_mode
+from yuxi.agents.middlewares.pi_sandbox import create_pi_sandbox_middleware
+from yuxi.agents.tool_approval import PI_DELEGATED_SANDBOX_TOOLS, normalize_tool_approval_mode
 from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
 
-_SUBAGENT_DISABLED_TOOLS = frozenset({"present_artifacts", "ask_user_question", "install_skill"})
-# 默认审批模式额外隐藏敏感 backend 工具，避免子智能体绕过主线程逐项审批。
-_SUBAGENT_DISABLED_TOOLS_DEFAULT_MODE = _SUBAGENT_DISABLED_TOOLS | SENSITIVE_BACKEND_TOOLS
+_SUBAGENT_DISABLED_TOOLS = (
+    frozenset({"present_artifacts", "ask_user_question", "install_skill"}) | PI_DELEGATED_SANDBOX_TOOLS
+)
 
 
 def _tool_name(tool) -> str | None:
@@ -41,11 +45,8 @@ def _tool_name(tool) -> str | None:
     return name if isinstance(name, str) else None
 
 
-def _disabled_tools_for(mode: str) -> frozenset[str]:
-    # 调用方已在边界 normalize 过 mode，这里直接按值选择隐藏集合。
-    if mode == "always_trust":
-        return _SUBAGENT_DISABLED_TOOLS
-    return _SUBAGENT_DISABLED_TOOLS_DEFAULT_MODE
+def _disabled_tools_for(_mode: str = "default") -> frozenset[str]:
+    return _SUBAGENT_DISABLED_TOOLS
 
 
 def _filter_disabled_tools(tools, disabled_tools: frozenset[str]):
@@ -63,7 +64,7 @@ class _SubAgentToolFilterMiddleware(AgentMiddleware[Any, Any, Any]):
         return await handler(request.override(tools=_filter_disabled_tools(request.tools or [], self.disabled_tools)))
 
 
-async def _build_middlewares(context, tool_approval_mode: str):
+async def _build_middlewares(context, backend, tool_approval_mode: str):
     # tool_approval_mode is normalized once by the caller (get_graph / SubAgentBackend.get_graph).
 
     summary_trigger_tokens = getattr(context, "summary_threshold", DEFAULT_SUMMARY_THRESHOLD_K) * 1024
@@ -78,6 +79,7 @@ async def _build_middlewares(context, tool_approval_mode: str):
     model_spec = resolve_chat_model_spec(context.model)
     summary_middleware = create_summary_middleware(
         model=load_chat_model(fully_specified_name=model_spec),
+        backend=backend,
         trigger=("tokens", summary_trigger_tokens),
         keep=("messages", summary_keep_messages),
         summary_prompt=summary_prompt,
@@ -89,10 +91,10 @@ async def _build_middlewares(context, tool_approval_mode: str):
     return [
         create_agent_filesystem_middleware(
             getattr(context, "tool_token_limit", DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS) * 1024,
-            context=context,
+            backend=backend,
         ),
-        save_attachments_to_fs,
         SkillsMiddleware(),
+        create_pi_sandbox_middleware(context),
         summary_middleware,
         TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
         PatchToolCallsMiddleware(),
@@ -112,13 +114,13 @@ class SubAgentBackend(BaseAgent):
     async def get_info(
         self,
         include_configurable_items: bool = True,
-        user_role: str | None = None,
+        can_manage: bool = False,
         db=None,
         user=None,
     ):
         info = await super().get_info(
             include_configurable_items=include_configurable_items,
-            user_role=user_role,
+            can_manage=can_manage,
             db=db,
             user=user,
         )
@@ -140,12 +142,13 @@ class SubAgentBackend(BaseAgent):
         model_spec = resolve_chat_model_spec(context.model)
         tool_approval_mode = normalize_tool_approval_mode(getattr(context, "tool_approval_mode", "default"))
         disabled_tools = _disabled_tools_for(tool_approval_mode)
+        backend = create_agent_composite_backend(context)
 
         return create_agent(
             model=load_chat_model(fully_specified_name=model_spec),
             tools=_filter_disabled_tools(await resolve_configured_runtime_tools(context), disabled_tools),
             system_prompt=build_prompt_with_context(context),
-            middleware=await _build_middlewares(context, tool_approval_mode),
+            middleware=await _build_middlewares(context, backend, tool_approval_mode),
             state_schema=BaseState,
             checkpointer=await self._get_checkpointer(),
         )

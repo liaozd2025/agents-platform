@@ -11,7 +11,7 @@
 
 ## 本仓库的既有文档，与上面是什么关系
 
-Yuxi 已有一份 [ARCHITECTURE.md](../../ARCHITECTURE.md)（matklad 风格的代码地图）。它与 `CONTEXT.md` **职责不同，应当共存，不要互相替代**：
+Yuxi 已有一份 [ARCHITECTURE.md](https://github.com/liaozd2025/agents-platform/blob/main/ARCHITECTURE.md)（matklad 风格的代码地图）。它与 `CONTEXT.md` **职责不同，应当共存，不要互相替代**：
 
 | 文档 | 回答的问题 | 内容 |
 |---|---|---|

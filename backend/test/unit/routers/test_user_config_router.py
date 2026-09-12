@@ -23,14 +23,12 @@ async def session():
             username="User A",
             uid="user_a",
             password_hash="$argon2id$placeholder",
-            role="user",
             department=department,
         )
         user_b = User(
             username="User B",
             uid="user_b",
             password_hash="$argon2id$placeholder",
-            role="user",
             department=department,
         )
         db.add_all([department, user_a, user_b])
@@ -60,7 +58,6 @@ async def test_user_config_allows_logged_in_user_without_department():
         username="No Dept User",
         uid="no_dept_user",
         password_hash="$argon2id$placeholder",
-        role="user",
     )
 
     assert await get_logged_in_user(user) is user

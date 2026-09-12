@@ -2,22 +2,100 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
 from langchain.messages import AIMessage, HumanMessage
 
 from yuxi.agents import context as agent_context
-from yuxi.agents.backends.sandbox import paths as workspace_paths
+from yuxi.workspace import paths as workspace_paths
 from yuxi.services import chat_service as svc
 
 
-def _empty_agent_context(_thread_id: str, _uid: str) -> str:
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_relation", [True, False])
+async def test_pi_state_uses_exact_persisted_run_without_constructing_langgraph(monkeypatch, valid_relation):
+    """PI状态来自真实Run选择器，关系缺失时不能退回相邻Run或checkpoint。"""
+    conversation = SimpleNamespace(uid="u", status="subagent", extra_metadata={"source": "pi_sandbox"})
+    run = SimpleNamespace(
+        id="actual-pi-run",
+        agent_slug="main",
+        conversation_thread_id="pi-child",
+        status="completed",
+        created_at=None,
+        finished_at=None,
+        error_message=None,
+        input_payload={"runtime": {"tool_call_id": "pi-task"}},
+    )
+    monkeypatch.setattr(
+        svc,
+        "ConversationRepository",
+        lambda _db: SimpleNamespace(get_conversation_by_thread_id=AsyncMock(return_value=conversation)),
+    )
+    monkeypatch.setattr(
+        svc,
+        "AgentRunRepository",
+        lambda _db: SimpleNamespace(
+            get_latest_pi_run_with_creator=AsyncMock(
+                return_value=(run, SimpleNamespace(conversation_thread_id="real-parent")) if valid_relation else None
+            )
+        ),
+    )
+    monkeypatch.setattr(svc, "AgentRepository", lambda _db: object())
+    checkpoint = AsyncMock(side_effect=AssertionError("PI must not construct LangGraph"))
+    monkeypatch.setattr(svc, "_read_checkpoint_state", checkpoint)
+    result = AsyncMock(return_value={"output": "yielded", "pi": {"stop_reason": "steer"}})
+    monkeypatch.setattr("yuxi.services.agent_run_service.get_agent_run_result", result)
+    if not valid_relation:
+        with pytest.raises(HTTPException) as error:
+            await svc.get_agent_state_view(thread_id="pi-child", current_user=SimpleNamespace(uid="u"), db=object())
+        assert error.value.status_code == 404
+    else:
+        state = await svc.get_agent_state_view(
+            thread_id="pi-child", current_user=SimpleNamespace(uid="u"), db=object(), include_messages=True
+        )
+        assert state["subagent_run"]["run_id"] == "actual-pi-run"
+        assert state["subagent_run"]["stop_reason"] == "steer"
+        assert state["parent_thread_id"] == "real-parent"
+        assert state["messages"][0]["id"] == "pi-actual-pi-run"
+        assert result.call_args.kwargs["run_id"] == "actual-pi-run"
+    checkpoint.assert_not_called()
+
+
+def _empty_agent_context(_uid: str) -> str:
     return ""
 
 
 async def _fake_normalize_agent_context_config(context, **_kwargs):
     return dict(context or {})
+
+
+async def _resolve_test_workdir(**_kwargs):
+    """返回测试 Conversation 的 Project Workdir。"""
+
+    return "projects/11111111-1111-4111-8111-111111111111"
+
+
+def test_build_agent_context_applies_runtime_input_to_declared_fields() -> None:
+    agent = SimpleNamespace(context_schema=agent_context.BaseContext)
+
+    context = svc._build_agent_context(
+        agent,
+        {
+            "thread_id": "thread-1",
+            "uid": "user-1",
+            "system_prompt": "runtime prompt",
+            "unknown_field": "ignored",
+            "update": "must not shadow the method",
+        },
+    )
+
+    assert context.thread_id == "thread-1"
+    assert context.uid == "user-1"
+    assert context.system_prompt == "runtime prompt"
+    assert not hasattr(context, "unknown_field")
+    assert callable(context.update)
 
 
 @pytest.mark.asyncio
@@ -41,10 +119,18 @@ async def test_resolve_agent_runtime_includes_subagents_only_when_requested(monk
             pass
 
         async def get_conversation_by_thread_id(self, thread_id: str):
-            return SimpleNamespace(uid="user-1", agent_id="worker", thread_id=thread_id, status="subagent")
+            return SimpleNamespace(
+                uid="user-1",
+                agent_id="worker",
+                thread_id=thread_id,
+                status="subagent",
+                project_id="11111111-1111-4111-8111-111111111111",
+            )
 
     monkeypatch.setattr(svc, "AgentRepository", FakeAgentRepository)
     monkeypatch.setattr(svc, "ConversationRepository", FakeConversationRepository)
+    monkeypatch.setattr(svc, "resolve_conversation_workdir_path", _resolve_test_workdir)
+    monkeypatch.setattr(svc, "ensure_bound_user_workdir", lambda _uid, _path: None)
     monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
     monkeypatch.setattr(
         svc.agent_manager,
@@ -62,7 +148,7 @@ async def test_resolve_agent_runtime_includes_subagents_only_when_requested(monk
             thread_id="child-thread",
         )
 
-    agent_item, backend, agent_config = await svc._resolve_agent_runtime(
+    agent_item, backend, agent_config, conversation = await svc._resolve_agent_runtime(
         db=object(),
         user=user,
         requested_agent_slug="worker",
@@ -74,6 +160,7 @@ async def test_resolve_agent_runtime_includes_subagents_only_when_requested(monk
     assert agent_item.slug == "worker"
     assert backend.context_schema is None
     assert agent_config == {}
+    assert conversation.thread_id == "child-thread"
 
 
 class _FakeConvRepo:
@@ -107,6 +194,7 @@ class _FakeConvRepo:
         image_content: str | None = None,
         run_id: str | None = None,
         request_id: str | None = None,
+        commit: bool = True,
     ):
         self.saved_messages.append(
             {
@@ -118,6 +206,7 @@ class _FakeConvRepo:
                 "image_content": image_content,
                 "run_id": run_id,
                 "request_id": request_id,
+                "commit": commit,
             }
         )
         return SimpleNamespace(id=1)
@@ -136,6 +225,7 @@ class _FakeConvRepo:
         tool_input: dict | None = None,
         status: str = "pending",
         langgraph_tool_call_id: str | None = None,
+        commit: bool = True,
     ):
         self.tool_calls.append(
             {
@@ -144,6 +234,7 @@ class _FakeConvRepo:
                 "tool_input": tool_input,
                 "status": status,
                 "langgraph_tool_call_id": langgraph_tool_call_id,
+                "commit": commit,
             }
         )
         return SimpleNamespace(id=len(self.tool_calls))
@@ -209,6 +300,7 @@ async def test_save_messages_from_langgraph_state_handles_dict_tool_call_blocks(
 
     assert conv_repo.saved_messages[0]["content"] == ""
     assert conv_repo.saved_messages[0]["extra_metadata"]["content"][0]["id"] == "call-task-1"
+    assert conv_repo.saved_messages[0]["commit"] is True
     assert conv_repo.tool_calls == [
         {
             "message_id": 1,
@@ -216,6 +308,7 @@ async def test_save_messages_from_langgraph_state_handles_dict_tool_call_blocks(
             "tool_input": {"description": "write file", "subagent_slug": "worker"},
             "status": "pending",
             "langgraph_tool_call_id": "call-task-1",
+            "commit": True,
         }
     ]
 
@@ -228,6 +321,9 @@ async def test_save_messages_from_langgraph_state_backfills_run_output_message(m
 
         async def commit(self):
             self.commit_count += 1
+
+        async def rollback(self):
+            pass
 
     class FakeGraph:
         async def aget_state(self, _config):
@@ -247,9 +343,22 @@ async def test_save_messages_from_langgraph_state_backfills_run_output_message(m
         def __init__(self, db):
             assert db is fake_db
 
-        async def set_output_message(self, run_id: str, message_id: int):
+        async def lock_output_persistence(
+            self,
+            run_id: str,
+            *,
+            worker_id: str,
+            conversation_thread_id: str,
+            request_id: str,
+        ):
+            captured["locked"] = (run_id, worker_id, conversation_thread_id, request_id)
+            return object()
+
+        async def set_output_message(self, run_id: str, message_id: int, *, worker_id: str):
             captured["run_id"] = run_id
             captured["message_id"] = message_id
+            captured["worker_id"] = worker_id
+            return object()
 
     monkeypatch.setattr(svc, "AgentRunRepository", FakeRunRepo)
 
@@ -262,23 +371,98 @@ async def test_save_messages_from_langgraph_state_backfills_run_output_message(m
         trace_info={"langfuse_trace_id": "trace-1"},
         run_id="run-1",
         request_id="req-1",
+        worker_id="worker-1",
     )
 
     assert conv_repo.saved_messages[0]["content"] == "answer"
     assert conv_repo.saved_messages[0]["run_id"] == "run-1"
     assert conv_repo.saved_messages[0]["request_id"] == "req-1"
+    assert conv_repo.saved_messages[0]["commit"] is False
     assert conv_repo.saved_messages[0]["extra_metadata"]["langfuse_trace_id"] == "trace-1"
-    assert captured == {"run_id": "run-1", "message_id": 1}
+    assert captured == {
+        "locked": ("run-1", "worker-1", "thread-1", "req-1"),
+        "run_id": "run-1",
+        "message_id": 1,
+        "worker_id": "worker-1",
+    }
     assert fake_db.commit_count == 1
 
 
 @pytest.mark.asyncio
-async def test_build_agent_input_context_loads_all_workspace_agent_context_files(
+async def test_interrupt_persists_message_and_terminal_status_in_one_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple] = []
+
+    class FakeDB:
+        async def commit(self):
+            events.append(("commit",))
+
+        async def rollback(self):
+            events.append(("rollback",))
+
+    class FakeGraph:
+        async def aget_state(self, _config):
+            return SimpleNamespace(values={"messages": [AIMessage(content="waiting")]})
+
+    class FakeAgent:
+        async def get_graph(self, *, context):
+            return FakeGraph()
+
+    class FakeRunRepo:
+        def __init__(self, _db):
+            pass
+
+        async def lock_output_persistence(self, *_args, **_kwargs):
+            events.append(("lock",))
+            return object()
+
+        async def set_output_message(self, run_id, message_id, *, worker_id):
+            events.append(("message", run_id, message_id, worker_id))
+
+        async def set_terminal_status(self, run_id, **kwargs):
+            events.append(("terminal", run_id, kwargs))
+            return SimpleNamespace(status="interrupted"), True
+
+        async def cancel_active_execution_tree_descendants(self, _run):
+            events.append(("descendants",))
+            return []
+
+    fake_db = FakeDB()
+    monkeypatch.setattr(svc, "AgentRunRepository", FakeRunRepo)
+
+    terminal_committed = await svc.save_messages_from_langgraph_state(
+        agent_instance=FakeAgent(),
+        thread_id="thread-1",
+        conv_repo=_FakeConvRepo(fake_db),
+        config_dict={},
+        context=object(),
+        run_id="run-1",
+        request_id="request-1",
+        worker_id="worker-1",
+        interrupt_run=True,
+        interrupt_error_type="ask_user_question_required",
+        interrupt_error_message="请选择",
+    )
+
+    assert terminal_committed is True
+    assert [event[0] for event in events] == ["lock", "message", "terminal", "descendants", "commit"]
+    assert events[-3][2] == {
+        "status": "interrupted",
+        "error_type": "ask_user_question_required",
+        "error_message": "请选择",
+        "token_usage": {"available": False},
+        "worker_id": "worker-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_build_agent_input_context_excludes_memory_from_shared_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(workspace_paths.conf, "save_dir", str(tmp_path))
-    workspace_paths.ensure_thread_dirs("thread-1", "user-1")
+    monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path / "threads"))
+    workspace_paths.ensure_user_workspace("user-1")
     agents_dir = tmp_path / "threads" / "shared" / "user-1" / "workspace" / "agents"
     (agents_dir / "AGENTS.md").write_text("行为约束", encoding="utf-8")
     (agents_dir / "USER.md").write_text("用户信息", encoding="utf-8")
@@ -287,15 +471,14 @@ async def test_build_agent_input_context_loads_all_workspace_agent_context_files
     context = await agent_context.build_agent_input_context({}, thread_id="thread-1", uid="user-1")
 
     assert context["system_prompt"] == (
-        "用户工作区 agents/AGENTS.md 内容：\n行为约束\n\n"
-        "用户工作区 agents/USER.md 内容：\n用户信息\n\n"
-        "用户工作区 agents/MEMORY.md 内容：\n长期记忆"
+        "用户工作区 agents/AGENTS.md 内容：\n行为约束\n\n用户工作区 agents/USER.md 内容：\n用户信息"
     )
+    assert "长期记忆" not in context["system_prompt"]
 
 
 @pytest.mark.asyncio
 async def test_build_agent_input_context_merges_workspace_agent_context(monkeypatch: pytest.MonkeyPatch):
-    def fake_agent_context(_thread_id: str, _uid: str) -> str:
+    def fake_agent_context(_uid: str) -> str:
         return (
             "用户工作区 agents/AGENTS.md 内容：\n回答前先读取 AGENTS.md\n\n"
             "用户工作区 agents/USER.md 内容：\n用户偏好中文"
@@ -315,6 +498,25 @@ async def test_build_agent_input_context_merges_workspace_agent_context(monkeypa
         "用户工作区 agents/USER.md 内容：\n用户偏好中文"
     )
     assert context["temperature"] == 0.1
+    assert context["thread_id"] == "thread-1"
+    assert context["uid"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_manifest_snapshot_prompt_keeps_workspace_agent_context(monkeypatch: pytest.MonkeyPatch):
+    async def fake_to_thread(func, *args):
+        del func, args
+        return "用户工作区 agents/AGENTS.md 内容：\nWORKSPACE-MARKER"
+
+    monkeypatch.setattr(agent_context.asyncio, "to_thread", fake_to_thread)
+    config = svc._runtime_agent_config(
+        {"system_prompt": "CURRENT-CONFIG"},
+        {"normalized_context": {"system_prompt": "MANIFEST-CONFIG"}},
+    )
+
+    context = await agent_context.build_agent_input_context(config, thread_id="thread-1", uid="user-1")
+
+    assert context["system_prompt"] == "MANIFEST-CONFIG\n\n用户工作区 agents/AGENTS.md 内容：\nWORKSPACE-MARKER"
     assert context["thread_id"] == "thread-1"
     assert context["uid"] == "user-1"
 
@@ -355,6 +557,7 @@ async def test_get_agent_state_view_rejects_async_subagent_without_child_convers
             raise AssertionError("async subagent state must be loaded through child conversation relation")
 
     monkeypatch.setattr(svc, "ConversationRepository", ConvRepo)
+    monkeypatch.setattr(svc, "resolve_conversation_workdir_path", _resolve_test_workdir)
     monkeypatch.setattr(svc, "AgentRunRepository", RunRepo)
 
     with pytest.raises(HTTPException) as exc:
@@ -378,7 +581,14 @@ async def test_get_agent_state_view_returns_interrupted_checkpoint_payload(monke
 
         async def get_conversation_by_thread_id(self, requested_thread_id: str):
             assert requested_thread_id == thread_id
-            return SimpleNamespace(id=20, uid="user-1", agent_id="main", status="active")
+            return SimpleNamespace(
+                id=20,
+                uid="user-1",
+                agent_id="main",
+                status="active",
+                project_id="11111111-1111-4111-8111-111111111111",
+                extra_metadata={"model_spec": "provider:conversation-model"},
+            )
 
     class AgentRepo:
         def __init__(self, _db):
@@ -404,7 +614,11 @@ async def test_get_agent_state_view_returns_interrupted_checkpoint_payload(monke
         async def get_latest_run_by_thread_for_user(self, requested_thread_id: str, uid: str):
             assert requested_thread_id == thread_id
             assert uid == "user-1"
-            return SimpleNamespace(id="run-1", status="interrupted", input_payload={})
+            return SimpleNamespace(
+                id="run-1",
+                status="interrupted",
+                input_payload={"model_spec": "provider:stale-run-model"},
+            )
 
     class Context:
         def __init__(self, *, thread_id="", uid=""):
@@ -440,10 +654,15 @@ async def test_get_agent_state_view_returns_interrupted_checkpoint_payload(monke
         ],
     )
 
-    async def read_checkpoint_state(*_args, **_kwargs):
+    async def read_checkpoint_state(*_args, context, **_kwargs):
+        assert context.runtime_scope_id == thread_id
+        assert context.model == "provider:conversation-model"
+        assert context.workdir_relative_path == "projects/11111111-1111-4111-8111-111111111111"
+        assert context.workdir_path == "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111"
         return checkpoint_state
 
     monkeypatch.setattr(svc, "ConversationRepository", ConvRepo)
+    monkeypatch.setattr(svc, "resolve_conversation_workdir_path", _resolve_test_workdir)
     monkeypatch.setattr(svc, "AgentRepository", AgentRepo)
     monkeypatch.setattr(svc, "SubagentThreadRepository", ThreadRepo)
     monkeypatch.setattr(svc, "AgentRunRepository", RunRepo)
@@ -463,6 +682,73 @@ async def test_get_agent_state_view_returns_interrupted_checkpoint_payload(monke
 
 
 @pytest.mark.asyncio
+async def test_get_agent_state_view_rejects_conversation_without_workdir(monkeypatch: pytest.MonkeyPatch):
+    class ConvRepo:
+        def __init__(self, _db):
+            pass
+
+        async def get_conversation_by_thread_id(self, thread_id: str):
+            assert thread_id == "thread-1"
+            return SimpleNamespace(
+                id=20,
+                uid="user-1",
+                agent_id="main",
+                status="active",
+                project_id="missing-project",
+            )
+
+    class AgentRepo:
+        def __init__(self, _db):
+            pass
+
+        async def get_by_slug(self, slug: str):
+            assert slug == "main"
+            return SimpleNamespace(backend_id="ChatBot", config_json={"context": {}})
+
+    class RunRepo:
+        def __init__(self, _db):
+            pass
+
+        async def get_latest_run_by_thread_for_user(self, thread_id: str, uid: str):
+            assert thread_id == "thread-1"
+            assert uid == "user-1"
+            return None
+
+    class Context:
+        def __init__(self, *, thread_id="", uid=""):
+            self.thread_id = thread_id
+            self.uid = uid
+
+        def update(self, data: dict):
+            for key, value in data.items():
+                setattr(self, key, value)
+
+    class Agent:
+        context_schema = Context
+
+    async def unexpected_checkpoint_read(*_args, **_kwargs):
+        raise AssertionError("缺少 Workdir 时不得读取 checkpoint")
+
+    async def missing_workdir(**_kwargs):
+        raise RuntimeError("Conversation 绑定的 Project 不存在")
+
+    monkeypatch.setattr(svc, "ConversationRepository", ConvRepo)
+    monkeypatch.setattr(svc, "resolve_conversation_workdir_path", missing_workdir)
+    monkeypatch.setattr(svc, "AgentRepository", AgentRepo)
+    monkeypatch.setattr(svc, "AgentRunRepository", RunRepo)
+    monkeypatch.setattr(svc, "normalize_agent_context_config", _fake_normalize_agent_context_config)
+    monkeypatch.setattr(svc, "_read_checkpoint_state", unexpected_checkpoint_read)
+    monkeypatch.setattr(svc.agent_manager, "get_agent", lambda backend_id: Agent())
+
+    with pytest.raises(RuntimeError, match="Project 不存在"):
+        await svc.get_agent_state_view(
+            thread_id="thread-1",
+            current_user=SimpleNamespace(uid="user-1"),
+            db=object(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_get_agent_state_view_includes_subagent_thread_relation(monkeypatch: pytest.MonkeyPatch):
     child_thread_id = "child-thread"
 
@@ -472,7 +758,13 @@ async def test_get_agent_state_view_includes_subagent_thread_relation(monkeypatc
 
         async def get_conversation_by_thread_id(self, thread_id: str):
             if thread_id == child_thread_id:
-                return SimpleNamespace(id=20, uid="user-1", agent_id="worker", status="subagent")
+                return SimpleNamespace(
+                    id=20,
+                    uid="user-1",
+                    agent_id="worker",
+                    status="subagent",
+                    project_id="11111111-1111-4111-8111-111111111111",
+                )
             return None
 
         async def get_conversation_by_id(self, conversation_id: int):
@@ -519,7 +811,11 @@ async def test_get_agent_state_view_includes_subagent_thread_relation(monkeypatc
         async def get_latest_run_by_thread_for_user(self, thread_id: str, uid: str):
             assert thread_id == child_thread_id
             assert uid == "user-1"
-            return SimpleNamespace(status="running", input_payload={"model_spec": "provider:run-model"})
+            return SimpleNamespace(
+                status="running",
+                runtime_scope_id="parent-thread",
+                input_payload={"model_spec": "provider:run-model"},
+            )
 
         async def get_latest_subagent_run_by_thread_for_user(self, thread_id: str, uid: str):
             assert thread_id == child_thread_id
@@ -572,9 +868,13 @@ async def test_get_agent_state_view_includes_subagent_thread_relation(monkeypatc
             assert context.thread_id == child_thread_id
             assert context.uid == "user-1"
             assert context.model == "provider:run-model"
+            assert context.runtime_scope_id == "parent-thread"
+            assert context.workdir_relative_path == "projects/11111111-1111-4111-8111-111111111111"
+            assert context.workdir_path == "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111"
             return Graph()
 
     monkeypatch.setattr(svc, "ConversationRepository", ConvRepo)
+    monkeypatch.setattr(svc, "resolve_conversation_workdir_path", _resolve_test_workdir)
     monkeypatch.setattr(svc, "AgentRepository", AgentRepo)
     monkeypatch.setattr(svc, "SubagentThreadRepository", ThreadRepo)
     monkeypatch.setattr(svc, "AgentRunRepository", RunRepo)
@@ -607,7 +907,13 @@ async def test_get_agent_state_view_reports_malformed_subagent_run_as_server_err
 
         async def get_conversation_by_thread_id(self, thread_id: str):
             assert thread_id == child_thread_id
-            return SimpleNamespace(id=20, uid="user-1", agent_id="worker", status="subagent")
+            return SimpleNamespace(
+                id=20,
+                uid="user-1",
+                agent_id="worker",
+                status="subagent",
+                project_id="11111111-1111-4111-8111-111111111111",
+            )
 
         async def get_conversation_by_id(self, conversation_id: int):
             assert conversation_id == 11
@@ -676,6 +982,7 @@ async def test_get_agent_state_view_reports_malformed_subagent_run_as_server_err
             return Graph()
 
     monkeypatch.setattr(svc, "ConversationRepository", ConvRepo)
+    monkeypatch.setattr(svc, "resolve_conversation_workdir_path", _resolve_test_workdir)
     monkeypatch.setattr(svc, "AgentRepository", AgentRepo)
     monkeypatch.setattr(svc, "SubagentThreadRepository", ThreadRepo)
     monkeypatch.setattr(svc, "AgentRunRepository", RunRepo)

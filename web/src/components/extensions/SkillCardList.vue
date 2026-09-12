@@ -4,6 +4,7 @@
       <template #actions>
         <template v-if="!isBatchDeleteMode">
           <a-button
+            v-if="canManageSkills"
             @click="isBatchDeleteMode = true"
             :disabled="loading || importing || filteredDeletableSkills.length === 0"
             class="lucide-icon-btn"
@@ -11,6 +12,7 @@
             <span>批量管理</span>
           </a-button>
           <a-button
+            v-if="canInstallSkills"
             @click="handleOpenRemoteInstall"
             :disabled="loading || importing"
             class="lucide-icon-btn"
@@ -19,6 +21,7 @@
             <span>远程安装</span>
           </a-button>
           <a-upload
+            v-if="canInstallSkills"
             accept=".zip,.md"
             :show-upload-list="false"
             :custom-request="handleImportUpload"
@@ -56,6 +59,21 @@
         </template>
       </template>
     </PageShoulder>
+
+    <nav v-if="skillCategoryTabs.length > 1" class="skill-category-tabs" aria-label="Skill 分类">
+      <button
+        v-for="tab in skillCategoryTabs"
+        :key="tab.key"
+        type="button"
+        class="skill-category-tab"
+        :class="{ active: activeSkillCategory === tab.key }"
+        :aria-current="activeSkillCategory === tab.key ? 'page' : undefined"
+        @click="activeSkillCategory = tab.key"
+      >
+        <span>{{ tab.label }}</span>
+        <span class="skill-category-count">{{ tab.count }}</span>
+      </button>
+    </nav>
 
     <div
       v-if="visibleSkillGroups.length === 0"
@@ -121,11 +139,11 @@
               >
                 <template #actions>
                   <button
-                    v-if="skill.sourceScope !== 'personal'"
+                    v-if="skill.sourceScope !== 'personal' && canManageSkill(skill)"
                     type="button"
                     class="skill-enabled-action"
                     :class="{ enabled: skill.enabled !== false }"
-                    :disabled="!canManageSkill(skill) || isSkillToggling(skill.slug)"
+                    :disabled="isSkillToggling(skill.slug)"
                     :aria-label="skill.enabled === false ? '启用 Skill' : '禁用 Skill'"
                     @click.stop="handleToggleSkillEnabled(skill)"
                   >
@@ -177,9 +195,9 @@
           </div>
           <div class="skill-preview-actions">
             <a-switch
-              v-if="previewSkill.sourceScope !== 'personal'"
+              v-if="previewSkill.sourceScope !== 'personal' && canManageSkill(previewSkill)"
               :checked="previewSkill.enabled !== false"
-              :disabled="!canManageSkill(previewSkill) || isSkillToggling(previewSkill.slug)"
+              :disabled="isSkillToggling(previewSkill.slug)"
               :loading="isSkillToggling(previewSkill.slug)"
               size="small"
               @change="handlePreviewToggle"
@@ -218,7 +236,7 @@
               class="lucide-icon-btn"
               @click="goToPreviewSkillManagement"
             >
-              <span>去管理</span>
+              <span>{{ canManageSkill(previewSkill) ? '去管理' : '查看详情' }}</span>
             </a-button>
           </div>
         </div>
@@ -242,7 +260,7 @@
                     <div class="repo-input-field">
                       <a-input
                         v-model:value="remoteInstallForm.source"
-                        placeholder="来源仓库，如 anthropics/skills 或 GitHub URL"
+                        placeholder="来源仓库或合集地址，如 https://modelscope.cn/collections/MiniMax/MiniMax-Office-skills"
                       >
                         <template #suffix>
                           <a-dropdown
@@ -512,7 +530,7 @@ import {
   Check,
   Plus,
   Minus
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { skillApi } from '@/apis/skill_api'
 import ExtensionCardGrid from './ExtensionCardGrid.vue'
 import SkillInstallFlowModal from './SkillInstallFlowModal.vue'
@@ -523,41 +541,81 @@ import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { formatExtensionCardTitle } from '@/utils/extensionDisplayName'
 import { getShareConfigLabel } from '@/utils/shareConfig'
 import { getSkillIcon } from '@/utils/skill_icon_utils'
+import { useAgentStore } from '@/stores/agent'
+import { useUserStore } from '@/stores/user'
 
 const RECOMMENDED_SUITES = [
   {
-    id: 'anthropic-documents',
-    name: 'Anthropic 文档处理套件',
-    provider: 'Anthropic',
+    id: 'minimax-office-skills',
+    name: 'MiniMax 办公文档套件',
+    provider: 'MiniMax-AI',
     description:
-      'Anthropic 官方文档处理 Skills，覆盖 PDF、Word、电子表格与演示文稿的读取、创建和编辑。',
-    source: 'anthropics/skills',
+      'MiniMax 开源的办公文档 Skills 合集，覆盖 DOCX、PDF、XLSX 与 PPTX 演示文稿的创建与格式化。',
+    source: 'https://modelscope.cn/collections/MiniMax/MiniMax-Office-skills',
     skills: [
       {
-        slug: 'pdf',
-        name: 'PDF',
-        description: '提取文本与表格，支持合并拆分、旋转水印、表单、加解密、图片提取和 OCR。'
+        slug: 'pptx-generator',
+        name: 'pptx-generator',
+        description:
+          '生成、编辑和阅读 PowerPoint 演示文稿。使用 PptxGenJS 从头开始创建，通过 XML 工作流编辑现有的 PPTX，或使用 markitdown 提取文本。'
       },
       {
-        slug: 'docx',
-        name: 'Docs',
-        description: '创建和编辑 Word 文档，处理目录、页码、图片、查找替换、修订与批注。'
+        slug: 'minimax-docx',
+        name: 'minimax-docx',
+        description:
+          '使用 OpenXML SDK（.NET）进行专业的 DOCX 文档创建、编辑和格式化，支持模板应用与 XSD 验证门控检查。'
       },
       {
-        slug: 'xlsx',
-        name: 'XLSX',
-        description: '创建和编辑电子表格，支持公式、格式、图表、数据清洗、表格重构与格式转换。'
+        slug: 'minimax-xlsx',
+        name: 'minimax-xlsx',
+        description:
+          '创建、读取、分析、编辑或验证 Excel/电子表格文件，支持公式重算校验与专业财务格式标准。'
       },
       {
-        slug: 'pptx',
-        name: 'PPTX',
-        description: '创建和编辑演示文稿，支持文本提取、模板版式、备注批注以及合并拆分。'
+        slug: 'minimax-pdf',
+        name: 'minimax-pdf',
+        description: '高视觉质量与设计感的 PDF 生成、表单字段填写、样式转换与专业打印级文档排版。'
+      }
+    ]
+  },
+  {
+    id: 'skill-builder-suite',
+    name: 'Skill 能力与进化套件',
+    provider: 'Community',
+    description: '用于 Agent 技能发现、创建、评测调优与自主进化的核心工具合集。',
+    skills: [
+      {
+        slug: 'skill-creator',
+        name: 'skill-creator',
+        source: 'https://modelscope.cn/skills/@anthropics/skill-creator',
+        description: '创建新技能、修改与优化现有技能，并通过方差基准分析评测技能表现与调优描述。'
+      },
+      {
+        slug: 'find-skills',
+        name: 'find-skills',
+        source: 'https://modelscope.cn/skills/@vercel-labs/find-skills',
+        description: '协助智能体根据用户需求检索并发现可安装的开源 Agent Skills，动态扩展自身能力。'
+      },
+      {
+        slug: 'self-improving-agent',
+        name: 'self-improving-agent',
+        source: 'https://github.com/zhaono1/agent-playbook',
+        description: '通用自我进化技能，基于多重记忆架构从经验与错误中持续学习并自我迭代。'
       }
     ]
   }
 ]
 
 const router = useRouter()
+const userStore = useUserStore()
+const agentStore = useAgentStore()
+const canUseSkills = computed(() => userStore.hasPermission('skill:use'))
+const canManageSkills = computed(() => userStore.hasPermission('skill:manage'))
+const canInstallSkills = computed(() => canUseSkills.value || canManageSkills.value)
+// iframe 刷新时 OA 授权是异步完成的，权限未就绪前不能判断应访问哪套 Skill 列表接口。
+const userPermissionsReady = computed(
+  () => Boolean(userStore.userId) && userStore.effectivePermissions.length > 0
+)
 
 const loading = ref(false)
 const importing = ref(false)
@@ -582,7 +640,7 @@ const installFlow = ref(null)
 const activeTab = ref('repo') // 'repo' 或 'search'
 
 const remoteInstallForm = reactive({
-  source: 'https://github.com/anthropics/skills',
+  source: 'https://modelscope.cn/collections/MiniMax/MiniMax-Office-skills',
   skills: []
 })
 const remoteSkillOptions = ref([])
@@ -649,33 +707,68 @@ const recommendedSuiteCards = computed(() =>
 )
 
 const filteredInstalledSkills = computed(() => installedSkillCards.value.filter(matchesSearch))
-const skillGroups = computed(() => [
-  {
-    key: 'recommended',
-    title: '推荐',
-    skills: isBatchDeleteMode.value ? [] : recommendedSuiteCards.value.filter(matchesSearch)
-  },
-  {
-    key: 'personal',
-    title: '个人技能',
-    skills: isBatchDeleteMode.value
-      ? []
-      : filteredInstalledSkills.value.filter((skill) => skill.sourceScope === 'personal')
-  },
-  {
-    key: 'builtin',
-    title: '内置',
-    skills: filteredInstalledSkills.value.filter((skill) => skill.sourceType === 'builtin')
-  },
-  {
-    key: 'uploaded',
-    title: '共享',
-    skills: filteredInstalledSkills.value.filter(
-      (skill) => skill.sourceType !== 'builtin' && skill.sourceScope !== 'personal'
-    )
+const activeSkillCategory = ref('')
+const skillGroups = computed(() => {
+  const installed = filteredInstalledSkills.value
+  return [
+    {
+      key: 'all',
+      title: '全部 Skill',
+      label: '全部',
+      skills: isBatchDeleteMode.value
+        ? installed.filter((skill) => skill.sourceScope !== 'personal')
+        : installed
+    },
+    {
+      key: 'personal',
+      title: '个人 Skill',
+      label: '个人',
+      skills: isBatchDeleteMode.value
+        ? []
+        : installed.filter((skill) => skill.sourceScope === 'personal')
+    },
+    {
+      key: 'shared',
+      title: '共享 Skill',
+      label: '共享',
+      skills: installed.filter(
+        (skill) => skill.sourceType !== 'builtin' && skill.sourceScope !== 'personal'
+      )
+    },
+    {
+      key: 'builtin',
+      title: '内置 Skill',
+      label: '内置',
+      skills: installed.filter((skill) => skill.sourceType === 'builtin')
+    },
+    {
+      key: 'recommended',
+      title: '推荐套件',
+      label: '推荐',
+      skills: isBatchDeleteMode.value ? [] : recommendedSuiteCards.value.filter(matchesSearch)
+    }
+  ]
+})
+const skillCategoryTabs = computed(() =>
+  skillGroups.value
+    .filter((group) => group.key === 'all' || group.skills.length > 0)
+    .map((group) => ({ key: group.key, label: group.label, count: group.skills.length }))
+)
+const visibleSkillGroups = computed(() => {
+  const group = skillGroups.value.find((item) => item.key === activeSkillCategory.value)
+  return group && group.skills.length ? [group] : []
+})
+
+watch(skillCategoryTabs, (tabs) => {
+  const activeExists = tabs.some((tab) => tab.key === activeSkillCategory.value)
+  if (!activeExists || !activeSkillCategory.value) {
+    activeSkillCategory.value =
+      tabs.find((tab) => tab.key === 'shared')?.key ||
+      tabs.find((tab) => tab.key !== 'all')?.key ||
+      tabs[0]?.key ||
+      'all'
   }
-])
-const visibleSkillGroups = computed(() => skillGroups.value.filter((group) => group.skills.length))
+})
 const filteredDeletableSkills = computed(() =>
   filteredInstalledSkills.value.filter(
     (skill) =>
@@ -798,7 +891,10 @@ const skillCardTags = (skill) => {
   ]
 }
 
-const canManageSkill = (skill) => skill?.can_manage !== false
+const canManageSkill = (skill) => {
+  if (skill?.sourceScope === 'personal') return canUseSkills.value && skill?.can_manage !== false
+  return canManageSkills.value && skill?.can_manage !== false
+}
 const isSkillToggling = (slug) => togglingSkillSlugs.value.includes(slug)
 const navigateToDetail = (skill) => {
   if (skill?.sourceScope === 'personal') return
@@ -900,7 +996,7 @@ const confirmDeletePreviewSkill = () => {
     title: `卸载 ${target.name || target.slug}`,
     content:
       target.sourceScope === 'personal'
-        ? '卸载后会删除个人工作区中的 Skill；如有同名共享版本，Agent 将恢复使用共享版本。'
+        ? '卸载后会删除个人 Skill；如有同名共享版本，Agent 将恢复使用共享版本。'
         : '卸载后会删除该 Skill 的数据库记录和本地文件，操作不可恢复。',
     okText: '卸载',
     okType: 'danger',
@@ -991,9 +1087,21 @@ const handleBatchDelete = () => {
 }
 
 const fetchSkills = async ({ refreshPersonal = false } = {}) => {
+  if (!userPermissionsReady.value) {
+    console.debug('[Skill] 用户权限尚未就绪，暂不加载 Skill 列表')
+    return
+  }
+
   loading.value = true
   try {
-    const skillResult = await skillApi.listSkillCards({ refreshPersonal })
+    const usePersonalSkillList = canUseSkills.value
+    console.debug('[Skill] 加载 Skill 列表', {
+      usePersonalSkillList,
+      refreshPersonal
+    })
+    const skillResult = canUseSkills.value
+      ? await skillApi.listSkillCards({ refreshPersonal })
+      : await skillApi.listSkills()
     skills.value = skillResult?.data || []
   } catch {
     message.error('加载失败')
@@ -1001,6 +1109,17 @@ const fetchSkills = async ({ refreshPersonal = false } = {}) => {
     loading.value = false
   }
 }
+
+watch(
+  () => [userStore.userId, userStore.effectivePermissions.join('|')],
+  ([userId, permissionSnapshot]) => {
+    if (!userId || !permissionSnapshot) return
+
+    // 权限从 OA 授权流程写入后，强制重新扫描个人 Skill，避免首次请求使用旧列表。
+    console.debug('[Skill] 用户权限已就绪，刷新个人 Skill 列表')
+    void fetchSkills({ refreshPersonal: true })
+  }
+)
 
 const beforeSkillUpload = (file) => {
   const lower = file.name.toLowerCase()
@@ -1043,7 +1162,25 @@ const openRecommendedSuite = (suite) => {
 const handleInstallFlowCompleted = async ({ success, failed }) => {
   if (failed === 0) message.success(`已添加 ${success} 个 Skill`)
   else message.warning(`安装完成：成功 ${success} 个，失败 ${failed} 个`)
-  await fetchSkills()
+  await fetchSkills({ refreshPersonal: true })
+
+  // 安装完成后，强制刷新当前 Agent 详情，更新对话页 Skill 提及选项。
+  const selectedAgentId = agentStore.selectedAgentId
+  if (success > 0 && selectedAgentId) {
+    try {
+      await agentStore.fetchAgentDetail(selectedAgentId, true)
+      console.debug('[Skill] 安装完成，已刷新当前 Agent 的 Skill 选项', {
+        agentId: selectedAgentId,
+        success
+      })
+    } catch (error) {
+      // Skill 已安装成功；详情刷新失败只影响即时展示，避免覆盖安装结果。
+      console.warn('[Skill] 安装完成后刷新 Agent Skill 选项失败', {
+        agentId: selectedAgentId,
+        error
+      })
+    }
+  }
 }
 
 const handleImportUpload = async ({ file, onSuccess, onError }) => {
@@ -1226,6 +1363,64 @@ defineExpose({
 </style>
 
 <style lang="less" scoped>
+.skill-category-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 14px var(--page-padding) 4px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.skill-category-tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 15px;
+  border: 1px solid transparent;
+  border-radius: 17px;
+  background: transparent;
+  color: var(--gray-500);
+  font-size: 14px;
+  line-height: 20px;
+  cursor: pointer;
+  transition:
+    color 0.18s ease,
+    background-color 0.18s ease,
+    border-color 0.18s ease;
+
+  &:hover {
+    border-color: var(--gray-150);
+    background: var(--gray-25);
+    color: var(--gray-800);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--main-color);
+    outline-offset: 2px;
+  }
+
+  &.active {
+    border-color: color-mix(in srgb, var(--main-color) 12%, var(--gray-0));
+    background: color-mix(in srgb, var(--main-color) 10%, var(--gray-0));
+    color: var(--main-color);
+    font-weight: 600;
+  }
+}
+
+.skill-category-count {
+  color: var(--gray-400);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+
+  .active & {
+    color: color-mix(in srgb, var(--main-color) 70%, var(--gray-500));
+  }
+}
+
 .skill-empty-state {
   width: 100%;
   min-height: 280px;

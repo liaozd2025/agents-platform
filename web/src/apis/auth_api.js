@@ -2,7 +2,7 @@
  * 认证相关 API
  */
 
-import { apiAdminGet, apiGet, apiPost } from './base'
+import { apiDelete, apiGet, apiPost, apiPut } from './base'
 
 async function parseErrorDetail(response, fallbackMessage) {
   const contentType = response.headers.get('content-type') || ''
@@ -35,11 +35,7 @@ async function exchangeLoginCredential(url, payload, fallbackMessage) {
  * @returns {Promise<{enabled: boolean, provider_name?: string}>}
  */
 async function getOIDCConfig() {
-  const response = await fetch('/api/auth/oidc/config')
-  if (!response.ok) {
-    throw new Error('获取 OIDC 配置失败')
-  }
-  return response.json()
+  return apiGet('/api/auth/oidc/config', {}, false)
 }
 
 /**
@@ -49,12 +45,7 @@ async function getOIDCConfig() {
  */
 async function getOIDCLoginUrl(redirectPath = '/') {
   const params = new URLSearchParams({ redirect_path: redirectPath })
-  const response = await fetch(`/api/auth/oidc/login-url?${params}`)
-  if (!response.ok) {
-    const detail = await parseErrorDetail(response, '获取 OIDC 登录地址失败')
-    throw new Error(detail)
-  }
-  return response.json()
+  return apiGet(`/api/auth/oidc/login-url?${params}`, {}, false)
 }
 
 /**
@@ -68,13 +59,18 @@ async function getOIDCLoginUrl(redirectPath = '/') {
  *   uid: string,
  *   phone_number: string | null,
  *   avatar: string | null,
- *   role: string,
+ *   roles: Array,
+ *   effective_permissions: string[],
  *   department_id: number | null,
  *   department_name: string | null
  * }>}
  */
 async function getUserAccessOptions() {
-  return apiAdminGet('/api/auth/users/access-options')
+  return apiGet('/api/auth/users/access-options')
+}
+
+async function checkUidAvailability(uid) {
+  return apiGet(`/api/auth/check-uid/${encodeURIComponent(uid)}`)
 }
 
 async function exchangeOIDCCode(code) {
@@ -84,6 +80,79 @@ async function exchangeOIDCCode(code) {
 /** 使用 OA 现有登录凭证交换 Yuxi token。 */
 async function exchangeOAToken(token) {
   return exchangeLoginCredential('/api/auth/oa/exchange-token', { token }, 'OA 免登录失败')
+}
+
+/** 使用父项目提供的 OA 账号换取 Yuxi 登录态。 */
+async function exchangeOAAccount(account) {
+  return exchangeLoginCredential('/api/auth/oa/exchange-account', { account }, 'OA 账号登录失败')
+}
+
+async function login(credentials) {
+  const formData = new FormData()
+  formData.append('username', credentials.loginId)
+  formData.append('password', credentials.password)
+  return apiPost('/api/auth/token', formData, {}, false)
+}
+
+async function initialize(admin) {
+  return apiPost('/api/auth/initialize', admin, {}, false)
+}
+
+async function checkFirstRun() {
+  return apiGet('/api/auth/check-first-run', {}, false)
+}
+
+async function getUsers({ skip = 0, limit = 100, keyword = '', departmentId = null, role = '' } = {}) {
+  const params = new URLSearchParams({ skip: String(skip), limit: String(limit) })
+  if (keyword.trim()) params.set('keyword', keyword.trim())
+  if (departmentId != null) params.set('department_id', String(departmentId))
+  if (role) params.set('role', role)
+
+  // 保持其他接口仍只返回 JSON；用户列表需要同时读取分页总数响应头。
+  const response = await apiGet(`/api/auth/users?${params}`, {}, true, 'response')
+  return { users: await response.json(), total: Number(response.headers.get('X-Total-Count') || 0) }
+}
+
+async function getUsersPage({ offset = 0, limit = 50, search, departmentId, role } = {}) {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  if (search) params.set('search', search)
+  if (departmentId) params.set('department_id', String(departmentId))
+  if (role) params.set('role', role)
+  return apiGet(`/api/auth/users/page?${params}`)
+}
+
+async function createUser(userData) {
+  return apiPost('/api/auth/users', userData)
+}
+
+async function updateUser(userId, userData) {
+  return apiPut(`/api/auth/users/${encodeURIComponent(userId)}`, userData)
+}
+
+async function deleteUser(userId) {
+  return apiDelete(`/api/auth/users/${encodeURIComponent(userId)}`)
+}
+
+async function validateUsername(username) {
+  return apiPost('/api/auth/validate-username', { username })
+}
+
+async function uploadAvatar(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return apiPost('/api/auth/upload-avatar', formData)
+}
+
+async function getCurrentUser(signal) {
+  return apiGet('/api/auth/me', signal ? { signal } : {})
+}
+
+async function updateProfile(profileData) {
+  return apiPut('/api/auth/profile', profileData)
+}
+
+async function impersonateUser(userId) {
+  return apiPost(`/api/auth/impersonate/${encodeURIComponent(userId)}`, {})
 }
 
 async function getCLIAuthSession(userCode) {
@@ -97,11 +166,28 @@ async function approveCLIAuthSession(userCode) {
 }
 
 export const authApi = {
+  getMCPConsent: (id) => apiGet(`/api/mcp/consent/${encodeURIComponent(id)}`),
+  approveMCPConsent: (id) => apiPost(`/api/mcp/consent/${encodeURIComponent(id)}`, {}),
+  login,
+  initialize,
+  checkFirstRun,
+  getUsers,
+  getUsersPage,
+  createUser,
+  updateUser,
+  deleteUser,
+  validateUsername,
+  uploadAvatar,
+  getCurrentUser,
+  updateProfile,
+  impersonateUser,
   getOIDCConfig,
   getOIDCLoginUrl,
   getUserAccessOptions,
+  checkUidAvailability,
   exchangeOIDCCode,
   exchangeOAToken,
+  exchangeOAAccount,
   getCLIAuthSession,
   approveCLIAuthSession
 }

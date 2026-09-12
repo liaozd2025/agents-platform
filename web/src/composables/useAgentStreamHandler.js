@@ -60,21 +60,26 @@ const loadingMessageChunk = (chunk) => {
   return msg || null
 }
 
-// 工具结果不走 messages 流，而是以 method=tools 的 stream_event 事件返回（tool-started/tool-finished）。
-// 取出 tool-finished 的 output（一条 ToolMessage 字典），交给 msgChunks 与 AI 消息按 tool_call_id 关联。
-const toolFinishedMessage = (chunk) => {
+// progress 和 finished 都是累计快照，不能按正文增量拼接。
+const toolOutputMessage = (chunk) => {
   const streamEvent = chunk?.event
   if (!streamEvent || streamEvent.method !== 'tools') return null
 
   const data = streamEvent.data
-  if (!data || data.event !== 'tool-finished') return null
+  if (!data || !['tool-progress', 'tool-finished'].includes(data.event)) return null
 
   const output = data.output
   if (!output || typeof output !== 'object') return null
 
   const id = output.id || output.tool_call_id || data.tool_call_id
   if (!id) return null
-  return { ...output, type: 'tool', id }
+  return {
+    ...output,
+    type: 'tool',
+    id,
+    tool_call_id: output.tool_call_id || data.tool_call_id || id,
+    ...(data.event === 'tool-progress' ? { status: 'running' } : {})
+  }
 }
 
 export function useAgentStreamHandler({
@@ -153,14 +158,12 @@ export function useAgentStreamHandler({
 
       case 'stream_event':
         {
-          // 工具结果需立即落地（不经平滑层），写入 msgChunks 后由 convertToolResultToMessages
-          // 按 tool_call_id 关联到对应 AI 消息的 tool_call，驱动其完成态。
-          const toolMessage = toolFinishedMessage(chunk)
+          const toolMessage = toolOutputMessage(chunk)
           if (toolMessage) {
-            if (!threadState.onGoingConv.msgChunks[toolMessage.id]) {
-              threadState.onGoingConv.msgChunks[toolMessage.id] = []
-            }
-            threadState.onGoingConv.msgChunks[toolMessage.id].push(toolMessage)
+            toolMessage.run_id = chunk.run_id || toolMessage.run_id
+            toolMessage.thread_id = threadId
+            const key = `tool:${toolMessage.run_id || ''}:${toolMessage.tool_call_id}`
+            threadState.onGoingConv.msgChunks[key] = [toolMessage]
           }
         }
         return false
@@ -195,16 +198,12 @@ export function useAgentStreamHandler({
           supportsFiles: unref(supportsFiles),
           currentAgentId: unref(currentAgentId),
           hasAgentState: !!chunk.agent_state,
-          todoCount: Array.isArray(chunk.agent_state?.todos) ? chunk.agent_state.todos.length : 0,
-          uploadCount: Array.isArray(chunk.agent_state?.uploads)
-            ? chunk.agent_state.uploads.length
-            : 0
+          todoCount: Array.isArray(chunk.agent_state?.todos) ? chunk.agent_state.todos.length : 0
         })
         if (chunk.agent_state) {
           console.log(`${debugPrefix}[agent_state_apply]`, {
             threadId,
-            todos: chunk.agent_state?.todos || [],
-            uploads: chunk.agent_state?.uploads || []
+            todos: chunk.agent_state?.todos || []
           })
           threadState.agentStateRequestVersion = (threadState.agentStateRequestVersion || 0) + 1
           threadState.agentState = chunk.agent_state
@@ -245,8 +244,7 @@ export function useAgentStreamHandler({
               `[AgentState|Final] ${new Date().toLocaleTimeString()}.${new Date().getMilliseconds()}`,
               {
                 threadId,
-                todos: threadState.agentState?.todos || [],
-                uploads: threadState.agentState?.uploads || []
+                todos: threadState.agentState?.todos || []
               }
             )
           }

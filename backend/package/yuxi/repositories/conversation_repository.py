@@ -2,22 +2,26 @@
 对话域持久化 Repository（Async）
 """
 
+import json
 import uuid as uuid_lib
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
+from yuxi.services.organization_snapshot_service import get_user_organization_snapshot
 from yuxi.storage.postgres.models_business import (
+    UNVIEWED_RUN_MARKER,
     Conversation,
     ConversationStats,
     Message,
+    SubagentThread,
     ToolCall,
-    UNVIEWED_RUN_MARKER,
 )
 from yuxi.utils import logger
 from yuxi.utils.datetime_utils import utc_now_naive
+from yuxi.utils.string_utils import truncate_utf8
 
 MAX_CONVERSATION_TITLE_LENGTH = 255
 MESSAGE_SEARCH_SNIPPET_RADIUS = 72
@@ -26,6 +30,23 @@ MESSAGE_SEARCH_SNIPPETS_PER_THREAD = 2
 MESSAGE_SEARCH_ROLES = ("user", "assistant")
 MESSAGE_SEARCH_EXCLUDED_TYPES = ("tool_call", "tool_result")
 INVOCATION_CONVERSATION_SOURCES = ("agent_call", "agent_evaluation")
+
+# ==== 历史对话检索参数 ====
+MEMORY_HISTORY_SEARCH_MAX_LIMIT = 10  # 单次历史搜索最多返回的消息条数。
+MEMORY_HISTORY_SEARCH_QUERY_MAX_CHARS = 256  # 历史搜索关键词允许的最大字符数。
+MEMORY_HISTORY_SEARCH_SNIPPET_MAX_BYTES = 512  # 单条搜索结果摘要的最大 UTF-8 字节数。
+MEMORY_HISTORY_SEARCH_RESPONSE_MAX_BYTES = 16 * 1024  # 历史搜索完整 JSON 响应的最大字节数。
+MEMORY_HISTORY_READ_MAX_LIMIT = 20  # 单次历史读取最多返回的消息条数。
+MEMORY_HISTORY_MESSAGE_MAX_BYTES = 8 * 1024  # 单条历史消息正文的最大 UTF-8 字节数。
+MEMORY_HISTORY_MESSAGES_MAX_BYTES = 32 * 1024  # 一次历史读取中全部消息正文的合计字节上限。
+MEMORY_HISTORY_TOOL_CALL_MAX_COUNT = 10  # 显式读取工具调用时最多返回的记录数。
+MEMORY_HISTORY_TOOL_CALL_MAX_BYTES = 4 * 1024  # 单条工具调用序列化后的最大字节数。
+MEMORY_HISTORY_TOOL_CALLS_MAX_BYTES = 16 * 1024  # 一次历史读取中全部工具调用的合计字节上限。
+MEMORY_HISTORY_READ_RESPONSE_MAX_BYTES = 64 * 1024  # 历史读取完整 JSON 响应的最大字节数。
+
+
+def _json_size(value: object) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
 
 
 class ConversationRepository:
@@ -94,24 +115,30 @@ class ConversationRepository:
         title: str | None = None,
         thread_id: str | None = None,
         metadata: dict | None = None,
+        project_id: str,
+        creation_request_id: str | None = None,
     ) -> Conversation:
         """创建对话和统计记录但只 flush，供外层事务继续绑定关系。"""
         if not thread_id:
             thread_id = str(uuid_lib.uuid4())
 
         metadata = (metadata or {}).copy()
-        metadata.setdefault("attachments", [])
+        metadata["attachments"] = []
 
         normalized_title = self._normalize_title(title)
+        organization_snapshot = await get_user_organization_snapshot(self.db, uid=str(uid))
 
         conversation = Conversation(
             thread_id=thread_id,
+            creation_request_id=creation_request_id,
             uid=str(uid),
             agent_id=agent_id,
             title=normalized_title or "New Conversation",
             status="active",
             extra_metadata=metadata,
+            **organization_snapshot,
             last_viewed_run_id=UNVIEWED_RUN_MARKER,
+            project_id=project_id,
         )
 
         self.db.add(conversation)
@@ -128,9 +155,11 @@ class ConversationRepository:
         self,
         uid: str,
         agent_id: str,
+        project_id: str,
         title: str | None = None,
         thread_id: str | None = None,
         metadata: dict | None = None,
+        creation_request_id: str | None = None,
     ) -> Conversation:
         """创建并提交一个完整对话，适用于不需要外层事务编排的入口。"""
         conversation = await self.add_conversation(
@@ -139,6 +168,8 @@ class ConversationRepository:
             title=title,
             thread_id=thread_id,
             metadata=metadata,
+            project_id=project_id,
+            creation_request_id=creation_request_id,
         )
         await self.db.commit()
         await self.db.refresh(conversation)
@@ -148,10 +179,23 @@ class ConversationRepository:
         result = await self.db.execute(select(Conversation).where(Conversation.thread_id == thread_id))
         return result.scalar_one_or_none()
 
+    async def get_conversation_by_creation_request_id(self, uid: str, request_id: str) -> Conversation | None:
+        """按用户和创建幂等键读取 Conversation。"""
+        result = await self.db.execute(
+            select(Conversation).where(
+                Conversation.uid == str(uid),
+                Conversation.creation_request_id == request_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def lock_conversation_by_thread_id(self, thread_id: str) -> Conversation | None:
         """锁定线程根记录，串行化同一对话的调度决策。"""
         result = await self.db.execute(
-            select(Conversation).where(Conversation.thread_id == thread_id).with_for_update()
+            select(Conversation)
+            .where(Conversation.thread_id == thread_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
 
@@ -180,8 +224,18 @@ class ConversationRepository:
         conversation.extra_metadata = metadata
         flag_modified(conversation, "extra_metadata")
         conversation.updated_at = utc_now_naive()
-        await self.db.commit()
-        await self.db.refresh(conversation)
+        await self.db.flush()
+
+    async def set_model_spec(self, conversation: Conversation, model_spec: str) -> None:
+        """在请求事务内更新对话绑定模型。"""
+        metadata = dict(conversation.extra_metadata or {})
+        metadata["model_spec"] = model_spec
+        await self._save_metadata(conversation, metadata)
+
+    async def _lock_conversation_by_id(self, conversation_id: int) -> Conversation | None:
+        """锁定会话元数据，串行化同一线程的附件更新。"""
+        result = await self.db.execute(select(Conversation).where(Conversation.id == conversation_id).with_for_update())
+        return result.scalar_one_or_none()
 
     async def add_message(
         self,
@@ -194,6 +248,7 @@ class ConversationRepository:
         run_id: str | None = None,
         request_id: str | None = None,
         delivery_status: str = "complete",
+        commit: bool = True,
     ) -> Message:
         message = Message(
             conversation_id=conversation_id,
@@ -212,10 +267,12 @@ class ConversationRepository:
         if conversation:
             conversation.updated_at = utc_now_naive()
 
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(message)
 
         await self._update_message_count(conversation_id)
+        if commit:
+            await self.db.commit()
 
         logger.debug(f"Added {role} message to conversation {conversation_id}")
         return message
@@ -231,6 +288,7 @@ class ConversationRepository:
         run_id: str | None = None,
         request_id: str | None = None,
         delivery_status: str = "complete",
+        commit: bool = True,
     ) -> Message | None:
         conversation = await self.get_conversation_by_thread_id(thread_id)
         if not conversation:
@@ -247,6 +305,7 @@ class ConversationRepository:
             run_id=run_id,
             request_id=request_id,
             delivery_status=delivery_status,
+            commit=commit,
         )
 
     async def add_tool_call(
@@ -258,6 +317,7 @@ class ConversationRepository:
         status: str = "pending",
         error_message: str | None = None,
         langgraph_tool_call_id: str | None = None,
+        commit: bool = True,
     ) -> ToolCall:
         if langgraph_tool_call_id:
             existing = await self.get_tool_call_by_langgraph_id(langgraph_tool_call_id)
@@ -268,6 +328,15 @@ class ConversationRepository:
                 )
                 return existing
 
+        uid = await self.db.scalar(
+            select(Conversation.uid)
+            .join(Message, Message.conversation_id == Conversation.id)
+            .where(Message.id == message_id)
+        )
+        if uid is None:
+            raise ValueError("工具调用对应的消息或对话不存在")
+        organization_snapshot = await get_user_organization_snapshot(self.db, uid=uid)
+
         tool_call = ToolCall(
             message_id=message_id,
             tool_name=tool_name,
@@ -276,11 +345,14 @@ class ConversationRepository:
             status=status,
             error_message=error_message,
             langgraph_tool_call_id=langgraph_tool_call_id,
+            **organization_snapshot,
         )
 
         self.db.add(tool_call)
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(tool_call)
+        if commit:
+            await self.db.commit()
 
         logger.debug(f"Added tool call {tool_name} to message {message_id}")
         return tool_call
@@ -337,38 +409,27 @@ class ConversationRepository:
         # First, get all pinned conversations (no limit)
         pinned_query = (
             select(Conversation)
+            .options(joinedload(Conversation.project))
             .where(*base_conditions)
             .where(Conversation.is_pinned)
-            .order_by(Conversation.updated_at.desc())
+            .order_by(Conversation.created_at.desc(), Conversation.id.desc())
         )
         result = await self.db.execute(pinned_query)
         pinned_conversations = list(result.scalars().all())
 
-        # Then, get non-pinned conversations with limit/offset
-        remaining_limit = None
-        remaining_offset = offset
-
+        # limit/offset 只作用于非置顶对话，避免重复附带的置顶项改变分页游标。
+        non_pinned_query = (
+            select(Conversation)
+            .options(joinedload(Conversation.project))
+            .where(*base_conditions)
+            .where(~Conversation.is_pinned)
+            .order_by(Conversation.created_at.desc(), Conversation.id.desc())
+            .offset(offset)
+        )
         if limit is not None:
-            # Calculate how many slots are taken by pinned conversations
-            pinned_count = len(pinned_conversations)
-            if pinned_count >= limit:
-                # All slots taken by pinned conversations
-                return pinned_conversations[:limit]
-            remaining_limit = limit - pinned_count
-
-        if remaining_limit is not None and remaining_limit > 0:
-            non_pinned_query = (
-                select(Conversation)
-                .where(*base_conditions)
-                .where(~Conversation.is_pinned)
-                .order_by(Conversation.updated_at.desc())
-                .limit(remaining_limit)
-                .offset(remaining_offset)
-            )
-            result = await self.db.execute(non_pinned_query)
-            non_pinned_conversations = list(result.scalars().all())
-        else:
-            non_pinned_conversations = []
+            non_pinned_query = non_pinned_query.limit(limit)
+        result = await self.db.execute(non_pinned_query)
+        non_pinned_conversations = list(result.scalars().all())
 
         return pinned_conversations + non_pinned_conversations
 
@@ -456,6 +517,239 @@ class ConversationRepository:
             )
 
         return items, has_more
+
+    async def search_memory_messages(self, *, uid: str, query: str, limit: int = 5) -> dict:
+        """搜索当前用户可见的普通主 Agent 历史消息。"""
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            raise ValueError("query 不能为空")
+        if len(normalized_query) > MEMORY_HISTORY_SEARCH_QUERY_MAX_CHARS:
+            raise ValueError(f"query 最多 {MEMORY_HISTORY_SEARCH_QUERY_MAX_CHARS} 个字符")
+        bounded_limit = max(1, min(int(limit), MEMORY_HISTORY_SEARCH_MAX_LIMIT))
+        message_conditions = self._message_search_conditions(normalized_query)
+
+        result = await self.db.execute(
+            select(
+                Conversation.thread_id,
+                Conversation.title,
+                Message.id,
+                Message.role,
+                Message.content,
+            )
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                *self._memory_conversation_conditions(uid),
+                *message_conditions,
+            )
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(bounded_limit)
+        )
+
+        items: list[dict] = []
+        response_truncated = False
+        for row in result.all():
+            snippet = self._build_message_search_snippet(row.content, normalized_query)
+            snippet, snippet_truncated = truncate_utf8(snippet, MEMORY_HISTORY_SEARCH_SNIPPET_MAX_BYTES)
+            item = {
+                "thread_id": row.thread_id,
+                "title": row.title,
+                "message_id": row.id,
+                "role": row.role,
+                "content": snippet,
+            }
+            if snippet_truncated:
+                item["truncated"] = True
+            items.append(item)
+            if _json_size({"items": items}) > MEMORY_HISTORY_SEARCH_RESPONSE_MAX_BYTES:
+                items.pop()
+                response_truncated = True
+                break
+        response = {"items": items}
+        if response_truncated:
+            response["truncated"] = True
+        return response
+
+    async def read_memory_messages(
+        self,
+        *,
+        uid: str,
+        thread_id: str,
+        message_id: int | None = None,
+        limit: int = 20,
+        include_tools: bool = False,
+    ) -> dict:
+        """读取当前用户普通主 Agent 线程的有界历史。"""
+        bounded_limit = max(1, min(int(limit), MEMORY_HISTORY_READ_MAX_LIMIT))
+        conversation_result = await self.db.execute(
+            select(Conversation.id, Conversation.thread_id, Conversation.title).where(
+                Conversation.thread_id == str(thread_id),
+                *self._memory_conversation_conditions(uid),
+            )
+        )
+        conversation = conversation_result.one_or_none()
+        if conversation is None:
+            raise ValueError("历史线程不存在或不可见")
+
+        message_conditions = [
+            Message.conversation_id == conversation.id,
+            Message.role.in_(MESSAGE_SEARCH_ROLES),
+            or_(Message.message_type.is_(None), Message.message_type.notin_(MESSAGE_SEARCH_EXCLUDED_TYPES)),
+        ]
+        if message_id is None:
+            query = (
+                self._memory_message_select()
+                .where(*message_conditions)
+                .order_by(Message.created_at.desc(), Message.id.desc())
+                .limit(bounded_limit)
+            )
+            result = await self.db.execute(query)
+            rows = list(result.all())
+            rows.reverse()
+        else:
+            anchor_id = int(message_id)
+            anchor_result = await self.db.execute(
+                select(Message.id).where(Message.id == anchor_id, *message_conditions)
+            )
+            if anchor_result.scalar_one_or_none() is None:
+                raise ValueError("历史消息不存在或不属于该线程")
+
+            before_limit = (bounded_limit + 1) // 2
+            before_query = (
+                self._memory_message_select()
+                .where(*message_conditions, Message.id <= anchor_id)
+                .order_by(Message.id.desc())
+                .limit(before_limit)
+            )
+            before_result = await self.db.execute(before_query)
+            before = list(before_result.all())
+            before.reverse()
+
+            after_limit = bounded_limit - len(before)
+            after = []
+            if after_limit:
+                after_query = (
+                    self._memory_message_select()
+                    .where(*message_conditions, Message.id > anchor_id)
+                    .order_by(Message.id.asc())
+                    .limit(after_limit)
+                )
+                after_result = await self.db.execute(after_query)
+                after = list(after_result.all())
+            rows = before + after
+
+        messages = self._serialize_memory_messages(rows)
+        tool_calls, tools_truncated = await self._serialize_memory_tool_calls(
+            [item["message_id"] for item in messages],
+            include_tools=include_tools,
+        )
+        is_truncated = tools_truncated or any(item.get("truncated") for item in messages)
+        payload = {
+            "thread_id": conversation.thread_id,
+            "title": conversation.title,
+            "messages": messages,
+            "tool_calls": tool_calls,
+        }
+        if is_truncated:
+            payload["truncated"] = True
+        self._fit_memory_read_response(payload)
+        return payload
+
+    def _memory_conversation_conditions(self, uid: str) -> list:
+        """构建用户可见普通主 Agent Conversation 条件。"""
+        child_thread_exists = select(SubagentThread.id).where(SubagentThread.child_conversation_id == Conversation.id)
+        return [
+            Conversation.uid == str(uid),
+            Conversation.status == "active",
+            *self._exclude_source_conditions(INVOCATION_CONVERSATION_SOURCES),
+            ~child_thread_exists.exists(),
+        ]
+
+    @staticmethod
+    def _memory_message_select():
+        return select(
+            Message.id,
+            Message.role,
+            Message.content,
+        )
+
+    @staticmethod
+    def _serialize_memory_messages(rows: list) -> list[dict]:
+        messages: list[dict] = []
+        remaining = MEMORY_HISTORY_MESSAGES_MAX_BYTES
+        for row in rows:
+            content_budget = min(MEMORY_HISTORY_MESSAGE_MAX_BYTES, remaining)
+            content, truncated = truncate_utf8(row.content, content_budget)
+            remaining = max(0, remaining - len(content.encode("utf-8")))
+            msg_item = {
+                "message_id": row.id,
+                "role": row.role,
+                "content": content,
+            }
+            if truncated:
+                msg_item["truncated"] = True
+            messages.append(msg_item)
+        return messages
+
+    async def _serialize_memory_tool_calls(
+        self,
+        message_ids: list[int],
+        *,
+        include_tools: bool,
+    ) -> tuple[list[dict], bool]:
+        if not include_tools or not message_ids:
+            return [], False
+        result = await self.db.execute(
+            select(
+                ToolCall.langgraph_tool_call_id,
+                ToolCall.tool_name,
+                ToolCall.tool_input,
+                ToolCall.tool_output,
+                ToolCall.status,
+                ToolCall.error_message,
+            )
+            .where(ToolCall.message_id.in_(message_ids))
+            .order_by(ToolCall.created_at.asc(), ToolCall.id.asc())
+            .limit(MEMORY_HISTORY_TOOL_CALL_MAX_COUNT + 1)
+        )
+        rows = list(result.all())
+        truncated = len(rows) > MEMORY_HISTORY_TOOL_CALL_MAX_COUNT
+        tool_calls: list[dict] = []
+        used_bytes = 0
+        for row in rows[:MEMORY_HISTORY_TOOL_CALL_MAX_COUNT]:
+            tool_input = json.dumps(row.tool_input or {}, ensure_ascii=False, separators=(",", ":"))
+            tool_input, input_truncated = truncate_utf8(tool_input, 1024)
+            tool_output, output_truncated = truncate_utf8(row.tool_output, 2048)
+            error, error_truncated = truncate_utf8(row.error_message, 512)
+            tool_item = {
+                "tool_call_id": row.langgraph_tool_call_id,
+                "name": row.tool_name,
+                "input": tool_input,
+                "output": tool_output,
+                "status": row.status,
+                "error": error,
+            }
+            if input_truncated or output_truncated or error_truncated:
+                tool_item["truncated"] = True
+            item_size = _json_size(tool_item)
+            if (
+                item_size > MEMORY_HISTORY_TOOL_CALL_MAX_BYTES
+                or used_bytes + item_size > MEMORY_HISTORY_TOOL_CALLS_MAX_BYTES
+            ):
+                truncated = True
+                break
+            used_bytes += item_size
+            tool_calls.append(tool_item)
+        return tool_calls, truncated
+
+    @staticmethod
+    def _fit_memory_read_response(payload: dict) -> None:
+        """确保历史读取最终 JSON 响应不超过协议预算。"""
+        while _json_size(payload) > MEMORY_HISTORY_READ_RESPONSE_MAX_BYTES and payload["tool_calls"]:
+            payload["tool_calls"].pop()
+            payload["truncated"] = True
+        while _json_size(payload) > MEMORY_HISTORY_READ_RESPONSE_MAX_BYTES and payload["messages"]:
+            payload["messages"].pop(0)
+            payload["truncated"] = True
 
     async def update_conversation(
         self,
@@ -550,6 +844,7 @@ class ConversationRepository:
         tool_output: str,
         status: str = "success",
         error_message: str | None = None,
+        commit: bool = True,
     ) -> ToolCall | None:
         tool_call = await self.get_tool_call_by_langgraph_id(langgraph_tool_call_id)
         if not tool_call:
@@ -561,8 +856,10 @@ class ConversationRepository:
         if error_message:
             tool_call.error_message = error_message
 
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(tool_call)
+        if commit:
+            await self.db.commit()
 
         logger.debug(f"Updated tool call {langgraph_tool_call_id} with output")
         return tool_call
@@ -575,7 +872,7 @@ class ConversationRepository:
             result = await self.db.execute(select(func.count()).where(Message.conversation_id == conversation_id))
             message_count = result.scalar()
             stats.message_count = message_count
-            await self.db.commit()
+            await self.db.flush()
 
     async def get_attachments(self, conversation_id: int) -> list[dict]:
         conversation = await self.get_conversation_by_id(conversation_id)
@@ -584,6 +881,13 @@ class ConversationRepository:
         metadata = self._ensure_metadata(conversation)
         return list(metadata.get("attachments", []))
 
+    async def lock_attachments(self, conversation_id: int) -> list[dict]:
+        """锁定会话并返回当前附件，用于需要检查后更新的用例。"""
+        conversation = await self._lock_conversation_by_id(conversation_id)
+        if not conversation:
+            return []
+        return list(self._ensure_metadata(conversation).get("attachments", []))
+
     async def get_attachments_by_thread_id(self, thread_id: str) -> list[dict]:
         conversation = await self.get_conversation_by_thread_id(thread_id)
         if not conversation:
@@ -591,7 +895,7 @@ class ConversationRepository:
         return await self.get_attachments(conversation.id)
 
     async def add_attachment(self, conversation_id: int, attachment_info: dict) -> dict | None:
-        conversation = await self.get_conversation_by_id(conversation_id)
+        conversation = await self._lock_conversation_by_id(conversation_id)
         if not conversation:
             return None
 
@@ -604,7 +908,7 @@ class ConversationRepository:
         return attachment_info
 
     async def add_attachments(self, conversation_id: int, attachment_infos: list[dict]) -> list[dict] | None:
-        conversation = await self.get_conversation_by_id(conversation_id)
+        conversation = await self._lock_conversation_by_id(conversation_id)
         if not conversation:
             return None
 
@@ -620,7 +924,7 @@ class ConversationRepository:
     async def update_attachment_status(
         self, conversation_id: int, file_id: str, status: str, update_fields: dict | None = None
     ) -> dict | None:
-        conversation = await self.get_conversation_by_id(conversation_id)
+        conversation = await self._lock_conversation_by_id(conversation_id)
         if not conversation:
             return None
 
@@ -643,7 +947,7 @@ class ConversationRepository:
     async def bind_attachments_to_request(
         self, conversation_id: int, request_id: str, file_ids: list[str]
     ) -> list[dict]:
-        conversation = await self.get_conversation_by_id(conversation_id)
+        conversation = await self._lock_conversation_by_id(conversation_id)
         if not conversation or not request_id or not file_ids:
             return []
 
@@ -673,7 +977,7 @@ class ConversationRepository:
         return [item for item in attachments if item.get("request_id") == request_id]
 
     async def remove_attachment(self, conversation_id: int, file_id: str) -> bool:
-        conversation = await self.get_conversation_by_id(conversation_id)
+        conversation = await self._lock_conversation_by_id(conversation_id)
         if not conversation:
             return False
 

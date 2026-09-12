@@ -14,9 +14,12 @@
             :alt="userStore.username"
             class="avatar-image"
           />
-          <!-- <div class="user-role-badge" :class="userRoleClass"></div> -->
         </div>
-        <div v-if="showRole" class="user-name">{{ userStore.username }}</div>
+        <div v-if="showRole" class="user-identity">
+          <!-- 优先展示中文姓名；历史账号没有姓名时回退到登录账号。 -->
+          <div class="user-name">{{ userStore.displayName || userStore.username }}</div>
+          <div class="user-department">{{ userStore.departmentName || '未分配部门' }}</div>
+        </div>
         <div v-if="slots.actions" class="user-info-actions">
           <slot name="actions" />
         </div>
@@ -28,15 +31,11 @@
               <div class="user-menu-username">{{ userStore.username }}</div>
               <div class="user-menu-details">
                 <span class="user-menu-info">ID: {{ userStore.uid }}</span>
-                <span class="user-menu-role">{{ userRoleText }}</span>
+                <span class="user-menu-role">{{ assignedRolesText }}</span>
               </div>
             </div>
           </a-menu-item>
           <a-menu-divider />
-          <a-menu-item key="docs" @click="openDocs">
-            <template #icon><BookOpen :size="16" /></template>
-            <span class="menu-text">文档中心</span>
-          </a-menu-item>
           <a-menu-item key="theme" @click="toggleTheme">
             <template #icon>
               <Sun v-if="themeStore.isDark" :size="16" />
@@ -47,7 +46,11 @@
             }}</span>
           </a-menu-item>
           <a-menu-divider />
-          <a-menu-item v-if="userStore.isSuperAdmin" key="debug" @click="showDebug = true">
+          <a-menu-item
+            v-if="userStore.hasPermission('system_log:read')"
+            key="debug"
+            @click="infoStore.openDebugModal"
+          >
             <template #icon><Terminal :size="16" /></template>
             <span class="menu-text">调试面板（非生产环境）</span>
           </a-menu-item>
@@ -55,7 +58,7 @@
             <template #icon><Settings :size="16" /></template>
             <span class="menu-text">设置</span>
           </a-menu-item>
-          <a-menu-item key="logout" @click="logout">
+          <a-menu-item v-if="props.allowLogout" key="logout" @click="logout">
             <template #icon><LogOut :size="16" /></template>
             <span class="menu-text">退出登录</span>
           </a-menu-item>
@@ -65,35 +68,34 @@
     <a-button v-else-if="showButton" type="primary" @click="goToLogin"> 登录 </a-button>
 
     <!-- 调试面板 Modal -->
-    <DebugComponent v-model:show="showDebug" />
+    <DebugComponent v-model:show="infoStore.showDebugModal" />
   </div>
 </template>
 
 <script setup>
-import { computed, ref, inject, useSlots } from 'vue'
+import { computed, inject, useSlots } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
+import { useInfoStore } from '@/stores/info'
 import DebugComponent from '@/components/DebugComponent.vue'
 import { message } from 'ant-design-vue'
-import { BookOpen, Sun, Moon, LogOut, Settings, Terminal } from 'lucide-vue-next'
+import { Sun, Moon, LogOut, Settings, Terminal } from '@lucide/vue'
 import { useThemeStore } from '@/stores/theme'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 
 const router = useRouter()
 const userStore = useUserStore()
+const infoStore = useInfoStore()
 const themeStore = useThemeStore()
 const slots = useSlots()
-
-// 调试面板状态
-const showDebug = ref(false)
 
 // Inject settings modal methods
 const { openSettingsModal } = inject('settingsModal', {})
 
 const avatarDefaultSrc = computed(() => (userStore.uid ? generatePixelAvatar(userStore.uid) : ''))
 
-defineProps({
+const props = defineProps({
   showRole: {
     type: Boolean,
     default: false
@@ -101,25 +103,26 @@ defineProps({
   showButton: {
     type: Boolean,
     default: false
+  },
+  // 嵌入 OA 时由宿主系统维护登录态，默认仅独立站允许主动退出。
+  allowLogout: {
+    type: Boolean,
+    default: true
   }
 })
 
-// 用户角色显示文本
-const userRoleText = computed(() => {
-  switch (userStore.userRole) {
-    case 'superadmin':
-      return '超级管理员'
-    case 'admin':
-      return '管理员'
-    case 'user':
-      return '普通用户'
-    default:
-      return '未知角色'
-  }
-})
+const assignedRolesText = computed(
+  () => userStore.userRoles.map((role) => role.name).join('、') || '未分配角色'
+)
 
 // 退出登录
 const logout = () => {
+  // 防止隐藏菜单以外的调用破坏 OA 宿主的登录会话。
+  if (!props.allowLogout) {
+    console.info('[用户菜单] 当前为嵌入模式，已忽略主动退出登录操作')
+    return
+  }
+
   userStore.logout()
   message.success('已退出登录')
   // 跳转到首页
@@ -129,10 +132,6 @@ const logout = () => {
 // 前往登录页
 const goToLogin = () => {
   router.push('/login')
-}
-
-const openDocs = () => {
-  window.open('https://xerrors.github.io/Yuxi/', '_blank', 'noopener,noreferrer')
 }
 
 const toggleTheme = () => {
@@ -183,6 +182,20 @@ const openProfile = () => {
 .user-name {
   min-width: 0;
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-identity {
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.user-department {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gray-500);
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

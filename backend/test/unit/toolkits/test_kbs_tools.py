@@ -9,6 +9,8 @@ import pytest
 from yuxi.agents.toolkits.kbs import tools
 from yuxi.knowledge.base import KnowledgeBase
 from yuxi.knowledge.manager import KnowledgeBaseManager
+from yuxi.knowledge.read_models import KnowledgeBaseDetail
+from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
 
 
 def _tool_callable(tool):
@@ -86,7 +88,23 @@ def _patch_retrievers(monkeypatch, *, kb_type: str = "milvus", retriever=None):
         raise AssertionError("knowledge base method is not configured for this test")
 
     async def _fake_get_database_document_support(kb_id: str):
-        return {"kb_id": kb_id, "name": "FAQ", "kb_type": kb_type}, kb_type != "dify"
+        return (
+            KnowledgeBaseDetail(
+                kb_id=kb_id,
+                name="FAQ",
+                description=None,
+                kb_type=kb_type,
+                embedding_model_spec=None,
+                llm_model_spec=None,
+                query_params={},
+                additional_params={},
+                share_config={"version": 2, "read_scope": None, "manage_scope": None},
+                created_by=None,
+                created_at=None,
+                files=None,
+            ),
+            kb_type != "dify",
+        )
 
     manager = SimpleNamespace(
         find_file_content=_not_configured,
@@ -125,10 +143,7 @@ async def test_get_mindmap_resolves_current_visible_knowledge_base(monkeypatch) 
         return SimpleNamespace(name="Renamed FAQ", mindmap={"content": "Root", "children": []})
 
     monkeypatch.setattr(tools, "_resolve_visible_knowledge_bases_for_query", _fake_visible_kbs)
-    monkeypatch.setattr(
-        "yuxi.repositories.knowledge_base_repository.KnowledgeBaseRepository.get_by_kb_id",
-        fake_get_by_kb_id,
-    )
+    monkeypatch.setattr(KnowledgeBaseRepository, "get_by_kb_id", fake_get_by_kb_id)
 
     result = await _run_get_mindmap(kb_name="FAQ", runtime=SimpleNamespace(context=SimpleNamespace()))
 
@@ -465,40 +480,72 @@ async def test_search_file_requires_kb_name_or_query(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_file_returns_files_by_query(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("kwargs", "fake_files", "expected_filenames"),
+    [
+        (
+            {"query": "test"},
+            [
+                SimpleNamespace(
+                    file_id="file-1",
+                    filename="test.pdf",
+                    file_type="file",
+                    status="indexed",
+                    created_at=None,
+                    updated_at=None,
+                    file_size=1024,
+                ),
+                SimpleNamespace(
+                    file_id="file-2",
+                    filename="test2.pdf",
+                    file_type="file",
+                    status="indexed",
+                    created_at=None,
+                    updated_at=None,
+                    file_size=2048,
+                ),
+                SimpleNamespace(
+                    file_id="file-3",
+                    filename="other.pdf",
+                    file_type="file",
+                    status="indexed",
+                    created_at=None,
+                    updated_at=None,
+                    file_size=512,
+                ),
+            ],
+            ["test.pdf", "test2.pdf"],
+        ),
+        (
+            {"kb_name": "FAQ"},
+            [
+                SimpleNamespace(
+                    file_id="file-1",
+                    filename="test.pdf",
+                    file_type="file",
+                    status="indexed",
+                    created_at=None,
+                    updated_at=None,
+                    file_size=1024,
+                ),
+                SimpleNamespace(
+                    file_id="file-2",
+                    filename="other.pdf",
+                    file_type="file",
+                    status="indexed",
+                    created_at=None,
+                    updated_at=None,
+                    file_size=2048,
+                ),
+            ],
+            ["test.pdf", "other.pdf"],
+        ),
+    ],
+)
+async def test_search_file_returns_files(monkeypatch, kwargs: dict, fake_files, expected_filenames: list[str]) -> None:
+    from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
+
     monkeypatch.setattr(tools, "_resolve_visible_knowledge_bases_for_query", _fake_visible_kbs)
-
-    from types import SimpleNamespace as SN
-
-    fake_files = [
-        SN(
-            file_id="file-1",
-            filename="test.pdf",
-            file_type="file",
-            status="indexed",
-            created_at=None,
-            updated_at=None,
-            file_size=1024,
-        ),
-        SN(
-            file_id="file-2",
-            filename="test2.pdf",
-            file_type="file",
-            status="indexed",
-            created_at=None,
-            updated_at=None,
-            file_size=2048,
-        ),
-        SN(
-            file_id="file-3",
-            filename="other.pdf",
-            file_type="file",
-            status="indexed",
-            created_at=None,
-            updated_at=None,
-            file_size=512,
-        ),
-    ]
 
     async def _fake_search_files(
         self,
@@ -514,68 +561,13 @@ async def test_search_file_returns_files_by_query(monkeypatch) -> None:
         matches = [file for file in fake_files if (filename_query or "") in file.filename.lower()]
         return matches[offset : offset + limit], len(matches)
 
-    from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
-
     monkeypatch.setattr(KnowledgeFileRepository, "search_files", _fake_search_files)
 
     runtime = SimpleNamespace(context=SimpleNamespace())
-    result = await _run_search_file(query="test", runtime=runtime)
+    result = await _run_search_file(runtime=runtime, **kwargs)
 
-    assert result["total"] == 2
-    assert len(result["files"]) == 2
-    assert result["files"][0]["filename"] == "test.pdf"
-    assert result["files"][1]["filename"] == "test2.pdf"
-
-
-@pytest.mark.asyncio
-async def test_search_file_returns_all_files_when_query_empty(monkeypatch) -> None:
-    monkeypatch.setattr(tools, "_resolve_visible_knowledge_bases_for_query", _fake_visible_kbs)
-
-    from types import SimpleNamespace as SN
-
-    fake_files = [
-        SN(
-            file_id="file-1",
-            filename="test.pdf",
-            file_type="file",
-            status="indexed",
-            created_at=None,
-            updated_at=None,
-            file_size=1024,
-        ),
-        SN(
-            file_id="file-2",
-            filename="other.pdf",
-            file_type="file",
-            status="indexed",
-            created_at=None,
-            updated_at=None,
-            file_size=2048,
-        ),
-    ]
-
-    async def _fake_search_files(
-        self,
-        *,
-        kb_id,
-        filename_query=None,
-        statuses=None,
-        offset=0,
-        limit=100,
-        files_only=True,
-    ):
-        del self, kb_id, filename_query, statuses, files_only
-        return fake_files[offset : offset + limit], len(fake_files)
-
-    from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
-
-    monkeypatch.setattr(KnowledgeFileRepository, "search_files", _fake_search_files)
-
-    runtime = SimpleNamespace(context=SimpleNamespace())
-    result = await _run_search_file(kb_name="FAQ", runtime=runtime)
-
-    assert result["total"] == 2
-    assert len(result["files"]) == 2
+    assert result["total"] == len(expected_filenames)
+    assert [file["filename"] for file in result["files"]] == expected_filenames
 
 
 @pytest.mark.asyncio
@@ -723,37 +715,59 @@ async def _run_download_kb_file(**kwargs):
     return await _run_tool(_download_kb_file_callable(), **kwargs)
 
 
+def _patch_output_backend(monkeypatch: pytest.MonkeyPatch):
+    state = SimpleNamespace(files={}, scopes=[])
+
+    class FakeBackend:
+        def __init__(self, **kwargs):
+            state.scopes.append(kwargs)
+
+        def regular_file_exists(self, path):
+            return path in state.files
+
+        def upload_authorized_file_from_path(self, path, source_path):
+            state.files[path] = Path(source_path).read_bytes()
+
+    monkeypatch.setattr(tools, "ProvisionerSandboxBackend", FakeBackend)
+    return state
+
+
 @pytest.mark.asyncio
 async def test_download_kb_file_writes_original_to_outputs_and_returns_virtual_path(monkeypatch, tmp_path) -> None:
-    captured: dict = {}
-
-    def _fake_resolve_output_path(file_thread_id, uid, data, file_id, save_as):
-        captured["file_thread_id"] = file_thread_id
-        captured["uid"] = uid
-        captured["data"] = data
-        captured["save_as"] = save_as
-        return tmp_path / "report.pdf"
+    del tmp_path
+    sandbox = _patch_output_backend(monkeypatch)
 
     monkeypatch.setattr(tools, "_resolve_visible_knowledge_bases_for_query", _fake_visible_kbs)
     _patch_download_manager(
         monkeypatch,
         file_download=_async_get_file_download(b"%PDF-1.4 bytes", "report.pdf"),
     )
-    monkeypatch.setattr(tools, "_resolve_download_output_path", _fake_resolve_output_path)
-    monkeypatch.setattr(
-        tools,
-        "virtual_path_for_thread_file",
-        lambda thread_id, path, *, uid: f"/home/gem/user-data/outputs/{Path(path).name}",
-    )
 
-    runtime = SimpleNamespace(context=SimpleNamespace(file_thread_id="thread-1", uid="user-1"))
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            thread_id="child-thread",
+            runtime_scope_id="thread-1",
+            workdir_relative_path="projects/11111111-1111-4111-8111-111111111111",
+            workdir_path="/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111",
+            uid="user-1",
+        )
+    )
     result = await _run_download_kb_file(kb_id="db-1", file_id="file-1", runtime=runtime)
 
-    assert (tmp_path / "report.pdf").read_bytes() == b"%PDF-1.4 bytes"
-    assert captured["file_thread_id"] == "thread-1"
-    assert captured["save_as"] is None
+    assert (
+        sandbox.files["/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111/outputs/report.pdf"]
+        == b"%PDF-1.4 bytes"
+    )
+    assert sandbox.scopes == [
+        {
+            "thread_id": "thread-1",
+            "uid": "user-1",
+            "workdir_path": "projects/11111111-1111-4111-8111-111111111111",
+            "create_if_missing": True,
+        }
+    ]
     assert result == {
-        "virtual_path": "/home/gem/user-data/outputs/report.pdf",
+        "virtual_path": "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111/outputs/report.pdf",
         "filename": "report.pdf",
         "media_type": "application/octet-stream",
         "size_bytes": len(b"%PDF-1.4 bytes"),
@@ -763,28 +777,30 @@ async def test_download_kb_file_writes_original_to_outputs_and_returns_virtual_p
 
 @pytest.mark.asyncio
 async def test_download_kb_file_passes_save_as_argument(monkeypatch, tmp_path) -> None:
-    captured: dict = {}
-
-    def _fake_resolve_output_path(file_thread_id, uid, data, file_id, save_as):
-        captured["save_as"] = save_as
-        return tmp_path / "renamed.xlsx"
+    del tmp_path
+    sandbox = _patch_output_backend(monkeypatch)
 
     monkeypatch.setattr(tools, "_resolve_visible_knowledge_bases_for_query", _fake_visible_kbs)
     _patch_download_manager(
         monkeypatch,
         file_download=_async_get_file_download(b"xlsx bytes", "origin.xlsx"),
     )
-    monkeypatch.setattr(tools, "_resolve_download_output_path", _fake_resolve_output_path)
-    monkeypatch.setattr(
-        tools,
-        "virtual_path_for_thread_file",
-        lambda thread_id, path, *, uid: f"/home/gem/user-data/outputs/{Path(path).name}",
-    )
 
-    runtime = SimpleNamespace(context=SimpleNamespace(file_thread_id="thread-1", uid="user-1"))
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            thread_id="thread-1",
+            runtime_scope_id="thread-1",
+            workdir_relative_path="projects/11111111-1111-4111-8111-111111111111",
+            workdir_path="/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111",
+            uid="user-1",
+        )
+    )
     result = await _run_download_kb_file(kb_id="db-1", file_id="file-1", save_as="renamed.xlsx", runtime=runtime)
 
-    assert captured["save_as"] == "renamed.xlsx"
+    assert (
+        sandbox.files["/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111/outputs/renamed.xlsx"]
+        == b"xlsx bytes"
+    )
     assert result["saved_as"] == "renamed.xlsx"
 
 
@@ -816,7 +832,7 @@ async def test_download_kb_file_rejects_readonly_knowledge_base(monkeypatch) -> 
 
     _patch_download_manager(monkeypatch, kb_type="dify", file_download=_must_not_download)
 
-    runtime = SimpleNamespace(context=SimpleNamespace(file_thread_id="thread-1", uid="user-1"))
+    runtime = SimpleNamespace(context=SimpleNamespace(thread_id="thread-1", uid="user-1"))
     result = await _run_download_kb_file(kb_id="db-1", file_id="file-1", runtime=runtime)
 
     assert not_called["flag"] is False
@@ -846,33 +862,38 @@ async def test_download_kb_file_missing_sandbox_context_returns_error(monkeypatc
     assert "沙盒上下文" in result
 
 
-def test_resolve_download_output_path_strips_directory_and_avoids_traversal(monkeypatch, tmp_path) -> None:
+def test_resolve_download_output_path_strips_directory_and_avoids_traversal() -> None:
     """save_as 含目录或路径穿越时，必须被剥离成纯文件名并落在 outputs 下。"""
-    monkeypatch.setattr(tools, "ensure_thread_dirs", lambda *a, **k: None)
-    monkeypatch.setattr(tools, "sandbox_outputs_dir", lambda thread_id: tmp_path)
-
     data = {"filename": "report.pdf"}
-    path = tools._resolve_download_output_path("thread-1", "user-1", data, "file-1", "../../../etc/passwd")
+    backend = SimpleNamespace(regular_file_exists=lambda _path: False)
+    path = tools._resolve_download_output_path(
+        backend,
+        "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111",
+        data,
+        "file-1",
+        "../../../etc/passwd",
+    )
 
-    assert path.parent == tmp_path
-    # 纯文件名，不含目录分隔，且未逃出 outputs 目录
-    assert path.name == "passwd"
-    assert "/" not in path.name
+    assert path == "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111/outputs/passwd"
 
 
-def test_resolve_download_output_path_appends_suffix_on_conflict(monkeypatch, tmp_path) -> None:
+def test_resolve_download_output_path_appends_suffix_on_conflict() -> None:
     """目标文件名已存在时，追加 _1 / _2 后缀直到不冲突。"""
-    monkeypatch.setattr(tools, "ensure_thread_dirs", lambda *a, **k: None)
-    monkeypatch.setattr(tools, "sandbox_outputs_dir", lambda thread_id: tmp_path)
-
-    (tmp_path / "report.pdf").write_bytes(b"existing")
-    (tmp_path / "report_1.pdf").write_bytes(b"existing")
-
     data = {"filename": "report.pdf"}
-    path = tools._resolve_download_output_path("thread-1", "user-1", data, "file-1", None)
+    existing = {
+        "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111/outputs/report.pdf",
+        "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111/outputs/report_1.pdf",
+    }
+    backend = SimpleNamespace(regular_file_exists=lambda path: path in existing)
+    path = tools._resolve_download_output_path(
+        backend,
+        "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111",
+        data,
+        "file-1",
+        None,
+    )
 
-    assert path.name == "report_2.pdf"
-    assert not path.exists()
+    assert path == "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111/outputs/report_2.pdf"
 
 
 def _async_get_file_download(content: bytes, filename: str):

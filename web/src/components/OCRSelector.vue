@@ -22,7 +22,12 @@
       <div class="ocr-selector-dropdown" @click.stop>
         <div class="ocr-selector-header">
           <span>OCR 方法</span>
-          <button v-if="userStore.isAdmin" type="button" class="config-link" @click="goToConfig">
+          <button
+            v-if="userStore.hasPermission('ocr:manage')"
+            type="button"
+            class="config-link"
+            @click="goToConfig"
+          >
             去配置
           </button>
         </div>
@@ -85,7 +90,7 @@
 
 <script setup>
 import { computed, inject, onMounted, ref } from 'vue'
-import { ChevronDown, ChevronRight, RefreshCw } from 'lucide-vue-next'
+import { ChevronDown, ChevronRight, RefreshCw } from '@lucide/vue'
 import { ocrApi } from '@/apis/system_api'
 import { useUserStore } from '@/stores/user'
 

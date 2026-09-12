@@ -5,11 +5,12 @@
         <div class="disabled-content">
           <h4>知识图谱不可用</h4>
           <p>当前知识库类型 "{{ kbTypeLabel }}" 不支持知识图谱功能。</p>
-          <p>只有 Milvus 类型的知识库支持知识图谱。</p>
+          <p>只有 Yuxi 类型的知识库支持知识图谱。</p>
         </div>
       </div>
       <div v-else class="graph-wrapper">
-        <GraphCanvas
+        <component
+          :is="graphCanvasComponent"
           ref="graphRef"
           :graph-data="graph.graphData"
           @node-click="graph.handleNodeClick"
@@ -64,7 +65,7 @@
               </div>
             </div>
           </template>
-        </GraphCanvas>
+        </component>
         <ResourceEmptyState
           v-if="showGraphConfigEmpty"
           class="graph-empty-state"
@@ -420,8 +421,9 @@ import {
   Network,
   BrainCircuit,
   ScanText
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import GraphCanvas from '@/components/GraphCanvas.vue'
+import GraphCanvas2D from '@/components/GraphCanvas2D.vue'
 import GraphDetailPanel from '@/components/GraphDetailPanel.vue'
 import ResourceEmptyState from '@/components/shared/ResourceEmptyState.vue'
 import { getKbTypeLabel } from '@/utils/kb_utils'
@@ -434,6 +436,14 @@ import { useGraph } from '@/composables/useGraph'
 const GRAPH_BUILD_TASK_TYPE = 'knowledge_graph_index'
 const MILVUS_KB_TYPE = 'milvus'
 const GRAPH_SUPPORTED_KB_TYPES = new Set([MILVUS_KB_TYPE])
+
+// 图谱渲染实现开关。
+// true  → GraphCanvas2D：sigma.js 2D 扁平渲染（当前使用）
+// false → GraphCanvas：3d-force-graph + Three.js 3D 渲染（历史实现，完整保留）
+// 两套组件对外契约（props / emits / slots / 暴露方法）完全一致，
+// 因此切换只需要改这一行，上层调用逻辑与样式均无需调整。
+const USE_FLAT_2D_GRAPH = true
+const graphCanvasComponent = USE_FLAT_2D_GRAPH ? GraphCanvas2D : GraphCanvas
 
 const props = defineProps({
   active: {
@@ -582,7 +592,9 @@ const graphConfigForm = reactive({
   extractor_type: 'llm',
   model_spec: '',
   schema: '',
-  concurrency_count: 50,
+  // 默认并发从 50 下调到 8：DashScope 等托管模型对并发有硬限，
+  // 50 并发会大量返回 429 Too many concurrent requests 并拖长单请求耗时，反而降低成功率。
+  concurrency_count: 8,
   model_params_text: ''
 })
 
@@ -662,7 +674,7 @@ const fillGraphConfigForm = () => {
   graphConfigForm.extractor_type = 'llm'
   graphConfigForm.model_spec = options.model_spec || configStore.config?.default_model || ''
   graphConfigForm.schema = options.schema || ''
-  graphConfigForm.concurrency_count = Number(options.concurrency_count || 50)
+  graphConfigForm.concurrency_count = Number(options.concurrency_count || 8)
   graphConfigForm.model_params_text = options.model_params
     ? JSON.stringify(options.model_params)
     : ''
@@ -682,7 +694,7 @@ const buildExtractorOptions = () => {
   return {
     model_spec: graphConfigForm.model_spec,
     schema: graphConfigForm.schema.trim(),
-    concurrency_count: graphConfigForm.concurrency_count || 50,
+    concurrency_count: graphConfigForm.concurrency_count || 8,
     model_params: parseModelParams()
   }
 }

@@ -91,7 +91,7 @@ def coerce_any_to_utc_datetime(value: dt.datetime | int | float | str | None) ->
     if isinstance(value, dt.datetime):
         return ensure_utc(value)
 
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return dt.datetime.fromtimestamp(value, tz=UTC)
 
     if isinstance(value, str):
@@ -124,6 +124,8 @@ def format_utc_datetime(value: dt.datetime | None) -> str | None:
     """
     if value is None:
         return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
     return utc_isoformat(value)
 
 

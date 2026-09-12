@@ -15,9 +15,10 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from yuxi.storage.postgres.models_business import Base
+from sqlalchemy.orm import declarative_base
 from yuxi.utils.datetime_utils import utc_now_naive
 
+Base = declarative_base()
 JSON_VALUE = JSON().with_variant(JSONB, "postgresql")
 
 
@@ -42,6 +43,9 @@ class KnowledgeBase(Base):
     mindmap_metadata = Column(JSON_VALUE)
     sample_questions = Column(JSON_VALUE)
     created_by = Column(String(64))
+    organization_id_snapshot = Column(Integer, nullable=True)
+    organization_path_snapshot = Column(String(512), nullable=True)
+    organization_snapshot_inferred = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=utc_now_naive)
     updated_at = Column(DateTime(timezone=True), default=utc_now_naive, onupdate=utc_now_naive)
 

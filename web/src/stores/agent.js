@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { agentApi, databaseApi, mcpApi, skillApi, toolApi } from '@/apis'
+import { useUserStore } from './user'
+import { useRuntimeCapabilitiesStore } from '@/stores/runtimeCapabilities'
 import { isDefaultAllAgentResourceKind } from '@/utils/agentConfigUtils'
 import { handleChatError } from '@/utils/errorHandler'
 
@@ -86,10 +88,20 @@ export const useAgentStore = defineStore(
 
     async function fetchMentionResources() {
       try {
+        const userStore = useUserStore()
+        const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
+        await runtimeCapabilitiesStore.ensureLoaded()
         const [dbsRes, mcpsRes, skillsRes] = await Promise.all([
-          databaseApi.getAccessibleDatabases().catch(() => ({ databases: [] })),
-          mcpApi.getMcpServers().catch(() => ({ data: [] })),
-          skillApi.listAccessibleSkills().catch(() => ({ data: [] }))
+          runtimeCapabilitiesStore.knowledgeEnabled &&
+          userStore.hasPermission('knowledge_base:read')
+            ? databaseApi.getAccessibleDatabases().catch(() => ({ databases: [] }))
+            : { databases: [] },
+          userStore.hasPermission('mcp:manage')
+            ? mcpApi.getMcpServers().catch(() => ({ data: [] }))
+            : { data: [] },
+          userStore.hasPermission('skill:use')
+            ? skillApi.listAccessibleSkills().catch(() => ({ data: [] }))
+            : { data: [] }
         ])
         availableKnowledgeBases.value = dbsRes.databases || []
         availableMcps.value = mcpsRes.data || []
@@ -100,6 +112,11 @@ export const useAgentStore = defineStore(
     }
 
     async function fetchToolMetadata() {
+      const userStore = useUserStore()
+      if (!userStore.hasPermission('tool:manage')) {
+        toolMetadata.value = []
+        return
+      }
       try {
         const result = await toolApi.getTools()
         toolMetadata.value = result?.data || []
@@ -110,6 +127,8 @@ export const useAgentStore = defineStore(
     }
 
     async function initialize() {
+      const userStore = useUserStore()
+      if (!userStore.hasPermission('agent:use')) return
       if (isInitialized.value || isInitializing.value) return
       isInitializing.value = true
       try {

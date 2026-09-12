@@ -58,7 +58,7 @@ async def test_submit_run_command_rejects_overlong_origin_before_repository_acce
 @pytest.mark.asyncio
 async def test_submit_run_command_shares_conversation_intake_and_finalize(monkeypatch: pytest.MonkeyPatch):
     calls: dict[str, object] = {}
-    current_user = SimpleNamespace(uid="user-1", role="user")
+    current_user = SimpleNamespace(uid="user-1")
 
     class Db:
         @asynccontextmanager
@@ -84,7 +84,11 @@ async def test_submit_run_command_shares_conversation_intake_and_finalize(monkey
 
         async def add_conversation(self, **kwargs):
             calls["conversation"] = kwargs
-            return SimpleNamespace(id=1, thread_id=kwargs["thread_id"])
+            return SimpleNamespace(
+                id=1,
+                thread_id=kwargs["thread_id"],
+                project_id=kwargs["project_id"],
+            )
 
     async def fake_intake_request(**kwargs):
         calls["intake"] = kwargs
@@ -105,6 +109,24 @@ async def test_submit_run_command_shares_conversation_intake_and_finalize(monkey
     monkeypatch.setattr(svc, "AgentRunRequestRepository", _EmptyRequestRepo)
     monkeypatch.setattr(svc, "AgentRunRepository", _EmptyRunRepo)
     monkeypatch.setattr(svc, "ConversationRepository", ConvRepo)
+
+    async def fake_create_implicit_project(**kwargs):
+        calls["project"] = kwargs
+        return SimpleNamespace(
+            id="11111111-1111-4111-8111-111111111111",
+            workdir_path="projects/11111111-1111-4111-8111-111111111111",
+            directory_mode="managed",
+        )
+
+    async def fake_resolve_binding(**kwargs):
+        del kwargs
+        return (
+            "projects/11111111-1111-4111-8111-111111111111",
+            SimpleNamespace(directory_mode="managed"),
+        )
+
+    monkeypatch.setattr(svc, "create_implicit_project", fake_create_implicit_project)
+    monkeypatch.setattr(svc, "resolve_conversation_workdir_binding", fake_resolve_binding)
     monkeypatch.setattr(svc.agent_manager, "get_agent", lambda backend_id: object())
     monkeypatch.setattr(svc, "intake_request", fake_intake_request)
     monkeypatch.setattr(svc, "finalize_intake", fake_finalize_intake)
@@ -126,6 +148,7 @@ async def test_submit_run_command_shares_conversation_intake_and_finalize(monkey
         ),
         request_metadata={"request_id": "req-1", "channel": "spoofed"},
         model_spec="provider:model",
+        executor="pi",
         create_conversation=True,
         conversation_title="Agent Call Run",
     )
@@ -137,10 +160,12 @@ async def test_submit_run_command_shares_conversation_intake_and_finalize(monkey
         "channel": "api",
         "agent_invocation_meta": {"trace_id": "trace-1"},
     }
+    assert calls["conversation"]["project_id"] == "11111111-1111-4111-8111-111111111111"
     assert calls["intake"]["source"] == "agent_call"
     assert calls["intake"]["channel"] == "api"
     assert calls["intake"]["external_id"] == "external-1"
     assert calls["intake"]["origin_metadata"] == {"agent_invocation_meta": {"trace_id": "trace-1"}}
+    assert calls["intake"]["executor"] == "pi"
     assert calls["intake"]["meta"] == {
         "request_id": "req-1",
         "channel": "api",
@@ -158,13 +183,16 @@ async def test_submit_run_command_shares_conversation_intake_and_finalize(monkey
         "thread_id": "thread-1",
     }
     assert calls["finalize"]["intake"].run_id == "run-1"
+    assert calls["finalize"]["uid"] == "user-1"
+    assert calls["finalize"]["workdir_path"] == "projects/11111111-1111-4111-8111-111111111111"
+    assert calls["finalize"]["materialize_managed"] is True
 
 
 @pytest.mark.asyncio
 async def test_submit_run_command_requires_existing_conversation_for_web_chat(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    current_user = SimpleNamespace(uid="user-1", role="user")
+    current_user = SimpleNamespace(uid="user-1")
 
     class AgentRepo:
         def __init__(self, db):

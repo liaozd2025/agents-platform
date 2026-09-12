@@ -6,7 +6,7 @@ const displayMode = ref(DEFAULT_OA_EMBED_MODE)
 const modeConfirmed = ref(false)
 const readonlyDisplayMode = readonly(displayMode)
 const readonlyModeConfirmed = readonly(modeConfirmed)
-const embedAppSections = ['/agent-manage', '/workspace', '/extensions', '/dashboard']
+const embedAppSections = ['/agent-manage', '/workspace', '/extensions', '/dashboard', '/settings']
 
 /** 根据路由元数据解析应用运行形态。 */
 export function resolveAppSurface(route) {

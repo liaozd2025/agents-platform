@@ -44,6 +44,7 @@ import MysqlListTablesTool from './tools/MysqlListTablesTool.vue'
 import AskUserQuestionTool from './tools/AskUserQuestionTool.vue'
 import ExecuteTool from './tools/ExecuteTool.vue'
 import OcrParseFileTool from './tools/OcrParseFileTool.vue'
+import RememberMemoryTool from './tools/RememberMemoryTool.vue'
 import { getToolCallId, isHiddenToolCall } from './toolRegistry'
 
 const props = defineProps({
@@ -68,6 +69,7 @@ const TOOL_RENDERERS = {
   bash: ExecuteTool,
   calculator: CalculatorTool,
   cmd: ExecuteTool,
+  edit: EditFileTool,
   edit_file: EditFileTool,
   execute: ExecuteTool,
   find_kb_document: FindKbDocumentTool,
@@ -82,8 +84,11 @@ const TOOL_RENDERERS = {
   mysql_query: MysqlQueryTool,
   ocr_parse_file: OcrParseFileTool,
   open_kb_document: OpenKbDocumentTool,
+  pi_sandbox: TaskTool,
   query_kb: QueryKbTool,
+  read: ReadFileTool,
   read_file: ReadFileTool,
+  remember_memory: RememberMemoryTool,
   replace: EditFileTool,
   run_shell_command: ExecuteTool,
   search_file: SearchFileTool,
@@ -98,6 +103,7 @@ const TOOL_RENDERERS = {
   tavily_search: WebSearchTool,
   doubao_search: WebSearchTool,
   text_to_img_qwen_image: ImageTool,
+  write: WriteFileTool,
   write_file: WriteFileTool,
   write_todos: TodoListTool
 }

@@ -1,37 +1,64 @@
-# Langfuse 集成
+# 接入 Langfuse
 
-## 为什么 Yuxi 需要 Langfuse
+Langfuse 是 Yuxi 的可选观测服务。它把一次 AgentRun 中的模型调用、工具调用、耗时和错误放到同一条 trace 中，方便按用户、线程、智能体和请求排查问题。
 
-Langfuse 是一套面向大模型应用的可观测性平台，适合用来观察一次智能体执行过程中到底发生了什么。在 Yuxi 里，一轮用户消息通常不会只对应一次简单的模型调用，它往往会伴随 LangGraph 图执行、工具调用、知识库检索以及多轮中间状态切换。仅靠普通后端日志，虽然也能定位问题，但往往需要在多个文件和多个服务日志之间来回跳转，阅读成本高，而且很难从用户、线程和智能体三个维度统一查看。Langfuse 的价值就在于，它把这些原本分散的执行细节收拢到同一条 trace 里，让你能够从一次对话出发，回看模型输入输出、工具链路、耗时和错误位置。
+Langfuse 不拥有 Yuxi 的消息、运行状态或最终结果。即使 Langfuse 未配置、初始化失败或暂时不可用，聊天和 AgentRun 仍按本地业务链路运行。
 
-在 Yuxi 当前的实现中，Langfuse 主要承担的是智能体执行观测层，而不是业务主流程的一部分。换句话说，它不会替代模型服务，也不会替代聊天接口本身，而是帮助你在智能体已经能够工作的前提下，看清楚它是如何工作的。对于调试复杂 Agent、排查工具调用失败、评估多轮会话质量以及分析不同智能体的耗时与成本来说，这类观测能力非常关键。尤其是在一个线程里连续发生多轮交互时，Langfuse 可以帮助你把“这轮请求是谁发起的、落在哪个 thread、触发了哪个 agent、调用了哪些模型和工具”这些信息统一串起来。
+## 能看到什么
 
-## 在 Yuxi 中能做什么
+Yuxi 会把本地运行信息映射到 Langfuse：
 
-Yuxi 对 Langfuse 的映射方式比较直接。一个 Yuxi 用户会映射为 Langfuse 中的 `user_id`，一个对话线程会映射为 `session_id`，而每次用户输入触发的一轮智能体执行会形成一条独立的 trace。这样做的好处是，既能按单轮请求排查问题，也能在同一个线程维度下连续查看多轮会话。对于需要长期分析使用质量、成本和延迟的场景，这种映射方式能够兼顾可读性和后续统计需求。
+| Yuxi 信息 | Langfuse 字段 | 用途 |
+| --- | --- | --- |
+| 用户 `uid` | `user_id` | 按用户筛选 |
+| 对话 `thread_id` | `session_id` | 查看同一线程的多轮运行 |
+| 一次请求 | trace | 查看模型、工具、耗时和错误 |
+| `agent_id`、operation 等 | metadata / tags | 按智能体和调用类型筛选 |
 
-当 Langfuse 与 Yuxi 连通之后，它最直接的作用是帮助你看清一轮智能体请求内部发生了哪些步骤。你可以看到这一轮调用关联的是哪个用户、哪个线程、哪个智能体，也可以进一步观察模型调用、工具调用和整体耗时表现。对于日常调试来说，它让“问题到底出在模型、工具、配置还是图流程”这件事变得更容易判断。对于长期运行的系统来说，它也为后续做延迟分析、成本分析和用户反馈分析提供了统一的观察入口。
+对话中的助手消息支持点赞或点踩。Yuxi 先把反馈保存到本地业务表；消息有对应 trace 时，再向 Langfuse 写入 `user-feedback` score。点赞为 `1`，点踩为 `0`，点踩原因作为 comment 保存。
 
-用户在对话界面对助手消息提交点赞或点踩后，Yuxi 会继续把反馈保存在本地业务表中；如果该助手消息已经关联 Langfuse trace，则会同步写入 Langfuse score。同步到 Langfuse 的 score 名称为 `user-feedback`，点赞值为 `1`，点踩值为 `0`，点踩原因会作为 score comment 保存，便于在 Langfuse 中按低分反馈筛选和分析具体 trace。
+## 配置
 
-## 如何配置
+在 API 和 worker 的运行环境中设置：
 
-如果你准备启用 Langfuse，首先需要在 Langfuse Cloud 中创建项目并获取访问凭证。当前版本推荐优先使用云端模式，因为接入成本最低，也更适合先把 tracing 跑通。你需要在运行 Yuxi 的环境中配置 `LANGFUSE_PUBLIC_KEY`、`LANGFUSE_SECRET_KEY` 和 `LANGFUSE_BASE_URL`。其中前两个字段用于鉴权，`LANGFUSE_BASE_URL` 用于指定 Langfuse 服务地址；如果你使用官方云服务，通常可以直接填写 `https://cloud.langfuse.com`。在大多数部署场景下，只要把这些变量写入 `.env` 并通过 Docker Compose 传给 `api` 服务即可生效。
+```bash
+LANGFUSE_PUBLIC_KEY=<your-public-key>
+LANGFUSE_SECRET_KEY=<your-secret-key>
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
 
-从当前实现来看，Langfuse 只有在 key 配置完整时才会被启用。如果没有配置 `LANGFUSE_PUBLIC_KEY` 或 `LANGFUSE_SECRET_KEY`，Yuxi 会自动退化为“不启用 tracing”的状态，正常聊天功能不会因此中断。这意味着 Langfuse 是一个可选增强项，而不是系统启动的前置依赖。对于希望先验证主流程、后续再逐步补全观测能力的部署者来说，这种行为比较友好，因为它降低了接入门槛，也减少了配置错误对主业务的影响。
+`LANGFUSE_BASE_URL` 用于自托管或指定区域；留空时使用 SDK 默认地址。需要显式关闭时设置：
 
-## 配置后系统会如何工作
+```bash
+LANGFUSE_ENABLED=false
+```
 
-理解 Langfuse 的另一个关键点在于，它并不等于“所有调试信息都会立即显示在界面里”。当前 Yuxi 的设计重点是先把 trace id 与执行上下文稳定关联起来，再把这些信息作为后续调试和分析的基础。也正因为如此，系统会优先保证聊天主链路的稳定性，而不是为了获取额外的可点击 URL 去同步等待 Langfuse 的远程接口。换句话说，Langfuse 在 Yuxi 里首先是观测数据的来源，其次才是一个方便跳转查看的外部页面入口。
+`LANGFUSE_ENABLED` 不填写时默认开启，但只有同时提供公钥、密钥且安装了 Langfuse SDK，实际 tracing 才会启用。修改环境变量后重新创建 API 和 worker 容器；如果修改了依赖，还要重新构建镜像：
 
-这也意味着，Langfuse 接入的目标并不是改变用户聊天体验，而是在不破坏主流程稳定性的前提下，为系统补上一层可观测性。只要配置正确，用户的对话仍然按照原有方式执行，只是在后台额外留下可追踪的执行记录。对于运维和开发来说，这类“尽量不影响主流程”的接入方式更适合在现有系统中逐步落地。
+```bash
+docker compose up -d --force-recreate api worker
+```
 
-## 如何查看是否生效
+密钥只放在受保护的运行环境中，不要写入仓库、Agent 环境或公开日志。
 
-启用完成后，你最常见的查看方式是在 Langfuse 控制台中按项目查看 traces。进入项目后，可以按照用户、线程、Agent 或时间范围来筛选，定位到某一轮具体的请求。打开单条 trace 之后，你通常可以看到这一轮智能体执行的整体耗时、模型调用、工具调用以及相关 metadata。对于排查问题来说，这比直接翻阅后端日志更高效，因为你不需要自己手动拼装上下文。对于性能分析来说，也可以更直观地看出某个智能体是否在某类请求上耗时异常，或者某个工具是否经常成为慢点。
+## 验证是否生效
 
-如果你是系统管理员或开发者，希望快速确认 Yuxi 是否已经成功把 tracing 打到 Langfuse，最简单的方法不是先看代码，而是先发起一条真实对话，再到 Langfuse 控制台中按最近时间排序查看是否出现新的 trace。如果配置正确，你应该可以看到对应线程下新增的一轮执行记录；如果没有看到，则优先检查 `.env` 中的三个关键变量是否正确传入 `api` 容器，以及容器内依赖是否已经包含 Langfuse SDK。对于基于 Docker Compose 的开发环境，这一步尤其重要，因为仅修改 `pyproject.toml` 并不会自动把新依赖装进已经运行中的镜像，通常还需要重新构建或更新容器。
+1. 重启 API 和 worker。
+2. 用测试账号发起一次真实对话，记录线程和大致时间。
+3. 在 Langfuse 控制台按 `session_id`、`agent_id` 或时间筛选 trace。
+4. 核对 trace 中的模型调用、工具调用、metadata 和耗时。
+5. 对助手消息提交一次测试反馈，再检查 `user-feedback` score。
 
-## 当前建议的接入方式
+超级管理员还可以在 Yuxi 的调试面板中开启对话 Debug，从消息对应的 Run 入口打开 Langfuse trace。Yuxi 会先检查当前用户是否能看到这个 Run，再读取同一 Run 输出消息中的 trace ID；没有持久化 trace、Langfuse 未配置或 URL 不在允许来源时，页面会提示不可用，不会从相邻 Run 推测结果。
 
-目前 Yuxi 推荐的接入顺序是先完成 tracing，再使用反馈 score 分析用户满意度，后续再扩展到更完整的运营面板。这样做的原因很简单：只有在 trace 关联已经稳定、用户和线程维度映射已经一致的前提下，后续的评分、质量分析和使用统计才会真正可靠。也正因如此，当前文档重点介绍的是 Langfuse 的定位、接入方式和查看路径，而不是一次性覆盖所有更复杂的高级功能。对于大多数项目来说，先把“能看清每轮智能体执行发生了什么”这件事做好，已经能显著改善调试和运维体验。
+## 常见问题
+
+- **看不到 trace**：检查 API/worker 是否读取到两组密钥、Langfuse SDK 是否安装，以及 `LANGFUSE_BASE_URL` 是否可访问。
+- **聊天成功但没有 score**：本地反馈需要先保存；只有已关联 trace 的助手消息才会同步 score。
+- **控制台显示旧数据**：Langfuse 客户端有缓冲，运行结束后会刷新；业务结果仍以 Yuxi 的 PostgreSQL 记录为准。
+
+## 代码和测试入口
+
+- [Langfuse 服务](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/services/langfuse_service.py)
+- [反馈服务](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/services/feedback_service.py)
+- [Langfuse 单元测试](https://github.com/xerrors/Yuxi/blob/main/backend/test/unit/services/test_langfuse_service.py)

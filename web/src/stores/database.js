@@ -3,7 +3,6 @@ import { ref, reactive } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import { databaseApi, documentApi, queryApi } from '@/apis/knowledge_api'
 import { useTaskerStore } from '@/stores/tasker'
-import { useUserStore } from '@/stores/user'
 import { useRouter } from 'vue-router'
 import { parseToShanghai } from '@/utils/time'
 import { canSelectFile, isProcessingFile } from '@/utils/knowledge_file_policy'
@@ -17,7 +16,6 @@ const AUTO_REFRESH_STALE_POLLS_LIMIT = 6
 export const useDatabaseStore = defineStore('database', () => {
   const router = useRouter()
   const taskerStore = useTaskerStore()
-  const userStore = useUserStore()
 
   // State
   const databases = ref([])
@@ -92,13 +90,10 @@ export const useDatabaseStore = defineStore('database', () => {
   }
 
   // Actions
-  // 管理员获取所有知识库，普通用户获取有权限访问的知识库
   async function loadDatabases() {
     state.listLoading = true
     try {
-      const data = userStore.isAdmin
-        ? await databaseApi.getDatabases()
-        : await databaseApi.getAccessibleDatabases()
+      const data = await databaseApi.getDatabases()
       const list = data?.databases || []
       databases.value = list.sort((a, b) => {
         const timeA = parseToShanghai(a.created_at)
@@ -518,11 +513,11 @@ export const useDatabaseStore = defineStore('database', () => {
     }
   }
 
-  async function parseFiles(fileIds) {
+  async function parseFiles(fileIds, params = {}) {
     if (fileIds.length === 0) return
     state.chunkLoading = true
     try {
-      const data = await documentApi.parseDocuments(kbId.value, fileIds)
+      const data = await documentApi.parseDocuments(kbId.value, fileIds, params)
       if (data.status === 'success' || data.status === 'queued') {
         enableAutoRefresh('auto')
         message.success(data.message || '解析任务已提交')
@@ -532,7 +527,7 @@ export const useDatabaseStore = defineStore('database', () => {
             name: `文档解析 (${kbId.value})`,
             task_type: 'knowledge_parse',
             message: data.message,
-            payload: { kb_id: kbId.value, count: fileIds.length }
+            payload: { kb_id: kbId.value, count: fileIds.length, params }
           })
         }
         await delayedRefresh() // 延迟1秒后刷新
@@ -550,10 +545,12 @@ export const useDatabaseStore = defineStore('database', () => {
     }
   }
 
-  async function parsePendingFiles(count = 0) {
+  async function parsePendingFiles(paramsOrCount = {}, count = 0) {
+    const params = typeof paramsOrCount === 'number' ? {} : paramsOrCount || {}
+    const totalCount = typeof paramsOrCount === 'number' ? paramsOrCount : count
     state.chunkLoading = true
     try {
-      const data = await documentApi.parsePendingDocuments(kbId.value)
+      const data = await documentApi.parsePendingDocuments(kbId.value, params)
       if (data.status === 'success' || data.status === 'queued') {
         enableAutoRefresh('auto')
         message.success(data.message || '解析任务已提交')
@@ -563,7 +560,12 @@ export const useDatabaseStore = defineStore('database', () => {
             name: `文档解析 (${kbId.value})`,
             task_type: 'knowledge_parse',
             message: data.message,
-            payload: { kb_id: kbId.value, count: data.queued_count || count, scope: 'pending' }
+            payload: {
+              kb_id: kbId.value,
+              count: data.queued_count || totalCount,
+              scope: 'pending',
+              params
+            }
           })
         }
         await delayedRefresh()

@@ -29,6 +29,13 @@ async def test_personal_skill_install_list_preview_and_delete_without_database_r
     draft = prepare_response.json()["data"]
 
     try:
+        shared_confirm_response = await test_client.post(
+            f"/api/skills/install-drafts/{draft['draft_id']}/confirm",
+            headers=headers,
+            json={"share_config": None, "slugs": [draft["items"][0]["slug"]]},
+        )
+        assert shared_confirm_response.status_code == 403, shared_confirm_response.text
+
         confirm_response = await test_client.post(
             f"/api/skills/personal/install-drafts/{draft['draft_id']}/confirm",
             headers=headers,
@@ -39,7 +46,7 @@ async def test_personal_skill_install_list_preview_and_delete_without_database_r
         assert "share_config" not in confirm_response.json()["data"][0]["skill"]
 
         cards_response = await test_client.get(
-            "/api/skills?refresh_personal=true",
+            "/api/skills",
             headers=headers,
         )
         assert cards_response.status_code == 200, cards_response.text
@@ -60,6 +67,12 @@ async def test_personal_skill_install_list_preview_and_delete_without_database_r
             if item["slug"] == slug and item["source_scope"] == "personal"
         )
         assert "share_config" not in accessible_personal
+
+        invisible_response = await test_client.get(
+            f"/api/system/skills/pytest-hidden-{uuid.uuid4().hex[:8]}/tree",
+            headers=headers,
+        )
+        assert invisible_response.status_code == 404, invisible_response.text
 
         preview_response = await test_client.get(
             f"/api/skills/personal/{slug}/file",

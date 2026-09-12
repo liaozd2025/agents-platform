@@ -1,6 +1,7 @@
 import {
   BookOpen,
   Bot,
+  Brain,
   Calculator,
   CheckSquare,
   Database,
@@ -16,13 +17,14 @@ import {
   Network,
   RefreshCw,
   SquareTerminal
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 export const TOOL_ICON_MAP = {
   ask_user_question: HelpCircle,
   bash: SquareTerminal,
   calculator: Calculator,
   cmd: SquareTerminal,
+  edit: FilePen,
   edit_file: FilePen,
   execute: SquareTerminal,
   find_kb_document: FolderSearch,
@@ -37,9 +39,12 @@ export const TOOL_ICON_MAP = {
   mysql_query: Database,
   ocr_parse_file: FileText,
   open_kb_document: FileText,
+  pi_sandbox: Bot,
   present_artifacts: FolderOutput,
   query_kb: BookOpen,
+  read: FileText,
   read_file: FileText,
+  remember_memory: Brain,
   replace: FilePen,
   run_shell_command: SquareTerminal,
   search_file: FolderSearch,
@@ -49,11 +54,13 @@ export const TOOL_ICON_MAP = {
   subagent_events: RefreshCw,
   subagent_start: Bot,
   subagent_status: RefreshCw,
+  submit_artifact: FolderOutput,
   task: Bot,
   web_search: Globe,
   tavily_search: Globe,
   doubao_search: Globe,
   text_to_img_qwen_image: Image,
+  write: FileEdit,
   write_file: FileEdit,
   write_todos: CheckSquare
 }
@@ -66,14 +73,19 @@ export const TOOL_NAME_MAP = {
   cmd: '执行命令',
   execute: '执行命令',
   run_shell_command: '执行命令',
+  read: '读取文件',
   ls: '列出目录',
   list_directory: '列出目录',
-  glob: '搜索文件',
+  glob: '匹配文件路径',
   grep: '搜索文件内容',
   read_file: '读取文件',
+  remember_memory: '更新记忆',
   write_file: '写入文件',
+  write: '写入文件',
+  edit: '编辑文件',
   edit_file: '编辑文件',
   replace: '编辑文件',
+  search_file: '搜索知识库文件',
   search_file_content: '搜索文件内容',
   write_todos: '更新任务清单',
   task: '调用子智能体',
@@ -82,7 +94,23 @@ export const TOOL_NAME_MAP = {
   subagent_events: '查看子智能体事件',
   subagent_cancel: '取消子智能体',
   subagent_await: '等待子智能体',
-  text_to_img_qwen_image: '生成图片'
+  text_to_img_qwen_image: '生成图片',
+  query_kb: '搜索知识库',
+  list_kbs: '查看知识库列表',
+  find_kb_document: '查找知识库文档',
+  open_kb_document: '打开知识库文档',
+  pi_sandbox: 'PI Agent',
+  submit_artifact: '交付文件',
+  get_mindmap: '获取思维导图',
+  calculator: '计算器',
+  web_search: '网络搜索',
+  tavily_search: '网络搜索',
+  doubao_search: '网络搜索',
+  ocr_parse_file: 'OCR识别文件',
+  mysql_list_tables: '列出数据库表',
+  mysql_describe_table: '查看表结构',
+  mysql_query: '执行SQL查询',
+  ask_user_question: '向用户提问'
 }
 
 // Keep intentionally hidden tool calls centralized so group summaries and renderers stay consistent.
@@ -121,6 +149,7 @@ export const parseToolCallArgs = (toolCall) => {
 
 export const SUBAGENT_TOOL_IDS = [
   'task',
+  'pi_sandbox',
   'subagent_start',
   'subagent_status',
   'subagent_events',
@@ -129,6 +158,28 @@ export const SUBAGENT_TOOL_IDS = [
 ]
 
 export const isSubagentToolCall = (toolCall) => SUBAGENT_TOOL_IDS.includes(getToolCallId(toolCall))
+
+/** 工具快照不是完成事实；优先保留子 Run 的明确终态。 */
+export const getToolCallStatus = (toolCall) => {
+  const run = toolCall?.subagent_run
+  if (run?.status === 'failed') return 'error'
+  if (['cancelled', 'interrupted'].includes(run?.status)) return run.status
+  if (run?.status === 'completed') return run.stop_reason === 'steer' ? 'steered' : 'completed'
+  const status = toolCall?.tool_call_result?.status || toolCall?.status
+  if (status === 'error' || status === 'failed') return 'error'
+  if (['running', 'pending', 'cancel_requested'].includes(status)) return 'running'
+  if (['cancelled', 'interrupted'].includes(status)) return status
+  if (
+    status === 'success' ||
+    status === 'completed' ||
+    toolCall?.tool_call_result ||
+    toolCall?.result
+  ) {
+    return 'completed'
+  }
+  if (run?.status) return 'running'
+  return null
+}
 
 export const parseToolCallResult = (toolCall) => {
   const content = toolCall?.tool_call_result?.content ?? toolCall?.result

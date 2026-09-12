@@ -1,312 +1,198 @@
-# Yuxi 沙盒架构说明
+# 配置沙盒与 provisioner
 
-::: tip info
-本文档是由 Codex 联合撰写，开发者审阅，尽管已经多次校对，但仍可能存在不准确或过时的描述。如果你发现任何问题，欢迎提交 issue 或 PR 来帮助我们改进文档。
-:::
+Yuxi 通过 `sandbox-provisioner` 为 Agent 提供文件和命令执行环境。本页面向部署和运维人员，说明如何选择 Docker 或 Kubernetes、配置连接参数以及排查沙盒问题。
 
-我们在 Yuxi 里引入沙盒，不是为了让架构更“重”，而是因为 Agent 一旦从纯文本对话进入真实执行阶段，就一定会碰到一组很具体的运行时需求：执行命令、读写文件、处理用户上传附件、产出可下载结果，以及在受控目录里保留中间过程文件。如果把这些能力直接放进 API 进程本身，权限边界、租户隔离、环境一致性和后续运维成本都会迅速恶化。
+沙盒的身份、文件 Owner、虚拟路径和恢复语义见[沙盒与文件系统机制](../mechanisms/sandbox.md)。
 
-从设计目标上看，沙盒这一层主要解决三件事。第一，给 Agent 一个可写、可执行、可回收的独立运行空间，而不是让它直接操作应用主进程。第二，把模型可见文件系统整理成稳定的命名空间，例如 `/home/gem/user-data` 和 `/home/gem/skills`，这样 prompt、工具、viewer 和 artifact 下载接口可以共享同一套路径语义。第三，让这套能力既能在本地 Docker 开发环境里稳定工作，也能在需要时切到 Kubernetes 这类更适合多实例部署的承载方式。
+## 先明确两层配置
 
-这份文档说明当前项目中“沙盒”这一层到底是什么、为什么同时会看到 Docker 和 Kubernetes、默认开发环境实际启用的是哪一种模式，以及沙盒如何和 `skills`、附件、工作区文件系统组合在一起工作。内容以当前仓库实现为准，我们重点解释真实调用链、配置入口、路径语义和运维边界，而不是抽象地介绍容器技术。
+应用层负责“API/worker 怎样找到 provisioner”；provisioner 层负责“用什么方式创建实际沙盒”。两层变量名称不同：
 
-## 一、先说明白：Docker 和 K8s 在这里是什么关系
+| 配置目标 | Compose/.env 入口 | provisioner 容器变量 |
+| --- | --- | --- |
+| 应用连接 provisioner | `SANDBOX_PROVIDER`、`SANDBOX_PROVISIONER_URL`、`SANDBOX_PROVISIONER_TOKEN` | 同名变量 |
+| 选择承载后端 | `SANDBOX_PROVISIONER_BACKEND` | `PROVISIONER_BACKEND` |
+| provisioner 对外代理地址 | `SANDBOX_PROVISIONER_URL` | `PROVISIONER_PUBLIC_URL` |
+| Docker/Kubernetes 参数 | `SANDBOX_*` 或对应宿主变量 | `DOCKER_*`、`K8S_*`、`NODE_HOST`、PVC 变量 |
 
-Docker 和 Kubernetes 不是互斥关系。Docker 解决的是“把一个进程放进容器里运行”这个问题，Kubernetes 解决的是“如何在一组机器上批量调度、暴露、重建和管理这些容器”这个问题。可以把 Docker 理解成容器运行时和镜像分发方式，把 Kubernetes 理解成容器编排平台。
+Compose 会把宿主变量映射为右侧的 provisioner 变量。直接运行 provisioner 时，设置右侧变量即可。
 
-放到 Yuxi 里，这个关系更具体一些。Yuxi 本身并不直接决定“沙盒一定跑在 Docker 还是一定跑在 K8s 上”，它只要求后端拿到一个可访问的沙盒地址，然后通过 `agent-sandbox` 的 HTTP API 去执行命令、读写文件。真正负责创建和回收沙盒实例的是 `sandbox-provisioner` 这个单独的服务。也就是说，Yuxi 的应用层只依赖 “provisioner”，而 provisioner 的后端可以选择用本机 Docker 去起容器，也可以选择向 Kubernetes 集群创建 Pod 和 Service。
+## 选择承载后端
 
-所以项目里看到的概念其实分成两层。第一层是应用层的 `SANDBOX_PROVIDER`，当前代码只支持 `provisioner`。第二层是 provisioner 内部的 `SANDBOX_PROVISIONER_BACKEND`，它决定具体用哪种底层实现去创建沙盒。当前真正应该对外理解和配置的是 `docker`、`kubernetes`，测试或占位场景可以使用 `memory`。
+应用层当前固定使用：
 
-## 二、当前项目的真实沙盒调用链
+```bash
+SANDBOX_PROVIDER=provisioner
+```
 
-当前仓库里，后端只支持 `SANDBOX_PROVIDER=provisioner`。当某个对话线程第一次需要执行文件操作或命令执行时，后端会基于文件线程与 skills 线程生成稳定的 `sandbox_id`，然后请求 `sandbox-provisioner` 创建或复用对应沙盒；普通 Agent 的文件线程和 skills 线程都回退为当前 `thread_id`。应用层拿到返回的 `sandbox_url` 之后，才会真正通过 `agent-sandbox` 客户端去调用远程沙盒的文件 API 和 shell API。
+provisioner 支持：
 
-调用链可以概括为：Web/API 请求进入 Yuxi 后端，后端构造 `ProvisionerSandboxBackend`，再经由 `ProvisionerClient` 调用 `sandbox-provisioner` 的 `/api/sandboxes` 接口。`sandbox-provisioner` 根据 `SANDBOX_PROVISIONER_BACKEND` 选择内存占位实现、Docker 容器实现或 Kubernetes 实现。沙盒真正启动后，对外暴露一个 HTTP 地址，Yuxi 再使用这个地址完成执行命令、上传文件、下载文件、目录遍历等操作。
+| `PROVISIONER_BACKEND` | 用途 | 隔离能力 |
+| --- | --- | --- |
+| `docker` | 开发和单机部署的默认后端 | 为每个运行时创建独立容器和网络 |
+| `kubernetes` | 将沙盒 Pod 交给目标集群承载 | 取决于集群、Pod 和网络安全策略 |
+| `memory` | unit 测试和占位测试 | 不创建真实隔离环境 |
 
-当前仓库的默认配置和默认开发环境都应该理解为 `docker`。正常情况下运行中的 provisioner 健康检查应返回 `backend=docker`。这意味着我们用 `docker compose up -d` 启动项目时，应用并不是直接把代码跑在宿主机上，而是通过 `sandbox-provisioner` 再去用 Docker 启一个真正的沙盒容器。
+生产环境不要使用 `memory`。切换后端只改变动态沙盒的承载位置，API 和 worker 仍通过同一个认证的 provisioner 代理访问。
 
-## 三、`memory`、`docker`、`kubernetes` 分别是什么
+## 应用层配置
 
-当前实现里，`memory`、`docker`、`kubernetes` 是三种需要区分的语义。
+API 和 worker 至少需要：
 
-`memory` 是一个纯内存登记实现。它不会真正创建容器，也不会提供真实隔离，主要适合测试或极轻量的占位场景。它只是记录一个 `sandbox_id -> sandbox_url` 的映射，因此不能把它理解成生产可用的沙盒。
+```bash
+SANDBOX_PROVIDER=provisioner
+SANDBOX_PROVISIONER_URL=http://sandbox-provisioner:8002
+SANDBOX_PROVISIONER_TOKEN=<random-value-at-least-32-characters>
+SANDBOX_VIRTUAL_PATH_PREFIX=/home/gem/user-data
+SANDBOX_EXEC_TIMEOUT_SECONDS=180
+SANDBOX_MAX_OUTPUT_BYTES=262144
+```
 
-`docker` 是当前默认也是推荐的本机容器后端。`sandbox-provisioner` 会使用 `LocalContainerProvisionerBackend` 通过宿主机 Docker daemon 动态创建沙盒容器。
+`SANDBOX_PROVISIONER_TOKEN` 必须至少 32 个字符，并且只提供给 API、worker 和 provisioner。它不能进入 `sandbox.env`、用户 Agent 环境、Skill 或模型上下文。
 
-`kubernetes` 则是另一条实现路径。它不会再去调用本机 Docker 起容器，而是使用 Kubernetes API 在指定 namespace 中创建一个 Pod 和一个 NodePort Service，然后把这个 Service 对应的可访问地址回传给 Yuxi 后端。
+`SANDBOX_VIRTUAL_PATH_PREFIX` 是 Agent 使用的虚拟用户数据根。API/worker 不直接取得动态容器地址，只使用 provisioner 返回的认证代理 URL。
 
-因此，如果在界面、文档或者环境变量里看到 “docker / k8s” 这几个词，最准确的理解应该是：Yuxi 的应用层只有一种 provider，也就是 `provisioner`；provisioner 下面有多种 backend；其中 `docker` 是默认的本机 Docker 后端，`kubernetes` 是另一种远程集群后端。
+## provisioner 通用配置
 
-## 四、默认开发模式到底是什么
+Compose 中的 `sandbox-provisioner` 使用以下变量：
 
-默认开发模式是 Docker Compose 启动整个项目，再由 `sandbox-provisioner` 按 `docker` 后端去创建沙盒容器。也就是说，项目本身跑在 Compose 里，沙盒也跑在 Docker 里，只不过沙盒不是 Compose 静态声明的长期服务，而是 provisioner 按需动态拉起和回收的短生命周期容器。
+| 变量 | 作用 | Compose 默认值 |
+| --- | --- | --- |
+| `PROVISIONER_BACKEND` | `docker`、`kubernetes` 或测试用 `memory` | `docker` |
+| `PROVISIONER_PUBLIC_URL` | 返回给 API/worker 的代理基地址 | `http://sandbox-provisioner:8002` |
+| `SANDBOX_IMAGE` | 动态沙盒镜像 | Compose 文件中的镜像 |
+| `SANDBOX_CONTAINER_PORT` | 沙盒内部 HTTP 端口 | `8080` |
+| `SANDBOX_HEALTH_TIMEOUT_SECONDS` | 创建后的健康检查上限 | `300` |
+| `SANDBOX_IDLE_TIMEOUT_SECONDS` | 空闲实例回收时间 | `120` |
+| `SANDBOX_IDLE_CHECK_INTERVAL_SECONDS` | idle reaper 扫描间隔 | `10` |
+| `SANDBOX_EXEC_TIMEOUT_SECONDS` | 命令超时，也用于计算安全回收下限 | `180` |
+| `SANDBOX_MEMORY_MB` | 每个沙盒的内存硬上限，MiB | `4096` |
+| `SANDBOX_CPUS` | 每个沙盒的 CPU 上限 | `2` |
+| `SANDBOX_TMPFS_MB` | `/home/gem` 内存盘上限，MiB | `1024` |
+| `SANDBOX_MAX_INSTANCES` | 当前 provisioner 管理的实例总上限 | `6` |
+| `SANDBOX_MAX_INSTANCES_PER_USER` | 每个用户的实例上限 | `4` |
 
-这也是为什么在 `docker-compose.yml` 中既能看到 `api`、`worker`、`sandbox-provisioner` 这样的常驻服务，又能看到 `sandbox-provisioner` 挂载了 `/var/run/docker.sock`。这不是重复设计，而是为了让 provisioner 有能力继续调用宿主机 Docker daemon 去创建新的“每线程沙盒容器”。
+API/worker 使用 `SANDBOX_CAPACITY_WAIT_SECONDS` 控制容量不足时的准备等待，默认 60 秒；`YUXI_WORKER_MAX_JOBS` 控制每个 worker 的并发，默认 4。满额创建返回 `sandbox_capacity_exhausted`，既有运行在准备阶段有界等待；超过等待预算以 `sandbox_capacity_timeout` 失败，其他创建错误不重试。该预算只约束容量等待，镜像拉取和首次健康检查仍使用各自超时。
 
-换句话说，当前项目不存在单独的 “纯宿主机 local 模式”。本机开发和单机部署应显式使用 `docker` 后端。
+容量由单个 provisioner 进程内的创建锁与真实实例清单共同裁决。Docker 槽位使用不同容器/网络前缀；Kubernetes 槽位使用独立 namespace，且每个槽位只运行一个 provisioner。上述默认预算面向使用外部模型 API 的单机部署，生产并发仍需结合 CPU、常驻服务和代表性任务校准。
 
-这里还需要把 Compose 里的环境变量分两层看。`api` 和 `worker` 关注的是应用层变量，例如 `SANDBOX_PROVIDER`、`SANDBOX_PROVISIONER_URL`、`SANDBOX_PROVISIONER_TOKEN`、`SANDBOX_VIRTUAL_PATH_PREFIX`、`SANDBOX_EXEC_TIMEOUT_SECONDS`、`SANDBOX_MAX_OUTPUT_BYTES`。`sandbox-provisioner` 自己则有另一组变量，负责决定具体如何创建沙盒实例。两层不要混看，否则很容易误以为改了 API 环境变量就能切换底层承载方式。
+当空闲回收时间小于等于命令超时时，provisioner 会把它提高到“命令超时 + 30 秒”，避免回收正在执行的任务。直接运行 provisioner 且没有 Compose 默认值时，代码默认的 idle timeout 是 600 秒；以实际 `/health` 响应为准。
 
-## 五、Docker 本机后端是如何工作的
+## Docker 后端
 
-当 `SANDBOX_PROVISIONER_BACKEND=docker` 时，`sandbox-provisioner` 会进入 `LocalContainerProvisionerBackend`。它会检查 Docker 是否可用，解析自身容器里 `/app/saves` 这个挂载点在宿主机上的真实路径，并据此推导出线程数据目录。随后它为每组文件线程与 skills 线程准备一个稳定的 `sandbox_id`，把容器命名为类似 `yuxi-sandbox-<id>` 的形式，并在 Docker 网络中启动真正的沙盒镜像。
+Docker 后端需要 provisioner 能访问 Docker daemon，并能看到 API/worker 挂载的两处宿主目录：
 
-这个沙盒镜像默认来自 `SANDBOX_IMAGE`，容器内部监听的端口默认是 `8080`。provisioner 会为每个动态沙盒创建独立的 Docker bridge 网络，只把 provisioner 和该沙盒接入其中；沙盒之间不能互访，也不能访问承载 PostgreSQL、Redis、Neo4j、MinIO 等服务的 `app-network`。沙盒端口不发布到宿主机，provisioner 通过对应的独立网络访问真实容器，再以需要 Bearer token 的代理地址向 API/worker 提供文件和命令接口。API/worker 不直接持有沙盒容器地址。
+| Compose 变量 | provisioner 变量 | 作用 |
+| --- | --- | --- |
+| `SANDBOX_DOCKER_NETWORK_PREFIX` | `DOCKER_NETWORK_PREFIX` | 每个沙盒独立网络的名称前缀 |
+| `SANDBOX_DOCKER_USER_DATA_HOST_PATH` | `DOCKER_USER_DATA_HOST_PATH` | UserWorkspace 在宿主机上的路径 |
+| `SANDBOX_DOCKER_SKILL_PROJECTIONS_HOST_PATH` | `DOCKER_SKILL_PROJECTIONS_HOST_PATH` | Skill 投影在宿主机上的路径 |
+| `SANDBOX_DOCKER_SANDBOX_PREFIX` | `DOCKER_SANDBOX_PREFIX` | 动态容器名称前缀 |
+| `SANDBOX_DOCKER_PIDS_LIMIT` | 同名变量 | 每个容器的进程数上限，默认 `512` |
 
-这个拓扑把沙箱按“其中代码可能被完全控制”处理。`SANDBOX_PROVISIONER_TOKEN` 只配置给 API、worker 和 provisioner，绝不能写进 `sandbox.env` 或用户级 Agent 环境变量，否则沙箱会重新获得 provisioner 管理权限。
+Compose 默认把 `/var/run/docker.sock`、UserWorkspace 和 Skill projection 挂载到 provisioner。只有 provisioner 持有 Docker socket；API 和 worker 不直接操作 Docker。
 
-Docker 后端在启动沙盒时，会挂载三类关键目录。第一类是用户级 workspace，挂载到容器内的 `/home/gem/user-data/workspace`。第二类是文件线程级 uploads/outputs，分别挂载到 `/home/gem/user-data/uploads` 和 `/home/gem/user-data/outputs`。第三类是 skills 线程可见的 skills 目录，挂载到 `/home/gem/skills`，而且是只读挂载。除此之外，容器的 `/home/gem` 本身还会额外挂一个 `tmpfs`，原因是当前沙盒镜像启动时要求 `/home/gem` 可写，但 Yuxi 希望真正持久化的只有 `user-data` 下面的内容。
+每个动态沙盒只加入自己的 bridge 网络，网络中包含 provisioner 和该沙盒，不加入承载 PostgreSQL、Redis、MinIO、Milvus 或 Neo4j 的 `app-network`，也不向宿主机发布沙盒端口。provisioner 会在复用前检查容器的用户、Workdir、挂载和网络身份，发现不匹配时拒绝复用。
 
-为了避免长期空闲的沙盒一直占资源，provisioner 还带了一个 idle reaper。它会记录每个沙盒最近一次被 touch 的时间，超过 `SANDBOX_IDLE_TIMEOUT_SECONDS` 之后自动删除。当前默认空闲超时是 120 秒，但如果这个值小于命令执行超时，系统会自动把它提高到“命令超时 + 30 秒”，以免执行中的任务被误回收。
+Docker 内存限制同时约束 memory+swap，容器不额外获得 swap 预算。provisioner 在创建、发现和代理请求时回读实际资源配置；存活实例与当前策略不匹配时返回 `sandbox_resource_policy_mismatch`，保留实例。调整策略前使用正常任务结束或既有停机流程排空实例，再重新创建；不要以自动删除正在工作的实例来应用新限额。
 
-对应到 `docker-compose.yml` 和 `docker-compose.prod.yml`，当前 `sandbox-provisioner` 实际会读取的 Docker 后端相关变量主要是这些：
+运行时挂载：
 
-- 通用变量：`PROVISIONER_BACKEND`、`SANDBOX_IMAGE`、`SANDBOX_CONTAINER_PORT`、`SANDBOX_HEALTH_TIMEOUT_SECONDS`、`SANDBOX_IDLE_TIMEOUT_SECONDS`、`SANDBOX_IDLE_CHECK_INTERVAL_SECONDS`、`SANDBOX_EXEC_TIMEOUT_SECONDS`、`MEMORY_SANDBOX_URL_TEMPLATE`
-- Docker 后端变量：`DOCKER_NETWORK_PREFIX`、`DOCKER_THREADS_HOST_PATH`、`DOCKER_SANDBOX_PREFIX`
-- 容器代理变量：`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`
+- `/home/gem/user-data`：当前用户 UserWorkspace，读写；
+- `/home/gem/skills`：当前用户获授权的共享/内置 Skill 投影，只读；
+- `/home/gem/user-data/<workdir_path>`：当前 Project 的工作目录。
 
-`DOCKER_NETWORK_PREFIX` 用于生成每个沙盒的独立网络名称。`DOCKER_THREADS_HOST_PATH` 也是 Docker 后端专用；如果不显式传入，provisioner 会尝试根据自身容器挂载反推出宿主机路径。
+`uploads/` 和 `outputs/` 在首次使用时创建。沙盒被 idle reaper 或 Run 终态回收时，UserWorkspace 中的持久文件不会被删除。
 
-## 六、Kubernetes 后端是如何工作的
+## Kubernetes 后端
 
-当 `SANDBOX_PROVISIONER_BACKEND=kubernetes` 时，`sandbox-provisioner` 会改用 Kubernetes Python 客户端。它会先加载 kubeconfig 或集群内配置，然后在指定的 namespace 中创建一个沙盒 Pod，再创建一个同名的 NodePort Service，把这个 Service 的 `nodePort` 暴露给 Yuxi 后端使用。
+Kubernetes 后端由 provisioner 创建沙盒 Pod 和 NodePort Service。Compose/宿主变量与容器变量如下：
 
-Kubernetes 后端下，沙盒还是同一套镜像，还是暴露同样的 HTTP API，但存储方式和暴露方式变了。它不会依赖宿主机 Docker bind mount，而是要求有一个可写的 PVC。当前实现里真正使用的是 `THREAD_PVC`，Pod 会把这块共享存储挂到 `/mnt/shared-data`，然后用 `subPath` 的方式把 `threads/shared/<uid>/workspace` 挂到 `/home/gem/user-data/workspace`，把 `threads/<file_thread_id>/user-data/uploads` 与 `threads/<file_thread_id>/user-data/outputs` 分别挂到 uploads/outputs，把 `threads/<skills_thread_id>/skills` 挂到 `/home/gem/skills`。这样做的好处是目录结构仍然可以和 Docker 模式保持一致，同时允许子智能体共享父对话文件但隔离 skills。
+| Compose/.env 变量 | provisioner 变量 | 作用 |
+| --- | --- | --- |
+| `SANDBOX_K8S_NAMESPACE` | `K8S_NAMESPACE` | Pod 和 Service 所在 namespace |
+| `KUBECONFIG_PATH` | `KUBECONFIG_PATH` | 容器内 kubeconfig；集群内运行可留空 |
+| `SANDBOX_NODE_HOST` | `NODE_HOST` | provisioner 访问 NodePort 的节点地址 |
+| `USER_DATA_PVC` | `USER_DATA_PVC` | UserWorkspace 共享卷 |
+| `SKILLS_PVC` | `SKILLS_PVC` | Skill 只读投影卷 |
 
-需要特别说明的是，代码里虽然读取了 `SKILLS_PVC` 这个环境变量，但当前 Pod 规格实际没有使用单独的 skills PVC，而是统一从 `THREAD_PVC` 中切 `threads/<thread_id>/skills` 这个子路径。因此，如果看到环境变量里同时出现 `SKILLS_PVC` 和 `THREAD_PVC`，应当以 `THREAD_PVC` 的真实挂载语义为准，`SKILLS_PVC` 目前更像一个预留字段。
+User Data PVC 必须提供跨节点部署需要的共享读写能力。Pod 将 `shared/<uid>/workspace` 挂载为 `/home/gem/user-data`，将 `skill-projections/<uid>` 只读挂载为 `/home/gem/skills`。Pod 默认不自动挂载 ServiceAccount token；使用 kubeconfig 或集群内 ServiceAccount 时，都应只授予目标 namespace 所需的 Pod、Service 操作权限。
 
-Kubernetes 后端还需要一个 `NODE_HOST`。这是因为当前实现使用的是 NodePort Service，而不是 Ingress，也不是 ClusterIP。provisioner 创建完 Service 后会通过 `http://<NODE_HOST>:<nodePort>` 访问目标沙箱，但返回给 Yuxi 后端的仍是 provisioner 认证代理地址。所以 `NODE_HOST` 必须从 provisioner 可达，不需要直接暴露给 API/worker。
+沙盒与 init 容器使用配置的 CPU/内存 requests 和 limits，`/home/gem` 使用带容量上限的 Memory emptyDir。`SANDBOX_DOCKER_PIDS_LIMIT` 只作用于 Docker；Kubernetes 的进程数上限由节点 kubelet `podPidsLimit` 管理，需要集群运维配置和验证。生产部署使用独立 namespace 与单个 provisioner 副本。
 
-当前 Compose 中与 Kubernetes 后端对应的变量主要是：
+当前实现使用 NodePort，不使用 Ingress、ClusterIP 或多集群选择器。`NODE_HOST` 只需要从 provisioner 可达，API/worker 不需要直接访问 NodePort；它们仍访问 `PROVISIONER_PUBLIC_URL` 返回的代理地址。
 
-- `K8S_NAMESPACE`
-- `KUBECONFIG_PATH`
-- `NODE_HOST`
-- `THREAD_PVC`
-- `SKILLS_PVC`
-
-其中真正决定运行时挂载的是 `THREAD_PVC`。`SKILLS_PVC` 目前只保留为代码层读取字段，并没有进入实际 Pod 挂载。
-
-## 七、如果要使用“远程 K8s”，应该怎么接
-
-这里最容易误解的一点是，所谓“选择远程 K8s”，并不是在 Yuxi 页面里点一个开关，然后系统自动发现一个集群。当前实现没有内建集群选择器，也没有多集群管理界面。它的工作方式很直接：我们把 `sandbox-provisioner` 配置成 `kubernetes` 后端，并让它能拿到目标集群的 kubeconfig 或者运行在集群内即可。对 provisioner 来说，只要 Kubernetes 客户端能连上 API Server，这个集群就是它要操作的“远程 K8s”。
-
-如果 Yuxi 部署在 Docker Compose 里，而 Kubernetes 集群在另一台机器或云厂商托管环境中，那么最常见的做法是把本地 kubeconfig 文件挂载进 `sandbox-provisioner` 容器，然后设置 `KUBECONFIG_PATH`。同时把 `SANDBOX_NODE_HOST` 改成一个从 `api` 容器也能访问的节点公网 IP、负载均衡域名，或者已经做过反向代理的地址。
-
-一个典型的 Compose 覆盖配置会长这样：
+一个 Compose 覆盖示例：
 
 ```yaml
 services:
   sandbox-provisioner:
     environment:
-      - PROVISIONER_BACKEND=kubernetes
-      - K8S_NAMESPACE=yuxi-know
-      - KUBECONFIG_PATH=/root/.kube/config
-      - THREAD_PVC=yuxi-thread
-      - SKILLS_PVC=yuxi-skills
-      - NODE_HOST=203.0.113.10
+      PROVISIONER_BACKEND: kubernetes
+      K8S_NAMESPACE: yuxi
+      KUBECONFIG_PATH: /root/.kube/config
+      NODE_HOST: 203.0.113.10
+      USER_DATA_PVC: yuxi-user-data
+      SKILLS_PVC: yuxi-skills
     volumes:
       - ~/.kube/config:/root/.kube/config:ro
 ```
 
-这段配置表达的意思不是“把整个应用迁到 K8s”，而是“仍然用 Compose 跑 Yuxi 主服务，但沙盒实例改为由远程 Kubernetes 集群承载”。这是当前代码最自然的混合部署方式。
+在 Kubernetes 内运行 provisioner 时，通常省略 `KUBECONFIG_PATH`，让客户端使用集群内配置。PVC、namespace、NodePort 可达性和 kubeconfig 权限需要由集群运维验证；仓库不提供完整的应用 Deployment 或旧 PVC 自动迁移工具。
 
-如果 `sandbox-provisioner` 本身就运行在 Kubernetes 集群内部，那么通常不需要显式提供 `KUBECONFIG_PATH`。它会优先尝试 `incluster_config`，也就是使用 Pod 的服务账号权限直接访问 Kubernetes API。此时更需要关注的是 namespace、PVC 和 NodePort 的可达性，而不是 kubeconfig 文件本身。
+## 沙盒内环境变量
 
-## 八、当前项目的沙盒文件系统是如何设计的
+动态沙盒环境由两部分合并：
 
-从模型和工具调用的视角看，Yuxi 主要向 Agent 暴露两类路径：`/home/gem/user-data` 和 `/home/gem/skills`。其中 `user-data` 是可写的用户工作区，`skills` 是只读的技能目录。知识库不再映射为沙盒文件系统路径，模型应通过知识库工具检索和打开文档。
+1. provisioner 只读挂载的 `docker/sandbox_provisioner/sandbox.env` 全局变量；
+2. 当前用户为 Agent 配置的变量。
 
-在宿主机侧，和线程相关的数据主要放在 `saves` 目录下。当前可读的目录结构可以概括为下面这样：
+开发和生产 Compose 都把该文件挂载到 provisioner 的 `/app/sandbox.env`。仓库当前默认文件只有 `CHECK_YUXI_SANDBOX_ENV_EXISTS=True`；如果需要全局变量，应在部署侧维护该文件并重新创建 provisioner。用户变量覆盖同名全局变量。两类变量都会对沙盒内代码可见，应按“不可信代码可以读取和外传”处理。只注入任务所需的低权限变量，禁止注入 provisioner token、数据库凭据、对象存储管理凭据和云平台管理员密钥。
 
-```text
-saves/
-├── skills/
-│   ├── <skill-slug>/
-│   └── ...
-├── threads/
-│   ├── <thread_id>/
-│   │   ├── user-data/
-│   │   │   ├── uploads/
-│   │   │   ├── outputs/
-│   │   │   └── ...
-│   │   └── skills/
-│   │       ├── <skill-slug>/
-│   │       └── ...
-│   ├── shared/
-│   │   └── <uid>/
-│   │       └── workspace/
-│   └── ...
-```
+远程 Skill 安装使用 `inherit_env=False` 的一次性 Sandbox，不继承全局或用户 Agent 环境，也不挂载持久用户目录。Kubernetes 沙盒默认关闭 ServiceAccount token 自动挂载。
 
-这里要重点理解 `workspace` 和 `uploads/outputs` 的区别。按照当前宿主机路径解析逻辑，`workspace` 被定义为用户级共享目录，位置是 `saves/threads/shared/<uid>/workspace`；而 `uploads` 和 `outputs` 属于文件线程目录，位置分别是 `saves/threads/<file_thread_id>/user-data/uploads` 和 `saves/threads/<file_thread_id>/user-data/outputs`。普通 Agent 的 `file_thread_id` 就是当前对话 `thread_id`，子智能体运行时则使用父对话作为 `file_thread_id`，因此可以读取父对话附件并把产物写回父对话 outputs。
+## 开发环境启动和验证
 
-与此同时，运行时 provisioner 在创建 Docker 容器或 Kubernetes Pod 时，会把用户级 `saves/threads/shared/<uid>/workspace` 单独挂到 `/home/gem/user-data/workspace`，再把文件线程的 `uploads/outputs` 分别挂到 `/home/gem/user-data/uploads` 和 `/home/gem/user-data/outputs`。因此在排查文件问题时，需要先明确一个前提：当前项目里同时存在“宿主机侧目录组织”和“容器内统一虚拟路径”两层概念。对外接口和 viewer 语义与底层挂载实现现在是一致的，workspace 是用户共享空间，而 uploads/outputs 跟随文件线程隔离或共享。
-
-## 九、路径暴露规则是什么
-
-Yuxi 不会把整个容器文件系统都开放给 Agent 或 viewer。当前 viewer 根目录只会列出几个命名空间入口，而不会直接暴露 `/` 的真实文件树。这样做是为了避免只看文件树就触发沙盒冷启动，也为了让权限边界更稳定。
-
-`/home/gem/user-data` 是主要工作区。它允许模型和工具写入，但推荐语义并不相同。内置 prompt 中已经明确说明，`workspace` 应当放中间文件，`outputs` 应当放最终产物，`uploads` 是用户上传文件的位置。对于普通对话 Agent，文案甚至提示“非必要不要写 workspace，而优先写 outputs”。
-
-`/home/gem/skills` 是共享与内置 Skill 的只读目录。它不是简单地把 `saves/skills` 整个暴露进去，而是按当前运行时最终生效的共享与内置 Skill，将来源同步到 `saves/threads/<skills_thread_id>/skills`，再把线程目录只读挂进沙盒。个人 Skill 不进入这层投影，Agent 直接读取已经挂载的 `/home/gem/user-data/workspace/agents/skills/<slug>`。
-
-知识库访问不属于沙盒文件系统暴露规则。当前 Agent 可见知识库仍由用户权限和 Agent 配置共同决定，但只通过 `query_kb`、`open_kb_document` 等工具访问，不提供沙盒目录投影。
-
-## 十、skills、知识库、附件是怎么和沙盒结合的
-
-skills 的结合方式分成两层。第一层是提示词层，`prepare_agent_runtime_context` 会先根据当前 Agent 配置的 `context.skills` 展开依赖闭包，`SkillsMiddleware` 再把 `_prompt_skills` 注入到系统提示里，并给出每个 Skill 的真实运行入口。第二层是文件系统层：共享与内置 Skill 由 `sync_thread_readable_skills` 同步到当前 `skills_thread_id` 的线程目录，并只读挂载到 `/home/gem/skills`；个人 Skill 直接使用用户工作区中的 `workspace/agents/skills`，不再生成线程副本。
-
-附件的结合方式更偏向“先落盘，再把路径告诉模型”。用户上传文件后，系统会先把原始文件写入 `saves/threads/<file_thread_id>/user-data/uploads`。如果该文件可以被解析，系统还会额外生成一个 Markdown 副本，写到 `saves/threads/<file_thread_id>/user-data/uploads/attachments/<name>.md`。普通 Agent 的文件线程就是当前对话线程；子智能体沿用父对话文件线程，所以能访问父对话附件。随后，LangGraph state 中会维护一份 `uploads` 列表，`AttachmentMiddleware` 会把这些可读路径注入系统提示，告诉模型优先用 `read_file` 去读取这些路径。因此，附件并不是“作为消息大段内联塞给模型”，而是被转换成沙盒文件系统中的路径对象。
-
-知识库不再与沙盒文件系统结合。它不会被复制到每个线程目录，也不会生成虚拟目录；模型通过专门的知识库工具检索，并在需要更完整上下文时用 `open_kb_document` 按 `kb_id` 和 `file_id` 打开文档内容。
-
-## 十一、当前推荐如何使用 Docker 沙盒
-
-如果只是正常开发、调试或单机部署，最简单也是当前默认的方式就是保留 `SANDBOX_PROVIDER=provisioner`，同时把 `SANDBOX_PROVISIONER_BACKEND` 设为 `docker`。这会让整个项目继续由 Docker Compose 管理，而沙盒实例由 provisioner 动态创建。通常不需要手工 `docker run` 沙盒镜像，也不需要在 Compose 文件里静态声明每一个沙盒容器。
-
-最小必要配置通常就是下面这几项：
-
-```env
-SANDBOX_PROVIDER=provisioner
-SANDBOX_PROVISIONER_URL=http://sandbox-provisioner:8002
-SANDBOX_PROVISIONER_TOKEN=<至少 32 个随机字符>
-SANDBOX_PROVISIONER_BACKEND=docker
-SANDBOX_VIRTUAL_PATH_PREFIX=/home/gem/user-data
-SANDBOX_DOCKER_NETWORK_PREFIX=yuxi-know-sandbox
-```
-
-然后用常规方式启动即可：
+开发 Compose 默认配置 Docker provisioner。初始化 `.env` 后启动：
 
 ```bash
 docker compose up -d
-curl http://localhost:8002/health
 ```
 
-如果健康检查返回 `backend: docker`，就说明 provisioner 已经处于默认的 Docker 本机后端。真正的沙盒容器不会在系统启动时立即全部出现，而是在你第一次创建线程并触发需要文件系统或命令执行的操作后才会被创建。
+启动依赖先构建 PI 派生镜像并比较镜像中的 Runner 摘要、PI 版本和依赖完整性，再允许 provisioner 启动。设置 `SANDBOX_IMAGE` 时，检查使用指定预构建镜像，保留其原始内容和供给引用；镜像缺失或与当前源码不匹配时，启动明确失败。开发和生产 Compose 使用同一检查路径。
 
-升级已有开发环境时可以重新运行初始化脚本，让脚本补生成 `SANDBOX_PROVISIONER_TOKEN`。历史共享沙盒网络中的容器会在下次发现时被重建到各自独立的网络。
+PI 派生镜像还修正基础镜像的 `/shell/write`，将控制输入送入当前进程的 PTY；预构建镜像检查同时验证该补丁。未包含修补的镜像即使 Runner 摘要相同也不能通过启动检查。
 
-## 十二、如何理解文件管理与暴露边界
+需要单独构建或检查镜像时运行 `make build-pi-sandbox`。生产配置可通过 `COMPOSE='docker compose --env-file .env.prod -f docker-compose.prod.yml'` 传给该目标；该命令只在本地构建和校验，不发布镜像。
 
-从产品行为上看，viewer 文件系统和 artifact 下载接口优先走的是宿主机路径解析，而不是无条件透传到沙盒容器内部。这么设计有两个直接收益。第一，浏览 `/` 或 `/home/gem/user-data` 这样的树形入口时，不需要为了只读查看而冷启动沙盒。第二，权限边界更好做，因为 `resolve_virtual_path` 会把用户可见路径严格限制在预定义的 `user-data` 和 `skills` 命名空间内。
+provisioner 只在第一次文件或命令操作时创建动态沙盒，刚启动时看不到沙盒容器是正常的。先检查 provisioner：
 
-从工程上看，当前实现更像“双层文件系统”。对 Agent 执行来说，真正工作的对象是远程沙盒进程暴露的文件 API；对 viewer、附件下载和一部分 artifact 查看来说，系统会优先在宿主机侧解析虚拟路径，再用本地文件读取或只读 backend 下载内容。这也是为什么你会看到既有 `ProvisionerSandboxBackend`，又有 `viewer_filesystem_service`、`SelectedSkillsReadonlyBackend` 这样的配套实现。
-
-## 十三、环境变量配置与传递链
-
-sandbox-provisioner 的环境变量传递分**两层**，需要分别理解：
-
-### 第一层：应用层 → sandbox-provisioner
-
-`api` 和 `worker` 服务通过 `SANDBOX_*` 前缀的环境变量告诉后端如何连接 provisioner。这些变量定义在 `docker-compose.yml` 的 `x-api-worker-env` 锚点中：
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `SANDBOX_PROVIDER` | 提供者类型，固定为 `provisioner` | `provisioner` |
-| `SANDBOX_PROVISIONER_URL` | provisioner 服务地址 | `http://sandbox-provisioner:8002` |
-| `SANDBOX_PROVISIONER_TOKEN` | provisioner 管理与代理接口 Bearer token，至少 32 个字符 | 无，必填 |
-| `SANDBOX_VIRTUAL_PATH_PREFIX` | 虚拟路径前缀 | `/home/gem/user-data` |
-| `SANDBOX_EXEC_TIMEOUT_SECONDS` | 命令执行超时时间 | `180` |
-| `SANDBOX_MAX_OUTPUT_BYTES` | 最大输出字节数 | `262144` |
-
-### 第二层：sandbox-provisioner 内部配置
-
-`sandbox-provisioner` 服务本身读取另一组环境变量，决定如何创建沙盒容器。这些变量直接写在 `docker-compose.yml` 的 `sandbox-provisioner.environment` 中：
-
-**通用配置：**
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `PROVISIONER_BACKEND` | 底层后端类型，`docker` 或 `kubernetes` | `docker` |
-| `SANDBOX_IMAGE` | 沙盒容器镜像 | 详见 compose 文件 |
-| `SANDBOX_CONTAINER_PORT` | 沙盒容器内部端口 | `8080` |
-| `SANDBOX_IDLE_TIMEOUT_SECONDS` | 空闲回收时间 | `120` |
-| `SANDBOX_HEALTH_TIMEOUT_SECONDS` | 健康检查超时 | `300` |
-
-**Docker 后端专用：**
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `DOCKER_NETWORK_PREFIX` | 每沙盒独立网络的名称前缀 | `yuxi-know-sandbox` |
-| `DOCKER_SANDBOX_PREFIX` | 沙盒容器名前缀 | `yuxi-sandbox` |
-| `DOCKER_THREADS_HOST_PATH` | 线程数据宿主机路径 | 自动推断 |
-
-**Kubernetes 后端专用：**
-
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `K8S_NAMESPACE` | Kubernetes namespace | `yuxi-know` |
-| `NODE_HOST` | Kubernetes 节点地址 | `host.docker.internal` |
-| `KUBECONFIG_PATH` | kubeconfig 文件路径 | 空（使用 incluster 配置） |
-| `THREAD_PVC` | 线程数据持久化卷 | `yuxi-thread` |
-| `SKILLS_PVC` | 技能目录持久化卷（预留） | `yuxi-skills` |
-
-### 环境变量传递链
-
-```
-宿主机 .env / 系统环境变量
-         ↓
-    docker-compose.yml
-         ↓
-    ┌────────────────────────────────┐
-    │  api/worker 服务               │  应用层变量 (SANDBOX_*)
-    │    SANDBOX_PROVISIONER_URL     │
-    │    SANDBOX_PROVISIONER_TOKEN   │
-    └────────────┬───────────────────┘
-                 ↓  带 Bearer token 的 HTTP 调用
-    ┌────────────────────────────────┐
-    │  sandbox-provisioner 服务       │  沙盒层变量 (PROVISIONER_BACKEND, DOCKER_*, K8S_*)
-    │    PROVISIONER_BACKEND         │
-    └────────────┬───────────────────┘
-                 ↓  Docker API / K8s API + 认证 HTTP 代理
-    ┌────────────────────────────────┐
-    │  动态创建的沙盒容器              │
-    └────────────────────────────────┘
+```bash
+curl --fail http://localhost:8002/health
+docker compose logs --tail=100 sandbox-provisioner
 ```
 
-两层变量不要混看。改了 `api/worker` 的 `SANDBOX_PROVISIONER_URL` 只是改了后端找 provisioner 的地址；改了 `sandbox-provisioner` 的 `PROVISIONER_BACKEND` 才是改了 provisioner 本身用什么方式创建沙盒。
+健康响应应包含 `backend`、`idle_timeout_seconds` 和 `tracked_sandboxes`。然后用真实线程执行一次文件读写或命令，并分别核对：
 
-### sandbox.env 的特殊作用
+- Docker：动态容器、独立网络、UserWorkspace 读写挂载和 Skill 只读挂载；
+- Kubernetes：Pod、NodePort Service、PVC 子路径和 `NODE_HOST` 可达性；
+- Viewer：通过 Workdir 读取同一个文件，确认它与沙盒看到的是同一份持久字节。
 
-`docker/sandbox_provisioner/sandbox.env` 文件的用途与上述两层变量不同。它通过 volume 挂载到 provisioner 容器内 (`/app/sandbox.env`)，然后由 `LocalContainerProvisionerBackend` 在创建沙盒容器时读取，解析后的键值对会作为**环境变量注入到每个动态创建的沙盒容器**中。
+等待超过 idle timeout 后，实例应被回收，但下一次操作可以重新创建，持久文件仍然存在。
 
-```yaml
-# docker-compose.yml 中 sandbox-provisioner 的挂载
-sandbox-provisioner:
-  volumes:
-    - ./docker/sandbox_provisioner/sandbox.env:/app/sandbox.env:ro
-```
+## 排障顺序
 
-也就是说，`sandbox.env` 配置的是沙盒容器内部可见的环境变量，而不是 provisioner 本身的配置。当前该文件内容为：
+1. 检查 API/worker 的 `SANDBOX_PROVISIONER_URL` 和 token 是否一致。
+2. 检查 `/health` 报告的后端和超时是否符合预期。
+3. Docker 后端检查两处 host path 是否为 provisioner 能看到的真实路径；Kubernetes 后端检查 kubeconfig、namespace、PVC 和 NodePort。
+4. 查看 provisioner 的创建、复用、健康检查和回收日志。
+5. 如果 Viewer 能看到文件但 Agent 不能，核对 Conversation 绑定的 `project_id`、Project 的 `workdir_path`、根 runtime scope、uid 和挂载路径；不要把 Viewer scope `/foo`、Agent 路径或宿主机路径混在一起。
 
-```env
-CHECK_YUXI_SANDBOX_ENV_EXISTS=True
-```
+健康接口只能证明 provisioner 进程和后端初始化，不能证明某个沙盒已经创建或文件权限正确。最终结论要通过真实文件、容器/PVC 和 API 响应回读确认。
 
-如果需要给所有沙盒容器注入额外的环境变量（如代理配置、认证信息等），可以添加到 `sandbox.env` 文件中。
+## 相关入口
 
-远程 Skill 拉取使用专门的一次性 Sandbox，不继承这里的全局环境变量或用户级 Agent 环境变量，避免不可信仓库通过复制文件带出凭据。Kubernetes 创建的 Sandbox 同时会禁用 ServiceAccount token 自动挂载。
-
-### 配置方式汇总
-
-| 配置目标 | 配置位置 | 示例变量 |
-|----------|----------|----------|
-| 应用层连接 provisioner | `.env` 或 compose 环境 | `SANDBOX_PROVISIONER_URL`, `SANDBOX_PROVISIONER_TOKEN` |
-| provisioner 自身行为 | `.env` 或 compose 环境 | `PROVISIONER_BACKEND`, `DOCKER_*` |
-| 沙盒容器内部环境 | `sandbox.env` 文件 | 代理、认证等运行时变量 |
-
-## 十四、和旧版文档相比，今天最重要的理解方式
-
-当前项目不应再按“应用直接管理一个长期存在的本地 sandbox 服务”去理解。更准确的认识应该是：Yuxi 只管理线程和上下文；provisioner 负责创建线程对应的沙盒实例；文件系统不是简单地暴露一个容器根目录，而是把可写工作区、只读 skills 等组合成一个受控命名空间（知识库不再映射为沙盒目录，改由 `query_kb`/`open_kb_document` 等工具访问）。
-
-因此，当你在界面上“启用沙盒”或者在文档里“选择 K8s”时，本质上做的不是切换一段业务逻辑，而是在切换 provisioner 的底层实例承载方式。选择 `docker` 时，沙盒由当前部署机上的 Docker daemon 动态创建；选择 `kubernetes` 时，沙盒由目标 K8s 集群动态创建。Yuxi 自己始终只面对一个 provisioner 服务地址。
-
-## 十五、排障时建议先看什么
-
-如果怀疑是 provisioner 级问题，先看 `http://localhost:8002/health`，确认 backend 类型和 idle timeout 是否符合预期。默认 Docker 部署下这里应看到 `backend=docker`。接着看 `docker logs sandbox-provisioner --tail 200`，因为这里能直接看到创建容器、复用旧实例、健康检查失败和 idle reaper 删除的日志。
-
-如果怀疑是 Docker 地址不可达，先确认每个动态沙箱只连接自己的 `yuxi-know-sandbox-<id>` 网络，provisioner 同时连接该网络，而 API/worker 只在 `app-network`。provisioner 日志中的目标地址应是动态容器名，API/worker 拿到的地址应是 `/api/sandboxes/<id>/proxy`；代理请求必须携带 `SANDBOX_PROVISIONER_TOKEN`。如果怀疑是 Kubernetes 地址不可达，重点检查 `NODE_HOST` 和 NodePort 是否从 provisioner 可达。
-
-如果怀疑是文件看得到但模型读不到，或者模型写了但 viewer 看不到，优先把问题拆成两层：一层是宿主机路径是否存在于 `saves/...` 下，另一层是该路径是否真的被当前线程沙盒挂载并暴露到了 `/home/gem/user-data` 或 `/home/gem/skills`。只要先分清“宿主机侧文件语义”和“沙盒侧运行时挂载语义”，定位问题通常会快很多。
+- [沙盒机制详解](../mechanisms/sandbox.md)
+- [Docker Compose](https://github.com/xerrors/Yuxi/blob/main/docker-compose.yml)
+- [生产 Compose](https://github.com/xerrors/Yuxi/blob/main/docker-compose.prod.yml)
+- [provisioner 实现](https://github.com/xerrors/Yuxi/blob/main/docker/sandbox_provisioner/app.py)

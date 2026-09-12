@@ -44,6 +44,9 @@
           <h4 id="tool-approval-question" class="tool-approval-question">
             {{ toolApprovalQuestion }}
           </h4>
+          <p v-if="activeToolRequest?.name === 'pi_sandbox'" class="tool-approval-scope">
+            允许后，PI Agent 可为本次任务执行命令、读取和修改你的用户工作区文件，期间不再逐条确认。
+          </p>
 
           <div
             v-if="activeToolRequest"
@@ -124,14 +127,20 @@
                 :disabled="isProcessing"
                 @change="setSingle(activeQuestion.questionId, optionItem.value)"
               />
-              <span
-                :class="{
-                  recommended:
-                    optionIndex === 0 && String(optionItem.label).includes('(Recommended)')
-                }"
-              >
-                {{ optionItem.label }}
-              </span>
+              <div class="option-content">
+                <span
+                  class="option-label"
+                  :class="{
+                    recommended:
+                      optionIndex === 0 && String(optionItem.label).includes('(Recommended)')
+                  }"
+                >
+                  {{ optionItem.label }}
+                </span>
+                <span v-if="optionItem.description" class="option-description">
+                  {{ optionItem.description }}
+                </span>
+              </div>
             </label>
 
             <div v-if="shouldShowOtherInput(activeQuestion)" class="other-input">
@@ -189,7 +198,7 @@
 
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
-import { ChevronDown, Wrench } from 'lucide-vue-next'
+import { ChevronDown, Wrench } from '@lucide/vue'
 import {
   isOtherOption,
   normalizeQuestions,
@@ -205,6 +214,7 @@ import {
 const TOOL_DISPLAY_NAMES = {
   write_file: '写入文件',
   edit_file: '编辑文件',
+  pi_sandbox: 'PI Agent',
   execute: '执行命令'
 }
 
@@ -243,6 +253,7 @@ const isToolApproval = computed(() => props.kind === 'tool_approval')
 const activeToolRequest = computed(() => props.actionRequests[activeToolIndex.value] || null)
 const activeToolIcon = computed(() => getToolIcon(activeToolRequest.value?.name) || Wrench)
 const toolApprovalQuestion = computed(() => {
+  if (activeToolRequest.value?.name === 'pi_sandbox') return '是否允许 PI Agent 执行本次任务？'
   if (activeToolRequest.value?.name === 'execute') return '是否允许执行以下命令？'
   if (activeToolRequest.value?.name === 'write_file') return '是否允许写入此文件？'
   if (activeToolRequest.value?.name === 'edit_file') return '是否允许编辑此文件？'
@@ -651,6 +662,13 @@ const formattedToolArgs = computed(() => formatToolApprovalArgs(activeToolReques
   }
 }
 
+.tool-approval-scope {
+  margin: 0 0 12px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .tool-approval-icon {
   display: inline-flex;
   align-items: center;
@@ -834,15 +852,41 @@ const formattedToolArgs = computed(() => formatToolApprovalArgs(activeToolReques
 
 .option-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   color: var(--gray-800);
   font-size: 14px;
+  cursor: pointer;
+
+  input {
+    margin-top: 3px;
+    flex-shrink: 0;
+  }
 }
 
-.option-item .recommended {
-  color: var(--main-color);
-  font-weight: 600;
+.option-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.option-label {
+  line-height: 1.4;
+  color: var(--gray-800);
+
+  &.recommended {
+    color: var(--main-color);
+    font-weight: 600;
+  }
+}
+
+.option-description {
+  font-size: 12px;
+  color: var(--gray-500);
+  line-height: 1.45;
+  word-break: break-word;
 }
 
 .other-input {

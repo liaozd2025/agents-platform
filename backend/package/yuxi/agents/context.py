@@ -6,12 +6,15 @@ from dataclasses import MISSING, dataclass, field, fields
 from typing import Any, get_origin
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from yuxi.agents.backends.sandbox.paths import sandbox_workspace_agent_context_file
+
 from yuxi.agents.tool_approval import DEFAULT_TOOL_APPROVAL_MODE
+from yuxi.config.options import system_options
+from yuxi.config.runtime import lite_mode_enabled
 from yuxi.utils.logging_config import logger
-from yuxi.utils.paths import WORKSPACE_AGENT_CONTEXT_FILES
+from yuxi.workspace.filesystem import Workspace
 
 WORKSPACE_AGENTS_PROMPT_MAX_BYTES = 64 * 1024
+WORKSPACE_BASE_CONTEXT_FILES = ("AGENTS.md", "USER.md")
 DEFAULT_SUMMARY_THRESHOLD_K = 100  # 100K tokens
 DEFAULT_SUMMARY_KEEP_MESSAGES = 10
 DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT = 300
@@ -51,23 +54,15 @@ DEFAULT_YUXI_SUMMARY_PROMPT = """你是对话上下文压缩助手。
 只输出压缩后的上下文，不要添加额外说明。"""
 
 
-def _role_can_access(auth: str | None, role: str | None) -> bool:
-    if not auth:
-        return True
-    if auth == "admin":
-        return role in {"admin", "superadmin"}
-    if auth == "superadmin":
-        return role == "superadmin"
-    return False
-
-
-def _load_workspace_agent_context(thread_id: str, uid: str) -> str:
+def _load_workspace_agent_context(uid: str) -> str:
     sections: list[str] = []
-    for filename in WORKSPACE_AGENT_CONTEXT_FILES:
-        context_file = sandbox_workspace_agent_context_file(thread_id, uid, filename)
+    filesystem = Workspace(uid)
+    for filename in WORKSPACE_BASE_CONTEXT_FILES:
         try:
-            with context_file.open("rb") as buffer:
-                content = buffer.read(WORKSPACE_AGENTS_PROMPT_MAX_BYTES + 1)
+            content, truncated = filesystem.read_authorized_file_prefix(
+                f"/agents/{filename}",
+                WORKSPACE_AGENTS_PROMPT_MAX_BYTES,
+            )
         except FileNotFoundError:
             continue
         except IsADirectoryError:
@@ -80,7 +75,7 @@ def _load_workspace_agent_context(thread_id: str, uid: str) -> str:
         prompt = content[:WORKSPACE_AGENTS_PROMPT_MAX_BYTES].decode("utf-8", errors="replace").strip()
         if not prompt:
             continue
-        if len(content) > WORKSPACE_AGENTS_PROMPT_MAX_BYTES:
+        if truncated:
             prompt = f"{prompt}\n\n[{filename} 内容已截断]"
         sections.append(f"用户工作区 agents/{filename} 内容：\n{prompt}")
     return "\n\n".join(sections)
@@ -94,42 +89,48 @@ async def build_agent_input_context(
     db: AsyncSession | None = None,
     run_id: str | None = None,
     request_id: str | None = None,
+    worker_id: str | None = None,
 ) -> dict:
-    """构建 Agent 输入上下文，并在可用时先同步用户资料记忆。"""
+    """构建上下文，读取工作区前同步当前用户资料。"""
     input_context = dict(agent_config or {})
     if db is not None:
         from yuxi.services.user_memory_service import sync_user_profile_to_memory
 
-        # 用户和部门以数据库为准；同步失败不应阻断本次 Agent 运行，但必须留下日志。
         try:
-            await sync_user_profile_to_memory(db=db, uid=uid, thread_id=thread_id)
+            async with db.begin_nested():
+                await sync_user_profile_to_memory(db=db, uid=uid)
         except Exception:
-            logger.exception("用户记忆同步失败，继续使用现有工作区内容：uid=%s, thread_id=%s", uid, thread_id)
-    agent_context = await asyncio.to_thread(_load_workspace_agent_context, thread_id, uid)
+            logger.exception("用户资料同步失败，沿用工作区内容：uid={}，thread_id={}", uid, thread_id)
+
+    agent_context = await asyncio.to_thread(_load_workspace_agent_context, uid)
 
     if agent_context:
         base_prompt = str(input_context.get("system_prompt") or "").rstrip()
         input_context["system_prompt"] = f"{base_prompt}\n\n{agent_context}" if base_prompt else agent_context
 
-    input_context.update({"uid": uid, "thread_id": thread_id, "run_id": run_id, "request_id": request_id})
+    input_context.update(
+        {
+            "uid": uid,
+            "thread_id": thread_id,
+            "run_id": run_id,
+            "request_id": request_id,
+            "worker_id": worker_id,
+        }
+    )
     return input_context
 
 
-def filter_config_by_role(
+def filter_agent_config_for_management(
     config_json: dict,
-    role: str | None,
+    can_manage: bool,
     context_schema: type["BaseContext"] | None = None,
 ) -> dict:
-    """按 Context 字段 metadata.auth 过滤 config_json.context。"""
+    """按智能体管理权限过滤 config_json.context。"""
     if not isinstance(config_json, dict):
         return {}
 
     schema = context_schema or BaseContext
-    restricted_fields = {
-        f.name
-        for f in fields(schema)
-        if f.metadata.get("auth") and not _role_can_access(str(f.metadata.get("auth")), role)
-    }
+    restricted_fields = {f.name for f in fields(schema) if f.metadata.get("manage_only") and not can_manage}
     if not restricted_fields:
         return dict(config_json)
 
@@ -138,6 +139,12 @@ def filter_config_by_role(
     if isinstance(context, dict):
         filtered["context"] = {key: value for key, value in context.items() if key not in restricted_fields}
     return filtered
+
+
+def _lite_mode_enabled() -> bool:
+    """返回当前进程是否禁止知识库重运行时。"""
+
+    return lite_mode_enabled()
 
 
 @dataclass(kw_only=True)
@@ -151,9 +158,10 @@ class BaseContext:
     """
 
     def update(self, data: dict):
-        """更新配置字段"""
+        """用运行时输入更新已声明的配置字段。"""
+        declared_fields = {item.name for item in fields(self)}
         for key, value in data.items():
-            if hasattr(self, key):
+            if key in declared_fields:
                 setattr(self, key, value)
 
     thread_id: str = field(
@@ -174,6 +182,26 @@ class BaseContext:
     request_id: str | None = field(
         default=None,
         metadata={"name": "请求 ID", "configurable": False, "hide": True},
+    )
+
+    worker_id: str | None = field(
+        default=None,
+        metadata={"name": "Worker Attempt Owner", "configurable": False, "hide": True},
+    )
+
+    runtime_scope_id: str | None = field(
+        default=None,
+        metadata={"name": "Sandbox Runtime Scope", "configurable": False, "hide": True},
+    )
+
+    workdir_relative_path: str | None = field(
+        default=None,
+        metadata={"name": "Workdir Relative Path", "configurable": False, "hide": True},
+    )
+
+    workdir_path: str | None = field(
+        default=None,
+        metadata={"name": "Workdir Virtual Path", "configurable": False, "hide": True},
     )
 
     system_prompt: str = field(
@@ -201,7 +229,7 @@ class BaseContext:
                 {"key": "always_trust", "name": "完全信任", "description": "敏感工具无需确认，自动执行"},
             ],
             "type": "string",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -251,6 +279,17 @@ class BaseContext:
         },
     )
 
+    preload_skills: list[str] = field(
+        default_factory=list,
+        metadata={
+            "name": "预加载 Skills",
+            "options": [],
+            "description": "创建 Agent Graph 时加载完整 Skill 说明，并从首轮开放其依赖工具。默认不预加载。",
+            "type": "list",
+            "kind": "skills",
+        },
+    )
+
     summary_threshold: int = field(
         default=DEFAULT_SUMMARY_THRESHOLD_K,
         metadata={
@@ -260,7 +299,7 @@ class BaseContext:
                 f"{DEFAULT_SUMMARY_THRESHOLD_K}K。"
             ),
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -272,7 +311,7 @@ class BaseContext:
                 f"上下文摘要触发后，除摘要消息外保留最近的消息数量，默认 {DEFAULT_SUMMARY_KEEP_MESSAGES} 条。"
             ),
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -283,7 +322,7 @@ class BaseContext:
             "description": "触发上下文摘要时使用的提示词，必须能接收 {messages} 作为待摘要消息占位符。",
             "type": "string",
             "kind": "prompt",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -297,7 +336,7 @@ class BaseContext:
                 f"{DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT}。"
             ),
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -311,7 +350,7 @@ class BaseContext:
                 f"{DEFAULT_SUMMARY_L2_TRIGGER_RATIO}。"
             ),
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -324,7 +363,7 @@ class BaseContext:
                 f"{DEFAULT_MAX_EXECUTION_STEPS}。"
             ),
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
@@ -334,17 +373,17 @@ class BaseContext:
             "name": "模型重试次数",
             "description": "模型调用失败时的最大重试次数，默认值为 2。",
             "type": "number",
-            "auth": "admin",
+            "manage_only": True,
         },
     )
 
     @classmethod
-    def get_configurable_items(cls, user_role: str | None = None):
+    def get_configurable_items(cls, can_manage: bool = False):
         """实现一个可配置的参数列表，在 UI 上配置时使用"""
         configurable_items = {}
         for f in fields(cls):
             if f.init and not f.metadata.get("hide", False):
-                if user_role is not None and not _role_can_access(f.metadata.get("auth"), user_role):
+                if f.metadata.get("manage_only") and not can_manage:
                     continue
                 if f.metadata.get("configurable", True):
                     type_name = cls._get_type_name(f.type)
@@ -460,12 +499,20 @@ async def resolve_agent_resource_options(
             if tool.get("slug")
         ]
     if "knowledges" in fields_to_load:
-        from yuxi.knowledge.runtime import knowledge_base
+        if _lite_mode_enabled():
+            options["knowledges"] = []
+        else:
+            from yuxi.knowledge.runtime import knowledge_base
+            from yuxi.permissions.authorization import build_authorization_context
 
-        databases = await knowledge_base.get_databases_by_user(user)
-        options["knowledges"] = [
-            _resource_option(item.kb_id, item.name, item.description) for item in databases if item.kb_id
-        ]
+            databases = (
+                await knowledge_base.get_databases_by_user(user)
+                if build_authorization_context(user).has_permission("knowledge_base:read")
+                else []
+            )
+            options["knowledges"] = [
+                _resource_option(item.kb_id, item.name, item.description) for item in databases if item.kb_id
+            ]
     if "mcps" in fields_to_load:
         from yuxi.agents.mcp.service import get_all_mcp_servers, get_enabled_mcp_server_slugs
 
@@ -477,11 +524,19 @@ async def resolve_agent_resource_options(
             if server.slug in enabled_slugs
         ]
     if "skills" in fields_to_load:
+        from yuxi.agents.skills.runtime import is_skill_allowed_in_runtime_mode
         from yuxi.agents.skills.service import list_accessible_skills
+        from yuxi.permissions.authorization import build_authorization_context
 
-        skills = await list_accessible_skills(db, user)
+        skills = (
+            await list_accessible_skills(db, user)
+            if build_authorization_context(user).has_permission("skill:use")
+            else []
+        )
         options["skills"] = [
-            _resource_option(skill.slug, skill.name, skill.description) for skill in skills if skill.slug
+            _resource_option(skill.slug, skill.name, skill.description)
+            for skill in skills
+            if skill.slug and is_skill_allowed_in_runtime_mode(skill.slug)
         ]
     if "subagents" in fields_to_load:
         from yuxi.repositories.agent_repository import AgentRepository
@@ -503,29 +558,29 @@ async def normalize_agent_context_config(
 ) -> dict:
     schema = context_schema or BaseContext
     raw_context = dict(context) if isinstance(context, dict) else {}
-    filtered = filter_config_by_role({"context": raw_context}, getattr(user, "role", None), schema)
-    normalized = dict(filtered.get("context") or {})
+    normalized = raw_context
     field_names = {item.name for item in fields(schema)}
     resource_fields = _AGENT_RESOURCE_FIELDS & field_names
-    if not resource_fields:
-        return normalized
-
     fields_to_load = _resource_fields_requiring_available_keys(normalized, resource_fields)
-    if not fields_to_load:
-        return normalized
+    if fields_to_load:
+        resource_options = await resolve_agent_resource_options(fields_to_load, db=db, user=user)
+        available = {
+            field_name: [option["key"] for option in field_options]
+            for field_name, field_options in resource_options.items()
+        }
 
-    resource_options = await resolve_agent_resource_options(fields_to_load, db=db, user=user)
-    available = {
-        field_name: [option["key"] for option in field_options]
-        for field_name, field_options in resource_options.items()
-    }
+        for field_name, available_keys in available.items():
+            current = normalized.get(field_name)
+            if current is None:
+                normalized[field_name] = available_keys
+            else:
+                normalized[field_name] = _normalize_selected_resource_keys(current, available_keys)
 
-    for field_name, available_keys in available.items():
-        current = normalized.get(field_name)
-        if current is None:
-            normalized[field_name] = available_keys
-        else:
-            normalized[field_name] = _normalize_selected_resource_keys(current, available_keys)
+    if "preload_skills" in field_names:
+        normalized["preload_skills"] = _normalize_selected_resource_keys(
+            normalized.get("preload_skills"),
+            normalized.get("skills", []),
+        )
 
     return normalized
 
@@ -541,29 +596,30 @@ async def prepare_agent_runtime_context(
     if not uid:
         return context
 
-    from yuxi.agents.backends.knowledge_base_backend import resolve_visible_knowledge_bases_for_context
-    from yuxi.agents.middlewares.skills import resolve_runtime_skills_for_context
+    from yuxi.agents.skills.runtime import resolve_runtime_skills_for_context
     from yuxi.repositories.user_repository import UserRepository
     from yuxi.storage.postgres.manager import pg_manager
 
     resource_fields = _AGENT_RESOURCE_FIELDS
+    context_resource_fields = resource_fields | {"preload_skills"}
     async with pg_manager.get_async_session_context() as db:
+        if not str(getattr(context, "model", "") or "").strip():
+            setattr(context, "model", (await system_options.get(db))["default_model"])
         user = await UserRepository().get_by_uid_with_db(db, uid)
         if user is None:
-            for field_name in resource_fields:
+            for field_name in context_resource_fields:
                 if hasattr(context, field_name):
                     setattr(context, field_name, [])
             setattr(context, "_visible_knowledge_bases", [])
-            setattr(context, "_prompt_skills", [])
-            setattr(context, "_readable_skills", [])
-            setattr(context, "_runtime_skill_metadata", {})
-            setattr(context, "_runtime_skill_dependency_map", {})
-            setattr(context, "_runtime_skill_sources", {})
+            setattr(context, "_effective_skill_slugs", [])
+            setattr(context, "_runtime_skills", {})
+            setattr(context, "_preloaded_skills", [])
+            setattr(context, "_preloaded_skill_contents", {})
             return context
 
         raw_resources = {
             field_name: getattr(context, field_name, None)
-            for field_name in resource_fields
+            for field_name in context_resource_fields
             if hasattr(context, field_name)
         }
         normalized = await normalize_agent_context_config(
@@ -572,17 +628,25 @@ async def prepare_agent_runtime_context(
             user=user,
             context_schema=schema,
         )
-        for field_name in resource_fields:
+        for field_name in context_resource_fields:
             if hasattr(context, field_name):
                 setattr(context, field_name, normalized.get(field_name, []))
 
-        await resolve_visible_knowledge_bases_for_context(context)
-        skill_scope = await resolve_runtime_skills_for_context(context, db=db, user=user)
+        if _lite_mode_enabled():
+            context.knowledges = []
+            setattr(context, "_visible_knowledge_bases", [])
+        else:
+            from yuxi.agents.backends.knowledge_base_backend import resolve_visible_knowledge_bases_for_context
+
+            await resolve_visible_knowledge_bases_for_context(context)
+        skill_scope = getattr(context, "_skill_runtime_snapshot", None)
+        if not isinstance(skill_scope, dict):
+            skill_scope = await resolve_runtime_skills_for_context(context, db=db, user=user)
         context.skills = skill_scope["context_skills"]
-        setattr(context, "_prompt_skills", skill_scope["prompt_skills"])
-        setattr(context, "_readable_skills", skill_scope["readable_skills"])
-        setattr(context, "_runtime_skill_metadata", skill_scope["runtime_skill_metadata"])
-        setattr(context, "_runtime_skill_dependency_map", skill_scope["runtime_skill_dependency_map"])
-        setattr(context, "_runtime_skill_sources", skill_scope.get("runtime_skill_sources", {}))
+        context.preload_skills = skill_scope["context_preload_skills"]
+        setattr(context, "_effective_skill_slugs", skill_scope["effective_skills"])
+        setattr(context, "_runtime_skills", skill_scope["runtime_skills"])
+        setattr(context, "_preloaded_skills", skill_scope["preloaded_skills"])
+        setattr(context, "_preloaded_skill_contents", skill_scope["preloaded_skill_contents"])
 
     return context

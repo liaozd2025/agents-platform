@@ -7,6 +7,10 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from server.routers import knowledge_eval_router
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -59,3 +63,69 @@ async def test_download_dataset_not_found(test_client, admin_headers):
         headers=admin_headers,
     )
     assert response.status_code == 404, response.text
+
+
+async def test_run_result_filter_contract_over_http(monkeypatch):
+    """HTTP 查询参数必须在依赖边界后按新旧协议校验并传给服务。"""
+
+    captured = []
+
+    class ServiceStub:
+        async def get_run_results(self, kb_id, run_id, **kwargs):
+            captured.append({"kb_id": kb_id, "run_id": run_id, **kwargs})
+            return {"items": []}
+
+    async def allow_database_read():
+        return object()
+
+    monkeypatch.setattr(knowledge_eval_router, "EvaluationService", ServiceStub)
+    app = FastAPI()
+    app.include_router(knowledge_eval_router.evaluation, prefix="/api")
+    app.dependency_overrides[knowledge_eval_router.require_evaluation_database_read] = allow_database_read
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        unknown = await client.get(
+            "/api/evaluation/databases/kb-test/runs/run-test",
+            params={"result_filter": "unknown"},
+        )
+        mixed = await client.get(
+            "/api/evaluation/databases/kb-test/runs/run-test",
+            params={"result_filter": "all", "error_only": "true"},
+        )
+        mixed_false = await client.get(
+            "/api/evaluation/databases/kb-test/runs/run-test",
+            params={"result_filter": "all", "error_only": "false"},
+        )
+        legacy = await client.get(
+            "/api/evaluation/databases/kb-test/runs/run-test",
+            params={"error_only": "true"},
+        )
+        current = await client.get(
+            "/api/evaluation/databases/kb-test/runs/run-test",
+            params={"page": 2, "page_size": 5, "result_filter": "errors_or_low_recall"},
+        )
+
+    assert unknown.status_code == 400
+    assert unknown.json()["detail"] == "无效的评估结果筛选条件"
+    assert mixed.status_code == 400
+    assert mixed.json()["detail"] == "不能同时使用 result_filter 和 error_only"
+    assert mixed_false.status_code == 400
+    assert mixed_false.json()["detail"] == "不能同时使用 result_filter 和 error_only"
+    assert legacy.status_code == 200
+    assert current.status_code == 200
+    assert captured == [
+        {
+            "kb_id": "kb-test",
+            "run_id": "run-test",
+            "page": 1,
+            "page_size": 20,
+            "result_filter": "legacy_errors",
+        },
+        {
+            "kb_id": "kb-test",
+            "run_id": "run-test",
+            "page": 2,
+            "page_size": 5,
+            "result_filter": "errors_or_low_recall",
+        },
+    ]

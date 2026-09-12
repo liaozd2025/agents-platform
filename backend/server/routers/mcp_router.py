@@ -17,10 +17,10 @@ from yuxi.agents.mcp.service import (
     toggle_tool_enabled,
     update_mcp_server,
 )
-from yuxi.storage.postgres.models_business import User
+from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.utils import logger
 
-from server.utils.auth_middleware import get_admin_user, get_db, get_required_user
+from server.utils.auth_middleware import get_authorization_context, get_db, require_permission
 
 mcp = APIRouter(prefix="/system/mcp-servers", tags=["mcp"])
 
@@ -99,13 +99,13 @@ def ensure_mcp_server_runnable(server) -> None:
 
 @mcp.get("")
 async def get_mcp_servers(
-    current_user: User = Depends(get_required_user),
+    authorization: AuthorizationContext = Depends(get_authorization_context),
     db: AsyncSession = Depends(get_db),
 ):
     """获取所有 MCP 服务器配置（普通用户仅获取脱敏的基础信息）"""
     try:
         servers = await get_all_mcp_servers(db)
-        if current_user.role in ["admin", "superadmin"]:
+        if authorization.has_permission("mcp:manage"):
             return {"success": True, "data": [serialize_mcp_server(s) for s in servers]}
 
         data = []
@@ -128,7 +128,7 @@ async def get_mcp_servers(
 @mcp.post("")
 async def create_mcp_server_route(
     request: CreateMcpServerRequest,
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(require_permission("mcp:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """创建新的 MCP 服务器"""
@@ -154,7 +154,7 @@ async def create_mcp_server_route(
             sse_read_timeout=request.sse_read_timeout,
             tags=request.tags,
             icon=request.icon,
-            created_by=current_user.username,
+            created_by=authorization.user.username,
         )
         return {"success": True, "data": serialize_mcp_server(server)}
     except ValueError as ve:
@@ -167,7 +167,7 @@ async def create_mcp_server_route(
 @mcp.get("/{slug}")
 async def get_mcp_server_route(
     slug: str,
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("mcp:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """获取单个 MCP 服务器配置"""
@@ -185,7 +185,7 @@ async def get_mcp_server_route(
 async def update_mcp_server_route(
     slug: str,
     request: UpdateMcpServerRequest,
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(require_permission("mcp:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """更新 MCP 服务器配置"""
@@ -207,7 +207,7 @@ async def update_mcp_server_route(
             sse_read_timeout=request.sse_read_timeout,
             tags=request.tags,
             icon=request.icon,
-            updated_by=current_user.username,
+            updated_by=authorization.user.username,
         )
         return {"success": True, "data": serialize_mcp_server(server)}
     except HTTPException:
@@ -226,7 +226,7 @@ async def update_mcp_server_route(
 @mcp.delete("/{slug}")
 async def delete_mcp_server_route(
     slug: str,
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("mcp:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """删除 MCP 服务器"""
@@ -255,7 +255,7 @@ async def delete_mcp_server_route(
 @mcp.post("/{slug}/test")
 async def test_mcp_server(
     slug: str,
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("mcp:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """测试 MCP 服务器连接"""
@@ -283,12 +283,12 @@ async def test_mcp_server(
 async def update_mcp_server_status_route(
     slug: str,
     request: UpdateMcpServerStatusRequest,
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(require_permission("mcp:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """更新 MCP 服务器启用状态"""
     try:
-        is_enabled, server = await set_server_enabled(db, slug, request.enabled, current_user.username)
+        is_enabled, server = await set_server_enabled(db, slug, request.enabled, authorization.user.username)
         return {
             "success": True,
             "enabled": is_enabled,
@@ -312,7 +312,7 @@ async def update_mcp_server_status_route(
 @mcp.get("/{slug}/tools")
 async def get_mcp_server_tools(
     slug: str,
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("mcp:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """获取 MCP 服务器的工具列表"""
@@ -364,7 +364,7 @@ async def get_mcp_server_tools(
 @mcp.post("/{slug}/tools/refresh")
 async def refresh_mcp_server_tools(
     slug: str,
-    current_user: User = Depends(get_admin_user),
+    _authorization: AuthorizationContext = Depends(require_permission("mcp:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """刷新 MCP 服务器的工具列表（清除缓存重新获取）"""
@@ -407,12 +407,12 @@ async def refresh_mcp_server_tools(
 async def toggle_mcp_server_tool_route(
     slug: str,
     tool_name: str,
-    current_user: User = Depends(get_admin_user),
+    authorization: AuthorizationContext = Depends(require_permission("mcp:manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """切换单个工具的启用状态"""
     try:
-        enabled, _ = await toggle_tool_enabled(db, slug, tool_name, current_user.username)
+        enabled, _ = await toggle_tool_enabled(db, slug, tool_name, authorization.user.username)
         return {
             "success": True,
             "tool_name": tool_name,

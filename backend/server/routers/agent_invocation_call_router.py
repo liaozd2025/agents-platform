@@ -26,7 +26,8 @@ from yuxi.services.run_submission_service import RunOrigin, RunSubmissionCommand
 from yuxi.storage.postgres.models_business import User
 from yuxi.utils.hash_utils import hash_id
 
-from server.utils.auth_middleware import get_db, get_required_user
+from server.utils.agent_permissions import require_agent_use_permission
+from server.utils.auth_middleware import get_db
 
 agent_invocation_call_router = APIRouter(prefix="/agent-invocation/agent-call", tags=["agent-invocation"])
 
@@ -61,7 +62,7 @@ class AgentCallRunResultRequest(BaseModel):
 @agent_invocation_call_router.post("/runs")
 async def create_agent_call_run(
     payload: AgentCallRunCreate,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
     db: AsyncSession = Depends(get_db),
 ):
     """创建 Agent Call，并按 async_mode 决定是否等待最终结果。"""
@@ -131,7 +132,7 @@ async def create_agent_call_run(
 @agent_invocation_call_router.post("/runs/result")
 async def get_agent_call_run_result(
     payload: AgentCallRunResultRequest,
-    current_user: User = Depends(get_required_user),
+    current_user: User = Depends(require_agent_use_permission),
     db: AsyncSession = Depends(get_db),
 ):
     """读取 Agent Call Run 的 OpenAI-compatible 结果。"""

@@ -12,7 +12,7 @@ const IMAGE_EXTENSIONS = new Set([
 ])
 const PDF_EXTENSIONS = new Set(['.pdf'])
 const HTML_EXTENSIONS = new Set(['.html', '.htm'])
-const OFFICE_EXTENSIONS = new Set(['.docx', '.pptx'])
+const OFFICE_EXTENSIONS = new Set(['.doc', '.docx', '.ppt', '.pptx'])
 const TEXT_EXTENSIONS = new Set([
   '.txt',
   '.text',
@@ -135,6 +135,7 @@ export const getPreviewTypeByPath = (path) => {
   if (MARKDOWN_EXTENSIONS.has(extension)) return 'markdown'
   if (HTML_EXTENSIONS.has(extension)) return 'html'
   if (OFFICE_EXTENSIONS.has(extension)) return 'office'
+  if (extension === '.xls' || extension === '.xlsx') return 'spreadsheet'
   if (TEXT_EXTENSIONS.has(extension)) return 'text'
   return 'unsupported'
 }
@@ -160,14 +161,40 @@ export const normalizePreviewResponse = async (response, baseFile = {}) => {
 
   if (contentType.includes('application/json')) {
     const payload = await response.json()
-    const previewType = payload.preview_type || payload.previewType || payload.kind || 'text'
+    const pathPreviewType = getPreviewTypeByPath(baseFile.path)
+    const previewType =
+      payload.preview_type ||
+      payload.previewType ||
+      payload.kind ||
+      (pathPreviewType !== 'unsupported' ? pathPreviewType : 'text')
     return {
       ...baseFile,
       ...payload,
       content: payload.content ?? '',
+      loading: false,
+      status: payload.status || (payload.supported === false ? 'unsupported' : 'ready'),
       previewType,
       supported: payload.supported !== false,
       message: payload.message || '',
+      previewUrl: ''
+    }
+  }
+
+  const pathPreviewType = getPreviewTypeByPath(baseFile.path)
+  const responsePreviewType = getPreviewTypeByContentType(contentType)
+  const textPreviewType = pathPreviewType !== 'unsupported' ? pathPreviewType : responsePreviewType
+  if (
+    ['text', 'markdown', 'html'].includes(textPreviewType) ||
+    contentType.includes('application/json')
+  ) {
+    return {
+      ...baseFile,
+      content: await response.text(),
+      loading: false,
+      status: 'ready',
+      previewType: textPreviewType,
+      supported: true,
+      message: '',
       previewUrl: ''
     }
   }
@@ -176,12 +203,19 @@ export const normalizePreviewResponse = async (response, baseFile = {}) => {
     response?.headers?.get?.('x-yuxi-preview-type') || getPreviewTypeByContentType(contentType)
   const blob = await response.blob()
 
+  const previewUrl =
+    typeof window !== 'undefined' && window.URL?.createObjectURL
+      ? window.URL.createObjectURL(blob)
+      : ''
+
   return {
     ...baseFile,
     content: null,
+    loading: false,
+    status: previewType !== 'unsupported' ? 'ready' : 'unsupported',
     previewType,
     supported: previewType !== 'unsupported',
     message: previewType === 'unsupported' ? '当前文件暂不支持预览，请下载后查看' : '',
-    previewUrl: window.URL.createObjectURL(blob)
+    previewUrl
   }
 }

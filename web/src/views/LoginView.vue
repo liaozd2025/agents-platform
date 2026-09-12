@@ -22,7 +22,7 @@
           <h1 class="brand-text">
             <span v-if="brandOrgName" class="brand-org">{{ brandOrgName }}</span>
             <span v-if="brandOrgName && brandName !== brandOrgName" class="brand-separator"></span>
-            <span class="brand-main">{{ brandName }}</span>
+            <span v-if="brandName !== brandOrgName" class="brand-main">{{ brandName }}</span>
           </h1>
         </div>
       </div>
@@ -166,9 +166,9 @@
                   <a-form-item
                     label="登录账号"
                     name="loginId"
-                    :rules="[{ required: true, message: '请输入UID或手机号' }]"
+                    :rules="[{ required: true, message: '请输入登录账号' }]"
                   >
-                    <a-input v-model:value="loginForm.loginId" placeholder="UID或手机号">
+                    <a-input v-model:value="loginForm.loginId" placeholder="请输入登录账号">
                       <template #prefix>
                         <user-icon size="18" />
                       </template>
@@ -266,11 +266,6 @@
 
     <!-- 页面底部：版权信息等 -->
     <footer class="page-footer">
-      <div class="footer-links">
-        <a href="https://github.com/xerrors" target="_blank">联系我们</a>
-        <span class="divider">|</span>
-        <a href="https://github.com/xerrors/Yuxi" target="_blank">使用帮助</a>
-      </div>
       <div class="copyright">
         &copy; {{ new Date().getFullYear() }} {{ brandName }}. All Rights Reserved.
       </div>
@@ -292,7 +287,7 @@ import {
   Lock as LockIcon,
   Key as KeyIcon,
   AlertCircle as ExclamationCircleIcon
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 import { tryAutoStartOIDC, sanitizeRedirect } from '@/utils/oidcAutoStart'
 import { MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
 
@@ -674,9 +669,8 @@ onUnmounted(() => {
   position: relative;
   display: flex;
   flex-direction: column;
-  background-color: var(--gray-10);
-  background-image: radial-gradient(var(--gray-200) 1px, transparent 1px);
-  background-size: 24px 24px;
+  /* 使用无纹理的浅蓝灰纯色，和白色登录卡片形成清晰层次。 */
+  background-color: #FBFCFC;
 
   &.has-alert {
     padding-top: 60px;
@@ -955,27 +949,6 @@ onUnmounted(() => {
 .page-footer {
   padding: 24px;
   text-align: center;
-}
-
-.footer-links {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 8px;
-
-  a {
-    color: var(--gray-500);
-    font-size: 13px;
-    &:hover {
-      color: var(--main-color);
-    }
-  }
-
-  .divider {
-    color: var(--gray-300);
-    font-size: 12px;
-  }
 }
 
 .copyright {

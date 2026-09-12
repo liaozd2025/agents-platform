@@ -1,110 +1,219 @@
-# 生产部署指南
+# 生产部署
 
-本文档介绍如何在生产环境中部署 Yuxi。
+本页说明如何用 Docker Compose 部署 Yuxi、验证服务状态，以及从 v0.7.1 升级到当前 `v0.7.2`。当前版本仍是 Beta，重要数据上线前请先在备份环境演练恢复。
 
-## 前置要求
+## 前置条件
 
-- Docker Engine (v24.0+)
-- Docker Compose (v2.20+)
-- NVIDIA Container Toolkit（如需使用 GPU 服务）
+- Docker Engine 24.0 或更高版本；
+- Docker Compose v2.20 或更高版本；
+- 能访问所需镜像和模型服务的网络；
+- 使用本地 GPU OCR 时准备 NVIDIA Container Toolkit。
 
-::: warning 注意事项
-1. 生产环境和开发环境建议使用不同的机器，避免端口和资源冲突
-2. 虽然名为「生产环境」，但这只是基本配置，真正上线需要根据实际情况调整
-3. 前端有调试面板（长按侧边栏触发），生产环境建议关闭
+生产 Compose 默认不把 PostgreSQL、MinIO、Neo4j 和 Milvus 管理端口发布到公网。维护这些服务时，优先使用 `docker compose exec` 或受控的内网入口。
+
+::: danger 公网部署必须先配置 TLS
+生产 Compose 自带的 Web 容器只监听 HTTP 80 端口，不负责证书和 HTTPS。把服务交给公网或接收登录、OIDC、API Key 请求前，必须在前面配置 TLS 反向代理，并只把 HTTPS 地址提供给用户和外部系统。HTTP 仅适合本机或受控内网调试。
 :::
 
-## 部署步骤
+## 1. 准备生产配置
 
-### 1. 准备配置文件
-
-为避免与开发环境冲突，生产环境建议使用 `.env.prod` 文件：
+复制模板并编辑 `.env.prod`：
 
 ```bash
 cp .env.template .env.prod
 ```
 
-编辑 `.env.prod`，设置强密码和必要的 API 密钥：
+至少填写：
 
-```sh
-POSTGRES_PASSWORD=
-NEO4J_PASSWORD=
-MINIO_ACCESS_KEY=
-MINIO_SECRET_KEY=
-JWT_SECRET_KEY=
-YUXI_INSTANCE_ID=
-SANDBOX_PROVISIONER_TOKEN=
-SILICONFLOW_API_KEY=
+```dotenv
+POSTGRES_PASSWORD=<strong-postgres-password>
+NEO4J_PASSWORD=<strong-neo4j-password>
+MINIO_ACCESS_KEY=<strong-minio-access-key>
+MINIO_SECRET_KEY=<strong-minio-secret-key>
+JWT_SECRET_KEY=<random-value-at-least-32-characters>
+API_KEY_DERIVATION_SECRET=<another-random-value-at-least-32-characters>
+SANDBOX_PROVISIONER_TOKEN=<another-random-value-at-least-32-characters>
+YUXI_INSTANCE_ID=<stable-instance-name>
 ```
 
-生产 Compose 会在前七项配置缺失或为空时拒绝启动，并提示具体变量名。`JWT_SECRET_KEY` 和 `SANDBOX_PROVISIONER_TOKEN` 均应至少使用 32 字节随机值并持久保存，可分别使用 `openssl rand -hex 32` 生成；两者不能复用。`YUXI_INSTANCE_ID` 应是每套部署稳定且唯一的实例标识。模型 API 密钥按实际使用的供应商配置。
-
-### 2. 启动服务
-
-使用生产环境配置文件启动：
+三个安全密钥必须彼此不同、没有首尾空白，并在重建或升级时保留原值。可以用下面的命令生成随机值，再把结果安全地写入 `.env.prod`：
 
 ```bash
-# 仅启动核心服务（CPU 模式）
-docker compose -f docker-compose.prod.yml up -d --build
-
-# 启动所有服务（包含 GPU OCR）
-docker compose -f docker-compose.prod.yml --profile all up -d --build
+openssl rand -hex 32
 ```
 
-### 3. 验证部署
+模型 API Key 按实际使用的供应商填写。生产 Compose 所有必填项都通过变量校验，缺失时会拒绝启动。
 
-- Web 访问：http://localhost（直接通过 80 端口）
-- API 健康检查：`curl http://localhost/api/system/health`
+后续命令必须显式使用 `--env-file .env.prod`。Compose 的 `env_file` 负责把变量注入容器，但不会替代 Compose 文件插值所需的 `--env-file`。
 
-公开头像和 Agent 图片通过前端同源路径 `/minio/public/...` 读取，由 Nginx 只读代理到 MinIO 的 `public` bucket。无需也不应向公网开放 MinIO 的 `9000` 对象 API 或 `9001` 管理控制台；知识库等私有 bucket 不经过这个代理。需要使用独立静态资源域名时，可在 `.env.prod` 中设置 `MINIO_PUBLIC_URL=https://assets.example.com`，并在该域名侧保持同等的只读 bucket 限制。
+## 2. 首次启动
 
-历史 PDF 解析 Markdown 中已经写入的 `http://localhost:9000/public/...` 或其他 `<host>:9000/public/...` 图片地址，会在前端渲染时自动转换为同源路径，不需要重新解析 PDF。
-
-## 跨域（CORS）配置
-
-`docker-compose.prod.yml` 默认把 `YUXI_ENV` 设为 `production`，后端在该环境下会按 `YUXI_CORS_ORIGINS` 显式声明允许的来源。**未配置时返回空列表，浏览器跨域请求会被拒绝**。生产部署前请根据前端与 API 的相对位置选择策略：
-
-| 部署形态 | 推荐配置 |
-|----------|----------|
-| 前端与 API 同源（Nginx 同端口反代） | 不需要设置，留空即可 |
-| 前端与 API 跨域部署 | `YUXI_CORS_ORIGINS=https://your-frontend.example.com` |
-| 多个前端域名 | 逗号分隔，如 `https://a.example.com,https://b.example.com` |
-| 完全放开（不推荐） | `YUXI_CORS_ORIGINS=*`，会自动关闭 credentials，登录态/JWT 无法跨域携带 |
-
-开发环境（`YUXI_ENV=development` 且未设置该变量）默认允许 `http://localhost:5173` 与 `http://127.0.0.1:5173`，方便本地前后端独立启动调试。从 0.7.0 升级到 0.7.1 时，如果此前是跨域部署但未显式声明来源，必须补上 `YUXI_CORS_ORIGINS`，否则前端跨域请求会被拒绝。
-
-## 维护与更新
-
-### 从使用默认凭据的版本升级
-
-如果部署曾使用仓库历史默认的 PostgreSQL、Neo4j 或 MinIO 凭据，升级 Compose 文件本身不会保证已有数据卷中的服务凭据已经改变。升级前应分别通过对应服务的管理命令真实修改凭据，再把新值写入 `.env.prod`；完成后重建相关服务，并使用旧凭据验证登录已被拒绝。
-
-PostgreSQL 可以在数据库容器内使用交互式命令修改，避免新密码出现在 shell 历史和进程参数中：
+新部署直接启动核心服务：
 
 ```bash
-docker compose -f docker-compose.prod.yml exec postgres psql -U postgres -d yuxi -c '\password postgres'
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build
 ```
 
-Neo4j 应使用 `cypher-shell` 的当前用户密码修改流程；MinIO 应使用 `mc admin` 或部署所采用的密钥管理流程。不要把真实密码写入文档、测试脚本或命令历史。完成凭据轮换并配置 `SANDBOX_PROVISIONER_TOKEN` 后，再执行下面的重建命令。
-
-### 更新代码
+需要本地 MinerU 或 PaddleX OCR 时，再启用 `all` profile：
 
 ```bash
-# 拉取最新代码
-git pull
-
-# 重新构建并启动
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.prod -f docker-compose.prod.yml --profile all up -d --build
 ```
 
-生产 Compose 不再向宿主机发布 PostgreSQL 和文档解析服务端口。确需从宿主机维护时，优先使用 `docker compose exec`；不要为了临时调试把这些端口重新暴露到公网。
+`storage-migrator` 是启动依赖的一部分。迁移器成功后会退出，退出码为 0 是正常结果；API、worker 和 provisioner 会等待它成功。
+
+## 3. 从 v0.7.1 升级
+
+升级前安排停机窗口，并在同一时点备份：
+
+- PostgreSQL 数据目录；
+- MinIO 数据目录；
+- `docker/volumes/yuxi` 中的历史文件、UserWorkspace 和 Skill 数据；
+- 当前 Compose、`.env.prod` 和目标版本代码。
+
+备份后至少做一次成套恢复演练。只恢复数据库或只恢复文件卷，会让数据库记录与文件字节不一致。
+
+检出目标版本后，先停止 API、worker 和 provisioner，再运行仓库提供的迁移入口：
+
+```bash
+git checkout v0.7.2
+bash scripts/migrate-storage.sh \
+  --env-file .env.prod \
+  -f docker-compose.prod.yml
+```
+
+迁移脚本会使用同一组 Compose、env file 和 profile 参数建立停机证明，阻止新的沙盒创建，等待现有沙盒清空，然后运行 storage migrator。迁移成功前不要启动新的 API 或 worker。
+
+迁移会处理历史 Conversation 的 Project/Workdir 绑定、附件和产物路径、系统配置、共享 Skill 以及持久目录的所有权；未完成的历史 AgentRun 会被收敛为可观察失败，旧 SQLite checkpoint 不会迁移。历史知识库 Markdown 中指向 `public` bucket 的图片也不会自动变成私有对象，敏感知识库升级后需要重新解析并核对图片访问权限。
+
+这两件事不要混淆：旧 Markdown 中已经写入的 `http://localhost:9000/public/...` 或其他 `<host>:9000/public/...` 图片地址，前端渲染时会自动转换为同源的 `/minio/public/...` 路径，因此不需要仅为了更新 URL 而重新解析 PDF；但对象仍在公开的 `public` bucket 中，不能把 URL 转换当作权限收紧。
+
+迁移按 PostgreSQL、对象存储和文件卷分别提交，不是跨存储的单事务。命令失败时保持服务停止并保留日志；修复冲突后使用完全相同的参数重跑，迁移器会校验已提交的确定性目标并继续。
+
+需要放弃升级时，保持服务停止，检出旧版本，并从同一停机时点的成套备份恢复。不要只恢复其中一个存储域。
+
+### Kubernetes 存储
+
+当前仓库只提供沙盒 provisioner 的 Kubernetes backend，不提供完整的应用 Deployment、StorageClass、Secret 或旧 PVC 原地迁移工具。新部署需要由集群运维预先创建：
+
+- `USER_DATA_PVC`：承载每个用户的 UserWorkspace，必须提供部署所需的共享读写能力；
+- `SKILLS_PVC`：承载按用户投影的共享/内置 Skill。
+
+旧版 `THREAD_PVC` 的目录形状与当前 `shared/<uid>/workspace/projects/<workdir-id>` 不同，不能只改变量名升级。请离线导出、校验并导入新布局，再启动新 provisioner。
+
+## 4. 验证部署
+
+先看容器状态：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml ps
+```
+
+生产 Web 入口默认是 `http://<host>/`。部署在反向代理后并配置 TLS 后，应使用 HTTPS。
+
+```bash
+curl --fail http://localhost/api/system/health
+curl --fail http://localhost/api/system/ready
+```
+
+- `/api/system/health` 只表示 API 进程存活；
+- `/api/system/ready` 表示启动完成、PostgreSQL/Redis 可用，并且兼容 worker 正在提供健康租约。
+
+就绪接口返回 `ready` 后，再用浏览器完成登录和一次真实对话。健康或就绪状态不能证明知识库、模型、沙盒或外部服务的业务链路正确。
+
+公开头像和智能体图片通过同源 `/minio/public/...` 只读代理访问。不要把 MinIO 的 9000 对象 API 或 9001 控制台暴露到公网；知识库等私有 bucket 不经过该代理。需要单独的静态资源域名时，设置 `MINIO_PUBLIC_URL`，并在域名侧保持同样的只读限制。
+
+## 跨域（CORS）
+
+生产环境不会默认允许浏览器跨域请求：
+
+```dotenv
+YUXI_CORS_ORIGINS=https://frontend.example.com
+```
+
+多个来源用逗号分隔：
+
+```dotenv
+YUXI_CORS_ORIGINS=https://a.example.com,https://b.example.com
+```
+
+前端与 API 同源时留空即可。设置为 `*` 会关闭 credentials，浏览器不会携带登录态，因此不适合需要 JWT Cookie/凭证的前端。开发环境在 `YUXI_ENV=development` 且未设置该变量时，默认允许 `http://localhost:5173` 和 `http://127.0.0.1:5173`；生产环境不会采用这个默认值。修改后重启 API。
+
+## 维护与故障排查
 
 ### 查看日志
 
 ```bash
-# API 日志
+docker compose --env-file .env.prod -f docker-compose.prod.yml logs --tail=200 api worker sandbox-provisioner
 docker logs -f api-prod
-
-# Nginx 访问日志
-docker logs -f web-prod
+docker logs -f worker-prod
 ```
+
+### Redis 重建后恢复 worker
+
+ARQ worker 不会在 Redis 容器重建后自动恢复连接。重建 Redis 后重启 worker：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d redis
+docker compose --env-file .env.prod -f docker-compose.prod.yml restart worker
+```
+
+再次检查 `/api/system/ready`，确认 worker 健康租约恢复。
+
+### 轮换历史默认凭据
+
+更换 `.env.prod` 中的 PostgreSQL、Neo4j 或 MinIO 凭据，不会自动修改已经写入数据卷的服务凭据。请先使用对应服务的官方管理流程修改数据卷内的凭据，再更新 `.env.prod`，重新创建相关服务，并用旧凭据验证登录已被拒绝。不要把真实密码写进命令历史、日志或文档。
+
+PostgreSQL 可以在数据库容器内使用交互式命令修改，避免新密码出现在 shell 历史和进程参数中：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml \
+  exec postgres psql -U postgres -d yuxi -c '\password postgres'
+```
+
+Neo4j 使用 `cypher-shell` 的当前用户密码修改流程；MinIO 使用 `mc admin` 或部署采用的密钥管理流程。完成轮换后，把新值写入 `.env.prod`，再重建依赖这些凭据的服务：
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml \
+  up -d --force-recreate postgres graph minio api worker
+```
+
+最后分别用新凭据和旧凭据执行一次受控登录验证；API/worker 的 `API_KEY_DERIVATION_SECRET` 与 `SANDBOX_PROVISIONER_TOKEN` 也必须保持为持久、独立且至少 32 个字符的值。
+
+### 常用检查顺序
+
+1. `docker compose ps`：确认迁移器成功、API/worker/provisioner 在运行。
+2. `docker compose logs`：从最先失败的服务开始看，不只看最后一条 API 错误。
+3. `/api/system/ready`：确认接流量前置条件。
+4. 真实登录、对话和文件操作：确认业务链路。
+5. 知识库、OCR、Langfuse 等可选能力：单独检查其配置和外部服务。
+
+## 第三方组件和许可证
+
+Yuxi 本体使用 MIT License。Compose 依赖以独立进程运行，Yuxi 通过公开协议访问它们；第三方组件的许可证不会因为使用 Compose 就变成 MIT。
+
+当前 Compose 引用的主要组件如下。表中的版本是镜像 tag；只有明确写死的 tag 才能提供对应的版本预期，`postgres:16`、`mineru-vllm:latest` 和 `paddlex:latest` 仍可能随重新拉取而变化：
+
+| 组件 | 镜像引用 | 许可证 |
+| --- | --- | --- |
+| Neo4j Community | `neo4j:5.26.29` | GPL-3.0-only |
+| MinIO | `minio/minio:RELEASE.2023-03-20T20-16-18Z` | AGPL-3.0 |
+| Milvus | `milvusdb/milvus:v2.5.6` | Apache-2.0 |
+| etcd | `quay.io/coreos/etcd:v3.5.5` | Apache-2.0 |
+| PostgreSQL | `postgres:16` | PostgreSQL License |
+| Redis | `redis:7.4.10-alpine` | RSALv2 / SSPLv1（均非 OSI 许可证） |
+| MinerU / PaddleX（可选） | `mineru-vllm:latest` / `paddlex:latest` | 以各自 Dockerfile 和上游声明为准 |
+
+这张表只覆盖 Compose 的主要镜像本体，不是完整的软件物料清单，也不承诺 `latest` 镜像的内容固定。镜像还可能包含各自的基础系统和传递依赖，离线交付前要按实际 digest 核对许可证、版权声明和对应源码。
+
+如果通过 `docker/save_docker_images.sh` 或其他方式向第三方再分发包含 GPL/AGPL 软件的镜像，需要保留许可证文本和上游声明，并按对应许可证第 6 节提供匹配的完整对应源码或有效的书面源码要约。通过网络提供服务、修改 AGPL 组件或把组件集成进同一程序时，义务可能不同，不能只附一个上游链接就视为完成。
+
+商业部署可以评估 Neo4j Enterprise、MinIO 商业订阅或其他兼容替代品，但这会带来新的协议、迁移和运维条件。
+
+需要 Neo4j 企业版功能或商业支持时，可以将图谱服务镜像替换为 `neo4j:5.26-enterprise`，并设置：
+
+```dotenv
+NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+```
+
+同时按 Neo4j 官方订阅协议确认许可范围；替换镜像不会自动迁移或改变现有数据卷。以上是工程侧边界，不构成法律意见；再分发、修改组件或对外托管前请让法务按具体版本和交付方式确认。

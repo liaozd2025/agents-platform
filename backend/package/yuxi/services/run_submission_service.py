@@ -20,6 +20,8 @@ from yuxi.repositories.agent_run_request_repository import AgentRunRequestReposi
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.services.agent_request_queue_service import finalize_intake, intake_request
 from yuxi.services.input_message_service import AgentRunInputMessage
+from yuxi.services.project_service import create_implicit_project
+from yuxi.services.workdir_service import resolve_conversation_workdir_binding
 from yuxi.storage.postgres.models_business import User
 
 
@@ -45,6 +47,7 @@ class RunSubmissionCommand:
     request_metadata: dict[str, Any] = field(default_factory=dict)
     model_spec: str | None = None
     tool_approval_mode: str | None = None
+    executor: str = "langgraph"
     queue_policy: str = "enqueue"
     create_conversation: bool = False
     conversation_title: str | None = None
@@ -64,6 +67,8 @@ async def submit_run_command(
     """
 
     origin = command.origin
+    if command.executor not in {"langgraph", "pi"}:
+        raise HTTPException(status_code=422, detail=f"不支持的 executor: {command.executor}")
     if not origin.source.strip() or not origin.channel.strip():
         raise HTTPException(status_code=422, detail="Run origin source/channel 不能为空")
     if len(origin.source) > 32:
@@ -123,6 +128,10 @@ async def submit_run_command(
             raise HTTPException(status_code=404, detail="对话线程不存在")
         try:
             async with db.begin_nested():
+                project = await create_implicit_project(
+                    uid=str(current_user.uid),
+                    db=db,
+                )
                 conversation = await conversation_repo.add_conversation(
                     uid=str(current_user.uid),
                     agent_id=agent_item.slug,
@@ -133,6 +142,7 @@ async def submit_run_command(
                         "source": origin.source,
                         "channel": origin.channel,
                     },
+                    project_id=project.id,
                 )
         except IntegrityError:
             conversation = await conversation_repo.get_conversation_by_thread_id(command.thread_id)
@@ -162,9 +172,21 @@ async def submit_run_command(
         agent_backend=agent_backend,
         model_spec=command.model_spec,
         tool_approval_mode=command.tool_approval_mode,
+        executor=command.executor,
         meta=request_metadata,
     )
-    await finalize_intake(db=db, intake=intake)
+    workdir_path, project = await resolve_conversation_workdir_binding(
+        conversation=conversation,
+        uid=str(current_user.uid),
+        db=db,
+    )
+    await finalize_intake(
+        db=db,
+        intake=intake,
+        uid=str(current_user.uid),
+        workdir_path=workdir_path,
+        materialize_managed=project is not None and project.directory_mode == "managed",
+    )
 
     return {
         "request_id": intake.request_id,

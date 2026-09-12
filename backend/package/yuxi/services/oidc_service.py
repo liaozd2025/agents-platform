@@ -19,12 +19,11 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from yuxi.permissions.authorization import build_authorization_context
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.operation_log_service import log_operation
-from yuxi.services.user_identity_service import (
-    build_unique_external_username,
-    get_or_create_external_department,
-)
+from yuxi.services.user_identity_service import build_unique_external_username, resolve_external_department
+from yuxi.services.user_role_service import serialize_user
 from yuxi.storage.postgres.models_business import Department, User
 from yuxi.storage.redis import get_async_redis_client
 from yuxi.utils.auth_utils import AuthUtils
@@ -116,12 +115,11 @@ class OIDCConfig(BaseModel):
     provider_name: str = Field(default="OIDC登录", description="认证源名称，显示在登录按钮上的文字")
     scopes: str = Field(default="openid profile email", description="请求的 scope")
     auto_create_user: bool = Field(default=True, description="是否自动创建用户")
-    default_role: str = Field(default="user", description="OIDC 用户的默认角色")
-    default_department: str = Field(default="OIDC用户", description="OIDC 用户的默认部门")
     username_claim: str = Field(default="preferred_username", description="用户名映射字段")
     email_claim: str = Field(default="email", description="邮箱映射字段")
     name_claim: str = Field(default="name", description="姓名映射字段")
     use_raw_username: bool = Field(default=False, description="是否使用原始用户名（不带oidc前缀）")
+    fetch_department_info: bool = Field(default=False, description="是否从OIDC中获取部门信息")
     department_claim: str = Field(default="department", description="部门信息映射字段")
     force_prompt_login: bool = Field(default=False, description="是否强制用户重新登录（添加prompt=login参数）")
 
@@ -151,12 +149,11 @@ class OIDCConfig(BaseModel):
             jwks_uri=_env("OIDC_JWKS_URI"),
             scopes=_env("OIDC_SCOPES", "openid profile email"),
             auto_create_user=os.environ.get("OIDC_AUTO_CREATE_USER", "true").lower() == "true",
-            default_role=_env("OIDC_DEFAULT_ROLE", "user"),
-            default_department=_env("OIDC_DEFAULT_DEPARTMENT", "OIDC用户"),
             username_claim=_env("OIDC_USERNAME_CLAIM", "preferred_username"),
             email_claim=_env("OIDC_EMAIL_CLAIM", "email"),
             name_claim=_env("OIDC_NAME_CLAIM", "name"),
             use_raw_username=os.environ.get("OIDC_USE_RAW_USERNAME", "false").lower() == "true",
+            fetch_department_info=os.environ.get("OIDC_FETCH_DEPARTMENT_INFO", "false").lower() == "true",
             department_claim=_env("OIDC_DEPARTMENT_CLAIM", "department"),
             force_prompt_login=os.environ.get("OIDC_FORCE_PROMPT_LOGIN", "true").lower() == "true",
         )
@@ -512,13 +509,9 @@ class OIDCUtils:
         if not name:
             name = username
 
-        department_name = userinfo.get(oidc_config.department_claim)
-        department_description = userinfo.get("department_description") or userinfo.get("department_desc")
-        if not department_name:
-            logger.warning(
-                f"OIDC identity missing department claim '{oidc_config.department_claim}', "
-                f"falling back to default department '{oidc_config.default_department}'"
-            )
+        department_name = None
+        if oidc_config.fetch_department_info:
+            department_name = userinfo.get(oidc_config.department_claim)
 
         return {
             "sub": sub,
@@ -526,7 +519,6 @@ class OIDCUtils:
             "email": email,
             "name": name,
             "department_name": department_name,
-            "department_description": department_description,
             "raw": userinfo,
         }
 
@@ -633,7 +625,6 @@ async def _create_oidc_binding_placeholder(db, sub: str, target_user: User) -> N
         phone_number=None,
         avatar=None,
         password_hash=password_hash,
-        role=target_user.role,
         department_id=target_user.department_id,
         is_deleted=1,  # 标记为deleted，不参与实际登录
         last_login=utc_now_naive(),
@@ -703,7 +694,6 @@ async def create_oidc_user(db, user_info: dict, department_id: int | None = None
                     "phone_number": None,
                     "avatar": None,
                     "password_hash": password_hash,
-                    "role": oidc_config.default_role,
                     "department_id": department_id,
                     "last_login": utc_now_naive(),
                 }
@@ -727,13 +717,19 @@ async def create_oidc_user(db, user_info: dict, department_id: int | None = None
     )
 
 
-async def restore_deleted_oidc_user(db, deleted_user: User, user_info: dict) -> User:
+async def restore_deleted_oidc_user(
+    db,
+    deleted_user: User,
+    user_info: dict,
+    department_id: int,
+) -> User:
     """恢复已注销的 OIDC 用户并返回可登录用户"""
     preferred_username = user_info["name"] or user_info["username"]
 
     deleted_user.is_deleted = 0
     deleted_user.deleted_at = None
     deleted_user.last_login = utc_now_naive()
+    deleted_user.department_id = department_id
     deleted_user.phone_number = None
     deleted_user.avatar = None
 
@@ -750,9 +746,11 @@ async def restore_deleted_oidc_user(db, deleted_user: User, user_info: dict) -> 
     return deleted_user
 
 
-async def update_oidc_user_login(db, user: User) -> None:
-    """更新 OIDC 用户登录时间"""
+async def update_oidc_user_login(db, user: User, department_id: int | None = None) -> None:
+    """更新 OIDC 用户登录时间与本次 claim 对应的归属节点。"""
     user.last_login = utc_now_naive()
+    if department_id is not None:
+        user.department_id = department_id
     await db.commit()
 
 
@@ -868,30 +866,29 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
         user = user_by_sub
 
     if user:
-        await update_oidc_user_login(db, user)
+        department_id = None
+        if oidc_config.fetch_department_info:
+            department = await resolve_external_department(db, extracted_info.get("department_name"))
+            department_id = department.id
+        await update_oidc_user_login(db, user, department_id)
         logger.info(f"OIDC user logged in: {user.username}")
     elif oidc_config.auto_create_user:
+        department = await resolve_external_department(db, extracted_info.get("department_name"))
         deleted_user = await find_deleted_oidc_user_by_sub(db, sub)
         if deleted_user:
-            user = await restore_deleted_oidc_user(db, deleted_user, extracted_info)
+            user = await restore_deleted_oidc_user(db, deleted_user, extracted_info, department.id)
             logger.info(f"OIDC deleted user restored and logged in: {user.username}")
         else:
-            # 从用户信息中获取部门信息
-            dept_name = extracted_info.get("department_name")
-            dept_desc = extracted_info.get("department_description")
-            dept = await get_or_create_external_department(
-                db,
-                dept_name,
-                dept_desc,
-                default_department=oidc_config.default_department,
-            )
-            department_id = dept.id if dept else None
-            user = await create_oidc_user(db, extracted_info, department_id)
+            user = await create_oidc_user(db, extracted_info, department.id)
     else:
         return _redirect_to_login_with_error("用户未注册，请联系管理员开通账号")
 
     if user.is_deleted:
         return _redirect_to_login_with_error("该账户已注销")
+
+    user = await UserRepository().get_by_id_with_db(db, user.id)
+    if user is None:
+        return _redirect_to_login_with_error("用户账户不存在")
 
     token_data = {"sub": str(user.id)}
     jwt_token = AuthUtils.create_access_token(token_data)
@@ -907,13 +904,8 @@ async def oidc_callback_handler(code: str, state: str, db, request: Request | No
         "access_token": jwt_token,
         "token_type": "bearer",
         "user_id": user.id,
-        "username": user.username,
-        "uid": user.uid,
-        "phone_number": user.phone_number,
-        "avatar": user.avatar,
-        "role": user.role,
-        "department_id": user.department_id,
-        "department_name": department_name,
+        **serialize_user(user, department_name),
+        "effective_permissions": list(build_authorization_context(user).effective_permissions),
     }
 
     exchange_code = await OIDCUtils.generate_login_code(response_data)

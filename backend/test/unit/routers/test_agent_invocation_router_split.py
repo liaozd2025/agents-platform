@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from server.utils.auth_middleware import get_db, get_required_user
+from server.utils.auth_middleware import get_authorization_context, get_db
 
 call_module = importlib.import_module("server.routers.agent_invocation_call_router")
 eval_module = importlib.import_module("server.routers.agent_invocation_eval_router")
@@ -23,10 +23,13 @@ def _build_app(*, authenticated: bool = True) -> TestClient:
     app.dependency_overrides[get_db] = fake_db
     if authenticated:
 
-        async def fake_user():
-            return SimpleNamespace(uid="user-1", role="user", department_id=1)
+        async def fake_authorization():
+            return SimpleNamespace(
+                user=SimpleNamespace(uid="user-1", department_id=1),
+                has_permission=lambda permission: permission == "agent:use",
+            )
 
-        app.dependency_overrides[get_required_user] = fake_user
+        app.dependency_overrides[get_authorization_context] = fake_authorization
     return TestClient(app)
 
 
@@ -93,10 +96,25 @@ def test_agent_eval_router_adapts_payload(monkeypatch):
         json={
             "query": "2+2=?",
             "agent_slug": "default-chatbot",
+            "thread_id": "YUXI_TEST_eval-thread",
             "evaluation": {"dataset_name": "dataset-1", "ignored": "drop"},
             "meta": {"request_id": "eval-1"},
         },
     )
     assert response.status_code == 200, response.text
     assert response.json()["output"] == "ok"
+    assert calls["command"].thread_id == "YUXI_TEST_eval-thread"
     assert calls["command"].origin.metadata == {"agent_invocation_meta": {"evaluation": {"dataset_name": "dataset-1"}}}
+
+
+def test_agent_eval_router_rejects_thread_id_longer_than_database_limit():
+    response = _build_app().post(
+        "/api/agent-invocation/eval/runs",
+        json={
+            "query": "2+2=?",
+            "agent_slug": "default-chatbot",
+            "thread_id": "t" * 65,
+        },
+    )
+
+    assert response.status_code == 422

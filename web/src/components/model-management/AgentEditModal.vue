@@ -3,14 +3,13 @@ import { computed, nextTick, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   Bot,
-  Info,
   Microscope,
   RefreshCw,
   Settings2,
   SlidersHorizontal,
   Upload,
   Wrench
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 import { userApi } from '@/apis/user_api'
 import AgentRuntimeConfigForm from '@/components/AgentRuntimeConfigForm.vue'
@@ -148,7 +147,7 @@ const normalizeAgent = (agent) => {
 }
 
 const agentModalMenuItems = computed(() => {
-  const items = [{ key: 'basic', label: '基本信息', icon: Info }]
+  const items = [{ key: 'basic', label: '基本信息', icon: Bot }]
   if (editingAgentId.value) {
     items.push(
       { key: 'model', label: '模型配置', icon: SlidersHorizontal },
@@ -192,8 +191,7 @@ const isEditingBuiltinAgent = computed(() => isBuiltinAgent({ id: editingAgentId
 const canEditAgentShareConfig = computed(() => !isEditingBuiltinAgent.value)
 const getAgentShareAllowedLevels = () => {
   if (isEditingBuiltinAgent.value) return ['global']
-  if (userStore.isAdmin) return ['global', 'department', 'user']
-  return ['user']
+  return ['global', 'department', 'user']
 }
 
 const agentModalTitle = computed(() => (editingAgentId.value ? '编辑智能体' : '新增智能体'))
@@ -548,7 +546,6 @@ defineExpose({
             <ShareConfigForm
               ref="agentShareConfigFormRef"
               v-model="agentShareConfig"
-              :auto-select-user-dept="true"
               :allowed-access-levels="getAgentShareAllowedLevels()"
             />
           </div>

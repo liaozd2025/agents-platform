@@ -1,20 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from abc import abstractmethod
 from contextlib import suppress
-from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import ToolMessage
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver, aiosqlite
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.stream.transformers import CustomTransformer
 from langgraph.types import Command
 
-from yuxi import config as sys_config
 from yuxi.agents.context import DEFAULT_MAX_EXECUTION_STEPS, BaseContext, resolve_agent_resource_options
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.utils import logger
@@ -116,9 +111,6 @@ class BaseAgent:
     def __init__(self, **kwargs):
         self.graph = None  # will be covered by get_graph
         self.checkpointer = None
-        self._async_conn = None
-        self.workdir = Path(sys_config.save_dir) / "agents" / self.module_name
-        self.workdir.mkdir(parents=True, exist_ok=True)
 
     @property
     def module_name(self) -> str:
@@ -133,7 +125,7 @@ class BaseAgent:
     async def get_info(
         self,
         include_configurable_items: bool = True,
-        user_role: str | None = None,
+        can_manage: bool = False,
         db=None,
         user=None,
     ):
@@ -141,7 +133,7 @@ class BaseAgent:
         metadata = self.load_metadata()
         configurable_items = {}
         if include_configurable_items:
-            configurable_items = self.context_schema.get_configurable_items(user_role=user_role)
+            configurable_items = self.context_schema.get_configurable_items(can_manage=can_manage)
             if db is not None and user is not None:
                 resource_fields = {
                     item["kind"]
@@ -272,7 +264,8 @@ class BaseAgent:
                 await route_task
 
     async def stream_messages_with_state(self, messages: list[str], input_context=None, **kwargs):
-        async for event in self._stream_input_with_state({"messages": messages}, input_context, **kwargs):
+        graph_input = {"messages": messages}
+        async for event in self._stream_input_with_state(graph_input, input_context, **kwargs):
             yield event
 
     async def stream_resume_with_state(self, resume_input, input_context=None, **kwargs):
@@ -349,7 +342,7 @@ class BaseAgent:
         """
         获取并编译对话图实例。
         必须确保在编译时设置 checkpointer，否则将无法获取历史记录。
-        例如: graph = workflow.compile(checkpointer=sqlite_checkpointer)
+        例如: graph = workflow.compile(checkpointer=checkpointer)
         """
         pass
 
@@ -357,63 +350,9 @@ class BaseAgent:
         if self.checkpointer is not None:
             return self.checkpointer
 
-        checkpointer = None
-        backend = os.getenv("LANGGRAPH_CHECKPOINTER_BACKEND", "sqlite").strip().lower()
-
-        if backend == "postgres":
-            checkpointer = await self._create_postgres_checkpointer()
-
-        if checkpointer is None:
-            try:
-                checkpointer = AsyncSqliteSaver(await self.get_async_conn())
-            except Exception as e:
-                logger.error(f"构建 sqlite checkpointer 失败: {e}, 尝试使用内存存储")
-                checkpointer = InMemorySaver()
-
-        self.checkpointer = checkpointer
+        self.checkpointer = pg_manager.get_langgraph_checkpointer()
+        logger.info(f"{self.name} 使用 postgres checkpointer")
         return self.checkpointer
-
-    async def _create_postgres_checkpointer(self):
-        postgres_url = os.getenv("POSTGRES_URL")
-        if not postgres_url:
-            logger.warning("POSTGRES_URL 未配置，无法启用 postgres checkpointer，回退 sqlite")
-            return None
-
-        try:
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # type: ignore
-        except Exception as e:
-            logger.warning(f"langgraph postgres checkpointer 不可用，回退 sqlite: {e}")
-            return None
-
-        try:
-            saver = AsyncPostgresSaver(pg_manager.langgraph_pool)
-
-            logger.info(f"{self.name} 使用 postgres checkpointer")
-            return saver
-        except Exception as e:
-            logger.warning(f"初始化 postgres checkpointer 失败，回退 sqlite: {e}")
-            return None
-
-    async def get_async_conn(self) -> aiosqlite.Connection:
-        """获取异步数据库连接"""
-        if self._async_conn is not None:
-            return self._async_conn
-
-        conn = await aiosqlite.connect(os.path.join(self.workdir, "aio_history.db"))
-        # WAL + busy_timeout：api 与 worker 多进程会并发写同一 checkpoint 库，
-        # 默认回滚日志模式下写写/读写互斥，超时后抛 SQLITE_BUSY。WAL 让写不阻塞读、崩溃可恢复。
-        for pragma in ("PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000", "PRAGMA synchronous=NORMAL"):
-            cursor = await conn.execute(pragma)
-            await cursor.fetchall()
-        # Patch: langgraph's AsyncSqliteSaver expects is_alive() method which aiosqlite may not have
-        if not hasattr(conn, "is_alive"):
-            conn.is_alive = lambda: True
-        self._async_conn = conn
-        return self._async_conn
-
-    async def get_aio_memory(self) -> AsyncSqliteSaver:
-        """获取异步存储实例"""
-        return AsyncSqliteSaver(await self.get_async_conn())
 
     def load_metadata(self) -> dict:
         """Load metadata from agent class attribute."""

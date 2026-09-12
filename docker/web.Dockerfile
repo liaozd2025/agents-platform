@@ -4,11 +4,12 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai
 
 # 安装 pnpm（版本与 package.json 的 packageManager 字段对齐，避免 pnpm@latest 与旧 lockfile 不兼容）
-RUN npm install -g pnpm@10.11.0
+RUN npm install -g pnpm@11.24.0
 
-# 复制 package.json 和 pnpm-lock.yaml
+# 复制 pnpm 依赖声明与锁文件
 COPY ./web/package*.json ./
 COPY ./web/pnpm-lock.yaml* ./
+COPY ./web/pnpm-workspace.yaml ./
 
 # 安装依赖（--frozen-lockfile 保证 dev 与 build/CI 三处依赖与 pnpm-lock.yaml 一致，避免漂移）
 RUN pnpm install --frozen-lockfile --registry=https://registry.npmmirror.com
@@ -28,11 +29,12 @@ ARG VITE_YUXI_EMBED_ALLOWED_ORIGINS
 ENV VITE_YUXI_EMBED_ALLOWED_ORIGINS=${VITE_YUXI_EMBED_ALLOWED_ORIGINS}
 
 # 安装 pnpm
-RUN npm install -g pnpm@10.11.0
+RUN npm install -g pnpm@11.24.0
 
 # 复制依赖文件
 COPY ./web/package*.json ./
 COPY ./web/pnpm-lock.yaml* ./
+COPY ./web/pnpm-workspace.yaml ./
 
 # 安装依赖
 RUN pnpm install --frozen-lockfile --registry=https://registry.npmmirror.com
