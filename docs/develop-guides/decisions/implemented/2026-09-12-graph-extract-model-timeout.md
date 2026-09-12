@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：`backend/package/yuxi/knowledge/graphs/extractors/llm.py`、`backend/package/yuxi/models/providers/builtin.py`
+Owner：backend/package/yuxi/knowledge/graphs/extractors/llm.py
 
 ## 问题
 
