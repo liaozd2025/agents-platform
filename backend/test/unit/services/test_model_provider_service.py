@@ -244,7 +244,7 @@ def test_normalize_payload_rejects_ollama_provider_type():
 
 
 def test_builtin_provider_templates_default_to_openai_provider_type():
-    assert len(BUILTIN_PROVIDERS) >= 16
+    assert len(BUILTIN_PROVIDERS) >= 18
     provider_types = {
         _normalize_payload(
             {
@@ -257,7 +257,9 @@ def test_builtin_provider_templates_default_to_openai_provider_type():
         for provider in BUILTIN_PROVIDERS
     }
     assert provider_types == {"openai"}
-    assert all("ollama" not in provider["provider_id"] for provider in BUILTIN_PROVIDERS)
+    providers_by_id = {provider["provider_id"]: provider for provider in BUILTIN_PROVIDERS}
+    assert providers_by_id["ollama"]["base_url"].endswith(":11434/v1")
+    assert providers_by_id["vllm"]["base_url"].endswith(":8000/v1")
 
 
 @pytest.mark.parametrize(

@@ -10,6 +10,20 @@ BUILTIN_PROVIDERS: list[dict[str, Any]] = [
         "api_key_env": "OPENAI_API_KEY",
         "models_endpoint": "https://api.openai.com/v1/models",
     },
+    {
+        "provider_id": "ollama",
+        "display_name": "Ollama",
+        "base_url": "http://host.docker.internal:11434/v1",
+        "models_endpoint": "http://host.docker.internal:11434/v1/models",
+        "is_enabled": False,
+    },
+    {
+        "provider_id": "vllm",
+        "display_name": "vLLM",
+        "base_url": "http://host.docker.internal:8000/v1",
+        "models_endpoint": "http://host.docker.internal:8000/v1/models",
+        "is_enabled": False,
+    },
     # {
     #     "provider_id": "anthropic",
     #     "display_name": "Anthropic",

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend
 from yuxi.agents.toolkits.registry import tool
 from yuxi.config.runtime import knowledge_capability_enabled
+from yuxi.knowledge.source_references import attach_knowledge_source_references
 from yuxi.knowledge.schemas import (
     FindInputSchema,
     OpenInputSchema,
@@ -166,7 +167,10 @@ async def query_kb(kb_id: str, query_text: str, file_name: str | None = None, ru
 
     try:
         kwargs = {"file_name": file_name} if file_name else {}
-        return await _get_knowledge_base().retrieve(target_kb_id, query_text, **kwargs)
+        manager = _get_knowledge_base()
+        result = await manager.retrieve(target_kb_id, query_text, **kwargs)
+        kb_name = next((str(kb.get("name") or "") for kb in visible_kbs if kb.get("kb_id") == target_kb_id), "")
+        return await attach_knowledge_source_references(manager, target_kb_id, kb_name, result)
     except Exception as e:
         logger.error(f"检索失败: {e}")
         return f"检索失败: {str(e)}"
