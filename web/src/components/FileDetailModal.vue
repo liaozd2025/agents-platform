@@ -96,14 +96,20 @@
           <a-spin tip="正在加载分块内容..." />
         </div>
         <div v-else class="chunk-grid">
-          <div v-for="chunk in mappedChunks" :key="chunk.id" class="chunk-card">
+          <button
+            v-for="chunk in mappedChunks"
+            :key="chunk.id"
+            type="button"
+            class="chunk-card"
+            @click="openChunkDetail(chunk)"
+          >
             <div class="chunk-card-header">
               <span class="chunk-order">#{{ chunk.chunk_order_index }}</span>
             </div>
             <div class="chunk-card-content">
               {{ chunk.content.replace(/\n+/g, ' ') }}
             </div>
-          </div>
+          </button>
         </div>
         <div v-if="!contentState.loading && mappedChunks.length === 0" class="empty-content">
           <p>{{ contentState.error || '暂无分块信息' }}</p>
@@ -114,6 +120,8 @@
     <div v-else-if="file" class="empty-content">
       <p>暂无文件内容</p>
     </div>
+
+    <KbChunkDetailModal v-model:open="chunkDetailVisible" :chunk="selectedChunk" />
   </a-modal>
 </template>
 
@@ -133,6 +141,7 @@ import {
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import AgentFilePreview from '@/components/AgentFilePreview.vue'
+import KbChunkDetailModal from '@/components/sources/KbChunkDetailModal.vue'
 import { Download, ChevronDown, FileSearch, FileText, Rows3, X } from '@lucide/vue'
 
 const props = defineProps({
@@ -177,6 +186,8 @@ const sourcePreview = ref({
   message: '',
   supported: true
 })
+const chunkDetailVisible = ref(false)
+const selectedChunk = ref(null)
 
 let basicRequestSeq = 0
 let contentRequestSeq = 0
@@ -222,7 +233,14 @@ const resetLocalState = () => {
   downloadingMarkdown.value = false
   resetContentState()
   resetSourcePreview()
+  chunkDetailVisible.value = false
+  selectedChunk.value = null
   viewMode.value = 'markdown'
+}
+
+const openChunkDetail = (chunk) => {
+  selectedChunk.value = chunk
+  chunkDetailVisible.value = true
 }
 
 const normalizeFileMeta = (meta = {}) => ({
@@ -697,6 +715,10 @@ onBeforeUnmount(resetLocalState)
 }
 
 .chunk-card {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
   background: var(--gray-0);
   border: 1px solid var(--gray-200);
   border-radius: 8px;
@@ -707,6 +729,11 @@ onBeforeUnmount(resetLocalState)
 .chunk-card:hover {
   border-color: var(--main-color);
   box-shadow: 0 2px 8px rgba(1, 97, 121, 0.1);
+}
+
+.chunk-card:focus-visible {
+  outline: 2px solid var(--main-color);
+  outline-offset: 2px;
 }
 
 .chunk-card-header {
