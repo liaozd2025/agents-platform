@@ -806,23 +806,35 @@ async def read_users(
 
 @auth.get("/users/access-options", response_model=list[UserAccessOption])
 async def read_user_access_options(
-    skip: int = 0,
-    limit: int = 1000,
-    department_id: int | None = None,
+    response: Response,
+    skip: int = Query(0, ge=0),
+    # 单次返回上限收敛到 100，引导调用方按 keyword 远程检索；
+    # 授权浮层改为远程搜索后不再依赖一次性全量拉取。
+    limit: int = Query(100, ge=1, le=100),
+    keyword: str | None = Query(None, max_length=100),
+    department_id: int | None = Query(None, ge=1),
     direct: bool = False,
     authorization: AuthorizationContext = Depends(require_permission("user:read")),
 ):
-    """返回与用户主列表相同管理域的候选用户。"""
+    """返回管理域内的候选用户，支持关键字远程检索。
 
-    visible_rows = await list_authorized_users(
+    授权范围过滤与关键字筛选均在仓储层以 SQL 完成，避免把全量用户
+    载入内存后逐个判定；响应头回传 X-Total-Count 供调用方判断是否还有更多。
+    """
+
+    page_result = await list_authorized_users_page(
         authorization,
         "user:read",
+        skip=skip,
+        limit=limit,
         department_id=department_id,
         direct=direct,
+        keyword=keyword,
     )
-    if visible_rows is None:
+    if page_result is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="组织节点不存在")
-    visible_rows = visible_rows[skip : skip + limit]
+    visible_rows, total = page_result
+    response.headers["X-Total-Count"] = str(total)
     return [
         {
             "uid": user.uid,

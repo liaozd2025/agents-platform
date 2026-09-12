@@ -49,6 +49,27 @@ async function getOIDCLoginUrl(redirectPath = '/') {
 }
 
 /**
+ * 查询共享配置浮层的候选用户（支持关键字远程搜索与分页）。
+ * 后端已在 SQL 层完成授权范围过滤，此处只需按需分页拉取。
+ * @param {{ keyword?: string, skip?: number, limit?: number }} params
+ *   keyword 为空串时表示不按关键字过滤，返回管理域内前 limit 条
+ * @returns {Promise<{ users: Array, total: number }>}
+ *   total 取自响应头 X-Total-Count，供调用方判断是否还有未加载的用户
+ */
+async function getUserAccessOptions({ keyword = '', skip = 0, limit = 100 } = {}) {
+  const params = new URLSearchParams({ skip: String(skip), limit: String(limit) })
+  if (keyword.trim()) params.set('keyword', keyword.trim())
+
+  // 与其他接口默认只返回 JSON 的行为保持一致，此处额外读取分页总数响应头。
+  const response = await apiGet(`/api/auth/users/access-options?${params}`, {}, true, 'response')
+  return { users: await response.json(), total: Number(response.headers.get('X-Total-Count') || 0) }
+}
+
+async function checkUidAvailability(uid) {
+  return apiGet(`/api/auth/check-uid/${encodeURIComponent(uid)}`)
+}
+
+/**
  * 使用一次性 code 交换 OIDC 登录结果
  * @param {string} code - 一次性登录 code
  * @returns {Promise<{
@@ -65,14 +86,6 @@ async function getOIDCLoginUrl(redirectPath = '/') {
  *   department_name: string | null
  * }>}
  */
-async function getUserAccessOptions() {
-  return apiGet('/api/auth/users/access-options')
-}
-
-async function checkUidAvailability(uid) {
-  return apiGet(`/api/auth/check-uid/${encodeURIComponent(uid)}`)
-}
-
 async function exchangeOIDCCode(code) {
   return exchangeLoginCredential('/api/auth/oidc/exchange-code', { code }, 'OIDC 登录失败')
 }
