@@ -17,6 +17,7 @@ ENV TZ=Asia/Shanghai \
 
 # 设置 npm 镜像源，为 MCP 和 Skills 安装依赖
 RUN npm config set registry https://registry.npmmirror.com --global \
+    && npm install --global --ignore-scripts --no-audit --no-fund @antv/mcp-server-chart@0.9.10 \
     && npm cache clean --force
 
 # 设置代理和时区，更换镜像源，安装系统依赖 - 合并为一个RUN减少层数

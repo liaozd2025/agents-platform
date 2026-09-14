@@ -39,8 +39,8 @@ _USER_CONFIGURABLE_TRANSPORTS = ("sse", "streamable_http")
 # Default MCP Server configurations (Imported to DB on first run)
 _DEFAULT_MCP_SERVERS = {
     "mcp-server-chart": {
-        "command": "npx",
-        "args": ["-y", "@antv/mcp-server-chart"],
+        "command": "mcp-server-chart",
+        "args": [],
         "transport": "stdio",
         "description": "图表生成工具，支持生成各类图表（柱状图、折线图、饼图等）",
         "icon": "📊",
