@@ -17,7 +17,7 @@ def test_build_knowledge_source_reference_uses_oa_article_header() -> None:
         "type_name": "新闻动态",
         "url": (
             "https://hnjiudian.cn/web/index.html#/corporate-culture/view-page/3?"
-            "title=%E6%96%B0%E9%97%BB%E8%AF%A6%E7%BB%86-2191146&taskID=2191146"
+            "title=%E6%96%B0%E9%97%BB%E8%AF%A6%E7%BB%86-2191146&taskID=2191146&ecType=3"
         ),
     }
 
@@ -38,7 +38,7 @@ def test_build_knowledge_source_reference_normalizes_news_oa_route() -> None:
     assert source_ref["title"] == "秋季高发！该怎么拯救我的过敏性鼻炎？"
     assert source_ref["url"] == (
         "https://hnjiudian.cn/web/index.html#/corporate-culture/view-page/3?"
-        "title=%E6%96%B0%E9%97%BB%E8%AF%A6%E7%BB%86-2441705&taskID=2441705"
+        "title=%E6%96%B0%E9%97%BB%E8%AF%A6%E7%BB%86-2441705&taskID=2441705&ecType=3"
     )
 
 
@@ -51,6 +51,7 @@ def test_build_knowledge_source_reference_uses_goodarticles_page_type() -> None:
 
     assert "/view-page/1?" in source_ref["url"]
     assert "taskID=3104861" in source_ref["url"]
+    assert "ecType=1" in source_ref["url"]
 
 
 def test_build_knowledge_source_reference_uses_good_articles_page_type() -> None:
@@ -62,3 +63,4 @@ def test_build_knowledge_source_reference_uses_good_articles_page_type() -> None
 
     assert "/view-page/1?" in source_ref["url"]
     assert "taskID=3104861" in source_ref["url"]
+    assert "ecType=1" in source_ref["url"]

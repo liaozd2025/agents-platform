@@ -205,6 +205,32 @@ test('OA bridge sends renewal requests only to the parent that supplied the acco
   )
 })
 
+test('OA bridge requests nested navigation only with complete taskId and ecType', async () => {
+  const harness = createBrowserHarness()
+  const bridge = harness.createBridge({
+    allowedOrigins: ['https://oa.example.test'],
+    onAccount: async () => {}
+  })
+
+  bridge.start()
+  await harness.dispatchMessage({
+    source: harness.browserWindow.parent,
+    origin: 'https://oa.example.test',
+    data: { type: 'initial-mode', mode: 'fixed' }
+  })
+
+  // 参数缺失时不下发消息，由调用方降级为新标签打开
+  assert.equal(bridge.requestNavigate({}), false)
+  assert.equal(bridge.requestNavigate({ taskId: '2441705' }), false)
+  assert.equal(bridge.requestNavigate({ ecType: '3' }), false)
+
+  assert.equal(bridge.requestNavigate({ taskId: 2441705, ecType: 3 }), true)
+  assert.deepEqual(harness.messages.at(-1), {
+    message: { type: 'new-navigate', data: { taskId: '2441705', ecType: '3' } },
+    targetOrigin: 'https://oa.example.test'
+  })
+})
+
 test('OA bridge maps formal window events and sends nested parent commands', async () => {
   const harness = createBrowserHarness()
   const confirmedModes = []

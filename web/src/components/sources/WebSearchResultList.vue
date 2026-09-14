@@ -8,7 +8,12 @@
       >
         <div class="result-header">
           <h5 class="result-title">
-            <a :href="result.url" target="_blank" rel="noopener noreferrer">
+            <a
+              :href="result.url"
+              target="_blank"
+              rel="noopener noreferrer"
+              @click="handleSourceClick(result.url, $event)"
+            >
               {{ result.title }}
             </a>
           </h5>
@@ -30,6 +35,8 @@
 </template>
 
 <script setup>
+import { navigateSource } from '@/utils/sourceNavigation.js'
+
 defineProps({
   results: {
     type: Array,
@@ -40,6 +47,19 @@ defineProps({
     default: '未找到相关搜索结果'
   }
 })
+
+/**
+ * 接管搜索结果左键点击。
+ * 网络搜索来源绝大多数是外部链接，但同一分发入口可兼容指向 OA 域名的结果，
+ * 内嵌态下同样交由父页面路由跳转。保留 href 以支持右键/中键/无障碍。
+ */
+const handleSourceClick = (url, event) => {
+  // 修饰键或非左键：保持浏览器原生行为，不接管
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  // 已由分发逻辑决定落点，阻止默认导航避免二次打开
+  event.preventDefault()
+  navigateSource({ sourceType: 'web_search', url })
+}
 
 const getItemKey = (item, index) => {
   if (item?.url) return item.url

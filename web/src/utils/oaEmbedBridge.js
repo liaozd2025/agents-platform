@@ -169,6 +169,21 @@ export function createOAEmbedBridge({
     requestClose(threadId) {
       console.info('[OA iframe] 已请求父项目关闭助手')
       post({ type: 'close', data: threadId ? { threadId } : {} })
+    },
+    /**
+     * 请求父项目在宿主页面内跳转到 OA 内部文章页。
+     * 载荷与正式 H5 协议一致，父页面负责路由跳转，当前 iframe 不被顶掉。
+     */
+    requestNavigate({ taskId, ecType } = {}) {
+      const normalizedTaskId = String(taskId ?? '').trim()
+      const normalizedEcType = String(ecType ?? '').trim()
+      if (!normalizedTaskId || !normalizedEcType) {
+        console.warn('[OA iframe] 忽略缺少 taskId 或 ecType 的跳转请求')
+        return false
+      }
+      console.info('[OA iframe] 已请求父项目跳转 OA 内部页面')
+      post({ type: 'new-navigate', data: { taskId: normalizedTaskId, ecType: normalizedEcType } })
+      return true
     }
   }
 }

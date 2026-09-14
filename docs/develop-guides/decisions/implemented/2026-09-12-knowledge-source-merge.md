@@ -20,7 +20,7 @@ Owner：backend/package/yuxi/services/knowledge_retrieval_policy.py
 
 ## 后果
 
-来源信息增加消息元数据体积，每个命中文件增加一次文章读取；单次检索内按文件复用。来源读取失败时保留文件名来源。OA 链接依赖现有站点路由，不表示已验证外部原文可访问。
+来源信息增加消息元数据体积，每个命中文件增加一次文章读取；单次检索内按文件复用。来源读取失败时保留文件名来源。OA 链接依赖现有站点路由，不表示已验证外部原文可访问。OA 链接的字节格式随后续变更增加了 `ecType` 参数，跳转行为由 [2026-09-12-source-navigation-embed-bridge.md](2026-09-12-source-navigation-embed-bridge.md) 拥有。
 
 ## 验证
 
