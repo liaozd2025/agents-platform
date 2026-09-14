@@ -35,7 +35,7 @@ image-gen 需要通过 Kie 提供 GPT Image 2 和 Nano Banana 2 的文生图与�
 
 ## 验证
 
-本地使用现有 API 镜像启动独立 Compose 测试容器，挂载本工作树，未修改运行中的开发服务或生产服务。测试 Key 为虚构值；外部协议测试使用本地 HTTP 替身。
+本地使用现有 API 镜像启动独立 Compose 测试容器，挂载本工作树，未修改运行中的开发服务或生产服务。隔离协议测试使用虚构 Key 和本地 HTTP 替身；真实 Kie 验证单独列出。
 
 - `uv run --no-sync --group test pytest test/unit/skills/test_image_gen_cli.py test/unit/services/test_skill_service.py`：通过。覆盖模型映射、参考图校验、失败与无效结果、任务编号、图片内容、文件路径、密钥缺失与脱敏。
 - `uv run --no-sync --group test pytest --noconftest test/integration/test_image_gen_protocol.py`：4 项通过。真实 CLI 子进程经实际 HTTP 请求完成两个模型的文生图与编辑路径，断言仅创建一个任务、待处理状态、下载请求头以及最终文件字节。`--noconftest` 隔离无关的全局平台清理 fixture，此测试自行创建并清理 HTTP 服务和文件。
@@ -43,6 +43,7 @@ image-gen 需要通过 Kie 提供 GPT Image 2 和 Nano Banana 2 的文生图与�
 - `uvx pyright --pythonpath /usr/local/bin/python3 --pythonversion 3.13 package/yuxi/agents/skills/buildin/image-gen/scripts/image_gen.py`：0 errors、0 warnings。变更 Python 文件的 `ruff check`、`ruff format --check` 与 `git diff --check` 通过。
 - `python3 scripts/verify_engineering_contracts.py` 与 `python3 -m unittest scripts.test_verify_engineering_contracts`：通过，后者 61 项。`cd docs && pnpm run build`：完成；构建有 VitePress/Rolldown 兼容提示，生成的决策 HTML 已回读核验。
 - 现有 PI 沙盒镜像中实际运行脚本的帮助及缺 Key 路径，分别返回帮助和结构化错误，依赖可导入。独立 Standards 与 Spec Review 完成，配置生效时机和凭据说明修正后无剩余阻塞。
-- 真实 Kie 生成、真实 Agent 的 present_artifacts 登记及浏览器展示：Not run，等待测试 Key 和业务验收环境。CLI 协议替身测试不代替这些验收。
+- 2026-09-14 使用 `yuxi-pi-sandbox:0.7.2.beta2` 和真实 Kie Key 执行技能 CLI，两个模型各创建一次文生图任务，均完成查询、下载及图片解码：Passed。相同提示词、`1:1`、`1K` 参数下，GPT Image 2 产出 1254×1254 PNG，Nano Banana 2 产出 1024×1024 PNG；从提交到观测并下载成功分别为 80.92 秒、82.78 秒，包含轮询等待。图片已回读，内容符合橘猫与蓝色杯子的水彩提示词。
+- 真实 Kie 参考图上传与编辑、真实 Agent 的 present_artifacts 登记及浏览器展示：Not run。两张文生图与 CLI 协议替身测试不代替这些验收。
 
 协议核验来源：[GPT Image 2 文生图](https://docs.kie.ai/market/gpt/gpt-image-2-text-to-image)、[GPT Image 2 编辑](https://docs.kie.ai/market/gpt/gpt-image-2-image-to-image)、[Nano Banana 2](https://docs.kie.ai/market/google/nanobanana2)、[文件上传](https://docs.kie.ai/file-upload-api/quickstart)、[任务查询](https://docs.kie.ai/market/common/get-task-detail)。上传文档的 OpenAPI server 字段与快速开始存在差异；使用快速开始与文件流上传示例共同列出的 kieai.redpandaai.co，实际可用性仍以真实 Key 测试为准。
