@@ -14,7 +14,6 @@ from uuid import uuid4
 import requests
 from PIL import Image, UnidentifiedImageError
 
-
 MODELS = {
     "gpt-image-2": {
         "text": "gpt-image-2-text-to-image",
