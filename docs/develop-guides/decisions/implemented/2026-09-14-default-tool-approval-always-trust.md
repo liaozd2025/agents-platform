@@ -35,5 +35,6 @@ Owner：backend/package/yuxi/agents/tool_approval.py
 - `python3 scripts/verify_engineering_contracts.py`：通过（92 decisions）。
 - `python3 -m py_compile`（4 个后端改动文件）与改动文件 UTF-8 / 行宽（≤120）检查：通过。
 - 运行态探针（api 容器内 `python -c`）：`DEFAULT = always_trust`、`resolve_agent_run_tool_approval_mode(None, None) = always_trust`、`resolve_agent_run_tool_approval_mode(None, "default") = default`（显式配置仍优先）、`create_tool_approval_middleware("always_trust") = None`。
-- Ruff：Not run；容器内未安装 `ruff`，`uv run` 重新同步被 `/usr/local/lib` 权限拒绝，宿主无 ruff 可执行文件。
+- Ruff（沿用 `backend/pyproject.toml` 配置，5 个改动文件）：`ruff check` → All checks passed；`ruff format --check` → 5 files already formatted。首次提交曾在 `agents/context.py` 引入 `E501 122 > 120`（描述行含中文，按双宽计算），已修正。
+- CI 基线：`Ruff Format & Lint`、`Backend unit tests`、`Runtime System Tests`、`Deploy VitePress site to Pages` 在 `main` 上长期失败，失败文件与用例不在本变更范围内；与本变更相关的 `Lint, unit and production build`、`Owner-local decisions and gate wiring`、`PowerShell security environment contract` 通过。
 - 真实 worker/SSE 链路的审批中断与默认模式端到端验收：Not run，残余风险限于运行态默认值投影。
