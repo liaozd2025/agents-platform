@@ -195,8 +195,8 @@ async def test_runtime_configs_exclude_user_created_stdio_servers(mcp_session):
 
     assert set(configs) == {"mcp-server-chart", "remote-http"}
     assert set(slugs) == {"mcp-server-chart", "remote-http"}
-    assert configs["mcp-server-chart"]["command"] == "npx"
-    assert configs["mcp-server-chart"]["args"] == ["-y", "@antv/mcp-server-chart"]
+    assert configs["mcp-server-chart"]["command"] == "mcp-server-chart"
+    assert configs["mcp-server-chart"]["args"] == []
     assert "command" not in configs["remote-http"]
     assert "args" not in configs["remote-http"]
 

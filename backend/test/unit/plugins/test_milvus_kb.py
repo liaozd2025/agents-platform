@@ -749,3 +749,25 @@ def test_collection_supports_bm25_requires_analyzed_content_sparse_field_and_fun
     collection = type("Collection", (), {"schema": schema})()
 
     assert kb._collection_supports_bm25(collection)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("description,bm25", [("", True), ("other-model", True), ("test-embedding", False)])
+async def test_existing_incompatible_collection_is_preserved(monkeypatch, description, bm25):
+    """不兼容集合必须保留，初始化不能删除已入库数据。"""
+    kb = MilvusKB.__new__(MilvusKB)
+    kb.connection_alias = "test"
+    collection = types.SimpleNamespace(description=description, records=["existing-chunk"])
+    monkeypatch.setattr(
+        milvus_module.model_cache,
+        "get_model_info",
+        lambda _: types.SimpleNamespace(model_type="embedding", model_id="test-embedding"),
+    )
+    monkeypatch.setattr(milvus_module.utility, "has_collection", lambda *a, **k: True)
+    monkeypatch.setattr(milvus_module, "Collection", lambda *a, **k: collection)
+    monkeypatch.setattr(kb, "_collection_supports_bm25", lambda _: bm25)
+    monkeypatch.setattr(milvus_module.utility, "drop_collection", lambda *a, **k: collection.records.clear())
+    monkeypatch.setattr(kb, "_create_new_collection", lambda *a: collection)
+    with pytest.raises(ValueError, match="保留"):
+        await kb._create_kb_instance("db", EMBEDDING_MODEL_SPEC)
+    assert collection.records == ["existing-chunk"]

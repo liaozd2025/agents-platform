@@ -364,17 +364,17 @@ class MilvusKB(KnowledgeBase):
                 expected_model = embedding_info.model_id
 
                 if expected_model not in description:
-                    logger.warning(
+                    raise ValueError(
                         f"Collection {collection_name} model mismatch: "
-                        f"expected='{expected_model}', found_in_description='{description}'"
+                        f"expected='{expected_model}', found_in_description='{description}'；"
+                        "已保留原集合，请确认模型后显式迁移索引"
                     )
-                    utility.drop_collection(collection_name, using=self.connection_alias)
-                    return self._create_new_collection(collection_name, embedding_info, kb_id)
 
                 if not self._collection_supports_bm25(collection):
-                    logger.warning(f"Collection {collection_name} schema does not support BM25, recreating")
-                    utility.drop_collection(collection_name, using=self.connection_alias)
-                    return self._create_new_collection(collection_name, embedding_info, kb_id)
+                    raise ValueError(
+                        f"Collection {collection_name} schema does not support BM25；"
+                        "已保留原集合，请显式迁移索引"
+                    )
 
                 logger.info(f"Retrieved existing collection: {collection_name}")
                 return collection
@@ -382,9 +382,6 @@ class MilvusKB(KnowledgeBase):
                 logger.info(f"Collection {collection_name} not found, creating new one")
                 return self._create_new_collection(collection_name, embedding_info, kb_id)
 
-        except (connections.MilvusException, RuntimeError) as e:
-            logger.error(f"Error checking collection {collection_name}: {e}")
-            raise
         except Exception as e:
             logger.error(f"Unexpected error while managing collection {collection_name}: {e}")
             logger.debug(f"Traceback: {traceback.format_exc()}")
