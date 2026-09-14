@@ -49,6 +49,7 @@ Owner：web/src/assets/css/base.css
 - 色阶数据本身可核对：两份样式文件里的 18 档刻度满足单调性（相对亮度随档号单调），浅色 `--main-600` 配白字对比度 4.89:1、深色 3.0:1（故深色实心按钮改用近黑字）。
 - 变量引用完整性：在 `web/src` 下扫描 `.vue` / `.js` / `.css` / `.less`，统计「被 `var(--x)` 引用」与「全仓有 `--x:` 定义」两个集合。改动后被引用 140 个变量，其中 30 个全仓未定义（`--color-error-600`、`--gray-250`、`--main-25`、`--text-primary` 等），全部是存量问题且引用处都带兜底值；本次改动**没有新增**未定义项，也没有留下悬空引用。
 - `node --check` 通过改动的 `web/src/stores/theme.js` 与 `web/src/utils/chartColors.js`。
+- 前端 lint / 单测 / 生产构建由提交后的 CI 执行并通过（`.github/workflows/web.yml` 的 `read-only web gates`：`pnpm run lint:check && pnpm run test:unit && pnpm run build`）。这条同时也证明 `.vue` 内联样式块能正常编译。
 - `python3 scripts/verify_engineering_contracts.py` 通过（含本决策记录的格式校验）。
 - 视觉确认（人工判断，无可复现命令）：把改动后的两份样式文件按 `<link>` 引入一个本地静态页面，渲染侧边栏 / 顶栏 / 卡片 / 标签 / 按钮 / 气泡 / 状态芯片的实景并截图，覆盖浅深两种模式、语义色矩阵与「旧值 vs 新值」并排对照，由作者逐张目视确认层级与可读性。该页面与截图属本地草稿（`docs/vibe/` 已被 gitignore），未随本次改动入库。
-- 未验证范围：`theme.js` 的组件级 Button override 只做了源码级确认，未在真实 antd 运行时断言深色主按钮文字色；`.vue` 内联样式块未编译。前端 build/单测需在容器内执行（本机 `web/` 无 `node_modules`）。
+- 未验证范围：`theme.js` 的组件级 Button override 只做了源码级确认，未在真实 antd 运行时断言深色主按钮文字色；未在真实浏览器中走查全站页面的实际观感（前端产物能编译、能过单测，不等于每个页面的观感都符合预期）。
