@@ -1,47 +1,47 @@
 /* 深色模式 */
 :root.dark {
-  --main-1000: #e1f6fb;
-  --main-900: #c4eaf5;
-  --main-800: #a3d8e8;
-  --main-700: #82c3d6;
-  --main-600: #5faec2;
-  --main-500: #4a9fb8;
-  --main-400: #3996ae;
-  --main-300: #24839a;
-  --main-200: #046a82;
-  --main-100: #035065;
-  --main-50: #023944;
-  --main-40: #01151f;
-  --main-30: #010d14;
-  --main-20: #010a0f;
-  --main-10: #00070a;
-  --main-5: #000405;
-  --main-1: #000102;
-  --main-0: #000000;
+  --main-1000: #eff0fb;
+  --main-900: #dadef8;
+  --main-800: #c3c9f5;
+  --main-700: #a8b0f3;
+  --main-600: #8692f0;
+  --main-500: #6777ea;
+  --main-400: #4d5ee0;
+  --main-300: #3748d0;
+  --main-200: #313e9f;
+  --main-100: #2b3472;
+  --main-50: #262b55;
+  --main-40: #222748;
+  --main-30: #1d203a;
+  --main-20: #171a2d;
+  --main-10: #121321;
+  --main-5: #0c0e15;
+  --main-1: #09090e;
+  --main-0: #030303;
 
   /* 保留原有的 main 变量 */
-  --main-color: #4a9fb8;
-  --main-bright: #5faec2;
+  --main-color: var(--main-600);
+  --main-bright: var(--main-700);
 
   /* 辅助色：暖金色系，深色模式反转刻度，与 --main-* 对齐 */
-  --second-1000: #faf3e2;
-  --second-900: #f4e8cc;
-  --second-800: #ead5a8;
-  --second-700: #dfc183;
-  --second-600: #d4ac5f;
-  --second-500: #d9ab52;
-  --second-400: #c9983c;
-  --second-300: #a97e2b;
-  --second-200: #8a641d;
-  --second-100: #6b4d14;
-  --second-50: #4a350d;
-  --second-40: #2e2108;
-  --second-30: #251a06;
-  --second-20: #1e1505;
-  --second-10: #150e03;
-  --second-5: #0e0902;
-  --second-1: #070401;
-  --second-0: #000000;
+  --second-1000: #f7f1e3;
+  --second-900: #f0e0c1;
+  --second-800: #ebce95;
+  --second-700: #e5b85f;
+  --second-600: #dd9e21;
+  --second-500: #c88f1b;
+  --second-400: #a7791e;
+  --second-300: #896722;
+  --second-200: #6b5424;
+  --second-100: #524121;
+  --second-50: #3f331d;
+  --second-40: #362d1a;
+  --second-30: #2c2416;
+  --second-20: #231e13;
+  --second-10: #19160e;
+  --second-5: #120f0b;
+  --second-1: #0d0b09;
+  --second-0: #030303;
 
   --second-color: var(--second-500);
 
@@ -57,11 +57,15 @@
   --gray-300: #697070;
   --gray-200: #4c4d4d;
   --gray-150: #323333;
-  --gray-100: #1e1f1f;
-  --gray-50: #151616;
-  --gray-25: #0c0d0d;
-  --gray-10: #080808;
-  --gray-0: #030303;
+  /* 深色最底层五档抬亮：原值 #030303~#1e1f1f 近似纯黑，而 body 背景直接取 --gray-0，
+     整页观感压抑。现改为以 #151517 打底、卡片层 #1b1b1c（用户指定），
+     并保持「档号越小越深」的单调关系与原有档距不变。
+     注意：--gray-0 在深色下语义是「最深层」而非「白」，浅色下才等于 #ffffff。 */
+  --gray-100: #212123;
+  --gray-50: #1b1b1c;
+  --gray-25: #19191b;
+  --gray-10: #171719;
+  --gray-0: #151517;
 
   --color-success-10: #0f1810; /* 成功色-极深 */
   --color-success-50: #162312; /* 成功色-最深 */
@@ -77,28 +81,28 @@
   --color-error-700: #ff7875; /* 错误色-浅 */
   --color-error-900: #ffa39e; /* 错误色-最浅 */
 
-  --color-warning-10: #1a1408; /* 警告色-极深 */
-  --color-warning-50: #2b2111; /* 警告色-最深 */
-  --color-warning-100: #614700; /* 警告色-深 */
-  --color-warning-500: #faad14; /* 警告色-标准 */
-  --color-warning-700: #ffc53d; /* 警告色-浅 */
-  --color-warning-900: #ffd666; /* 警告色-最浅 */
+  --color-warning-10: #1d1309; /* 警告色-极深 */
+  --color-warning-50: #2e1f12; /* 警告色-最深 */
+  --color-warning-100: #793900; /* 警告色-深 */
+  --color-warning-500: #fcaa62; /* 警告色-标准 */
+  --color-warning-700: #ffc28c; /* 警告色-浅 */
+  --color-warning-900: #ffd2ac; /* 警告色-最浅 */
 
-  --color-info-10: #0c0d0d; /* 信息色-极深 */
-  --color-info-50: #111b26; /* 信息色-最深 */
-  --color-info-100: #111d2c; /* 信息色-深 */
-  --color-info-500: #3d8fff; /* 信息色-标准 */
-  --color-info-700: #40a9ff; /* 信息色-浅 */
-  --color-info-900: #69c0ff; /* 信息色-最浅 */
+  --color-info-10: var(--main-10); /* 信息色-极深 */
+  --color-info-50: var(--main-50); /* 信息色-最深 */
+  --color-info-100: var(--main-100); /* 信息色-深 */
+  --color-info-500: var(--main-500); /* 信息色-标准 */
+  --color-info-700: var(--main-700); /* 信息色-浅 */
+  --color-info-900: var(--main-900); /* 信息色-最浅 */
 
-  --color-accent-10: #081919; /* 强调色-极深 */
-  --color-accent-50: #0f2e2e; /* 强调色-最深 */
-  --color-accent-100: #164e63; /* 强调色-深 */
-  --color-accent-500: #13c2c2; /* 强调色-标准 */
-  --color-accent-700: #36cfc9; /* 强调色-浅 */
-  --color-accent-900: #5cdbd3; /* 强调色-最浅 */
+  --color-accent-10: var(--second-10); /* 强调色-极深 */
+  --color-accent-50: var(--second-50); /* 强调色-最深 */
+  --color-accent-100: var(--second-100); /* 强调色-深 */
+  --color-accent-500: var(--second-500); /* 强调色-标准 */
+  --color-accent-700: var(--second-700); /* 强调色-浅 */
+  --color-accent-900: var(--second-900); /* 强调色-最浅 */
 
-  --chart-palette-1: var(--main-300);
+  --chart-palette-1: var(--main-500);
   --chart-palette-2: #3ea896;
   --chart-palette-3: #d6ad37;
   --chart-palette-4: #cf6666;
@@ -109,7 +113,9 @@
   --chart-palette-9: #c46e9e;
   --chart-palette-10: #7a7a7a;
 
-  --bg-sider: #141414;
+  /* 侧栏/顶栏底色与卡片同层（原值是写死的 #141414，落在旧 gray-25 与 gray-50 之间，
+     抬亮后改为直接引用灰阶，避免同一层背景存两份真值） */
+  --bg-sider: var(--gray-50);
   --color-text: #ffffff;
 
   --dark-98: rgba(255, 255, 255, 0.98);
@@ -139,8 +145,10 @@
   --light-0: rgba(0, 0, 0, 0);
 
   /* Ant Design 兼容变量 - 深色模式 */
-  --color-bg-container: #1f1f1f;
-  --color-bg-elevated: #262626;
+  /* 改用 var 引用灰阶（与浅色主题的写法一致），避免同一层背景同时存在
+     「硬编码值」与「灰阶变量」两份真值，抬亮时漏改任何一处就会撕裂 */
+  --color-bg-container: var(--gray-50);
+  --color-bg-elevated: var(--gray-100);
   --color-text-secondary: rgba(255, 255, 255, 0.65);
   --color-text-tertiary: rgba(255, 255, 255, 0.45);
 
