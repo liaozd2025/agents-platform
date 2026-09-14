@@ -128,30 +128,6 @@
                     />
                   </a-form-item>
 
-                  <a-form-item v-if="showAgreementConsent" class="agreement-form-item">
-                    <div class="agreement-row">
-                      <a-checkbox v-model:checked="agreementAccepted">
-                        登录即代表同意
-                        <a
-                          class="agreement-link"
-                          :href="userAgreementUrl"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          @click.stop
-                          >《用户协议》</a
-                        >
-                        <a
-                          class="agreement-link"
-                          :href="privacyPolicyUrl"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          @click.stop
-                          >《隐私协议》</a
-                        >
-                      </a-checkbox>
-                    </div>
-                  </a-form-item>
-
                   <a-form-item>
                     <a-button type="primary" html-type="submit" :loading="loading" block
                       >创建管理员账户</a-button
@@ -187,27 +163,9 @@
                     </a-input-password>
                   </a-form-item>
 
-                  <a-form-item v-if="showAgreementConsent" class="agreement-form-item">
+                  <a-form-item class="agreement-form-item">
                     <div class="agreement-row">
-                      <a-checkbox v-model:checked="agreementAccepted">
-                        登录即代表同意
-                        <a
-                          class="agreement-link"
-                          :href="userAgreementUrl"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          @click.stop
-                          >《用户协议》</a
-                        >
-                        <a
-                          class="agreement-link"
-                          :href="privacyPolicyUrl"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          @click.stop
-                          >《隐私协议》</a
-                        >
-                      </a-checkbox>
+                      <a-checkbox v-model:checked="rememberLogin">保持登录 30 天</a-checkbox>
                     </div>
                   </a-form-item>
 
@@ -317,21 +275,12 @@ const brandName = computed(() => {
 
   return orgName || brandNameRaw
 })
-const userAgreementUrl = computed(() => {
-  return infoStore.footer?.user_agreement_url?.trim() || ''
-})
-const privacyPolicyUrl = computed(() => {
-  return infoStore.footer?.privacy_policy_url?.trim() || ''
-})
-const showAgreementConsent = computed(() => {
-  return Boolean(userAgreementUrl.value && privacyPolicyUrl.value)
-})
-
 // 状态
 const isFirstRun = ref(false)
 const loading = ref(false)
 const errorMessage = ref('')
-const agreementAccepted = ref(false)
+// 勾选后跨浏览器会话保留令牌；后端令牌有效期固定为 30 天。
+const rememberLogin = ref(false)
 const serverStatus = ref('loading')
 const serverError = ref('')
 const healthChecking = ref(false)
@@ -418,25 +367,11 @@ const validateConfirmPassword = async (rule, value) => {
   }
 }
 
-const ensureAgreementAccepted = () => {
-  if (!showAgreementConsent.value || agreementAccepted.value) {
-    return true
-  }
-
-  const warningMessage = '请先阅读并同意《用户协议》《隐私协议》'
-  message.warning(warningMessage)
-  return false
-}
-
 // 处理登录
 const handleLogin = async () => {
   // 如果当前被锁定，不允许登录
   if (isLocked.value) {
     message.warning(`账户被锁定，请等待 ${formatTime(lockRemainingTime.value)}`)
-    return
-  }
-
-  if (!ensureAgreementAccepted()) {
     return
   }
 
@@ -447,7 +382,8 @@ const handleLogin = async () => {
 
     await userStore.login({
       loginId: loginForm.loginId,
-      password: loginForm.password
+      password: loginForm.password,
+      rememberLogin: rememberLogin.value
     })
 
     message.success('登录成功')
@@ -508,10 +444,6 @@ const handleLogin = async () => {
 
 // 处理 OIDC 登录
 const handleOIDCLogin = async () => {
-  if (!ensureAgreementAccepted()) {
-    return
-  }
-
   try {
     oidcLoading.value = true
     errorMessage.value = ''
@@ -523,6 +455,7 @@ const handleOIDCLogin = async () => {
       const redirectPath =
         sessionStorage.getItem('redirect') || router.currentRoute.value.query.redirect || '/'
       sessionStorage.setItem('oidc_redirect', redirectPath)
+      sessionStorage.setItem('oidc_remember_login', String(rememberLogin.value))
 
       // 跳转到 OIDC Provider
       window.location.href = response.login_url
@@ -558,10 +491,6 @@ const checkOIDCConfig = async () => {
 
 // 处理初始化管理员
 const handleInitialize = async () => {
-  if (!ensureAgreementAccepted()) {
-    return
-  }
-
   try {
     loading.value = true
     errorMessage.value = ''

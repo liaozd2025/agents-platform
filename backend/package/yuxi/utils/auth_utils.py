@@ -12,7 +12,8 @@ from argon2.exceptions import InvalidHash, VerificationError, VerifyMismatchErro
 from yuxi.utils.datetime_utils import utc_now
 
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION = 7 * 24 * 60 * 60
+# 默认登录令牌有效期为 30 天；前端“保持登录”选项与此期限保持一致。
+JWT_EXPIRATION = 30 * 24 * 60 * 60
 JWT_AUDIENCE = "yuxi-know-api"
 PUBLIC_DEFAULT_JWT_SECRET_KEY = "yuxi_know_secure_key"
 PASSWORD_HASHER = PasswordHasher()
