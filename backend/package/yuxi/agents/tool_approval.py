@@ -5,7 +5,8 @@ from langchain.agents.middleware import HumanInTheLoopMiddleware
 
 ToolApprovalMode = Literal["default", "always_trust"]
 
-DEFAULT_TOOL_APPROVAL_MODE: ToolApprovalMode = "default"
+# 系统级工具审批默认模式：请求与 Agent 配置都未指定时生效。当前默认完全信任（敏感工具自动执行）。
+DEFAULT_TOOL_APPROVAL_MODE: ToolApprovalMode = "always_trust"
 TOOL_APPROVAL_MODES = frozenset({"default", "always_trust"})
 SANDBOX_EXECUTION_TOOLS = frozenset({"write_file", "edit_file", "execute"})
 PI_DELEGATED_SANDBOX_TOOLS = SANDBOX_EXECUTION_TOOLS | {"ls", "glob", "grep", "ocr_parse_file"}

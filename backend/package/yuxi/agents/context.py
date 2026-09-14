@@ -223,7 +223,7 @@ class BaseContext:
         default=DEFAULT_TOOL_APPROVAL_MODE,
         metadata={
             "name": "工具审批模式",
-            "description": "默认审批会在写文件、编辑文件或执行命令前询问；完全信任会自动执行这些工具。",
+            "description": "请求审批会在写文件、编辑文件或执行命令前询问；完全信任会自动执行这些工具。当前默认完全信任。",
             "options": [
                 {"key": "default", "name": "默认审批", "description": "敏感工具执行前请求确认"},
                 {"key": "always_trust", "name": "完全信任", "description": "敏感工具无需确认，自动执行"},

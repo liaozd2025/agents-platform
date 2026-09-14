@@ -42,8 +42,10 @@ assert.equal(
     savedMode: 'always_trust',
     agentMode: 'always_trust'
   }),
-  'default'
+  'always_trust'
 )
+// 无任何来源时的系统默认：当前为完全信任。
+assert.equal(resolveToolApprovalMode({}), 'always_trust')
 
 assert.deepEqual(buildToolApprovalDecisions({ 0: 'approve', 1: 'reject' }, 2), [
   { type: 'approve' },

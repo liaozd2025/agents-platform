@@ -1810,13 +1810,13 @@ async def test_create_resume_run_defaults_tool_approval_mode_for_legacy_parent(m
         created_by_run_id="parent-run",
     )
 
-    assert db.created_run_kwargs["input_payload"]["tool_approval_mode"] == "default"
+    assert db.created_run_kwargs["input_payload"]["tool_approval_mode"] == "always_trust"
 
 
 def test_resolve_tool_approval_mode_uses_request_then_agent_config_then_default():
     assert agent_run_service.resolve_agent_run_tool_approval_mode("default", "always_trust") == "default"
     assert agent_run_service.resolve_agent_run_tool_approval_mode(None, "always_trust") == "always_trust"
-    assert agent_run_service.resolve_agent_run_tool_approval_mode(None, None) == "default"
+    assert agent_run_service.resolve_agent_run_tool_approval_mode(None, None) == "always_trust"
 
 
 def test_resolve_tool_approval_mode_rejects_unknown_value():
