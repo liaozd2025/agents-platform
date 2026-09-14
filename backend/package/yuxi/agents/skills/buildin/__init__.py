@@ -23,8 +23,8 @@ BUILTIN_SKILLS: list[BuiltinSkillSpec] = [
     BuiltinSkillSpec(
         slug="image-gen",
         source_dir=_SKILLS_ROOT / "image-gen",
-        description="在 Agent 沙盒中生成图片并保存到 outputs，默认支持 Qwen-Image，也可接入其它图片生成接口。",
-        version="2026.06.02",
+        description="通过 Kie 生成或编辑图片并保存到 outputs，支持 GPT Image 2 和 Nano Banana 2。",
+        version="2026.09.14",
         tool_dependencies=("present_artifacts",),
     ),
     BuiltinSkillSpec(

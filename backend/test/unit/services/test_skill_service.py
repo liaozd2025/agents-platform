@@ -519,6 +519,8 @@ def test_image_gen_builtin_skill_spec():
     assert image_gen["name"] == "image-gen"
     assert image_gen["tool_dependencies"] == ["present_artifacts"]
     assert (image_gen["source_dir"] / "SKILL.md").exists()
+    assert (image_gen["source_dir"] / "scripts/image_gen.py").is_file()
+    assert "Kie" in image_gen["description"]
 
 
 def test_html_preview_builtin_skill_spec():
