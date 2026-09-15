@@ -67,7 +67,7 @@
       <MarkdownPreview
         v-if="parsedData.content"
         :key="message.id"
-        :content="parsedData.content"
+        :content="citationContent"
         code-copy
         class="message-md"
       />
@@ -170,6 +170,7 @@ import { inferImageMimeTypeFromBase64, normalizeAttachmentPreviews } from '@/uti
 import { buildMentionDisplayLabels } from '@/utils/mention_utils'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { enrichTaskToolCalls } from '@/components/ToolCallingResult/toolRegistry'
+import { groupKnowledgeChunks } from '@/utils/kbResultGroups.js'
 
 const props = defineProps({
   // 消息角色：'user'|'assistant'|'sent'|'received'
@@ -332,6 +333,32 @@ const parsedData = computed(() => {
     content,
     reasoning_content: reasoningContent
   }
+})
+
+const citationSources = computed(() => {
+  const knowledge = groupKnowledgeChunks(messageSources.value.knowledgeChunks || []).map((group) => ({ ...group, content: group.chunks?.map((chunk) => chunk.content).filter(Boolean).join(' ') }))
+  const web = messageSources.value.webSources || []
+  return [...knowledge, ...web]
+})
+
+const citationContent = computed(() => {
+  const content = parsedData.value.content || ''
+  if (!content || !citationSources.value.length) return content
+  return content.replace(/\[(\d+)\]/g, (match, rawIndex) => {
+    const index = Number(rawIndex) - 1
+    const source = citationSources.value[index]
+    if (!source) return match
+    const isWeb = index >= groupKnowledgeChunks(messageSources.value.knowledgeChunks || []).length
+    const preview = String(source.content || source.title || source.metadata?.source || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 240)
+    const label = `引用 ${rawIndex}: ${preview}`
+    if (isWeb && source.url) {
+      return `<a class="yuxi-inline-citation" href="${source.url}" target="_blank" rel="noopener noreferrer" title="${label.replace(/"/g, '&quot;')}">[${rawIndex}]</a>`
+    }
+    return `<a class="yuxi-inline-citation" href="#yuxi-source-${rawIndex}" title="${label.replace(/"/g, '&quot;')}">[${rawIndex}]</a>`
+  })
 })
 </script>
 
@@ -539,6 +566,20 @@ const parsedData = computed(() => {
     max-height: 200px;
     overflow-y: auto;
   }
+}
+
+:deep(.yuxi-inline-citation) {
+  color: var(--main-color);
+  font-size: 0.78em;
+  font-weight: 600;
+  text-decoration: none;
+  vertical-align: super;
+  cursor: pointer;
+  padding: 0 1px;
+}
+
+:deep(.yuxi-inline-citation:hover) {
+  text-decoration: underline;
 }
 
 .human-message-attachments {

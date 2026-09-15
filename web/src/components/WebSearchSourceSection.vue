@@ -1,7 +1,7 @@
 <template>
   <div class="source-section">
     <div class="section-title">网络搜索来源 ({{ sources.length }})</div>
-    <WebSearchResultList :results="sources" empty-text="未找到网络搜索来源" />
+    <WebSearchResultList :results="sources" :knowledge-count="knowledgeCount" empty-text="未找到网络搜索来源" />
   </div>
 </template>
 
@@ -12,6 +12,10 @@ defineProps({
   sources: {
     type: Array,
     default: () => []
+  },
+  knowledgeCount: {
+    type: Number,
+    default: 0
   }
 })
 </script>

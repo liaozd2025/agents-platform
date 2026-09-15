@@ -5,6 +5,7 @@
         v-for="(result, index) in results"
         :key="getItemKey(result, index)"
         class="search-result-item"
+        :id="`yuxi-source-${index + knowledgeCount + 1}`"
       >
         <div class="result-header">
           <h5 class="result-title">
@@ -45,6 +46,10 @@ defineProps({
   emptyText: {
     type: String,
     default: '未找到相关搜索结果'
+  },
+  knowledgeCount: {
+    type: Number,
+    default: 0
   }
 })
 

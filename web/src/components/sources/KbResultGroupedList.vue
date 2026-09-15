@@ -5,7 +5,7 @@
     </div>
 
     <div class="kb-results" v-if="normalizedChunks.length > 0">
-      <div v-for="(fileGroup, index) in fileGroupList" :key="fileGroup.key" class="file-group-item">
+      <div v-for="(fileGroup, index) in fileGroupList" :id="`yuxi-source-${index + 1}`" :key="fileGroup.key" class="file-group-item">
         <a
           v-if="fileGroup.url"
           class="file-info"

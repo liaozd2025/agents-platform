@@ -83,7 +83,7 @@
     <!-- 来源详情面板 -->
     <div v-if="isSourcesExpanded" class="sources-panel-body">
       <KnowledgeSourceSection v-if="knowledgeChunks.length > 0" :chunks="knowledgeChunks" />
-      <WebSearchSourceSection v-if="webSources.length > 0" :sources="webSources" />
+      <WebSearchSourceSection v-if="webSources.length > 0" :sources="webSources" :knowledge-count="knowledgeArticleCount" />
     </div>
   </div>
 
