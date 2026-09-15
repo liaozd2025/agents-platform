@@ -18,10 +18,12 @@ from yuxi.repositories.api_key_repository import (
     APIKeySubjectUnavailable,
 )
 from yuxi.services.user_management_service import get_authorized_user, list_authorized_users
+from yuxi.services.user_memory_service import sync_user_profile_to_memory
 from yuxi.storage.minio import upload_image_to_minio
 from yuxi.storage.postgres.models_business import APIKey, User
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import coerce_any_to_utc_datetime, format_utc_datetime, utc_now_naive
+from yuxi.utils.logging_config import logger
 
 user_router = APIRouter(prefix="/user", tags=["user"])
 
@@ -99,6 +101,12 @@ async def update_user_config(
     db: AsyncSession = Depends(get_db),
 ):
     user_config = await UserConfig(uid=current_user.uid, schema=data).save(db)
+    try:
+        # 配置已提交后立即更新 USER.md，保证首次会话前文件就反映最新资料；上下文构建仍会再次幂等校正。
+        await sync_user_profile_to_memory(db=db, uid=current_user.uid)
+    except Exception:
+        # 文件同步属于派生投影，失败不能回滚已经成功保存的用户配置。
+        logger.exception(f"同步用户资料到 USER.md 失败：uid={current_user.uid}")
     return user_config.dump_config()
 
 

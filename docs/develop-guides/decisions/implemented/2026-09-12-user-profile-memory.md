@@ -8,6 +8,8 @@ Owner：backend/package/yuxi/services/user_memory_service.py
 
 用户资料同步需要适配用户级 Workspace 和多角色模型，在保留手工资料的同时让下一次 Agent 输入反映数据库资料。
 
+用户开启或关闭 `enable_memory` 后，在配置事务提交成功后立即同步或清理 `USER.md`；Agent 上下文构建阶段继续执行幂等同步，作为首次会话和外部文件变更的兜底。派生文件同步失败不回滚已保存的用户配置，但必须记录日志。
+
 ## 决策
 
 UserRepository 查询当前用户、部门、Memory 开关与角色分配；仅写入启用角色的名称。上下文构建在读取 USER.md 前执行同步，chat、resume 与状态查看共用该入口。Workspace 提供 no-follow 文件读取与原子替换，资料同步完整读取最多 1 MiB，超过上限拒绝写入，保留原文件。用户关闭 Memory 时移除机器区块，手工内容继续遵循原有上下文加载规则。
