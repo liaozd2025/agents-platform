@@ -12,9 +12,16 @@ class _Result:
         self._row = row
 
     def all(self):
+        # 列序与被测查询保持一致：0=username、1=display_name、2=部门、3=Memory 开关、4=角色名
         user, department, enabled = self._row
         return [
-            (user.username, department, enabled, a.role.name if a.role.is_active else None)
+            (
+                user.username,
+                user.display_name,
+                department,
+                enabled,
+                a.role.name if a.role.is_active else None,
+            )
             for a in user.role_assignments
         ]
 
@@ -27,9 +34,11 @@ class _DB:
         return _Result(self.row)
 
 
-def _user() -> SimpleNamespace:
+def _user(display_name: str | None = "张三") -> SimpleNamespace:
+    """登录账号与展示名刻意不同：确保断言验证的是 display_name 而不是 username。"""
     return SimpleNamespace(
-        username="张三",
+        username="2024102811",
+        display_name=display_name,
         uid="user-1",
         role_assignments=[
             SimpleNamespace(role=SimpleNamespace(name="普通用户", is_active=True)),
@@ -56,6 +65,8 @@ async def test_sync_profile_writes_database_user_and_department_and_keeps_manual
     content = memory_file.read_text(encoding="utf-8")
     assert "手工偏好：使用中文" in content
     assert "- 用户名：张三" in content
+    # 关键回归点：展示名存在时不能退回登录账号（修复前这里会写成 2024102811）
+    assert "- 用户名：2024102811" not in content
     assert "- 部门：研发部" in content
     assert "- 角色：普通用户" in content
     assert "停用角色" not in content
@@ -66,6 +77,25 @@ async def test_sync_profile_writes_database_user_and_department_and_keeps_manual
         uid="user-1",
     )
     assert memory_file.read_text(encoding="utf-8") == content
+
+
+@pytest.mark.asyncio
+async def test_sync_profile_falls_back_to_login_account_without_display_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未维护展示名时回退登录账号，保证「用户名」一行不为空。"""
+    monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path / "threads"))
+    workspace_paths.ensure_user_workspace("user-1")
+    memory_file = tmp_path / "threads" / "shared" / "user-1" / "workspace" / "agents" / "USER.md"
+    memory_file.write_text("# USER\n", encoding="utf-8")
+
+    await svc.sync_user_profile_to_memory(
+        db=_DB((_user(display_name=None), "研发部", True)),
+        uid="user-1",
+    )
+
+    assert "- 用户名：2024102811" in memory_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio

@@ -112,10 +112,14 @@ class UserRepository:
         return await _get_user_with_department_ancestors(db, User.uid == uid)
 
     async def get_memory_profile(self, uid: str):
-        """只投影资料字段与启用角色，不刷新调用方的 ORM 权限关系。"""
+        """只投影资料字段与启用角色，不刷新调用方的 ORM 权限关系。
+
+        第 1 项返回展示名：优先 ``display_name``（真实姓名），未维护时回退登录账号 ``username``，
+        避免 USER.md 里只出现数字账号。
+        """
         async with self._session() as session:
             result = await session.execute(
-                select(User.username, Department.name, UserConfig.enable_memory, Role.name)
+                select(User.username, User.display_name, Department.name, UserConfig.enable_memory, Role.name)
                 .select_from(User)
                 .outerjoin(Department, User.department_id == Department.id)
                 .outerjoin(UserConfig, UserConfig.uid == User.uid)
@@ -126,7 +130,14 @@ class UserRepository:
             rows = result.all()
             if not rows:
                 return None
-            return (*rows[0][:3], sorted({row[3] for row in rows if row[3]}))
+            # 元组列序：0=username、1=display_name、2=部门、3=Memory 开关、4=角色名；角色名可能为空（未分配或角色已停用）
+            username, display_name, department_name, enable_memory = rows[0][:4]
+            return (
+                display_name or username,
+                department_name,
+                enable_memory,
+                sorted({row[4] for row in rows if row[4]}),
+            )
 
     async def list_by_uids(self, uids: list[str]) -> list[User]:
         """批量获取指定 uid 的用户。"""

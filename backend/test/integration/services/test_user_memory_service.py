@@ -45,7 +45,13 @@ async def test_profile_sync_uses_current_roles_and_preserves_manual_content(tmp_
         role = Role(code=uid, name="资料测试角色", default_scope_type="self", is_active=True)
         db.add_all([department, role])
         await db.flush()
-        user = User(username=uid, uid=uid, password_hash="unused-test-hash", department_id=department.id)
+        user = User(
+            username=uid,
+            display_name="资料测试姓名",
+            uid=uid,
+            password_hash="unused-test-hash",
+            department_id=department.id,
+        )
         config = UserConfig(uid=uid, enable_memory=True)
         db.add_all([user, config])
         await db.flush()
@@ -64,10 +70,18 @@ async def test_profile_sync_uses_current_roles_and_preserves_manual_content(tmp_
             return content
 
         content = await context()
-        assert f"- 用户名：{uid}" in content
+        # 真实资料同步必须写展示姓名，而不是登录账号
+        assert "- 用户名：资料测试姓名" in content
+        assert f"- 用户名：{uid}" not in content
         assert f"- 部门：{uid}" in content
         assert "- 角色：资料测试角色" in content
         assert "unused-test-hash" not in content
+        # 展示姓名缺失时回退登录账号
+        user.display_name = None
+        await db.flush()
+        assert f"- 用户名：{uid}" in await context()
+        user.display_name = "资料测试姓名"
+        await db.flush()
         department.name = "更新部门"
         role.name = "更新角色"
         await db.flush()

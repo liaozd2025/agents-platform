@@ -19,14 +19,15 @@ async def sync_user_profile_to_memory(*, db: AsyncSession, uid: str) -> None:
     row = await UserRepository(db).get_memory_profile(uid)
     if row is None:
         return
-    username, department_name, enable_memory, roles = row
+    # 首项已是展示名：优先 display_name（真实姓名），未维护时回退登录账号；标签沿用「用户名」保持文件格式不变
+    display_name, department_name, enable_memory, roles = row
     profile = None
     if enable_memory:
         profile = "\n".join(
             (
                 PROFILE_START,
                 "## 用户资料",
-                f"- 用户名：{username}",
+                f"- 用户名：{display_name}",
                 f"- UID：{uid}",
                 f"- 部门：{department_name or '未分配'}",
                 f"- 角色：{'、'.join(roles) or '未分配'}",
