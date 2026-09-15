@@ -67,12 +67,12 @@ test('排队请求在等待 Run 创建期间保持 loading 状态', async () => 
 })
 
 /** 集中 Run SSE 测试的固定依赖，只暴露各用例关心的行为。 */
-const createRunStream = ({ threadState, handleStreamChunk, resetOnGoingConv }) =>
+const createRunStream = ({ threadState, handleStreamChunk, resetOnGoingConv, fetchThreadMessages }) =>
   useAgentRunStream({
     getThreadState: () => threadState,
     currentAgentId: { value: 'agent-1' },
     handleStreamChunk,
-    fetchThreadMessages: async () => {},
+    fetchThreadMessages: fetchThreadMessages || (async () => {}),
     fetchAgentState: () => {},
     resetOnGoingConv,
     onScrollToBottom: () => {},
@@ -380,5 +380,141 @@ test('旧 Run 终态清理保留排队 Request SSE', async () => {
     assert.equal(threadState.requestStreams['request-2'].controller.signal.aborted, false)
   } finally {
     agentApi.streamAgentRunEvents = originalStreamAgentRunEvents
+  }
+})
+
+test('本地流还开着但 Run 已终态时收敛视图，避免残留实时消息挡住末轮来源', async () => {
+  // 复现路径：页面重新可见触发 resume 分支，它抢先发现 run 已终态并清空 activeRunId，
+  // 随后到达的 SSE finished 会被 finalizeRunStream 的早退判断跳过（activeRunId !== runId）。
+  // 若此处不补一次「刷新历史 + 清实时消息」，本轮实时消息会残留成一条 streaming 尾巴轮：
+  // 该轮自身不渲染 refs，其前一历史轮又被判为未收尾，末轮「来源」按钮据此消失。
+  const residualChunks = { 'msg-1': [{ id: 'msg-1', type: 'ai', content: '残留回复' }] }
+  const threadState = {
+    activeRunId: 'run-1',
+    activeRunSteerable: false,
+    runLastSeq: '1700000000001-0',
+    runStreamAbortController: new AbortController(),
+    replyLoadingVisible: false,
+    pendingRequestId: null,
+    pendingInterrupt: null,
+    isStreaming: true,
+    onGoingConv: { msgChunks: residualChunks }
+  }
+  const fetchCalls = []
+  const resetCalls = []
+  const originalGetAgentRun = agentApi.getAgentRun
+  agentApi.getAgentRun = async () => ({ run: { id: 'run-1', status: 'completed' } })
+
+  try {
+    const runStream = createRunStream({
+      threadState,
+      handleStreamChunk: () => {},
+      resetOnGoingConv: (threadId, options) => {
+        resetCalls.push([threadId, options])
+        threadState.onGoingConv = { msgChunks: {} }
+      },
+      fetchThreadMessages: async (payload) => {
+        fetchCalls.push(payload)
+      }
+    })
+
+    await runStream.resumeActiveRunForThread('thread-1')
+    // 收敛会延迟 200ms 等后端事务提交，用例需等待其完成后再断言
+    await new Promise((resolve) => setTimeout(resolve, 300))
+
+    assert.equal(threadState.activeRunId, null)
+    // 只断言本次收敛真正关心的契约：刷新当前线程历史，并留出后端事务提交的延迟
+    assert.equal(fetchCalls.length, 1)
+    assert.equal(fetchCalls[0].threadId, 'thread-1')
+    assert.equal(fetchCalls[0].delay, 200)
+    assert.deepEqual(resetCalls, [['thread-1', { preserveRequestStreams: true }]])
+    assert.deepEqual(threadState.onGoingConv.msgChunks, {})
+  } finally {
+    agentApi.getAgentRun = originalGetAgentRun
+  }
+})
+
+test('无活跃 Run 且仍有实时消息残留时补一次收敛', async () => {
+  // 页面重新可见时本地已无 Run 流订阅，但上一轮收尾没收敛、实时消息还在，
+  // 这种残留同样会让末轮 refs（含来源）不渲染，需要在权威确认无活跃 run 后补一次。
+  const residualChunks = { 'msg-9': [{ id: 'msg-9', type: 'ai', content: '残留回复' }] }
+  const threadState = {
+    activeRunId: null,
+    activeRunSteerable: false,
+    runLastSeq: '0-0',
+    runStreamAbortController: null,
+    replyLoadingVisible: false,
+    pendingRequestId: null,
+    pendingInterrupt: null,
+    isStreaming: false,
+    onGoingConv: { msgChunks: residualChunks }
+  }
+  const fetchCalls = []
+  const resetCalls = []
+  const originalGetThreadActiveRun = agentApi.getThreadActiveRun
+  agentApi.getThreadActiveRun = async () => ({ run: null })
+
+  try {
+    const runStream = createRunStream({
+      threadState,
+      handleStreamChunk: () => {},
+      resetOnGoingConv: (threadId, options) => {
+        resetCalls.push([threadId, options])
+        threadState.onGoingConv = { msgChunks: {} }
+      },
+      fetchThreadMessages: async (payload) => {
+        fetchCalls.push(payload)
+      }
+    })
+
+    await runStream.resumeActiveRunForThread('thread-2')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+
+    assert.equal(fetchCalls.length, 1)
+    assert.equal(fetchCalls[0].threadId, 'thread-2')
+    assert.deepEqual(resetCalls, [['thread-2', { preserveRequestStreams: true }]])
+    assert.deepEqual(threadState.onGoingConv.msgChunks, {})
+  } finally {
+    agentApi.getThreadActiveRun = originalGetThreadActiveRun
+  }
+})
+
+test('活跃 Run 查询失败时不清实时消息', async () => {
+  // 查询失败可能是网络抖动，此时 run 仍可能在跑：不能据此清场，否则会丢掉尚未落库的实时输出。
+  const residualChunks = { 'msg-10': [{ id: 'msg-10', type: 'ai', content: '可能仍在生成' }] }
+  const threadState = {
+    activeRunId: null,
+    activeRunSteerable: false,
+    runLastSeq: '0-0',
+    runStreamAbortController: null,
+    replyLoadingVisible: false,
+    pendingRequestId: null,
+    pendingInterrupt: null,
+    isStreaming: false,
+    onGoingConv: { msgChunks: residualChunks }
+  }
+  const fetchCalls = []
+  const resetCalls = []
+  const originalGetThreadActiveRun = agentApi.getThreadActiveRun
+  agentApi.getThreadActiveRun = async () => {
+    throw new Error('network down')
+  }
+
+  try {
+    const runStream = createRunStream({
+      threadState,
+      handleStreamChunk: () => {},
+      resetOnGoingConv: (threadId, options) => resetCalls.push([threadId, options]),
+      fetchThreadMessages: async (payload) => fetchCalls.push(payload)
+    })
+
+    await runStream.resumeActiveRunForThread('thread-3')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+
+    assert.deepEqual(fetchCalls, [])
+    assert.deepEqual(resetCalls, [])
+    assert.equal(threadState.onGoingConv.msgChunks, residualChunks)
+  } finally {
+    agentApi.getThreadActiveRun = originalGetThreadActiveRun
   }
 })

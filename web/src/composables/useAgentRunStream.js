@@ -2,7 +2,12 @@ import { unref } from 'vue'
 import { agentApi } from '@/apis'
 import { handleChatError } from '@/utils/errorHandler'
 import { isSteerableMainChatRun } from '@/utils/agentRun'
-import { compareRunSeq, normalizeRunSeq, resolveRunResumeAfterSeq } from '@/utils/runStreamResume'
+import {
+  compareRunSeq,
+  hasOngoingRunChunks,
+  normalizeRunSeq,
+  resolveRunResumeAfterSeq
+} from '@/utils/runStreamResume'
 import { hasPendingInterruptPayload } from '@/utils/toolApproval'
 
 const RUN_INTERRUPTED_STATUS = 'interrupted'
@@ -185,6 +190,28 @@ export function useAgentRunStream({
     }
   }
 
+  /**
+   * 终态收敛：刷新线程历史并清掉本轮实时消息，让视图回到「历史分组」形态。
+   *
+   * run 的终态可能先被 resume 分支（页面重新可见时恢复）发现，也可能先收到 SSE finished。
+   * 两条路都必须收敛，否则本轮实时消息会残留成一条 status 为 streaming 的尾巴轮：
+   * 该轮自身不渲染 refs，且其前一历史轮会被 isConversationSettled 判为「未收尾」，
+   * 表现为回复完成后「来源」按钮不出现、刷新页面后才恢复。
+   *
+   * @param {string} threadId 线程 ID
+   * @param {string|null} runId 本次终态的 run ID；为 null 表示兜底收敛（无活跃 run）
+   * @param {{delay?: number}} options delay 为等待后端事务提交的毫秒数
+   */
+  const settleThreadAfterTerminal = (threadId, runId, { delay = 200 } = {}) => {
+    return fetchThreadMessages({ agentId: unref(currentAgentId), threadId, delay }).finally(() => {
+      const latest = getThreadState(threadId)
+      // 仅当没有新 run 接管时才清实时消息，避免误清下一轮正在流式的输出。
+      if (!latest?.activeRunId || latest.activeRunId === runId) {
+        resetOnGoingConv(threadId, { preserveRequestStreams: true })
+      }
+    })
+  }
+
   const finalizeRunStream = (
     threadId,
     runId,
@@ -209,11 +236,8 @@ export function useAgentRunStream({
     ts.lastRetryableJobTry = null
     ts.replyLoadingVisible = false
     ts.pendingRequestId = null
-    fetchThreadMessages({ agentId: unref(currentAgentId), threadId, delay }).finally(() => {
-      const latest = getThreadState(threadId)
-      if (!latest?.activeRunId || latest.activeRunId === runId) {
-        resetOnGoingConv(threadId, { preserveRequestStreams: true })
-      }
+    // 统一走终态收敛：刷新历史 + 清本轮实时消息，保证视图回到「历史分组」形态。
+    settleThreadAfterTerminal(threadId, runId, { delay }).finally(() => {
       fetchAgentState(unref(currentAgentId), threadId)
       if (scroll) onScrollToBottom()
       if (isInterrupted) {
@@ -452,6 +476,9 @@ export function useAgentRunStream({
           ts.pendingRequestId = null
           clearPendingInterruptForRun(threadId, run.id)
           clearActiveRunSnapshot(threadId)
+          // 本地流还开着但 run 已终态：这里先清掉了 activeRunId，随后到达的 SSE finished
+          // 会被 finalizeRunStream 的早退判断跳过，故必须在此补一次终态收敛。
+          void settleThreadAfterTerminal(threadId, run.id)
           notifyTerminalDetected(threadId, run.id, new Set([threadId]))
         }
       } catch (e) {
@@ -495,6 +522,8 @@ export function useAgentRunStream({
       }
     }
 
+    // 只有服务端权威判定「没有活跃 run」后才允许清实时消息；查询失败时不能据此清场。
+    let terminalConfirmed = false
     try {
       const active = await agentApi.getThreadActiveRun(threadId)
       const run = active?.run
@@ -514,6 +543,8 @@ export function useAgentRunStream({
         await startRunStream(threadId, run.id, '0-0')
         return
       }
+      // 走到这里说明服务端既没有中断也没有在跑的 run（无 run 或已终态）
+      terminalConfirmed = true
     } catch (e) {
       console.warn('Failed to load active run for thread:', threadId, e)
     }
@@ -526,6 +557,11 @@ export function useAgentRunStream({
     ts.pendingRequestId = null
     ts.pendingInterrupt = null
     clearActiveRunSnapshot(threadId)
+    // 已确认无活跃 run 却仍有实时消息残留，说明此前的收尾没有收敛（如终态被上面的分支抢先清掉），
+    // 这里补一次收敛，避免残留的 streaming 尾巴轮把末轮 refs（含来源）挡住。
+    if (terminalConfirmed && hasOngoingRunChunks(ts)) {
+      void settleThreadAfterTerminal(threadId, null)
+    }
     notifyTerminalDetected(threadId, null, new Set([threadId]))
   }
 
