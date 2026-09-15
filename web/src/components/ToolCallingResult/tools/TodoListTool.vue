@@ -185,17 +185,19 @@ const todoListData = (content) => {
       .icon {
         font-size: 16px;
 
+        /* 统一走语义色变量：原来写死的 #1890ff / #faad14 是旧调色板的值，
+           主题换色后不会跟着变，会在列表里留下两种不协调的蓝与黄 */
         &.completed {
-          color: #52c41a;
+          color: var(--color-success-500);
         }
         &.in-progress {
-          color: #1890ff;
+          color: var(--color-info-500);
         }
         &.pending {
-          color: #faad14;
+          color: var(--color-warning-500);
         }
         &.cancelled {
-          color: #ff4d4f;
+          color: var(--color-error-500);
         }
         &.unknown {
           color: var(--gray-400);
