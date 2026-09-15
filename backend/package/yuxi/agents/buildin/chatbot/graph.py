@@ -28,7 +28,11 @@ from yuxi.agents.middlewares import (
 from yuxi.agents.middlewares.skills import SkillsMiddleware
 from yuxi.agents.middlewares.pi_sandbox import create_pi_sandbox_middleware
 from yuxi.agents.middlewares.subagent_task import create_subagent_task_middleware
-from yuxi.agents.tool_approval import create_tool_approval_middleware, normalize_tool_approval_mode
+from yuxi.agents.tool_approval import (
+    DEFAULT_TOOL_APPROVAL_MODE,
+    create_tool_approval_middleware,
+    normalize_tool_approval_mode,
+)
 from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
 
 from .context import ChatBotContext
@@ -87,7 +91,7 @@ async def _build_middlewares(context, backend):
         ]
     )
     approval_middleware = create_tool_approval_middleware(
-        normalize_tool_approval_mode(getattr(context, "tool_approval_mode", "default")),
+        normalize_tool_approval_mode(getattr(context, "tool_approval_mode", DEFAULT_TOOL_APPROVAL_MODE)),
         current_project_path=runtime_workdir_path(context.workdir_relative_path),
     )
     if approval_middleware:
