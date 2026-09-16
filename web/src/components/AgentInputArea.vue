@@ -192,6 +192,15 @@ const handleKeyDown = (e) => {
     return
   }
 
+  // 输入法组合态（预编辑）内的按键不参与发送：中文输入法里回车是"确认上屏"，
+  // macOS 的中文输入法仍以 key="Enter" 上报这次按键（isComposing=true），
+  // 直接按 key 判定会让输入英文字母后敲回车时把消息发出去。
+  // keyCode 229 用于兼容只上报 Process 键的输入法（Windows 微软拼音等），
+  // 这层判断与 MessageInputComponent 内的组合态早退互为兜底。
+  if (e.isComposing || e.keyCode === 229) {
+    return
+  }
+
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     handleSend()
