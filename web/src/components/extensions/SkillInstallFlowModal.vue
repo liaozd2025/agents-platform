@@ -54,23 +54,40 @@
               </div>
             </div>
             <div class="flow-item-list selection-list">
-              <label
-                v-for="skill in suiteSkills"
-                :key="skill.slug"
-                class="selection-item"
-                :class="{ installed: isInstalled(skill.slug) }"
-              >
-                <a-checkbox
-                  :checked="selectedSlugs.includes(skill.slug)"
-                  :disabled="isInstalled(skill.slug)"
-                  @change="(event) => toggleSelection(skill.slug, event.target.checked)"
-                />
-                <span class="flow-item-content">
-                  <strong>{{ skill.name }}</strong>
-                  <small>{{ skill.description || skill.slug }}</small>
-                </span>
-                <span v-if="isInstalled(skill.slug)" class="status-badge neutral">已安装</span>
-              </label>
+              <template v-for="skill in suiteSkills" :key="skill.slug">
+                <!-- 未安装：勾选后加载安装 -->
+                <label v-if="!isInstalled(skill.slug)" class="selection-item">
+                  <a-checkbox
+                    :checked="selectedSlugs.includes(skill.slug)"
+                    @change="(event) => toggleSelection(skill.slug, event.target.checked)"
+                  />
+                  <span class="flow-item-content">
+                    <strong>{{ skill.name }}</strong>
+                    <small>{{ skill.description || skill.slug }}</small>
+                  </span>
+                </label>
+                <!-- 已安装：整行可点，切换启用/停用 -->
+                <button
+                  v-else
+                  type="button"
+                  class="selection-item installed installed-toggle"
+                  :disabled="isSkillToggling(skill)"
+                  :aria-pressed="!isSkillDisabled(skill)"
+                  :title="skillToggleHint(skill)"
+                  @click="toggleSkillEnabled(skill)"
+                >
+                  <Plus v-if="isSkillDisabled(skill)" :size="15" class="installed-state-icon" />
+                  <Check v-else :size="15" class="installed-state-icon enabled" />
+                  <span class="flow-item-content">
+                    <strong>{{ skill.name }}</strong>
+                    <small>{{ skill.description || skill.slug }}</small>
+                  </span>
+                  <span class="skill-enabled-text">
+                    {{ isSkillDisabled(skill) ? '已停用' : '已启用' }}
+                  </span>
+                  <LoaderCircle v-if="isSkillToggling(skill)" :size="14" class="spin" />
+                </button>
+              </template>
             </div>
           </template>
         </section>
@@ -225,7 +242,17 @@
 
 <script setup>
 import { computed, defineComponent, h, nextTick, ref, watch } from 'vue'
-import { CheckCircle2, Circle, LoaderCircle, PackageOpen, X as XIcon, XCircle } from '@lucide/vue'
+import {
+  Check,
+  CheckCircle2,
+  Circle,
+  LoaderCircle,
+  PackageOpen,
+  Plus,
+  X as XIcon,
+  XCircle
+} from '@lucide/vue'
+import { message } from 'ant-design-vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
 import { skillApi } from '@/apis/skill_api'
 import { useUserStore } from '@/stores/user'
@@ -235,7 +262,7 @@ const props = defineProps({
   flow: { type: Object, default: null }
 })
 
-const emit = defineEmits(['close', 'completed'])
+const emit = defineEmits(['close', 'completed', 'skills-changed'])
 const userStore = useUserStore()
 const canInstallPersonal = computed(() => userStore.hasPermission('skill:use'))
 const canInstallShared = computed(() => userStore.hasPermission('skill:manage'))
@@ -292,8 +319,23 @@ const StatusItemList = defineComponent({
 
 const suiteSkills = computed(() => props.flow?.suite?.skills || [])
 const installedSet = computed(
-  () => new Set((props.flow?.installedSlugs || []).map((slug) => String(slug).toLowerCase()))
+  () =>
+    new Set([
+      ...(props.flow?.installedSlugs || []),
+      ...(props.flow?.installedSkills || []).flatMap((skill) => [skill.slug, skill.name])
+    ].filter(Boolean).map((value) => String(value).toLowerCase()))
 )
+const installedSkillMap = computed(() => {
+  const map = new Map()
+  for (const skill of props.flow?.installedSkills || []) {
+    for (const value of [skill.slug, skill.name]) {
+      if (value) map.set(String(value).toLowerCase(), skill)
+    }
+  }
+  return map
+})
+const togglingSkillSlugs = ref([])
+const skillEnabledOverrides = ref({})
 const currentStep = computed(
   () => ({ selecting: 0, preparing: 1, reviewing: 2, installing: 3, result: 3 })[phase.value]
 )
@@ -369,6 +411,71 @@ const cloneShareConfig = (config) => ({
 })
 
 const isInstalled = (slug) => installedSet.value.has(String(slug).toLowerCase())
+/** 套件定义与已安装记录的 slug 可能只对得上其中一个字段，两个都尝试。 */
+const resolveInstalledSkill = (skill) => {
+  const map = installedSkillMap.value
+  return (
+    map.get(String(skill?.slug || '').toLowerCase()) ||
+    map.get(String(skill?.name || '').toLowerCase()) ||
+    null
+  )
+}
+const skillStateKey = (skill) => String(skill?.slug || skill?.name || '').toLowerCase()
+const isSkillDisabled = (skill) => {
+  const override = skillEnabledOverrides.value[skillStateKey(skill)]
+  return (override ?? resolveInstalledSkill(skill)?.enabled) === false
+}
+const canToggleSkill = (skill) => {
+  const installed = resolveInstalledSkill(skill)
+  if (!installed || installed.can_manage === false) return false
+  const sourceScope = installed.source_scope || installed.sourceScope
+  return sourceScope === 'personal'
+    ? userStore.hasPermission('skill:use')
+    : userStore.hasPermission('skill:manage')
+}
+const skillToggleHint = (skill) => {
+  if (!canToggleSkill(skill)) return '没有切换该 Skill 启用状态的权限'
+  if (isSkillToggling(skill)) return '正在切换'
+  return isSkillDisabled(skill) ? '点击启用该 Skill' : '点击停用该 Skill'
+}
+const isSkillToggling = (skill) => togglingSkillSlugs.value.includes(skillStateKey(skill))
+const toggleSkillEnabled = async (skill) => {
+  if (!skill || isSkillToggling(skill)) return
+  const installed = resolveInstalledSkill(skill)
+  // 找不到安装记录或没有权限时给出可见提示，避免点击后毫无反馈。
+  if (!installed) {
+    message.warning('未找到该 Skill 的安装记录，请刷新列表后重试')
+    return
+  }
+  if (!canToggleSkill(skill)) {
+    message.warning('没有切换该 Skill 启用状态的权限')
+    return
+  }
+  // 目标状态只能由「覆盖值参与后的有效状态」推导。installed.enabled 是弹窗打开时的快照，
+  // 连续点击时它不会更新，直接用它会每次都提交同一个值，表现为点一次之后就卡住。
+  const enabled = isSkillDisabled(skill)
+  const stateKey = skillStateKey(skill)
+  togglingSkillSlugs.value.push(stateKey)
+  try {
+    const sourceScope = installed.source_scope || installed.sourceScope
+    const result =
+      sourceScope === 'personal'
+        ? await skillApi.updatePersonalSkillEnabled(installed.slug, enabled)
+        : await skillApi.updateSkillEnabled(installed.slug, enabled)
+    const updated = result?.data
+    const nextEnabled = updated ? updated.enabled !== false : enabled
+    // 覆盖值同时写入两个标识，保证套件定义的 slug 与已安装记录不一致时也能刷新。
+    for (const key of [skill.slug, skill.name, updated?.slug, updated?.name]) {
+      if (key) skillEnabledOverrides.value[String(key).toLowerCase()] = nextEnabled
+    }
+    emit('skills-changed')
+    message.success(`Skill 已${nextEnabled ? '启用' : '禁用'}`)
+  } catch (error) {
+    message.error(error?.response?.data?.detail || error.message || '更新 Skill 启用状态失败')
+  } finally {
+    togglingSkillSlugs.value = togglingSkillSlugs.value.filter((item) => item !== stateKey)
+  }
+}
 const selectAllAvailable = () => {
   selectedSlugs.value = suiteSkills.value
     .filter((skill) => !isInstalled(skill.slug))
@@ -572,6 +679,7 @@ watch(
     drafts.value = []
     reviewItems.value = []
     installItems.value = []
+    skillEnabledOverrides.value = {}
     installTarget.value = canInstallPersonal.value ? 'personal' : 'shared'
 
     if (props.flow.kind === 'suite') {
@@ -804,6 +912,40 @@ watch(
     cursor: not-allowed;
     background: var(--gray-50);
   }
+
+  // 已安装项整行可点用于切换启用状态，因此恢复为可点击外观。
+  &.installed-toggle {
+    width: 100%;
+    font-family: inherit;
+    font-size: inherit;
+    color: var(--gray-700);
+    text-align: left;
+    cursor: pointer;
+
+    &:hover:not(:disabled) {
+      background: var(--gray-100);
+    }
+
+    &:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+  }
+}
+
+.installed-state-icon {
+  flex: 0 0 auto;
+  color: var(--gray-400);
+
+  &.enabled {
+    color: var(--color-success-700);
+  }
+}
+
+.skill-enabled-text {
+  flex: 0 0 auto;
+  color: var(--gray-500);
+  font-size: 12px;
 }
 
 .flow-item-content,

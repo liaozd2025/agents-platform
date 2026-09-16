@@ -26,20 +26,44 @@ import { Boxes, ChevronRight } from '@lucide/vue'
 
 const props = defineProps({
   suite: { type: Object, required: true },
-  installedSlugs: { type: Array, default: () => [] }
+  installedSlugs: { type: Array, default: () => [] },
+  installedSkills: { type: Array, default: () => [] }
 })
 
 defineEmits(['open'])
 
 const installedSet = computed(
-  () => new Set(props.installedSlugs.map((slug) => String(slug).toLowerCase()))
+  () =>
+    new Set([
+      ...props.installedSlugs,
+      ...props.installedSkills.flatMap((skill) => [skill.slug, skill.name])
+    ].filter(Boolean).map((value) => String(value).toLowerCase()))
 )
+const installedState = computed(() => {
+  let enabled = 0
+  let disabled = 0
+  props.suite.skills.forEach((skill) => {
+    const match = props.installedSkills.find(
+      (item) =>
+        String(item.slug || '').toLowerCase() === String(skill.slug).toLowerCase() ||
+        String(item.name || '').toLowerCase() === String(skill.name || '').toLowerCase()
+    )
+    if (!match && !installedSet.value.has(String(skill.slug).toLowerCase())) return
+    if (match?.enabled === false) disabled += 1
+    else enabled += 1
+  })
+  return { enabled, disabled }
+})
 const installedCount = computed(
   () =>
     props.suite.skills.filter((skill) => installedSet.value.has(skill.slug.toLowerCase())).length
 )
 const statusText = computed(() => {
-  if (installedCount.value === props.suite.skills.length) return '已全部安装'
+  if (installedCount.value === props.suite.skills.length) {
+    const { enabled, disabled } = installedState.value
+    if (disabled) return `已启用 ${enabled} · 已停用 ${disabled}`
+    return '已全部安装 · 已启用'
+  }
   if (installedCount.value > 0) return `已安装 ${installedCount.value}/${props.suite.skills.length}`
   return `${props.suite.skills.length} 个可安装`
 })
