@@ -76,7 +76,12 @@
           @click="openDirectory(entry.path)"
         >
           <Folder :size="16" />
-          <span :title="entry.path">{{ entry.name }}</span>
+          <!-- 命中展示名时主标题用可读名称，原始目录名（如托管会话目录的 uuid）以括号跟随在同行 -->
+          <span v-if="entry.label" class="picker-row-label" :title="entry.label.hint">
+            <strong>{{ entry.label.label }}</strong>
+            <small>（{{ entry.name }}）</small>
+          </span>
+          <span v-else :title="entry.path">{{ entry.name }}</span>
           <Check v-if="isSelectedDirectory(entry.path)" :size="15" class="picker-check" />
           <ChevronRight v-else :size="15" />
         </button>
@@ -127,7 +132,9 @@ const props = defineProps({
   disabled: { type: Boolean, default: false },
   includeUnboundProjectDirs: { type: Boolean, default: false },
   unselectableDirectories: { type: Array, default: () => ['/'] },
-  isFileSelectable: { type: Function, default: () => true }
+  isFileSelectable: { type: Function, default: () => true },
+  // 目录展示名解析器：入参为目录路径，返回 { label, hint }；返回空表示沿用服务端原始目录名。
+  resolveDirectoryLabel: { type: Function, default: null }
 })
 const emit = defineEmits(['update:modelValue', 'loading-change'])
 
@@ -161,7 +168,15 @@ const selectedDirectory = computed(() =>
 const selectedPathSet = computed(
   () => new Set(Array.isArray(props.modelValue) ? props.modelValue : [])
 )
-const directoryEntries = computed(() => entries.value.filter((entry) => entry.is_dir))
+const directoryEntries = computed(() =>
+  entries.value
+    .filter((entry) => entry.is_dir)
+    .map((entry) => ({
+      ...entry,
+      // 未配置解析器时不产生额外展示名，组件对其它调用点保持原行为。
+      label: typeof props.resolveDirectoryLabel === 'function' ? props.resolveDirectoryLabel(entry.path) : null
+    }))
+)
 const fileEntries = computed(() =>
   props.selectionMode === 'files' ? entries.value.filter((entry) => !entry.is_dir) : []
 )
@@ -482,6 +497,29 @@ watch(
 .picker-row > small {
   flex: 0 0 auto;
   color: var(--color-text-secondary);
+  font-size: 11px;
+}
+
+/* 目录展示名：主标题为可读名称，括号内跟随服务端原始目录名 */
+.picker-row-label {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.picker-row-label > strong {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.picker-row-label > small {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
   font-size: 11px;
 }
 
