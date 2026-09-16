@@ -7,13 +7,16 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException, status
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.services import login_rate_limit_service as login_limiter
+from yuxi.services import oa_sso_service
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
     ROOT_DEPARTMENT_ID,
@@ -1108,3 +1111,103 @@ async def test_locked_user_token_is_rejected(test_client, standard_user):
     profile_response = await test_client.get("/api/auth/me", headers=standard_user["headers"])
     assert profile_response.status_code == 423
     assert "X-Lock-Remaining" in profile_response.headers
+
+
+async def _create_numeric_account_user(test_client, account: str) -> tuple[int, str]:
+    """创建用户名形如工号的本地账号（非 OA 身份），返回 (user_id, password)。"""
+    pg_manager.initialize()
+    await pg_manager.async_engine.dispose()
+    await pg_manager.ensure_business_schema()
+
+    password = f"Pw!{uuid.uuid4().hex}"
+    async with pg_manager.get_async_session_context() as session:
+        root = await session.get(Department, ROOT_DEPARTMENT_ID)
+        assert root is not None, "登录补全测试需要现有集团根节点"
+        user = User(
+            username=account,
+            uid=f"pytest_local_{uuid.uuid4().hex[:10]}",
+            password_hash=AuthUtils.hash_password(password),
+            department_id=root.id,
+        )
+        session.add(user)
+        await session.flush()
+        assert user.id is not None
+        return user.id, password
+
+
+async def _delete_user(user_id: int) -> None:
+    """清理测试账号，避免污染本地用户表。"""
+    async with pg_manager.get_async_session_context() as session:
+        await session.execute(delete(User).where(User.id == user_id))
+        await session.commit()
+
+
+def _configure_oa_lookup(monkeypatch, result) -> None:
+    """把 OA 用户接口配置与反查结果替换成测试替身。"""
+    monkeypatch.setattr(oa_sso_service.oa_sso_config, "enabled", True)
+    monkeypatch.setattr(oa_sso_service.oa_sso_config, "userinfo_url", "https://oa.example.test/userinfo")
+    monkeypatch.setattr(oa_sso_service.oa_sso_config, "company_code", "TEST")
+    monkeypatch.setattr(oa_sso_service, "_request_oa_user_data", result)
+
+
+async def test_local_account_login_backfills_display_name_and_station(monkeypatch, test_client):
+    """本地账号（用户名即工号）登录成功后补齐展示姓名与岗位，供 USER.md 使用。"""
+    account = f"2024{int(uuid.uuid4().hex[:8], 16) % 10**8:08d}"
+    user_id, password = await _create_numeric_account_user(test_client, account)
+    _configure_oa_lookup(
+        monkeypatch,
+        AsyncMock(
+            return_value={
+                "account": account,
+                "companyCode": "TEST",
+                "fullName": "吴轩",
+                "userStateCode": "service",
+                "userJobInformationDtos": [
+                    {
+                        "pagingSort": 1,
+                        "appointmentDepartmentName": "研发部",
+                        "appointmentStationName": "中级前端程序员",
+                        "jobLevelName": "11",
+                        "jobGradeName": "基层",
+                    }
+                ],
+            }
+        ),
+    )
+
+    try:
+        response = await test_client.post("/api/auth/token", data={"username": account, "password": password})
+        assert response.status_code == 200, response.text
+
+        async with pg_manager.get_async_session_context() as session:
+            stored = await session.get(User, user_id)
+            assert stored is not None
+            # 展示姓名、岗位与职级写入本地行；账号与 UID 不变
+            assert stored.display_name == "吴轩"
+            assert stored.oa_station_name == "中级前端程序员"
+            assert stored.oa_job_level_name == "11（基层）"
+            assert stored.username == account
+    finally:
+        await _delete_user(user_id)
+
+
+async def test_local_account_login_survives_oa_lookup_failure(monkeypatch, test_client):
+    """OA 不可用时登录照常返回令牌，本地资料保持原样。"""
+    account = f"2024{int(uuid.uuid4().hex[:8], 16) % 10**8:08d}"
+    user_id, password = await _create_numeric_account_user(test_client, account)
+    _configure_oa_lookup(
+        monkeypatch,
+        AsyncMock(side_effect=HTTPException(status.HTTP_502_BAD_GATEWAY, "OA 用户服务暂不可用")),
+    )
+
+    try:
+        response = await test_client.post("/api/auth/token", data={"username": account, "password": password})
+        assert response.status_code == 200, response.text
+
+        async with pg_manager.get_async_session_context() as session:
+            stored = await session.get(User, user_id)
+            assert stored is not None
+            assert stored.display_name is None
+            assert stored.oa_station_name is None
+    finally:
+        await _delete_user(user_id)

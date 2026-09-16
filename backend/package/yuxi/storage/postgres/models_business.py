@@ -165,6 +165,8 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String, nullable=False, unique=True, index=True)  # 登录账号
     display_name = Column(String(100), nullable=True)  # 界面展示姓名，不参与登录身份识别
+    oa_station_name = Column(String(100), nullable=True)  # OA 反查得到的岗位名，仅用于用户资料展示
+    oa_job_level_name = Column(String(100), nullable=True)  # OA 职级展示文本（如“11（基层）”），仅用于用户资料展示
     uid = Column(String, nullable=False, unique=True, index=True)  # 登录标识
     phone_number = Column(String, nullable=True, unique=True, index=True)  # 手机号
     avatar = Column(String, nullable=True)  # 头像URL

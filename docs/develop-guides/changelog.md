@@ -6,7 +6,7 @@
 
 ## v0.7.2 (2026-09-02)
 
-- Memory 开启时，Agent 上下文构建将用户名、UID、部门和已启用角色同步到 `agents/USER.md`，保留手工内容；关闭 Memory 后清理资料区块。
+- Memory 开启时，Agent 上下文构建把账号资料按「关于我」画像同步到 `agents/USER.md`：称呼、部门（组织链路）、有值时的岗位与职级，保留手工内容；关闭 Memory 后清理该区块。工作区新建 `USER.md` 使用同一画像模板。
 
 - Project 支持重命名和软删除，侧边栏按 Project 与最近会话分组；删除保留 Workdir 字节，并与普通会话、SubAgent 会话创建共用 PostgreSQL 行锁边界。
 - Skill、MCP 与知识库复用统一详情布局；知识库评估收敛为可深链接的基准、题目和结果工作台，独立站与 OA 全屏路由使用相同权限约束。智能体 TOP 5 表格从页面移除，既有 `top_performing_agents` HTTP 字段暂时保留兼容。

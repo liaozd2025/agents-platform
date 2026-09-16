@@ -49,6 +49,7 @@ from yuxi.services.login_rate_limit_service import (
 from yuxi.services.oa_sso_service import (
     MAX_OA_ACCOUNT_LENGTH,
     MAX_OA_TOKEN_LENGTH,
+    backfill_local_user_oa_profile,
     exchange_oa_account_handler,
     exchange_oa_token_handler,
 )
@@ -438,6 +439,10 @@ async def login_for_access_token(
     user.last_login = utc_now_naive()
     await user_repository.save(user)
     await clear_login_failures(client_ip, login_identifier)
+
+    # 本地账号按工号反查 OA，补齐展示姓名、岗位与职级（供 USER.md 用户画像使用）；
+    # 反查失败只记日志并跳过，登录流程不受影响，改动随下方 db.commit() 一并提交
+    await backfill_local_user_oa_profile(db, user)
 
     # 生成访问令牌
     token_data = {"sub": str(user.id)}

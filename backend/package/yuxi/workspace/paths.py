@@ -16,7 +16,11 @@ WORKSPACE_DIR_NAME = "workspace"
 WORKSPACE_AGENTS_DIR_NAME = "agents"
 WORKSPACE_AGENT_CONTEXT_FILES = {
     "AGENTS.md": "# AGENTS\n\n以下是约束 Agent 行为的一些要求\n",
-    "USER.md": "# USER\n\n以下是有关用户的一些信息\n",
+    # 用户画像按「关于我」组织：机器同步的账号资料写在标记区块内，手工补充内容写在区块外
+    "USER.md": (
+        "# 关于我\n\n"
+        "<!-- 区块内的账号资料由系统同步，请勿手工修改；沟通偏好、不需要的内容等请写在区块之外。 -->\n"
+    ),
     "MEMORY.md": "# MEMORY\n\n以下是 Agent 需要记住的一些信息\n",
 }
 

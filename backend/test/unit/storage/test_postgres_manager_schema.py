@@ -293,6 +293,26 @@ async def test_ensure_business_schema_adds_user_display_name():
 
 
 @pytest.mark.asyncio
+async def test_ensure_business_schema_adds_user_oa_station_name():
+    """存量 users 表须幂等补 OA 岗位列，只用于用户资料展示。"""
+    async with _recording_manager() as (manager, connection):
+        await manager.ensure_business_schema()
+
+    statements = "\n".join(connection.statements)
+    assert "users ADD COLUMN IF NOT EXISTS oa_station_name VARCHAR(100)" in statements
+
+
+@pytest.mark.asyncio
+async def test_ensure_business_schema_adds_user_oa_job_level_name():
+    """存量 users 表须幂等补 OA 职级列，只用于用户资料展示。"""
+    async with _recording_manager() as (manager, connection):
+        await manager.ensure_business_schema()
+
+    statements = "\n".join(connection.statements)
+    assert "users ADD COLUMN IF NOT EXISTS oa_job_level_name VARCHAR(100)" in statements
+
+
+@pytest.mark.asyncio
 async def test_ensure_business_schema_backfills_historical_organization_snapshots_idempotently():
     """旧历史事件应只按当前组织关系推算一次，并保留明确标记。"""
 
