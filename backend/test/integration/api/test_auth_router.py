@@ -411,6 +411,87 @@ async def test_profile_requires_authentication(test_client):
     assert response.json()["detail"] == "请登录后再访问"
 
 
+async def test_standard_user_can_change_own_password(test_client, user_management_test_users):
+    """普通用户自助改密：原密码校验、拒绝与原密码相同、改密后新旧密码登录结果互换。
+
+    这是「普通用户在页面上改自己密码」的接口契约：只有 user 角色的账号也必须能用，
+    因此本用例刻意使用 standard_headers（普通用户），而不是管理员令牌。
+    """
+
+    standard_headers = user_management_test_users["standard_headers"]
+    password = user_management_test_users["password"]
+
+    me_response = await test_client.get("/api/auth/me", headers=standard_headers)
+    assert me_response.status_code == 200, me_response.text
+    me = me_response.json()
+    login_identifier = me["uid"]
+    user_id = me["id"]
+
+    new_password = f"New{uuid.uuid4().hex[:10]}!"
+
+    # 未登录不能改密
+    anonymous = await test_client.put(
+        "/api/auth/password",
+        json={"old_password": password, "new_password": new_password},
+    )
+    assert anonymous.status_code == 401
+
+    # 原密码错误 → 400，且此时密码未发生任何变化
+    wrong_old = await test_client.put(
+        "/api/auth/password",
+        headers=standard_headers,
+        json={"old_password": f"wrong-{password}", "new_password": new_password},
+    )
+    assert wrong_old.status_code == 400, wrong_old.text
+    assert wrong_old.json()["detail"] == "原密码不正确"
+
+    # 新密码与原密码相同 → 400，避免用户误以为改过
+    same_password = await test_client.put(
+        "/api/auth/password",
+        headers=standard_headers,
+        json={"old_password": password, "new_password": password},
+    )
+    assert same_password.status_code == 400, same_password.text
+    assert same_password.json()["detail"] == "新密码不能与原密码相同"
+
+    # 新密码不足 8 位 → 422，与管理员设密的下限保持一致
+    too_short = await test_client.put(
+        "/api/auth/password",
+        headers=standard_headers,
+        json={"old_password": password, "new_password": "short"},
+    )
+    assert too_short.status_code == 422, too_short.text
+
+    # 预置登录失败计数，用于验证改密成功后会一并清零
+    async with pg_manager.get_async_session_context() as session:
+        await session.execute(update(User).where(User.id == user_id).values(login_failed_count=3))
+        await session.commit()
+
+    changed = await test_client.put(
+        "/api/auth/password",
+        headers=standard_headers,
+        json={"old_password": password, "new_password": new_password},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["message"] == "密码修改成功"
+
+    # 真 HTTP 复核：旧密码失效、新密码可用（只看接口返回值不算证据）
+    old_login = await test_client.post("/api/auth/token", data={"username": login_identifier, "password": password})
+    assert old_login.status_code == 401, old_login.text
+    new_login = await test_client.post(
+        "/api/auth/token", data={"username": login_identifier, "password": new_password}
+    )
+    assert new_login.status_code == 200, new_login.text
+
+    # 失败计数已清零；并写入「密码已更新」操作日志（批量运维判断「是否改过密码」依赖该文案）
+    async with pg_manager.get_async_session_context() as session:
+        refreshed = await session.get(User, user_id)
+        assert refreshed is not None
+        assert refreshed.login_failed_count == 0
+        logs = (await session.scalars(select(OperationLog).where(OperationLog.user_id == user_id))).all()
+    assert any("密码已更新" in (log.details or "") for log in logs)
+
+
 async def test_admin_can_create_and_delete_user(test_client, admin_headers):
     suffix = uuid.uuid4().hex[:8]
     payload = {
