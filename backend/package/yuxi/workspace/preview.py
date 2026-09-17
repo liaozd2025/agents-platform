@@ -8,11 +8,14 @@ from pathlib import Path, PurePosixPath
 
 from yuxi.config import get_runtime_dir
 from yuxi.utils.filepreview import (
+    ENCRYPTED_OFFICE_PREVIEW_MESSAGE,
     PreviewResult,
     convert_office_to_pdf,
     is_office_pdf_preview_file,
+    office_container_signature_mismatch,
     render_preview,
 )
+from yuxi.utils.logging_config import logger
 
 
 async def preview_workspace_file(
@@ -22,6 +25,17 @@ async def preview_workspace_file(
     office_cache_key: str,
 ) -> PreviewResult:
     """把 UserWorkspace 文件字节渲染为预览结果。"""
+    # 加密（如企业 DLP）或损坏的 Office 文件签名不匹配，交给 LibreOffice 只会降级转换并长时间占用，
+    # 这里直接返回可读提示，避免用户白等数十秒后只看到超时错误。
+    if office_container_signature_mismatch(path, raw_content):
+        logger.warning(f"Office 预览签名不匹配，按加密或已损坏文件处理: path={path}")
+        return PreviewResult(
+            content=None,
+            preview_type="unsupported",
+            supported=False,
+            message=ENCRYPTED_OFFICE_PREVIEW_MESSAGE,
+        )
+
     if is_office_pdf_preview_file(path):
         pdf_content = await _convert_office_to_pdf_cached(path, raw_content, office_cache_key)
         return PreviewResult(
