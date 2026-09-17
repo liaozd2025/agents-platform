@@ -934,7 +934,9 @@ class AgentRunRepository:
         self._require_lease_owner(run, worker_id=worker_id, now=utc_now_naive(), action="发送 PI 控制输入")
         return run
 
-    async def get_previous_pi_session(self, *, run_id: str, uid: str, project_id: str) -> dict | None:
+    async def get_previous_pi_session(
+        self, *, run_id: str, uid: str, project_id: str, source_run_id: str | None = None
+    ) -> dict | None:
         """仅从同用户、Project、child 会话的已 ACK 历史选取明确 session。"""
         current = await self.db.scalar(
             select(AgentRun)
@@ -961,6 +963,7 @@ class AgentRunRepository:
                     AgentRun.run_type == "sandbox",
                     AgentRun.status == "completed",
                     AgentRun.id != current.id,
+                    AgentRun.id == source_run_id if source_run_id is not None else True,
                     AgentRunAttempt.final_acked_at.is_not(None),
                     AgentRunAttempt.final_acked_at <= current.created_at,
                 )
@@ -969,6 +972,8 @@ class AgentRunRepository:
             )
         ).first()
         if row is None:
+            if source_run_id is not None:
+                raise ValueError("PI 续接来源不存在、未完成确认或不属于当前用户和子会话")
             return None
         prior, attempt, message = row
         pi = (message.extra_metadata or {}).get("pi") or {}
@@ -1087,6 +1092,9 @@ class AgentRunRepository:
                     "session": payload.get("session"),
                     "output_subdir": output_subdir,
                     "runtime_manifest_digest": envelope["runtime_manifest_digest"],
+                    "source_run_id": (
+                        ((attempt.runtime_manifest or {}).get("context") or {}).get("session_source") or {}
+                    ).get("run_id"),
                     "stop_reason": stop_reason,
                 }
             },

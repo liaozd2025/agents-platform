@@ -19,6 +19,10 @@ LOCK = threading.Lock()
 
 def plan_response(request: dict) -> tuple[str, str, dict | str]:
     """按实际模型输入与工具结果选择固定响应，拒绝跳过真实工具的路径。"""
+    if request.get("model") == "pi-delegation-controlled" and request.get("stream") is True:
+        response = plan_delegation_response(request)
+        nonce, stage = re.findall(r"PI_DELEGATION:([a-f0-9]+):([ABCS])", json.dumps(request["messages"]))[-1]
+        return nonce, f"delegation-{stage}-{len(request['messages'])}", response
     if request.get("model") != "pi-http-controlled" or request.get("stream") is not True:
         raise ValueError("invalid_model_or_stream")
     messages = request.get("messages")
@@ -39,7 +43,10 @@ def plan_response(request: dict) -> tuple[str, str, dict | str]:
 
     if "pi_sandbox" in names:
         if not tool_messages:
-            return nonce, "parent_delegate", {"name": "pi_sandbox", "args": {"description": user_texts[-1]}}
+            arguments = {"description": user_texts[-1]}
+            if "YUXI_PI_EXPECT_HISTORY:" in user_texts[-1]:
+                arguments["continue_session"] = True
+            return nonce, "parent_delegate", {"name": "pi_sandbox", "args": arguments}
         if scenario != "artifact" or "PI_HTTP_CHILD_OK" not in json.dumps(tool_messages, ensure_ascii=False):
             raise ValueError("child_result_missing")
         if "large.bin" not in json.dumps(tool_messages):
@@ -105,6 +112,99 @@ def plan_response(request: dict) -> tuple[str, str, dict | str]:
     return nonce, "pi_complete", "PI_HTTP_CHILD_OK"
 
 
+def plan_delegation_response(body):
+    """按调用方和已发生的工具结果选择下一步，拒绝错误历史。"""
+    messages = body["messages"]
+    user = next(item["content"] for item in reversed(messages) if item["role"] == "user")
+    if not isinstance(user, str):
+        user = "\n".join(part.get("text", "") for part in user)
+    nonce, stage = re.findall(r"PI_DELEGATION:([a-f0-9]+):([ABCS])", user)[-1]
+    names = {item["function"]["name"] for item in body.get("tools", [])}
+    parent = "pi_sandbox" in names
+    last = messages[-1]
+    if parent:
+        question_calls = {
+            call["id"]
+            for message in messages
+            for call in message.get("tool_calls", [])
+            if call["function"]["name"] == "ask_user_question"
+        }
+        if last["role"] == "user":
+            arguments = {"description": f"PI_DELEGATION:{nonce}:{stage} 完成阶段并交付核验文本。"}
+            if "MISSING_EVIDENCE" in user:
+                arguments["description"] += " MISSING_EVIDENCE"
+            if stage == "C":
+                sources = [
+                    re.search(r"PI Run: ([\w-]+)", str(item.get("content", "")))
+                    for item in messages
+                    if item["role"] == "tool"
+                ]
+                sources = [match.group(1) for match in sources if match]
+                assert sources, "parent cannot identify original PI run from its tool results"
+                arguments["source_run_id"] = sources[-2]
+            return {"name": "pi_sandbox", "args": arguments}
+        content = str(last.get("content", ""))
+        if stage == "S" and "缺少申请科室" in content:
+            return {"name": "ask_user_question", "args": {"questions": [{"question": "请补充申请科室"}]}}
+        if stage == "S" and last.get("tool_call_id") in question_calls:
+            answer = json.loads(content)["answer"]["answer"]
+            sources = re.findall(r"PI Run: ([\w-]+)", json.dumps(messages))
+            return {
+                "name": "pi_sandbox",
+                "args": {
+                    "description": f"PI_DELEGATION:{nonce}:S SUPPLIED_VALUE={answer}",
+                    "source_run_id": sources[-1],
+                },
+            }
+        if "PI Run:" in content:
+            paths = re.findall(r"/home/gem/user-data/[^\s]+/verification\.txt", content)
+            assert paths, "PI result omitted verification file"
+            return {"name": "read_file", "args": {"file_path": paths[-1]}}
+        if "MISSING_VALUE" in content:
+            sources = re.findall(r"PI Run: ([\w-]+)", json.dumps(messages))
+            return {
+                "name": "pi_sandbox",
+                "args": {
+                    "description": f"PI_DELEGATION:{nonce}:{stage} REPAIR 补齐验收缺项。",
+                    "source_run_id": sources[-1],
+                },
+            }
+        if stage == "S":
+            answers = [
+                json.loads(item["content"])["answer"]["answer"]
+                for item in messages
+                if item.get("role") == "tool" and item.get("tool_call_id") in question_calls
+            ]
+            assert answers and f"申请科室：{answers[-1]}" in content, "supplement not delivered"
+        else:
+            assert f"{stage}: verified" in content, "parent must read actual verification bytes"
+        assert "More lines remain" not in content, "complete verification file was reported as truncated"
+        return f"阶段 {stage} 已读取验收文件并核对。"
+
+    # 新任务的最后一条 user 消息之前才是旧历史，避免把本次多轮误算成继承。
+    latest_user = max(index for index, item in enumerate(messages) if item["role"] == "user")
+    prior = json.dumps(messages[:latest_user], ensure_ascii=False)
+    if stage == "B":
+        assert f"PI_DELEGATION:{nonce}:A" not in prior, "independent check inherited editing history"
+    if stage == "C":
+        assert f"PI_DELEGATION:{nonce}:A" in prior, "correction lost original editing history"
+        assert f"PI_DELEGATION:{nonce}:B" not in prior, "correction inherited the independent check"
+    supplied = re.search(r"SUPPLIED_VALUE=([\w-]+)", user)
+    if stage == "S":
+        if supplied is None:
+            return "阶段未完成：缺少申请科室，请主智能体向用户补充。"
+        assert "缺少申请科室" in prior, "supplement lost the incomplete stage history"
+    output_root = re.search(r"Put every generated deliverable under ([^\n]+?)\. ", user).group(1)
+    if last["role"] == "user":
+        value = "MISSING_VALUE" if "MISSING_EVIDENCE" in user and "REPAIR" not in user else f"{stage}: verified"
+        if supplied:
+            value = f"申请科室：{supplied[1]}"
+        return {"name": "write", "args": {"path": f"{output_root}/verification.txt", "content": f"{value}\n{nonce}\n"}}
+    if '"name": "submit_artifact"' not in json.dumps(messages[latest_user:]):
+        return {"name": "submit_artifact", "args": {"path": "verification.txt"}}
+    return f"阶段 {stage} 完成；验收依据 verification.txt；未解决项：无。"
+
+
 class ReplayHandler(BaseHTTPRequestHandler):
     """只提供测试模型、健康及当前用例的脱敏观察记录。"""
 
@@ -135,12 +235,12 @@ class ReplayHandler(BaseHTTPRequestHandler):
                 raise ValueError("invalid_body_size")
             body = json.loads(self.rfile.read(length))
             nonce, phase, response = plan_response(body)
-        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        except (AssertionError, ValueError, KeyError, TypeError, AttributeError) as exc:
             self.write_json(422, {"error": str(exc)})
             return
         with LOCK:
             records = OBSERVATIONS.setdefault(nonce, [])
-            if len(records) >= 20:
+            if len(records) >= (64 if body["model"] == "pi-delegation-controlled" else 20):
                 self.write_json(422, {"error": "unexpected_model_loop"})
                 return
             records.append({"phase": phase})

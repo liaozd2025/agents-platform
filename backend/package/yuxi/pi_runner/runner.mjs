@@ -12,20 +12,6 @@ import {
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
-import { Type } from "typebox";
-
-import {
-  createAgentSession,
-  DefaultResourceLoader,
-  ModelRuntime,
-  SessionManager,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import {
-  fauxAssistantMessage,
-  fauxProvider,
-  fauxToolCall,
-} from "@earendil-works/pi-ai";
 
 const PROTOCOL = "yuxi.pi-jsonl.v1";
 const OUTPUTS_ROOT = resolve(process.cwd(), "outputs");
@@ -54,6 +40,19 @@ const runnerPath = fileURLToPath(import.meta.url);
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
+// 完整性检查只读取已安装文件；加载 SDK 属于真正执行任务时的开销。
+if (process.argv[2] === "--inspect") {
+  const report = `${JSON.stringify(await inspectRuntime())}\n`;
+  await new Promise(done => process.stdout.write(report, done));
+  process.exit(0);
+}
+const sdkStartedAt = performance.now();
+const { Type } = await import("typebox");
+const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
+  await import("@earendil-works/pi-coding-agent");
+const { fauxAssistantMessage, fauxProvider, fauxToolCall } = await import("@earendil-works/pi-ai");
+const sdkLoadMs = performance.now() - sdkStartedAt;
+
 /** 构造 PI 任务提示，并让本次交付目录覆盖任务中的冲突路径。 */
 function buildTaskPrompt(task, projectRoot, outputRoot) {
   // ponytail: 先用提示优先级保留通用 workspace 写入；模型再次越界时再增加 write-set gate。
@@ -67,7 +66,13 @@ function buildTaskPrompt(task, projectRoot, outputRoot) {
     "Only explicitly submitted files are delivered; do not submit dependencies, caches or temporary files. " +
     "Submit again after editing a submitted file. Tasks without deliverable files need not submit anything. " +
     "Limits: 200 files, 64 MiB per file, 256 MiB total. Project edits remain in the Project workspace; " +
-    "the delivery patch describes added deliverable files only, not the Project source diff."
+    "the delivery patch describes added deliverable files only, not the Project source diff. " +
+    "Follow the applicable Skill and finish this stage including its checks before returning. " +
+    "Keep the final reply concise: completion state, deliverable paths, verification evidence and unresolved items. " +
+    "For document tasks, save the checked key content and verification evidence as a text file alongside the deliverable, " +
+    "and submit that file so the parent can inspect it without repeating this task. " +
+    "Do not repeat full source text or tool traces in the final reply. " +
+    "If knowledge or a user decision is missing, describe the specific missing input for the parent; do not invent it."
   );
 }
 
@@ -743,6 +748,7 @@ function taskTokenUsage(session, manager, before, firstEntry, model) {
 }
 
 async function runTask(job, outputRoot) {
+  const startedAt = performance.now();
   const model = job.manifest?.model;
   if (!model || typeof job.task !== "string" || !job.task.trim())
     throw new Error("PI task or model is missing");
@@ -811,6 +817,7 @@ async function runTask(job, outputRoot) {
   });
   const piModel = modelRuntime.getModel("yuxi", model.model_id);
   if (!piModel) throw new Error("PI model registration failed");
+  const modelReadyAt = performance.now();
   const projectRoot = process.cwd();
   const artifacts = new Map();
   const { settingsManager, resourceLoader } = await createResources(
@@ -823,6 +830,7 @@ async function runTask(job, outputRoot) {
     projectRoot,
     sessionDir,
   );
+  const resourcesReadyAt = performance.now();
   const { session } = await createAgentSession({
     cwd: projectRoot,
     modelRuntime,
@@ -840,7 +848,16 @@ async function runTask(job, outputRoot) {
   const stream = subscribeToolEvents(session, emitEvent);
   const control = installYieldControl(session, job, emitEvent);
   try {
-    emitEvent("log", { message: "pi_started", model: model.model_id });
+    emitEvent("log", {
+      message: "pi_started", model: model.model_id,
+      timings_ms: {
+        sdk_load: sdkLoadMs,
+        model_runtime: modelReadyAt - startedAt,
+        resources_and_history: resourcesReadyAt - modelReadyAt,
+        agent_session: performance.now() - resourcesReadyAt,
+        before_first_model: sdkLoadMs + performance.now() - startedAt,
+      },
+    });
     let text = await promptUntilComplete(
       session,
       buildTaskPrompt(job.task, process.cwd(), outputRoot),
@@ -884,9 +901,7 @@ async function runTask(job, outputRoot) {
   }
 }
 
-if (process.argv[2] === "--inspect") {
-  process.stdout.write(`${JSON.stringify(await inspectRuntime())}\n`);
-} else {
+{
   let job;
   if (process.argv[2] === "--job") {
     const jobPath = String(process.argv[3] || "");

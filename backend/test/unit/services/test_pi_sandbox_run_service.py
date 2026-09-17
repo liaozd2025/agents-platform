@@ -13,6 +13,7 @@ async def test_skill_digest_runs_outside_event_loop(monkeypatch, tmp_path):
     """目录摘要计算阻塞时，事件循环仍应能够调度心跳任务。"""
 
     started = threading.Event()
+
     def blocking_hash(_path):
         started.set()
         time.sleep(0.3)
@@ -37,7 +38,6 @@ async def test_skill_digest_runs_outside_event_loop(monkeypatch, tmp_path):
     assert ticks >= 2
 
 
-
 class Db:
     def __init__(self):
         self.commits = 0
@@ -50,7 +50,30 @@ class Db:
 
 
 @pytest.mark.asyncio
-async def test_start_inherits_parent_runtime_project_model_and_locked_skills(monkeypatch, tmp_path):
+@pytest.mark.parametrize("source,legacy", [(" ", None), ("edit-a", False)])
+async def test_invalid_history_request_does_not_create_run(source, legacy):
+    """空来源或相互矛盾的续接参数不能写入运行请求。"""
+    db = Db()
+    with pytest.raises(ValueError, match="来源"):
+        await svc.PiSandboxRunService(db).start(
+            uid="user",
+            created_by_run_id="parent",
+            description="修正原文件",
+            tool_call_id="call",
+            skill_slugs=[],
+            skill_sources={},
+            skill_runtime_paths={},
+            source_run_id=source,
+            continue_session=legacy,
+        )
+    assert db.commits == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_run_id,continue_session", [(None, None), ("edit-a", None), (None, True)])
+async def test_start_inherits_parent_runtime_project_model_and_locked_skills(
+    monkeypatch, tmp_path, source_run_id, continue_session
+):
     db = Db()
     service = svc.PiSandboxRunService(db)
     parent = SimpleNamespace(
@@ -124,6 +147,8 @@ async def test_start_inherits_parent_runtime_project_model_and_locked_skills(mon
         skill_slugs=["dept-work-report"],
         skill_sources={"dept-work-report": skill_dir},
         skill_runtime_paths={"dept-work-report": "/home/gem/skills/dept-work-report"},
+        source_run_id=source_run_id,
+        continue_session=continue_session,
     )
 
     expected_thread = hash_id("pi_", "user-1:runtime-parent:assistant", length=64)
@@ -143,8 +168,31 @@ async def test_start_inherits_parent_runtime_project_model_and_locked_skills(mon
             "skill_slugs": ["dept-work-report"],
             "skill_digests": {"dept-work-report": "d" * 64},
             "skill_runtime_paths": {"dept-work-report": "/home/gem/skills/dept-work-report"},
+            "source_run_id": source_run_id,
+            "continue_session": bool(source_run_id or continue_session),
         },
     }
+    assert db.commits == 1
+
+    child.input_payload = captured["persist"]["input_payload"]
+    original_runtime = dict(child.input_payload["runtime"])
+
+    async def replay_scope(**_kwargs):
+        return SimpleNamespace(existing_run=child)
+
+    monkeypatch.setattr(svc.agent_run_service, "prepare_agent_run_creation_scope", replay_scope)
+    replay = await service.start(
+        uid="user-1",
+        created_by_run_id="parent-run",
+        description="重放时的新描述",
+        tool_call_id="call-1",
+        skill_slugs=["dept-work-report"],
+        skill_sources={"dept-work-report": skill_dir},
+        skill_runtime_paths={"dept-work-report": "/home/gem/skills/dept-work-report"},
+        source_run_id="check-b",
+    )
+    assert replay.run is child and replay.created is False
+    assert child.input_payload["runtime"] == original_runtime
     assert db.commits == 1
 
 

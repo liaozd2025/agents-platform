@@ -145,6 +145,8 @@ async def pi_environment(e2e_client, e2e_headers):
         context["project"] = response.json()["project_id"]
         context["workdir"] = response.json()["workdir_path"]
         assert context["workdir"] == f"projects/{context['project']}"
+        # worker 的模型配置本地缓存为 5 秒；准备完成后再验证任务执行。
+        await asyncio.sleep(6)
         yield context
     finally:
         if context.get("queued_request"):

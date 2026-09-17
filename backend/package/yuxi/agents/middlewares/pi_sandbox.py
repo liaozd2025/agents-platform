@@ -30,16 +30,26 @@ ResponseT = TypeVar("ResponseT")
 
 PI_SANDBOX_PROMPT = """## `pi_sandbox`（PI Agent 沙箱）
 
-凡是需要查看、列举、搜索、读取、创建或修改沙箱文件，执行命令、安装依赖、运行测试或生成交付物，都必须调用 `pi_sandbox`。
-不要尝试使用其它文件或命令工具访问 workspace、uploads、outputs。
+解析文档、列举或搜索文件、创建或修改文件、执行命令、安装依赖、运行测试或生成交付物时，调用 `pi_sandbox`。
+已知路径的文本、Skill 和落盘验收结果，用 `read_file` 按需读取，不为读取同一份文本重新委派 PI。
 天气、Web 搜索、知识库、MCP、Skill 激活和子智能体编排继续使用原工具。
-调用时在 `description` 中一次给出完整目标、已知路径、上下文和验收标准。
+按 Skill 把输入检查、执行、产物核验作为一个连续阶段委派，交齐目标、路径、必要证据、约束和验收标准。
+资料已齐备时，一次 pi_sandbox 应完成整个阶段；不要把查看文件、提取结构、生成成品和验收逐项变成独立委派。
+长资料优先引用当前已授权且 PI 可读取的文件，不把知识库 file_id 当沙箱路径，也不重复复制整段历史。
+PI 返回阶段完成情况、产物、验收依据和未解决项。读取验收文本核对关键内容与来源。
+发现具体缺项、矛盾或新增要求才再次委派，不默认重复全量检查。
+Run completed、完成摘要或文件哈希不等于业务验收；二进制文档由 PI 一并提取关键内容和验收记录，再读取其文本文件核对。
+交付物已登记为下载文件卡片，直接交付原路径；outputs/pi-runs/ 内是最终交付物，无需复制到 outputs/ 根目录。
+独立任务省略 source_run_id；同一阶段的补充或修正填原 PI Run 标识，即使中间插入了独立核验，也继续原编辑 Run。
+continue_session 仅兼容旧调用，新调用不要使用。历史续接不表示进程或容器常驻。
+缺少知识或用户决策时接回处理；执行失败先核实具体原因和已落盘结果，不通过重交整项任务重复文件副作用。
 """
 
 PI_SANDBOX_DESCRIPTION = """Delegate one complete sandbox task to PI Agent.
 
-Use it for every sandbox file read/list/search/write/edit operation, command, dependency install, test, or deliverable.
-Put the complete task brief, known paths, context, and acceptance criteria in description."""
+Delegate a complete Skill stage including execution and verification. Read known text paths with read_file.
+Put the goal, paths, necessary evidence, constraints and acceptance criteria in description.
+For a correction, source_run_id identifies the original PI run; omit it for an independent task."""
 
 
 class PiSandboxMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
@@ -68,6 +78,8 @@ class PiSandboxMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         async def pi_sandbox(
             description: Annotated[str, "PI Agent 要完成的完整沙箱任务、上下文和验收标准。"],
             runtime: ToolRuntime,
+            source_run_id: Annotated[str | None, "继续原 PI 阶段时填写其 Run 标识；独立任务省略。"] = None,
+            continue_session: Annotated[bool | None, "仅兼容旧调用；新调用使用 source_run_id。"] = None,
         ) -> Command:
             tool_call_id = str(runtime.tool_call_id or "").strip()
             uid = str(getattr(self.context, "uid", "") or "").strip()
@@ -86,6 +98,8 @@ class PiSandboxMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                         skill_slugs=skill_slugs,
                         skill_sources=skill_sources,
                         skill_runtime_paths=skill_runtime_paths,
+                        source_run_id=source_run_id,
+                        continue_session=continue_session,
                     )
                 await execute_pi_sandbox_run(started.run.id)
                 result = await agent_run_service.load_agent_run_result(run_id=started.run.id, current_uid=uid)
@@ -99,10 +113,13 @@ class PiSandboxMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 output = str(error.get("message") or "PI 沙箱运行失败")
             if not output:
                 output = f"PI 沙箱任务状态：{result.get('status') or 'unknown'}"
+            source = (result.get("pi") or {}).get("source_run_id")
+            source_label = source or ("未确认（见错误）" if error else "无（新上下文）")
+            output = f"PI Run: {started.run.id}\n续接来源: {source_label}\n\n{output}"
 
             artifacts = self._artifact_paths(result)
             if artifacts:
-                output += "\n\n交付物：\n" + "\n".join(f"- {path}" for path in artifacts)
+                output += "\n\n已登记的交付物（直接使用原路径）：\n" + "\n".join(f"- {path}" for path in artifacts)
             child_thread_id = str(result.get("thread_id") or started.run.conversation_thread_id)
             subagent_run = {
                 "id": tool_call_id,
@@ -118,7 +135,7 @@ class PiSandboxMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             if error:
                 subagent_run["error"] = str(error.get("message") or "PI 沙箱运行失败")
             update = {
-                "messages": [ToolMessage(output, tool_call_id=tool_call_id)],
+                "messages": [ToolMessage(output, tool_call_id=tool_call_id, status="error" if error else "success")],
                 "subagent_runs": [subagent_run],
             }
             if artifacts:
@@ -179,7 +196,7 @@ class PiSandboxMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
 
     @staticmethod
     def _message(tool_call_id: str, content: str) -> Command:
-        return Command(update={"messages": [ToolMessage(content, tool_call_id=tool_call_id)]})
+        return Command(update={"messages": [ToolMessage(content, tool_call_id=tool_call_id, status="error")]})
 
 
 def create_pi_sandbox_middleware(context) -> PiSandboxMiddleware:

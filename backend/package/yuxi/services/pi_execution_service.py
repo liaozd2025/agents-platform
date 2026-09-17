@@ -7,6 +7,7 @@ import base64
 import hashlib
 import inspect
 import json
+import time
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -18,6 +19,7 @@ from yuxi.agents.skills.service import compute_skill_dir_hash, is_valid_skill_sl
 from yuxi.models.providers.cache import model_cache
 from yuxi.services.agent_run_manifest_service import canonical_json, compute_manifest_fingerprint
 from yuxi.utils import get_docker_safe_url
+from yuxi.utils.logging_config import logger
 from yuxi.workspace.paths import ensure_bound_user_workdir
 from yuxi.workspace.workdir import Workdir
 
@@ -319,9 +321,10 @@ async def execute_pi_attempt(
     preserve_outputs = False
     primary_error: BaseException | None = None
     refs: dict[str, dict] = {}
+    sink_seconds = 0.0
 
     async def accept_event(event: dict) -> None:
-        nonlocal final_acked, preserve_outputs
+        nonlocal final_acked, preserve_outputs, sink_seconds
         if cancel_event is not None and cancel_event.is_set() and not final_acked_event.is_set():
             raise PiExecutionCancelled("PI attempt cancelled before result ACK")
         envelope = build_pi_envelope(attempt=attempt, adapter_name=adapter.name, event=event)
@@ -339,22 +342,32 @@ async def execute_pi_attempt(
             # commit 可能成功而 ACK 响应被取消；提交开始后不能据未收到响应删除产物。
             preserve_outputs = True
         for sink_try in range(2):
+            sink_started = time.perf_counter()
             try:
                 response = await _call_sink(result_sink, envelope)
                 break
             except Exception:
                 if sink_try == 1:
                     raise
+            finally:
+                sink_seconds += time.perf_counter() - sink_started
         if envelope["type"] == "final" and isinstance(response, dict) and response.get("ack") is True:
             final_acked = True
             preserve_outputs = True
             final_acked_event.set()
 
+    create_started = time.perf_counter()
     instance_id = await adapter.create(attempt)
+    create_seconds = time.perf_counter() - create_started
+    inspect_seconds = 0.0
     try:
         if instance_sink is not None:
             await _call_sink(instance_sink, instance_id)
-        validate_pi_runtime(manifest, await adapter.inspect(instance_id))
+        inspect_started = time.perf_counter()
+        try:
+            validate_pi_runtime(manifest, await adapter.inspect(instance_id))
+        finally:
+            inspect_seconds = time.perf_counter() - inspect_started
         try:
             events = await _execute_until_cancelled(
                 adapter,
@@ -383,10 +396,21 @@ async def execute_pi_attempt(
         primary_error = exc
         raise
     finally:
+        stop_started = time.perf_counter()
         try:
             await adapter.stop(instance_id, preserve_outputs=preserve_outputs)
         except Exception as exc:
             raise PiCleanupFailed(f"PI cleanup_failed: {exc}", primary=primary_error) from exc
+        finally:
+            logger.info(
+                "PI timing run={} attempt={} create_ms={:.3f} inspect_ms={:.3f} sink_ms={:.3f} stop_ms={:.3f}",
+                attempt.get("run_id"),
+                attempt.get("attempt_id"),
+                create_seconds * 1000,
+                inspect_seconds * 1000,
+                sink_seconds * 1000,
+                (time.perf_counter() - stop_started) * 1000,
+            )
 
 
 class LocalPiAdapter:

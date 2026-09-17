@@ -133,6 +133,11 @@ async function runTaskScenario(
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line));
+    if (code === 0) {
+      const startup = events.find((event) => event.type === "log" && event.payload?.message === "pi_started");
+      assert.ok(startup?.payload.timings_ms, "successful execution reports its startup phases");
+      for (const value of Object.values(startup.payload.timings_ms)) assert.ok(Number.isFinite(value) && value >= 0);
+    }
     await verify({ project, output, code, stderr, events, requests });
   } finally {
     server.closeAllConnections();
@@ -144,6 +149,30 @@ async function runTaskScenario(
 
 const bash = (command) => ({ name: "bash", args: { command } });
 const submit = (path) => ({ name: "submit_artifact", args: { path } });
+
+test("runtime inspect validates installed files without loading the agent SDK", async () => {
+  const temp = await mkdtemp("/tmp/pi-inspect-");
+  try {
+    const hook = resolve(temp, "block-sdk.mjs");
+    await writeFile(hook, `import { registerHooks } from 'node:module';
+registerHooks({ resolve(specifier, context, nextResolve) {
+  if (specifier.startsWith('@earendil-works/') || specifier === 'typebox')
+    throw new Error('inspect must not initialize the agent SDK');
+  return nextResolve(specifier, context);
+} });`);
+    const child = spawn(process.execPath, ["--import", hook, "/opt/yuxi-pi-runner/runner.mjs", "--inspect"]);
+    let stdout = "", stderr = "";
+    child.stdout.on("data", chunk => stdout += chunk);
+    child.stderr.on("data", chunk => stderr += chunk);
+    assert.equal(await new Promise(done => child.once("close", done)), 0, stderr);
+    const actual = JSON.parse(stdout);
+    assert.equal(actual.runner_digest, digest(await readFile("/opt/yuxi-pi-runner/runner.mjs")));
+    assert.equal(actual.pi_version, "0.84.2");
+    assert.ok(actual.skills);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
 
 test("runTask streams text and cumulative tool snapshots, then yields after the complete tool batch", async () => {
   let sent = false;

@@ -47,9 +47,17 @@ Conversation 通过 `project_id` 绑定 Project；Project 拥有这项绑定和 
 
 `pi_sandbox` 在现有 Request、child Run 和 Attempt 中执行 PI Runner。命令的 cwd 是当前 Project；依赖和中间文件保留在工作目录，最终交付通过 `submit_artifact` 显式登记在当前 attempt 的 `outputs/pi-runs/<目录>/`。登记和 final ACK 都验证文件类型、路径、大小和摘要；单文件上限 64MiB，总量 256MiB，最多 200 个文件。只读任务可以没有交付物。artifact、session、patch 和最终消息始终绑定同一 attempt；patch 描述该次已登记交付，不是任意项目源码改动的回滚包。
 
-后续任务从相同用户、Project 和 PI child 会话的最近已 ACK 结果续接。repository 选定来源后，Workdir 有界读取并验证 session 摘要，Runner 从字节快照 fork 新 session，旧文件保持不变。Project 根 `AGENTS.md` 与获授权 Skill 路径显式投影；Runner 不自动加载工作目录中的其他 Skill、扩展或系统提示文件。模型上下文、输出上限、输入模态及 reasoning 能力来自现有逐模型配置；child Run 用量只统计本次执行，未上报时显示未知。
+主智能体负责用户沟通、知识检索和阶段安排，把已知路径、必要证据、约束及验收要求交给 PI。阶段由任务和 Skill 定义，输入医院模板可以不同。PI 在一次委派内执行并检查，返回简短结论、产物及未解决项；文档任务同时落盘关键内容和验收依据。主智能体通过 `read_file` 读取已知文本路径，核对原文与证据；发现具体缺项或新增要求才追加委派。
+
+用户持久化文件直接经过 Workspace 的 no-follow 边界读取，无需启动沙箱；单次读取沿用 `MAX_BINARY_BYTES` 预览上限，超限交给 PI 提取。分页使用一致的 Unicode 行定义，只在确有后续内容时提示续读。
+
+工具返回包含本次 PI Run 标识及实际续接来源，供后续修正选择。新委派省略 `source_run_id` 时使用新上下文；同阶段修正填写原 PI Run 标识。来源须属于相同用户、Project 和 PI child 会话，在当前 child 创建前完成并 ACK。指定来源无效时明确失败。兼容输入 `continue_session=true` 单独出现时选择符合上述条件的最近成功 PI；同时填写来源时以明确来源为准，false 与来源同时出现则拒绝。重放复用原 child，已有 attempt 的来源保持不变。
+
+repository 选定来源后，Workdir 有界读取并验证 session 摘要，Runner 从字节快照 fork 新 session，旧文件保持不变。每次委派仍启动新的 PI 进程，同根执行范围复用沙箱，根执行树结束后清理沙箱。Project 根 `AGENTS.md` 与获授权 Skill 路径显式投影；Runner 不自动加载工作目录中的其他 Skill、扩展或系统提示文件。模型上下文、输出上限、输入模态及 reasoning 能力来自现有逐模型配置；child Run 用量只统计本次执行，未上报时显示未知。
 
 正文增量和工具累计输出经 Redis SSE 展示，约每 250ms 合并；工具完成事件覆盖中间快照。这些高频事件校验当前 attempt 与 lease，但不追加 PostgreSQL 历史。数据库保留工具首尾和 final ACK，PI 详情从真实 child Run 回读状态及用量，不依赖 LangGraph checkpoint。
+
+worker 的 `PI timing` 日志按 Run/attempt 记录登记、容器准备、runtime inspect、结果接收与持久化、清理耗时；`PI stream` 记录输出轮询次数、轮询 API 调用次数（不含 SDK 内部重试）、空输出轮询与传输字节。Runner 的 `pi_started.timings_ms` 记录 SDK 加载、模型配置、资源和历史加载及首个模型请求前耗时。runtime inspect 只读取并校验版本、Runner 和 Skill 文件，实际任务启动时才加载 SDK。主任务耗时包含 PI 子任务，统计总时长时不重复相加。
 
 运行中引导沿用根会话的 Request 队列。服务端确认当前执行树存在待处理的 steer 后，仅发送固定让位控制行；PI 完成当前整个工具批次并确认控制后，以 `stop_reason=steer` 交付，下一 Request 再执行新要求。当前 PI 不直接接收并执行那段新要求。取消会等待已启动执行停止再清理；启动响应或停止确认失败会保留可观察的清理失败事实，不能因重建 adapter 缺少旧进程句柄而宣称已回收。任务审批沿用既有授权范围，包含沙箱命令及当前用户工作区访问，不提供逐命令审批。
 

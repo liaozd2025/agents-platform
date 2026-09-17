@@ -384,18 +384,19 @@ def test_filesystem_middleware_redirects_direct_sandbox_tools_to_pi() -> None:
     )
     content = "BEGIN\n" + ("middle\n" * 5000) + "END"
 
-    for tool_name in ("grep", "glob", "ls", "edit_file", "write_file", "execute", "ocr_parse_file", "read_file"):
+    for tool_name in ("grep", "glob", "ls", "edit_file", "write_file", "execute", "ocr_parse_file"):
         request = SimpleNamespace(tool_call={"name": tool_name}, runtime=SimpleNamespace())
         result = middleware.wrap_tool_call(
             request,
             lambda _: ToolMessage(content=content, name=tool_name, tool_call_id=f"call-{tool_name}"),
         )
-        assert result.content == "用户沙箱文件必须通过 pi_sandbox 交给 PI Agent 处理。"
+        assert result.content == "此文件或命令操作通过 pi_sandbox 交给 PI Agent 处理；已知文本路径可用 read_file 读取。"
 
     assert backend.writes == []
 
 
-def test_filesystem_middleware_keeps_read_file_result_inline_to_avoid_evict_loop() -> None:
+@pytest.mark.parametrize("path", ["/home/gem/skills/demo/SKILL.md", f"{WORKDIR_PATH}/outputs/verification.txt"])
+def test_filesystem_middleware_keeps_read_file_result_inline_to_avoid_evict_loop(path) -> None:
     class _Backend:
         def __init__(self):
             self.writes: list[tuple[str, str]] = []
@@ -410,7 +411,7 @@ def test_filesystem_middleware_keeps_read_file_result_inline_to_avoid_evict_loop
         backend=CompositeBackend(default=backend, routes={}, artifacts_root=f"{WORKDIR_PATH}/outputs"),
     )
     request = SimpleNamespace(
-        tool_call={"name": "read_file", "args": {"file_path": "/home/gem/skills/demo/SKILL.md"}},
+        tool_call={"name": "read_file", "args": {"file_path": path}},
         runtime=SimpleNamespace(),
     )
     content = "x" * 100
@@ -971,7 +972,7 @@ def test_provisioner_read_binary_preserves_or_decodes_base64_content(monkeypatch
     )
     backend._get_client = MethodType(lambda self: fake_client, backend)
 
-    assert backend._read_binary("/home/gem/user-data/outputs/file.bin") == expected
+    assert backend._read_binary("/home/gem/skills/outputs/file.bin") == expected
 
 
 def test_provisioner_read_file_base64_reads_temp_file_not_shell_output(monkeypatch) -> None:
@@ -999,7 +1000,7 @@ def test_provisioner_read_file_base64_reads_temp_file_not_shell_output(monkeypat
     )
     backend._get_client = MethodType(lambda self: fake_client, backend)
 
-    result = backend._read_file_base64("/home/gem/user-data/image.png")
+    result = backend._read_file_base64("/home/gem/skills/image.png")
 
     assert result == expected
     assert len(shell_calls) == 2
@@ -1010,8 +1011,8 @@ def test_provisioner_read_file_base64_reads_temp_file_not_shell_output(monkeypat
 @pytest.mark.parametrize(
     ("path", "base64_content"),
     [
-        ("/home/gem/user-data/image.png", "iVBORw0KGgo="),
-        ("/home/gem/user-data/image.gif", "R0lGODlh"),
+        ("/home/gem/skills/image.png", "iVBORw0KGgo="),
+        ("/home/gem/skills/image.gif", "R0lGODlh"),
     ],
 )
 def test_provisioner_read_treats_image_files_as_base64(monkeypatch, path, base64_content) -> None:
@@ -1039,7 +1040,7 @@ def test_provisioner_read_rejects_large_known_binary_before_read(monkeypatch) ->
     monkeypatch.setattr(backend, "_read_binary", _read_binary)
     monkeypatch.setattr(backend, "_read_file_base64", lambda _path: pytest.fail("binary file was read"))
 
-    result = backend.read("/home/gem/user-data/large.png")
+    result = backend.read("/home/gem/skills/large.png")
 
     assert result.file_data is None
     assert result.error == f"Binary file exceeds maximum preview size of {MAX_BINARY_BYTES} bytes"
@@ -1057,11 +1058,11 @@ def test_provisioner_read_rejects_unknown_binary(monkeypatch) -> None:
 
     monkeypatch.setattr(backend, "_read_binary", _read_binary)
 
-    result = backend.read("/home/gem/user-data/large.unknown")
+    result = backend.read("/home/gem/skills/large.unknown")
 
     assert result.file_data is None
     assert result.error == "read_file only supports UTF-8 text and image files. This file type is not supported."
-    assert read_calls == [("/home/gem/user-data/large.unknown", 0, 2000)]
+    assert read_calls == [("/home/gem/skills/large.unknown", 0, 2001)]
 
 
 def test_provisioner_read_rejects_unknown_file_on_sandbox_utf8_decode_failure(monkeypatch) -> None:
@@ -1073,24 +1074,25 @@ def test_provisioner_read_rejects_unknown_file_on_sandbox_utf8_decode_failure(mo
 
     monkeypatch.setattr(backend, "_read_binary", _read_binary_raises)
 
-    result = backend.read("/home/gem/user-data/uploaded.bin")
+    result = backend.read("/home/gem/skills/uploaded.bin")
 
     assert result.file_data is None
     assert result.error == "read_file only supports UTF-8 text and image files. This file type is not supported."
 
 
 @pytest.mark.parametrize("extension", ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx"])
-def test_provisioner_read_routes_documents_to_ocr(monkeypatch, extension: str) -> None:
+def test_provisioner_read_routes_documents_to_pi(monkeypatch, extension: str) -> None:
     monkeypatch.setattr("yuxi.agents.backends.sandbox.backend.get_sandbox_provider", lambda: object())
     backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
     monkeypatch.setattr(backend, "_file_size_bytes", lambda _path: 8)
     monkeypatch.setattr(backend, "_read_binary", lambda *_args, **_kwargs: pytest.fail("document was read"))
 
-    result = backend.read(f"/home/gem/user-data/uploads/document.{extension}")
+    result = backend.read(f"/home/gem/skills/uploads/document.{extension}")
 
     assert result.file_data is None
     assert result.error == (
-        "read_file does not support PDF or Office documents. Use ocr_parse_file to convert the file to Markdown first."
+        "read_file does not support PDF or Office documents. "
+        "Use pi_sandbox to inspect the document and return verification text."
     )
 
 
@@ -1101,7 +1103,7 @@ def test_provisioner_read_rejects_other_known_modalities(monkeypatch, extension:
     monkeypatch.setattr(backend, "_file_size_bytes", lambda _path: 8)
     monkeypatch.setattr(backend, "_read_file_base64", lambda _path: pytest.fail("binary file was read"))
 
-    result = backend.read(f"/home/gem/user-data/uploads/media.{extension}")
+    result = backend.read(f"/home/gem/skills/uploads/media.{extension}")
 
     assert result.file_data is None
     assert result.error == "read_file only supports UTF-8 text and image files. This file type is not supported."
@@ -1167,9 +1169,9 @@ def test_provisioner_read_returns_pagination_window(monkeypatch) -> None:
 
     monkeypatch.setattr(backend, "_read_binary", _read_binary)
 
-    result = backend.read("/home/gem/user-data/outputs/report.md", offset=2, limit=3)
+    result = backend.read("/home/gem/skills/outputs/report.md", offset=2, limit=3)
 
-    assert read_calls == [(2, 3)]
+    assert read_calls == [(2, 4)]
     assert result.error is None
     assert result.start_line == 3
     assert result.end_line == 5
@@ -1182,10 +1184,66 @@ def test_provisioner_read_non_positive_limit_reports_no_lines_requested(monkeypa
     backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
     monkeypatch.setattr(backend, "_read_binary", lambda *_args, **_kwargs: pytest.fail("file was inspected"))
 
-    result = backend.read("/home/gem/user-data/outputs/report.md", offset=0, limit=0)
+    result = backend.read("/home/gem/skills/outputs/report.md", offset=0, limit=0)
 
     assert result.no_lines_requested is True
     assert result.file_data is None
+
+
+@pytest.mark.parametrize("limit", [2, 3, 2000])
+def test_provisioner_read_stops_at_actual_end_of_file(monkeypatch, limit):
+    """已读完的证据不能提示继续读，从而诱发无效读取或重新委派。"""
+    monkeypatch.setattr("yuxi.agents.backends.sandbox.backend.get_sandbox_provider", lambda: object())
+    backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
+    monkeypatch.setattr(backend, "_read_binary", lambda *_args, **_kwargs: b"first\nsecond\n")
+    result = backend.read("/home/gem/skills/evidence.txt", limit=limit)
+    assert result.next_offset is None
+    assert result.total_lines == 2
+    assert result.file_data["content"] == "first\nsecond\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("separator", ["\n", "\u2028"])
+async def test_workspace_text_read_uses_safe_files_without_starting_sandbox(
+    monkeypatch, tmp_path, asynchronous, separator
+):
+    """父级读持久文本不启动沙箱，文件或父目录 symlink 均不能逃出用户根。"""
+    from yuxi.workspace import filesystem
+
+    root = tmp_path / "user-1"
+    root.mkdir()
+    (root / "evidence.txt").write_text(f"first{separator}second\nthird\n")
+    other = tmp_path / "other-user"
+    other.mkdir()
+    (other / "secret.txt").write_text("must not disclose")
+    (root / "link.txt").symlink_to(other / "secret.txt")
+    (root / "linked-directory").symlink_to(other, target_is_directory=True)
+    monkeypatch.setattr(filesystem, "user_workspace_dir", lambda uid: tmp_path / uid)
+    monkeypatch.setattr("yuxi.agents.backends.sandbox.backend.get_sandbox_provider", lambda: object())
+    backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
+    monkeypatch.setattr(backend, "_get_connection", lambda: pytest.fail("text read started a sandbox"))
+
+    async def read(path, offset=0, limit=2):
+        if asynchronous:
+            return await backend.aread(path, offset=offset, limit=limit)
+        return backend.read(path, offset=offset, limit=limit)
+
+    page = await read("/home/gem/user-data/evidence.txt")
+    assert page.file_data["content"] == f"first{separator}second\n" and page.next_offset == 2
+    end = await read("/home/gem/user-data/evidence.txt", offset=2)
+    assert end.file_data["content"] == "third\n" and end.next_offset is None
+    for name in ("link.txt", "linked-directory/secret.txt"):
+        denied = await read("/home/gem/user-data/" + name)
+        assert "Access denied" in denied.error
+        assert denied.file_data is None
+
+    monkeypatch.setattr(sandbox_backend_module, "MAX_BINARY_BYTES", 5)
+    oversized = await read("/home/gem/user-data/evidence.txt")
+    assert oversized.file_data is None and "direct read limit of 5 bytes" in oversized.error
+    backend._closed = True
+    closed = await read("/home/gem/user-data/evidence.txt")
+    assert closed.file_data is None and "已关闭" in closed.error
 
 
 def test_provisioner_read_negative_offset_clamps_to_first_line(monkeypatch) -> None:
@@ -1199,12 +1257,12 @@ def test_provisioner_read_negative_offset_clamps_to_first_line(monkeypatch) -> N
 
     monkeypatch.setattr(backend, "_read_binary", _read_binary)
 
-    result = backend.read("/home/gem/user-data/outputs/report.md", offset=-5, limit=2)
+    result = backend.read("/home/gem/skills/outputs/report.md", offset=-5, limit=2)
 
-    assert read_calls == [(0, 2)]
+    assert read_calls == [(0, 3)]
     assert result.start_line == 1
     assert result.end_line == 2
-    assert result.next_offset == 2
+    assert result.next_offset is None
 
 
 @pytest.mark.asyncio
@@ -1230,7 +1288,7 @@ async def test_provisioner_aread_returns_pagination_and_closes_http_client(monke
 
     async def read_file(**kwargs):
         read_calls.append(kwargs)
-        return SimpleNamespace(data=SimpleNamespace(content="line-2\nline-3\nline-4\n", encoding="utf-8"))
+        return SimpleNamespace(data=SimpleNamespace(content="line-2\nline-3\nline-4\nline-5\n", encoding="utf-8"))
 
     owned_http_client = _install_async_file_client(
         monkeypatch,
@@ -1238,13 +1296,13 @@ async def test_provisioner_aread_returns_pagination_and_closes_http_client(monke
         SimpleNamespace(read_file=read_file),
     )
 
-    result = await backend.aread("/home/gem/user-data/outputs/report.md", offset=2, limit=3)
+    result = await backend.aread("/home/gem/skills/outputs/report.md", offset=2, limit=3)
 
     assert read_calls == [
         {
-            "file": "/home/gem/user-data/outputs/report.md",
+            "file": "/home/gem/skills/outputs/report.md",
             "start_line": 2,
-            "end_line": 5,
+            "end_line": 6,
         }
     ]
     assert result.file_data == {"content": "line-2\nline-3\nline-4\n", "encoding": "utf-8"}
@@ -1267,7 +1325,7 @@ async def test_provisioner_aread_image_streams_native_download_without_shell(mon
 
     _install_async_file_client(monkeypatch, backend, SimpleNamespace(download_file=download_file))
 
-    result = await backend.aread("/home/gem/user-data/uploads/image.png")
+    result = await backend.aread("/home/gem/skills/uploads/image.png")
 
     assert result.file_data == {
         "content": base64.b64encode(b"\x89PNGimage-bytes").decode("ascii"),
@@ -1275,7 +1333,7 @@ async def test_provisioner_aread_image_streams_native_download_without_shell(mon
     }
     assert download_calls == [
         {
-            "path": "/home/gem/user-data/uploads/image.png",
+            "path": "/home/gem/skills/uploads/image.png",
             "request_options": {"timeout_in_seconds": backend._command_timeout_seconds},
         }
     ]
@@ -1293,7 +1351,7 @@ async def test_provisioner_aread_image_rejects_stream_over_limit(monkeypatch) ->
 
     _install_async_file_client(monkeypatch, backend, SimpleNamespace(download_file=download_file))
 
-    result = await backend.aread("/home/gem/user-data/uploads/large.png")
+    result = await backend.aread("/home/gem/skills/uploads/large.png")
 
     assert result.file_data is None
     assert result.error == f"Binary file exceeds maximum preview size of {MAX_BINARY_BYTES} bytes"
@@ -1304,12 +1362,12 @@ async def test_provisioner_aread_image_rejects_stream_over_limit(monkeypatch) ->
     ("path", "expected_error"),
     [
         (
-            "/home/gem/user-data/uploads/document.pdf",
+            "/home/gem/skills/uploads/document.pdf",
             "read_file does not support PDF or Office documents. "
-            "Use ocr_parse_file to convert the file to Markdown first.",
+            "Use pi_sandbox to inspect the document and return verification text.",
         ),
         (
-            "/home/gem/user-data/uploads/audio.mp3",
+            "/home/gem/skills/uploads/audio.mp3",
             "read_file only supports UTF-8 text and image files. This file type is not supported.",
         ),
     ],
@@ -1339,7 +1397,7 @@ async def test_provisioner_aread_rejects_unknown_binary_decode_failure(monkeypat
 
     _install_async_file_client(monkeypatch, backend, SimpleNamespace(read_file=read_file))
 
-    result = await backend.aread("/home/gem/user-data/uploads/data.unknown")
+    result = await backend.aread("/home/gem/skills/uploads/data.unknown")
 
     assert result.file_data is None
     assert result.error == "read_file only supports UTF-8 text and image files. This file type is not supported."
@@ -1520,6 +1578,10 @@ async def test_stream_stdin_accepts_only_fixed_shell_comment_controls(monkeypatc
 async def test_provisioner_aexecute_stream_delivers_output_before_command_finishes(
     monkeypatch, snapshots, expected_chunks, expected_ranges, premature_completion
 ) -> None:
+    logs = []
+    monkeypatch.setattr(
+        sandbox_backend_module.logger, "info", lambda template, *args: logs.append(template.format(*args))
+    )
     monkeypatch.setattr(sandbox_backend_module, "get_sandbox_provider", lambda: object())
     backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
     backend._max_output_bytes = 5
@@ -1544,7 +1606,12 @@ async def test_provisioner_aexecute_stream_delivers_output_before_command_finish
         if kwargs["command"].startswith("rm -f -- "):
             return SimpleNamespace(data=SimpleNamespace(output="", status="completed", exit_code=0))
         return SimpleNamespace(
-            data=SimpleNamespace(session_id="session-1", output="", status="completed" if premature_completion else "running", exit_code=None)
+            data=SimpleNamespace(
+                session_id="session-1",
+                output="",
+                status="completed" if premature_completion else "running",
+                exit_code=None,
+            )
         )
 
     async def view(**_kwargs):
@@ -1601,6 +1668,7 @@ async def test_provisioner_aexecute_stream_delivers_output_before_command_finish
     assert exec_calls[0]["timeout"] == 0.2
     assert exec_calls[-1]["command"].startswith("rm -f -- ")
     assert http_client.closed is True
+    assert f"polls=3 poll_requests={6 + int(premature_completion)} " in logs[-1]
 
 
 @pytest.mark.asyncio
@@ -2114,9 +2182,9 @@ async def test_stream_missing_exit_status_times_out_and_stops_process(monkeypatc
     backend._provider = SimpleNamespace(get=lambda *_args, **_kwargs: SimpleNamespace(sandbox_url="http://sandbox"))
     monkeypatch.setattr(sandbox_backend_module.httpx, "AsyncClient", lambda **_kwargs: _OwnedAsyncHttpClient())
     shell = SimpleNamespace(
-        exec_command=AsyncMock(return_value=SimpleNamespace(
-            data=SimpleNamespace(session_id="session-1", status="completed", exit_code=0)
-        )),
+        exec_command=AsyncMock(
+            return_value=SimpleNamespace(data=SimpleNamespace(session_id="session-1", status="completed", exit_code=0))
+        ),
         view=AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(status="completed", exit_code=0))),
         kill_process=AsyncMock(return_value=SimpleNamespace(success=True, data=SimpleNamespace(status="terminated"))),
     )

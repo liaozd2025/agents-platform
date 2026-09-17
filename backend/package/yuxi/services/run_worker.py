@@ -93,7 +93,7 @@ async def _compute_skill_digest_async(source: Path, slug: str) -> str:
     started_at = time.perf_counter()
     digest = await asyncio.to_thread(compute_skill_dir_hash, source)
     logger.info(
-        "PI Runtime Skill 摘要校验完成: slug=%s elapsed=%.2fs",
+        "PI Runtime Skill 摘要校验完成: slug={} elapsed={:.3f}s",
         slug,
         time.perf_counter() - started_at,
     )
@@ -366,6 +366,7 @@ async def _release_runtime_if_idle(run: AgentRun) -> bool:
             uid=str(current.uid),
             db=db,
         )
+        cleanup_started = time.perf_counter()
         await asyncio.to_thread(
             get_sandbox_provider().release,
             runtime_scope_id,
@@ -375,6 +376,11 @@ async def _release_runtime_if_idle(run: AgentRun) -> bool:
         )
         current.runtime_cleanup_pending = False
         await db.flush()
+        logger.info(
+            "PI timing run={} phase=root_cleanup elapsed_ms={:.3f}",
+            run.id,
+            (time.perf_counter() - cleanup_started) * 1000,
+        )
     return True
 
 
@@ -1044,10 +1050,34 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
 async def _snapshot_pi_run_context(run: AgentRun) -> tuple[dict, dict | None]:
     """按已授权 child 身份选择历史，再从 Workdir 固化本次模型上下文。"""
     binding = await _validate_run_workdir_binding(run)
+    runtime = run.input_payload.get("runtime") or {}
+    source_run_id = runtime.get("source_run_id")
+    legacy_continue = runtime.get("continue_session")
+    if source_run_id is not None and (not isinstance(source_run_id, str) or not source_run_id.strip()):
+        raise ValueError("PI 续接来源标识无效")
+    if legacy_continue is not None and not isinstance(legacy_continue, bool):
+        raise ValueError("PI continue_session 必须是布尔值")
+    if source_run_id and legacy_continue is False:
+        raise ValueError("PI 续接来源与 continue_session=false 冲突")
+    # 旧持久记录没有开关，维持其自动续接语义；新委派总会固化显式开关。
+    wants_history = bool(source_run_id) or runtime.get("continue_session", True)
+    previous = None
     async with pg_manager.get_async_session_context() as db:
-        previous = await AgentRunRepository(db).get_previous_pi_session(
-            run_id=run.id, uid=str(run.uid), project_id=binding.project_id
-        )
+        repo = AgentRunRepository(db)
+        attempts = await repo.list_run_attempts(run.id)
+        frozen_context = (attempts[-1].runtime_manifest or {}).get("context") if attempts else None
+        if frozen_context is not None:
+            frozen_source = frozen_context.get("session_source")
+            wants_history = frozen_source is not None
+            source_run_id = frozen_source["run_id"] if frozen_source else None
+        if wants_history:
+            previous = await repo.get_previous_pi_session(
+                run_id=run.id, uid=str(run.uid), project_id=binding.project_id, source_run_id=source_run_id
+            )
+            if previous is None and (legacy_continue is True or source_run_id):
+                raise ValueError("PI 续接来源不存在已完成且已确认的历史")
+            if frozen_context is not None and previous != frozen_context.get("session_source"):
+                raise ValueError("PI 已固化的续接来源发生变化")
     return await asyncio.to_thread(snapshot_pi_context, binding.workdir, previous)
 
 

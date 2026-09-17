@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import time
 import uuid
 from contextlib import aclosing, suppress
 from collections.abc import Awaitable, Callable
@@ -35,9 +36,11 @@ from yuxi.agents.backends.paths import (
     VIRTUAL_PATH_PREFIX,
     VIRTUAL_SKILLS_PATH,
     runtime_workdir_path,
+    workspace_scope_from_runtime_path,
 )
 from yuxi.utils.logging_config import logger
 from yuxi.workspace.errors import FileTransferLimitError
+from yuxi.workspace.filesystem import Workspace
 
 from .provider import get_sandbox_provider, sandbox_id_for_thread, sandbox_provisioner_token
 from .provisioner_client import SandboxCapacityError
@@ -48,7 +51,8 @@ _BINARY_PREVIEW_TOO_LARGE_ERROR = f"Binary file exceeds maximum preview size of 
 _IMAGE_EXTENSIONS = frozenset({".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".webp"})
 _DOCUMENT_EXTENSIONS = frozenset({".doc", ".docx", ".pdf", ".ppt", ".pptx", ".xls", ".xlsx"})
 _DOCUMENT_READ_ERROR = (
-    "read_file does not support PDF or Office documents. Use ocr_parse_file to convert the file to Markdown first."
+    "read_file does not support PDF or Office documents. "
+    "Use pi_sandbox to inspect the document and return verification text."
 )
 _BINARY_READ_ERROR = "read_file only supports UTF-8 text and image files. This file type is not supported."
 _EPHEMERAL_SECRET_NAME = re.compile(r"yuxi-secret-[a-f0-9]{24}\.json")
@@ -472,13 +476,39 @@ class ProvisionerSandboxBackend(BaseSandbox):
             return ReadResult(error=_BINARY_PREVIEW_TOO_LARGE_ERROR)
         return ReadResult(file_data={"content": self._read_file_base64(path), "encoding": "base64"})
 
+    def _read_workspace_file(self, path: str, *, start_line: int, limit: int | None) -> ReadResult:
+        """从持久化用户根读取，复用 no-follow 边界且无需 execution runtime。"""
+        if self._closed:
+            raise RuntimeError("sandbox backend 已关闭")
+        kind = _read_file_kind(path)
+        # ponytail: 复用现有预览字节上限；大文本成为实测瓶颈后再增加按行文件读取。
+        try:
+            content = Workspace(self._uid).read_authorized_file(
+                workspace_scope_from_runtime_path(path), MAX_BINARY_BYTES
+            )
+        except FileTransferLimitError:
+            return ReadResult(
+                error=f"File exceeds direct read limit of {MAX_BINARY_BYTES} bytes; use pi_sandbox for extraction."
+            )
+        if kind == "document":
+            return ReadResult(error=_DOCUMENT_READ_ERROR)
+        if kind == "binary":
+            return ReadResult(error=_BINARY_READ_ERROR)
+        if kind == "image":
+            return ReadResult(file_data={"content": base64.b64encode(content).decode("ascii"), "encoding": "base64"})
+        if _looks_like_binary(content):
+            return ReadResult(error=_BINARY_READ_ERROR)
+        lines = content.decode("utf-8").splitlines(keepends=True)
+        end = start_line + int(limit) if limit is not None else None
+        return self._text_read_result("".join(lines[start_line - 1 : end]), start_line=start_line, limit=limit)
+
     def read(
         self,
         file_path: str,
         offset: int = 0,
         limit: int = 2000,
     ) -> ReadResult:
-        """Read allowed file content via the sandbox file API."""
+        """读取已授权用户文件或沙箱只读投影。"""
         try:
             normalized_path = _normalize_path(file_path)
         except Exception as exc:  # noqa: BLE001
@@ -491,6 +521,8 @@ class ProvisionerSandboxBackend(BaseSandbox):
         start_line = max(0, int(offset)) + 1
 
         try:
+            if _is_same_or_child(normalized_path, _USER_DATA_ROOT):
+                return self._read_workspace_file(normalized_path, start_line=start_line, limit=limit)
             file_kind = _read_file_kind(normalized_path)
             if file_kind == "image":
                 return self._read_base64_file(normalized_path)
@@ -505,14 +537,14 @@ class ProvisionerSandboxBackend(BaseSandbox):
                 content = self._read_binary(
                     normalized_path,
                     offset=start_line - 1,
-                    limit=int(limit) if limit is not None else None,
+                    limit=int(limit) + 1 if limit is not None else None,
                 )
             except Exception as exc:  # noqa: BLE001
                 if not _is_utf8_decode_failure(exc):
                     raise
                 return ReadResult(error=_BINARY_READ_ERROR)
 
-            return self._text_content_read_result(content, start_line=start_line)
+            return self._text_content_read_result(content, start_line=start_line, limit=limit)
         except Exception as exc:  # noqa: BLE001
             error = _describe_read_error(file_path, exc)
             return ReadResult(error=error.removeprefix("Error: "))
@@ -536,6 +568,8 @@ class ProvisionerSandboxBackend(BaseSandbox):
         start_line = max(0, int(offset)) + 1
 
         try:
+            if _is_same_or_child(normalized_path, _USER_DATA_ROOT):
+                return await asyncio.to_thread(self.read, normalized_path, offset, limit)
             connection = await asyncio.to_thread(self._get_connection)
             async with httpx.AsyncClient(
                 timeout=self._command_timeout_seconds,
@@ -557,28 +591,33 @@ class ProvisionerSandboxBackend(BaseSandbox):
                         client,
                         normalized_path,
                         offset=start_line - 1,
-                        limit=int(limit) if limit is not None else None,
+                        limit=int(limit) + 1 if limit is not None else None,
                     )
                 except Exception as exc:  # noqa: BLE001
                     if not _is_utf8_decode_failure(exc):
                         raise
                     return ReadResult(error=_BINARY_READ_ERROR)
 
-                return self._text_content_read_result(content, start_line=start_line)
+                return self._text_content_read_result(content, start_line=start_line, limit=limit)
         except Exception as exc:  # noqa: BLE001
             error = _describe_read_error(file_path, exc)
             return ReadResult(error=error.removeprefix("Error: "))
 
-    def _text_content_read_result(self, content: bytes, *, start_line: int) -> ReadResult:
+    def _text_content_read_result(self, content: bytes, *, start_line: int, limit: int | None) -> ReadResult:
         """将文本候选字节转换为读取结果。"""
         if _looks_like_binary(content):
             return ReadResult(error=_BINARY_READ_ERROR)
-        return self._text_read_result(content.decode("utf-8"), start_line=start_line)
+        return self._text_read_result(content.decode("utf-8"), start_line=start_line, limit=limit)
 
     @staticmethod
-    def _text_read_result(text: str, *, start_line: int) -> ReadResult:
-        """按 0.7 协议补齐分页窗口字段，支持可靠续读提示。"""
-        lines_returned = len(text.splitlines())
+    def _text_read_result(text: str, *, start_line: int, limit: int | None) -> ReadResult:
+        """多读一行判断实际续页，避免 EOF 被误报为未读内容。"""
+        lines = text.splitlines(keepends=True)
+        has_more = limit is not None and len(lines) > int(limit)
+        if has_more:
+            lines = lines[: int(limit)]
+        text = "".join(lines)
+        lines_returned = len(lines)
         if lines_returned <= 0:
             return ReadResult(file_data={"content": text, "encoding": "utf-8"})
         end_line = start_line + lines_returned - 1
@@ -586,7 +625,8 @@ class ProvisionerSandboxBackend(BaseSandbox):
             file_data={"content": text, "encoding": "utf-8"},
             start_line=start_line,
             end_line=end_line,
-            next_offset=end_line,
+            next_offset=end_line if has_more else None,
+            total_lines=None if has_more else end_line,
         )
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
@@ -637,6 +677,8 @@ class ProvisionerSandboxBackend(BaseSandbox):
     ) -> ExecuteResponse:
         """异步执行命令，并把新增 stdout 片段实时交给调用方。"""
 
+        stream_started = time.perf_counter()
+        polls = poll_requests = empty_polls = transferred = 0
         from agent_sandbox.core.api_error import ApiError
 
         output_limit = self._max_output_bytes if max_output_bytes is None else int(max_output_bytes)
@@ -707,8 +749,11 @@ class ProvisionerSandboxBackend(BaseSandbox):
                     deadline = asyncio.get_running_loop().time() + (timeout or self._command_timeout_seconds)
 
                     while True:
+                        polls += 1
+                        previous_offset = capture_offset
                         if status == "completed":
                             try:
+                                poll_requests += 1
                                 captured_status = await client.file.read_file(
                                     file=status_path,
                                     request_options={"timeout_in_seconds": self._command_timeout_seconds},
@@ -728,6 +773,7 @@ class ProvisionerSandboxBackend(BaseSandbox):
                         terminal = status != "running"
                         try:
                             # file.read 会去掉末尾换行；按原始字节读取才能辨别完整 JSONL 行。
+                            poll_requests += 1
                             async with client.file.with_raw_response.download_file(
                                 path=capture_path,
                                 request_options={
@@ -739,6 +785,7 @@ class ProvisionerSandboxBackend(BaseSandbox):
                                     raise RuntimeError("sandbox 未按字节范围返回命令输出")
                                 async for part in captured.data:
                                     pending_output.extend(part)
+                                    transferred += len(part)
                                     capture_offset += len(part)
                                     if capture_offset > output_limit:
                                         break
@@ -749,6 +796,8 @@ class ProvisionerSandboxBackend(BaseSandbox):
                             if content_range != f"*/{capture_offset}":
                                 raise RuntimeError("sandbox 命令输出在轮询期间发生回退") from exc
                         truncated = capture_offset > output_limit
+                        if capture_offset == previous_offset:
+                            empty_polls += 1
                         available = pending_output[: max(0, output_limit - output_size)]
                         complete_end = len(available) if terminal or truncated else available.rfind(b"\n") + 1
                         encoded = bytes(available[:complete_end])
@@ -785,6 +834,7 @@ class ProvisionerSandboxBackend(BaseSandbox):
                                 if written.success is not True:
                                     raise RuntimeError("sandbox 控制输入发送失败")
                         await asyncio.sleep(0.2)
+                        poll_requests += 1
                         viewed = await client.shell.view(
                             id=session_id,
                             request_options={"timeout_in_seconds": self._command_timeout_seconds},
@@ -838,6 +888,17 @@ class ProvisionerSandboxBackend(BaseSandbox):
                 raise
             logger.error(f"Sandbox streaming execute failed for thread {self._thread_id}: {exc}")
             return ExecuteResponse(output=f"Error: {exc}", exit_code=1, truncated=False)
+        finally:
+            logger.info(
+                "PI stream scope={} session={} polls={} poll_requests={} empty_polls={} bytes={} elapsed_ms={:.3f}",
+                self._thread_id,
+                session_id,
+                polls,
+                poll_requests,
+                empty_polls,
+                transferred,
+                (time.perf_counter() - stream_started) * 1000,
+            )
 
     def write_ephemeral_secret(self, file_path: str, content: str) -> None:
         """把 PI job 与模型凭据写入 Sandbox tmpfs。"""

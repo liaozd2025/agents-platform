@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from yuxi.agents.middlewares import pi_sandbox
@@ -46,6 +47,7 @@ async def test_pi_sandbox_delegates_complete_task_and_returns_project_artifacts(
             "output": "done",
             "thread_id": "pi-child-thread",
             "pi": {
+                "source_run_id": "original-edit-run",
                 "output_subdir": "pi-runs/0123456789abcdef01234567",
                 "artifact": {"files": [{"path": "report.sources.md"}]},
             },
@@ -62,6 +64,7 @@ async def test_pi_sandbox_delegates_complete_task_and_returns_project_artifacts(
     command = await middleware.tools[0].coroutine(
         description="读取周报并生成月报来源索引",
         runtime=SimpleNamespace(tool_call_id="call-1"),
+        source_run_id="original-edit-run",
     )
 
     assert middleware.tools[0].name == "pi_sandbox"
@@ -84,3 +87,25 @@ async def test_pi_sandbox_delegates_complete_task_and_returns_project_artifacts(
         }
     ]
     assert "done" in command.update["messages"][0].content
+    assert "child-run" in command.update["messages"][0].content
+    assert "original-edit-run" in command.update["messages"][0].content
+    assert calls[0]["source_run_id"] == "original-edit-run"
+
+    monkeypatch.setattr(
+        pi_sandbox.agent_run_service,
+        "load_agent_run_result",
+        AsyncMock(
+            return_value={
+                "status": "failed",
+                "thread_id": "pi-child-thread",
+                "error": {"message": "PI 续接来源无效"},
+            }
+        ),
+    )
+    failed = await middleware.tools[0].coroutine(
+        description="修正原稿", runtime=SimpleNamespace(tool_call_id="call-2"), source_run_id="bad-source"
+    )
+    message = failed.update["messages"][0]
+    assert message.status == "error"
+    assert "PI 续接来源无效" in message.content
+    assert "新上下文" not in message.content
