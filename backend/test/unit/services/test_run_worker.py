@@ -4,7 +4,6 @@ import asyncio
 from contextlib import asynccontextmanager
 import importlib
 import os
-from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -14,6 +13,7 @@ import pytest
 import yuxi.services.run_worker as run_worker
 from arq.worker import RetryJob
 from yuxi.config import options as config_options
+from yuxi.services import task_service
 
 
 @pytest.fixture(autouse=True)
@@ -33,8 +33,158 @@ class _RaisingAsyncIter:
     async def __anext__(self):
         raise self._exc
 
+    async def aclose(self):
+        """模拟可关闭的执行流。"""
+
+
+@pytest.mark.parametrize("cancellation", ["signal", "outer", "consumer_body"])
+async def test_stream_cancellation_closes_execution_before_owner_cleanup(cancellation):
+    """用户信号、基础设施取消及消费侧取消均不得留下旧执行副作用。"""
+    entered, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    effects = []
+    ctx = run_worker.RunContext(run_id="run-cancel", worker_id="owner")
+
+    async def stream():
+        """用独立屏障检测取消后仍继续执行的旧任务。"""
+        try:
+            if cancellation == "consumer_body":
+                yield b"first"
+            entered.set()
+            await release.wait()
+            effects.append("old execution continued")
+            yield b"late"
+        finally:
+            closed.set()
+
+    producer = stream()
+
+    async def consume():
+        """以 Worker 的相同 close 边界消费，退出代表允许外层释放 owner。"""
+        async with run_worker.aclosing(run_worker._consume_stream_with_cancel(producer, ctx)) as chunks:
+            async for _ in chunks:
+                entered.set()
+                await release.wait()
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        if cancellation == "signal":
+            ctx.cancel_event.set()
+        else:
+            consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(consumer, 1)
+        assert closed.is_set(), "释放 owner 时旧执行尚未关闭"
+        release.set()
+        await asyncio.sleep(0)
+        assert effects == []
+    finally:
+        release.set()
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        await asyncio.sleep(0)
+        await producer.aclose()
+
+
+async def test_cancel_waiter_is_reused_for_all_stream_chunks():
+    """完整输出保持顺序，一个 Run 的取消等待器只启动一次。"""
+    waiter_starts = 0
+
+    class Context:
+        """只提供消费器需要的取消协议。"""
+
+        async def wait_cancelled(self):
+            """持续等待，记录逻辑等待器的创建次数。"""
+            nonlocal waiter_starts
+            waiter_starts += 1
+            await asyncio.Event().wait()
+
+    async def stream():
+        """生成连续事件。"""
+        for index in range(50):
+            yield index
+
+    results = [row async for row in run_worker._consume_stream_with_cancel(stream(), Context())]
+    assert results == list(range(50))
+    assert waiter_starts == 1
+
+
+async def test_repeated_cancel_waits_for_async_execution_cleanup():
+    """二次取消不能越过异步收尾屏障而释放执行 owner。"""
+    entered, cleanup_started, release_cleanup, closed = (asyncio.Event() for _ in range(4))
+    ctx = run_worker.RunContext(run_id="repeat-cancel", worker_id="owner")
+
+    async def stream():
+        """用异步屏障模拟节点和执行流的清理。"""
+        try:
+            entered.set()
+            await asyncio.Event().wait()
+            yield b"unreachable"
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            closed.set()
+
+    async def consume():
+        """外层退出是 owner 允许释放的时点。"""
+        async with run_worker.aclosing(run_worker._consume_stream_with_cancel(stream(), ctx)) as chunks:
+            async for _ in chunks:
+                pass
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        consumer.cancel()
+        await asyncio.wait_for(cleanup_started.wait(), 1)
+        consumer.cancel()
+        await asyncio.sleep(0)
+        assert not consumer.done(), "二次取消提前释放了仍在清理的 owner"
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(consumer, 1)
+        assert closed.is_set(), "执行流的异步清理被二次取消打断"
+    finally:
+        release_cleanup.set()
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+
+
+def test_durable_task_outer_timeout_tracks_configured_worker_default():
+    durable_function = next(
+        function
+        for function in run_worker.WorkerSettings.functions
+        if getattr(function, "name", getattr(function, "__name__", None)) == "process_task"
+    )
+
+    assert task_service.tasker.default_timeout_seconds == task_service.TASKER_DEFAULT_TIMEOUT_SECONDS
+    assert durable_function.timeout_s == task_service.TASKER_DEFAULT_TIMEOUT_SECONDS + 30
+
+
+def test_durable_task_shipping_worker_accepts_default_above_24_hours():
+    env = os.environ.copy()
+    env["TASKER_DEFAULT_TIMEOUT_SECONDS"] = "172800"
+    script = """
+from yuxi.services.run_worker import WorkerSettings
+from yuxi.services.task_service import tasker
+
+durable = next(
+    function
+    for function in WorkerSettings.functions
+    if getattr(function, "name", getattr(function, "__name__", None)) == "process_task"
+)
+assert tasker.default_timeout_seconds == 172800
+assert durable.timeout_s == 172830
+"""
+
+    completed = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, check=False)
+
+    assert completed.returncode == 0, completed.stderr
+
 
 class _BytesAsyncIter:
+    async def aclose(self):
+        """模拟真实 async generator 的显式收尾协议。"""
+
     def __init__(self, values: list[bytes]):
         self._values = list(values)
         self._idx = 0
@@ -169,6 +319,7 @@ async def test_validate_run_workdir_binding_requires_subagent_creator_tree(
 async def test_cancelling_subagent_preserves_shared_runtime(monkeypatch: pytest.MonkeyPatch):
     run = _build_run()
     run.run_type = "subagent"
+    release_runtime = AsyncMock()
 
     async def fake_noop(*args, **kwargs):
         del args, kwargs
@@ -184,11 +335,12 @@ async def test_cancelling_subagent_preserves_shared_runtime(monkeypatch: pytest.
 
     monkeypatch.setattr(run_worker, "_flush_writer_best_effort", fake_noop)
     monkeypatch.setattr(run_worker, "_finish_execution_tree_children", fake_tree_finished)
+    monkeypatch.setattr(run_worker, "_release_runtime_before_terminal_event", release_runtime)
     monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
     monkeypatch.setattr(run_worker, "_append_run_event_best_effort", fake_noop)
     monkeypatch.setattr(run_worker, "_append_end_event", fake_noop)
 
-    await run_worker._finish_user_cancel(
+    transition = await run_worker._finish_user_cancel(
         run_id=run.id,
         request_id=run.request_id,
         thread_id=run.conversation_thread_id,
@@ -197,6 +349,9 @@ async def test_cancelling_subagent_preserves_shared_runtime(monkeypatch: pytest.
         writer=SimpleNamespace(),
         run=run,
     )
+
+    assert transition == run_worker.TerminalTransition(status="cancelled", changed=True)
+    release_runtime.assert_not_awaited()
 
 
 def _patch_common(monkeypatch: pytest.MonkeyPatch, run_obj: SimpleNamespace):
@@ -248,6 +403,7 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, run_obj: SimpleNamespace):
     monkeypatch.setattr(run_worker, "mark_run_running", fake_mark_run_running)
     monkeypatch.setattr(run_worker, "release_run_lease_for_retry", fake_mark_run_running)
     monkeypatch.setattr(run_worker, "persist_run_manifest", fake_noop)
+    monkeypatch.setattr(run_worker, "_record_run_timing_best_effort", fake_noop)
     monkeypatch.setattr(
         run_worker,
         "_validate_run_workdir_binding",
@@ -477,139 +633,6 @@ async def test_cleanup_reconciler_reenqueues_pending_retry_without_worker_restar
 
 
 @pytest.mark.asyncio
-async def test_pi_cleanup_reconciler_retries_persisted_orphan(monkeypatch: pytest.MonkeyPatch):
-    """一次删除失败必须保留事实，后续周期成功后才清除。"""
-    pending = True
-    failed_at = run_worker.datetime(2026, 8, 27, 12, 0, 0)
-    stop_calls: list[tuple[str, bool]] = []
-    cleared: list[tuple[int, object]] = []
-    locked: list[tuple[int, object]] = []
-
-    @asynccontextmanager
-    async def fake_session_ctx():
-        yield object()
-
-    class Repo:
-        def __init__(self, _db):
-            pass
-
-        async def list_pi_cleanup_failures(self):
-            if not pending:
-                return []
-            return [
-                {
-                    "attempt_id": 7,
-                    "run_id": "run-1",
-                    "instance_id": None,
-                    "error_type": "execution_unknown",
-                    "final_acked_at": None,
-                    "cleanup_failed_at": failed_at,
-                    "uid": "user-1",
-                }
-            ]
-
-        async def clear_pi_cleanup_failure(self, attempt_id: int, *, failed_at):
-            nonlocal pending
-            cleared.append((attempt_id, failed_at))
-            pending = False
-            return True
-
-        async def lock_pi_cleanup_failure(self, attempt_id: int, *, failed_at):
-            locked.append((attempt_id, failed_at))
-            return True
-
-    class Adapter:
-        calls = 0
-
-        def __init__(self, **kwargs):
-            assert kwargs == {"uid": "user-1", "run_id": "run-1", "attempt_id": "7"}
-
-        async def stop(self, instance_id: str, *, preserve_outputs: bool):
-            type(self).calls += 1
-            stop_calls.append((instance_id, preserve_outputs))
-            if type(self).calls == 1:
-                raise TimeoutError("provisioner still unavailable")
-
-    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_ctx)
-    monkeypatch.setattr(run_worker, "AgentRunRepository", Repo)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", Adapter)
-
-    assert await run_worker.reconcile_pi_cleanup_failures() == []
-    assert pending is True
-    assert await run_worker.reconcile_pi_cleanup_failures() == [7]
-    assert stop_calls == [("", True), ("", True)]
-    assert locked == [(7, failed_at), (7, failed_at)]
-    assert cleared == [(7, failed_at)]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("root_status", "cleanup_pending", "expected_cleaned"),
-    [("running", False, []), ("completed", True, []), ("completed", False, [7])],
-)
-async def test_pi_child_orphan_waits_for_root_runtime_cleanup(
-    monkeypatch: pytest.MonkeyPatch, root_status, cleanup_pending, expected_cleaned
-):
-    """新建 adapter 不能凭关闭空句柄清除仍可能运行的 child 命令。"""
-    root = _build_run()
-    root.id = "root-run"
-    root.run_type = "resume"
-    root.created_by_run_id = "historical-chat"
-    root.status = root_status
-    root.runtime_cleanup_pending = cleanup_pending
-    historical = _build_run()
-    historical.id = "historical-chat"
-    historical.status = "completed"
-    child = _build_run()
-    child.run_type = "sandbox"
-    child.created_by_run_id = root.id
-    cleared = []
-
-    @asynccontextmanager
-    async def session_context():
-        yield object()
-
-    class Repo:
-        def __init__(self, _db):
-            pass
-
-        async def list_pi_cleanup_failures(self):
-            return [
-                {
-                    "attempt_id": 7,
-                    "run_id": child.id,
-                    "uid": child.uid,
-                    "run_type": "sandbox",
-                    "runtime_scope_id": child.runtime_scope_id,
-                    "cleanup_failed_at": "failed-at",
-                    "final_acked_at": None,
-                    "error_type": "execution_unknown",
-                    "instance_id": "sandbox-1",
-                }
-            ]
-
-        async def lock_pi_cleanup_failure(self, *_args, **_kwargs):
-            return True
-
-        async def get_run_for_user(self, run_id, uid):
-            assert uid == child.uid
-            return {child.id: child, root.id: root, historical.id: historical}.get(run_id)
-
-        async def clear_pi_cleanup_failure(self, attempt_id, **_kwargs):
-            cleared.append(attempt_id)
-            return True
-
-    stop = AsyncMock()
-    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", session_context)
-    monkeypatch.setattr(run_worker, "AgentRunRepository", Repo)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", lambda **_kwargs: SimpleNamespace(stop=stop))
-    assert await run_worker.reconcile_pi_cleanup_failures() == expected_cleaned
-    assert cleared == expected_cleaned
-    if not expected_cleaned:
-        stop.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_process_agent_run_persists_usage_from_canonical_state(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -826,7 +849,7 @@ async def test_committed_interrupt_cleanup_failure_keeps_terminal_events_unpubli
         run_worker,
         "stream_agent_chat",
         lambda **_kwargs: _BytesAsyncIter(
-            [b'{"status":"interrupted","thread_id":"thread-1","message":"content guard","terminal_committed":true}\n']
+            [b'{"status":"interrupted","thread_id":"thread-1","message":"input required","terminal_committed":true}\n']
         ),
     )
 
@@ -1032,6 +1055,21 @@ async def test_release_failure_does_not_mask_infrastructure_cancel(monkeypatch: 
 
     with pytest.raises(asyncio.CancelledError, match="worker shutdown"):
         await run_worker.process_agent_run({"worker_id": "worker-shutdown", "job_try": 1}, "run-1")
+
+
+@pytest.mark.asyncio
+async def test_run_context_stream_checks_only_local_cancel_event(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """模型事件循环不得把取消检查放大为逐事件 PostgreSQL 查询。"""
+    run_context = run_worker.RunContext(run_id="run-1", worker_id="worker-1:attempt-1")
+    durable_read = AsyncMock(side_effect=AssertionError("stream check must not query PostgreSQL"))
+    monkeypatch.setattr(run_worker, "_is_cancel_requested", durable_read)
+
+    assert await run_context.is_cancelled() is False
+    run_context.cancel_event.set()
+    assert await run_context.is_cancelled() is True
+    durable_read.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1332,6 +1370,34 @@ async def test_chunked_event_writer_flushes_semantic_tool_call_immediately(monke
     ]
 
 
+def test_model_output_detection_accepts_text_reasoning_and_tool_calls_only():
+    assert run_worker._contains_model_output({"stream_event": {"type": "message_delta", "content": "你"}})
+    assert run_worker._contains_model_output({"stream_event": {"type": "message_delta", "reasoning_content": "思考"}})
+    assert run_worker._contains_model_output({"stream_event": {"type": "tool_call_delta", "args_delta": "{"}})
+    assert not run_worker._contains_model_output({"status": "metadata", "run_id": "run-1"})
+    assert not run_worker._contains_model_output({"stream_event": {"type": "message_delta", "content": ""}})
+    assert not run_worker._contains_model_output({"stream_event": {"type": "tool_call_delta", "args_delta": ""}})
+
+
+@pytest.mark.asyncio
+async def test_timing_persistence_failure_does_not_fail_agent_execution(monkeypatch: pytest.MonkeyPatch):
+    class FailingRepository:
+        def __init__(self, _db):
+            pass
+
+        async def record_prepared(self, *_args, **_kwargs):
+            raise RuntimeError("timing storage unavailable")
+
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session)
+    monkeypatch.setattr(run_worker, "AgentRunRepository", FailingRepository)
+
+    await run_worker._record_run_timing_best_effort("run-1", "worker-1:token", "prepared")
+
+
 def test_run_owner_token_has_stable_worker_prefix_and_unique_attempt_suffix():
     ctx = {"worker_id": "worker-stable"}
 
@@ -1348,6 +1414,7 @@ async def test_run_context_stops_when_heartbeat_cannot_renew(monkeypatch: pytest
     renew = AsyncMock(return_value=False)
     monkeypatch.setattr(run_worker, "RUN_HEARTBEAT_SECONDS", 0)
     monkeypatch.setattr(run_worker, "renew_run_lease", renew)
+    monkeypatch.setattr(run_worker, "_run_attempt_finished", AsyncMock(return_value=False))
     run_ctx = run_worker.RunContext(run_id="run-1", worker_id="worker-1:attempt-1")
 
     await run_ctx._heartbeat_lease()
@@ -1358,14 +1425,28 @@ async def test_run_context_stops_when_heartbeat_cannot_renew(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_run_context_fails_closed_when_terminal_attempt_check_fails(monkeypatch: pytest.MonkeyPatch):
+    """无法确认本 attempt 的终态时，继续按丢失 ownership 停止执行。"""
+    monkeypatch.setattr(run_worker, "RUN_HEARTBEAT_SECONDS", 0)
+    monkeypatch.setattr(run_worker, "renew_run_lease", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        run_worker, "_run_attempt_finished", AsyncMock(side_effect=RuntimeError("database unavailable"))
+    )
+    context = run_worker.RunContext(run_id="run-1", worker_id="worker-1:attempt-1")
+
+    await context._heartbeat_lease()
+
+    assert context.lease_lost and context.cancel_event.is_set()
+
+
+@pytest.mark.asyncio
 async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.MonkeyPatch):
     calls: list[str] = []
 
     def fake_initialize():
         calls.append("initialize")
 
-    async def fake_require_current_schema(*, include_knowledge: bool):
-        assert include_knowledge is True
+    async def fake_require_current_schema():
         calls.append("require_current_schema")
 
     async def fake_ensure_builtin_mcp_servers_in_db():
@@ -1393,6 +1474,9 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
     async def fake_publish_reconciliation_health():
         calls.append("publish_reconciliation_health")
 
+    async def fake_publish_task_reconciliation_health():
+        calls.append("publish_task_reconciliation_health")
+
     async def fake_reconcile_expired_run_leases():
         calls.append("reconcile_expired_run_leases")
         return []
@@ -1401,12 +1485,21 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         calls.append("reconcile_pending_runtime_cleanups")
         return []
 
-    async def fake_reconcile_pi_cleanup_failures():
-        calls.append("reconcile_pi_cleanup_failures")
-        return []
-
     async def fake_reconciliation_loop():
         calls.append("reconciliation_loop")
+
+    async def fake_reconcile_and_publish_tasks():
+        calls.append("reconcile_and_publish_tasks")
+        return []
+
+    async def fake_task_reconciliation_loop():
+        calls.append("task_reconciliation_loop")
+
+    async def fake_recover_scheduled_dispatches():
+        calls.append("recover_scheduled_dispatches")
+
+    async def fake_claim_and_dispatch_due_jobs():
+        calls.append("claim_and_dispatch_due_jobs")
 
     monkeypatch.setattr(run_worker.pg_manager, "initialize", fake_initialize)
     monkeypatch.setattr(run_worker.pg_manager, "require_current_schema", fake_require_current_schema)
@@ -1422,15 +1515,20 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "reconcile_pending_runtime_cleanups",
         fake_reconcile_pending_runtime_cleanups,
     )
-    monkeypatch.setattr(run_worker, "reconcile_pi_cleanup_failures", fake_reconcile_pi_cleanup_failures)
     monkeypatch.setattr(run_worker, "_publish_reconciliation_health", fake_publish_reconciliation_health)
+    monkeypatch.setattr(run_worker, "_publish_task_reconciliation_health", fake_publish_task_reconciliation_health)
     monkeypatch.setattr(run_worker, "_reconcile_agent_run_leases_forever", fake_reconciliation_loop)
+    monkeypatch.setattr(run_worker, "reconcile_and_publish_tasks", fake_reconcile_and_publish_tasks)
+    monkeypatch.setattr(run_worker, "_reconcile_durable_tasks_forever", fake_task_reconciliation_loop)
+    monkeypatch.setattr(run_worker, "recover_scheduled_dispatches", fake_recover_scheduled_dispatches)
+    monkeypatch.setattr(run_worker, "claim_and_dispatch_due_jobs", fake_claim_and_dispatch_due_jobs)
     options_module = importlib.import_module("yuxi.config.options")
     monkeypatch.setattr(options_module, "ensure_options_in_db", fake_ensure_options_in_db)
 
     ctx = {}
     await run_worker._worker_startup(ctx)
     await ctx[run_worker._RECONCILIATION_TASK_KEY]
+    await ctx[run_worker._TASK_RECONCILIATION_TASK_KEY]
 
     assert calls == [
         "initialize",
@@ -1441,15 +1539,47 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "init_builtin_skills",
         "reconcile_expired_run_leases",
         "reconcile_pending_runtime_cleanups",
-        "reconcile_pi_cleanup_failures",
         "recover_pending_dispatches",
+        "reconcile_and_publish_tasks",
+        "publish_task_reconciliation_health",
+        "recover_scheduled_dispatches",
+        "claim_and_dispatch_due_jobs",
         "publish_reconciliation_health",
         "reconciliation_loop",
+        "task_reconciliation_loop",
     ]
     assert ctx["worker_id"] == run_worker.WORKER_ID
 
 
+async def test_durable_task_publication_failure_does_not_refresh_health(monkeypatch):
+    sleep_calls = 0
+    health_calls = 0
+
+    async def controlled_sleep(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    async def fail_reconciliation():
+        raise ConnectionError("arq publication failed")
+
+    async def publish_health():
+        nonlocal health_calls
+        health_calls += 1
+
+    monkeypatch.setattr(run_worker.asyncio, "sleep", controlled_sleep)
+    monkeypatch.setattr(run_worker, "reconcile_and_publish_tasks", fail_reconciliation)
+    monkeypatch.setattr(run_worker, "_publish_task_reconciliation_health", publish_health)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_worker._reconcile_durable_tasks_forever()
+
+    assert health_calls == 0
+
+
 def test_worker_settings_publish_short_ttl_versioned_health_contract():
+    assert run_worker.WorkerSettings.max_jobs == run_worker.worker_max_jobs()
     assert run_worker.WorkerSettings.health_check_key == "yuxi:worker:health:agent-run-v1"
     assert 0 < run_worker.WorkerSettings.health_check_interval <= 10
 
@@ -1459,6 +1589,7 @@ def test_worker_settings_limit_concurrency_and_reject_zero(value):
     """实际导入 WorkerSettings，验证配置不会退回 ARQ 的隐式并发。"""
     env = os.environ.copy()
     env.pop("YUXI_WORKER_MAX_JOBS", None)
+    env.pop("ARQ_MAX_JOBS", None)
     if value is not None:
         env["YUXI_WORKER_MAX_JOBS"] = value
     completed = subprocess.run(
@@ -1470,10 +1601,26 @@ def test_worker_settings_limit_concurrency_and_reject_zero(value):
     )
     if value == "0":
         assert completed.returncode != 0
-        assert "YUXI_WORKER_MAX_JOBS must be positive" in completed.stderr
+        assert "YUXI_WORKER_MAX_JOBS must be >= 1" in completed.stderr
     else:
         assert completed.returncode == 0, completed.stderr
-        assert completed.stdout.strip().splitlines()[-1] == (value or "4")
+        assert completed.stdout.strip().splitlines()[-1] == (value or "10")
+
+
+async def test_worker_polls_new_requests_within_interactive_latency_budget():
+    """真实 ARQ 配置必须把空闲队列轮询等待限制在 50ms 内。"""
+    from arq.worker import create_worker
+
+    worker = create_worker(run_worker.WorkerSettings, handle_signals=False)
+    assert 0 < worker.poll_delay_s <= 0.05
+
+
+def test_worker_settings_max_jobs_uses_environment():
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.delenv("YUXI_WORKER_MAX_JOBS", raising=False)
+        monkeypatch.setenv("ARQ_MAX_JOBS", "50")
+
+        assert run_worker.worker_max_jobs() == 50
 
 
 def test_worker_settings_reject_invalid_redis_dsn_instead_of_using_arq_default():
@@ -1519,7 +1666,11 @@ async def test_reconciliation_failure_does_not_refresh_success_lease(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_worker_startup_fails_when_system_options_cannot_initialize(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("max_jobs, durable_limit", [(1, 1), (4, 3), (10, 4)])
+async def test_worker_startup_fails_when_system_options_cannot_initialize(
+    monkeypatch: pytest.MonkeyPatch, max_jobs, durable_limit
+):
+    monkeypatch.setenv("YUXI_WORKER_MAX_JOBS", str(max_jobs))
     monkeypatch.setattr(run_worker.pg_manager, "initialize", lambda: None)
     monkeypatch.setattr(run_worker.pg_manager, "require_current_schema", AsyncMock())
 
@@ -1533,8 +1684,10 @@ async def test_worker_startup_fails_when_system_options_cannot_initialize(monkey
     monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_ctx)
     monkeypatch.setattr(config_options, "ensure_options_in_db", fail_initialize)
 
+    context = {}
     with pytest.raises(RuntimeError, match="config load failed"):
-        await run_worker._worker_startup({})
+        await run_worker._worker_startup(context)
+    assert context["durable_task_max_running"] == durable_limit
 
 
 @pytest.mark.asyncio
@@ -1559,19 +1712,28 @@ async def test_worker_shutdown_closes_queue_clients_before_postgres(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_manifest_persist_failure_fails_run_before_execution(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("cancel_during_manifest", [None, "manifest", "terminal"])
+async def test_manifest_persist_failure_fails_run_before_execution(
+    monkeypatch: pytest.MonkeyPatch, cancel_during_manifest
+):
     """manifest 固化失败时 Run 显式失败，且不得进入执行流。"""
     run_obj = _build_run()
     _patch_common(monkeypatch, run_obj)
     terminal_calls: list[dict] = []
     stream_called = asyncio.Event()
+    finish_cancel = AsyncMock(return_value=run_worker.TerminalTransition(status="cancelled", changed=True))
 
     async def fake_persist_manifest(**kwargs):
         del kwargs
+        if cancel_during_manifest == "manifest":
+            run_obj.status = "cancel_requested"
         raise RuntimeError("manifest db unavailable")
 
     async def fake_mark_terminal(run_id: str, status: str, **kwargs):
         terminal_calls.append({"run_id": run_id, "status": status, **kwargs})
+        if cancel_during_manifest:
+            run_obj.status = "cancel_requested"
+            return run_worker.TerminalTransition(status="cancel_requested", changed=False)
         return run_worker.TerminalTransition(status=status, changed=True)
 
     def fake_stream_agent_chat(**kwargs):
@@ -1582,422 +1744,20 @@ async def test_manifest_persist_failure_fails_run_before_execution(monkeypatch: 
     monkeypatch.setattr(run_worker, "persist_run_manifest", fake_persist_manifest)
     monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
     monkeypatch.setattr(run_worker, "stream_agent_chat", fake_stream_agent_chat)
+    monkeypatch.setattr(run_worker, "_finish_user_cancel", finish_cancel)
 
     await run_worker.process_agent_run({"job_try": 1}, "run-1")
 
     assert not stream_called.is_set()
+    if cancel_during_manifest:
+        finish_cancel.assert_awaited_once()
+        assert len(terminal_calls) == 1
+        return
+    finish_cancel.assert_not_awaited()
     assert len(terminal_calls) == 1
     assert terminal_calls[0]["status"] == "failed"
     assert terminal_calls[0]["error_type"] == "manifest_persist_failed"
     assert "执行未开始" in terminal_calls[0]["error_message"]
-
-
-@pytest.mark.asyncio
-async def test_process_agent_run_routes_pi_without_entering_langgraph(monkeypatch: pytest.MonkeyPatch):
-    """PI 请求在 claim 时冻结 manifest，并只进入统一 PI execution seam。"""
-    run_obj = _build_run()
-    run_obj.input_payload["runtime"] = {"executor": "pi"}
-    _patch_common(monkeypatch, run_obj)
-    manifest = {"manifest_version": 1, "policy": {"timeout_seconds": 60}}
-    digest = "a" * 64
-    captured: dict[str, object] = {}
-
-    async def fake_mark_running(run_id, worker_id, attempt_metadata=None):
-        captured["claim"] = (run_id, worker_id, attempt_metadata)
-        return True
-
-    async def fake_get_attempt(run_id, worker_id):
-        captured["attempt_lookup"] = (run_id, worker_id)
-        return SimpleNamespace(id=7)
-
-    async def fake_bind(run_id, attempt_id, instance_id, worker_id):
-        captured["instance"] = (run_id, attempt_id, instance_id, worker_id)
-        return True
-
-    async def fake_record(run_id, attempt_id, envelope, worker_id):
-        captured["envelope"] = (run_id, attempt_id, envelope, worker_id)
-        run_obj.status = "completed"
-        return {"ack": True, "duplicate": False}
-
-    class Adapter:
-        def __init__(self, **kwargs):
-            captured["adapter"] = kwargs
-
-    async def fake_execute(**kwargs):
-        captured["execution"] = kwargs["attempt"]
-        await kwargs["instance_sink"]("sandbox-1")
-        await kwargs["result_sink"](
-            {
-                "job_id": "run-1",
-                "attempt_id": "7",
-                "adapter": "local",
-                "event_id": "final-1",
-                "sequence": 0,
-                "type": "final",
-                "runtime_manifest_digest": digest,
-                "payload": {"text": "YUXI_PI_GOLDEN_V1"},
-                "payload_digest": "b" * 64,
-            }
-        )
-        return []
-
-    async def forbidden(*args, **kwargs):
-        raise AssertionError(f"LangGraph path must not run: {args}, {kwargs}")
-
-    async def noop(*args, **kwargs):
-        del args, kwargs
-
-    monkeypatch.setattr(run_worker, "build_default_pi_runtime_manifest", lambda: (manifest, digest))
-    monkeypatch.setattr(run_worker, "mark_run_running", fake_mark_running)
-    monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
-    monkeypatch.setattr(run_worker, "bind_pi_instance", fake_bind)
-    monkeypatch.setattr(run_worker, "record_pi_envelope", fake_record)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", Adapter)
-    monkeypatch.setattr(run_worker, "execute_pi_attempt", fake_execute)
-    monkeypatch.setattr(run_worker, "persist_run_manifest", forbidden)
-    monkeypatch.setattr(run_worker, "stream_agent_chat", forbidden)
-    monkeypatch.setattr(run_worker, "dispatch_next_request", noop)
-
-    await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, "run-1")
-
-    claim = captured["claim"]
-    worker_id = claim[1]
-    assert claim[0] == "run-1"
-    assert claim[2] == {
-        "adapter": "local",
-        "route_reason": "t2_local_only",
-        "route_snapshot": {"rule_version": "t2-local-only"},
-        "runtime_manifest": manifest,
-        "runtime_manifest_digest": digest,
-    }
-    assert captured["attempt_lookup"] == ("run-1", worker_id)
-    assert captured["adapter"] == {"uid": "user-1", "run_id": "run-1", "attempt_id": "7"}
-    assert captured["instance"] == ("run-1", 7, "sandbox-1", worker_id)
-    assert captured["execution"] == {
-        "run_id": "run-1",
-        "attempt_id": "7",
-        "manifest": manifest,
-        "manifest_digest": digest,
-    }
-
-
-@pytest.mark.asyncio
-async def test_sandbox_run_reuses_parent_runtime_and_executes_pi_task(monkeypatch: pytest.MonkeyPatch):
-    """Sandbox child 必须以 PI adapter 复用父 runtime，并留下 attempt 清单。"""
-
-    run_obj = _build_run()
-    run_obj.run_type = "sandbox"
-    run_obj.conversation_thread_id = "pi-child-thread"
-    run_obj.runtime_scope_id = "root-thread"
-    run_obj.created_by_run_id = "parent-run"
-    run_obj.input_payload["runtime"] = {
-        "executor": "pi",
-        "parent_thread_id": "spoofed-thread",
-        "workdir_path": "projects/11111111-1111-4111-8111-111111111111",
-        "skill_slugs": ["report"],
-        "skill_digests": {"report": "d" * 64},
-        "skill_runtime_paths": {"report": "/home/gem/skills/report"},
-    }
-    _patch_common(monkeypatch, run_obj)
-    parent_run = SimpleNamespace(
-        id="parent-run",
-        uid=run_obj.uid,
-        conversation_thread_id="parent-thread",
-    )
-
-    async def fake_get_run(run_id: str):
-        return parent_run if run_id == "parent-run" else run_obj
-
-    monkeypatch.setattr(run_worker, "_get_run", fake_get_run)
-    manifest = {"manifest_version": 1, "policy": {"timeout_seconds": 600}}
-    digest = "a" * 64
-    credentials = {"api_key": "secret", "headers": {}, "auth_header": True}
-    captured: dict[str, object] = {}
-    published_events: list[tuple[str, str, dict, str | None]] = []
-
-    async def fake_mark_running(run_id, worker_id, attempt_metadata=None):
-        captured["claim"] = (run_id, worker_id, attempt_metadata)
-        return True
-
-    async def fake_get_attempt(*_args, **_kwargs):
-        return SimpleNamespace(id=7)
-
-    async def fake_record(_run_id, _attempt_id, envelope, _worker_id):
-        if envelope["type"] == "final":
-            run_obj.status = "completed"
-        return {"ack": True, "duplicate": False}
-
-    async def fake_publish(run_id, event_type, payload, *, thread_id=None):
-        published_events.append((run_id, event_type, payload, thread_id))
-        return True
-
-    class Adapter:
-        def __init__(self, **kwargs):
-            captured["adapter"] = kwargs
-
-    async def fake_execute(**kwargs):
-        captured["execution"] = kwargs["attempt"]
-        await kwargs["instance_sink"]("sandbox-parent")
-        await kwargs["result_sink"](
-            {
-                "type": "tool_call",
-                "payload": {"tool_call_id": "pi-tool-1", "name": "bash", "args": {"command": "pwd"}},
-            }
-        )
-        await kwargs["result_sink"](
-            {
-                "type": "tool_result",
-                "payload": {
-                    "tool_call_id": "pi-tool-1",
-                    "name": "bash",
-                    "content": "ok",
-                    "is_error": False,
-                },
-            }
-        )
-        await kwargs["result_sink"](
-            {
-                "type": "final",
-                "payload": {"text": "done"},
-            }
-        )
-        return []
-
-    def fake_build_manifest(**kwargs):
-        captured["manifest_args"] = kwargs
-        return manifest, digest
-
-    async def forbidden(*args, **kwargs):
-        raise AssertionError(f"Sandbox child must not enter LangGraph or queue dispatch: {args}, {kwargs}")
-
-    monkeypatch.setattr(run_worker, "resolve_pi_model_runtime", lambda _spec: ({"model_id": "m"}, credentials))
-    monkeypatch.setattr(run_worker, "get_user_skills_root_dir", lambda _uid: Path("/projection"))
-    monkeypatch.setattr(run_worker, "compute_skill_dir_hash", lambda path: "d" * 64 if path.name == "report" else "")
-    monkeypatch.setattr(run_worker, "build_pi_runtime_manifest", fake_build_manifest)
-    monkeypatch.setattr(
-        run_worker, "_snapshot_pi_run_context", AsyncMock(return_value=({"project_instructions": []}, None))
-    )
-    monkeypatch.setattr(run_worker, "mark_run_running", fake_mark_running)
-    monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
-    monkeypatch.setattr(run_worker, "bind_pi_instance", AsyncMock(return_value=True))
-    monkeypatch.setattr(run_worker, "record_pi_envelope", fake_record)
-    monkeypatch.setattr(run_worker, "_append_run_event_best_effort", fake_publish)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", Adapter)
-    monkeypatch.setattr(run_worker, "execute_pi_attempt", fake_execute)
-    monkeypatch.setattr(run_worker, "persist_run_manifest", forbidden)
-    monkeypatch.setattr(run_worker, "stream_agent_chat", forbidden)
-    monkeypatch.setattr(run_worker, "dispatch_next_request", forbidden)
-
-    await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, run_obj.id)
-
-    assert callable(captured["adapter"].pop("steer_check"))
-    assert captured["adapter"] == {
-        "uid": "user-1",
-        "run_id": "run-1",
-        "attempt_id": "7",
-        "runtime_scope_id": "root-thread",
-        "workdir_path": "projects/11111111-1111-4111-8111-111111111111",
-        "skill_sources": {"report": Path("/projection/report")},
-        "reuse_sandbox": True,
-        "credentials": credentials,
-    }
-    assert captured["execution"] == {
-        "run_id": "run-1",
-        "attempt_id": "7",
-        "manifest": manifest,
-        "manifest_digest": digest,
-        "task": "hello",
-    }
-    assert captured["claim"][2]["runtime_manifest_digest"] == digest
-    standard_events = [event for event in published_events if event[1] == "messages"]
-    assert {(event[0], event[3]) for event in standard_events} == {
-        ("run-1", "pi-child-thread"),
-        ("parent-run", "parent-thread"),
-    }
-    assert {event[2]["chunk"]["status"] for event in standard_events} == {"loading", "stream_event"}
-
-
-def test_pi_stream_projection_keeps_child_text_and_tool_snapshots_separate():
-    """同一provider工具ID在不同child中隔离，快照不会冒充完成。"""
-
-    def project(kind, child, payload):
-        """投影到父Run，保留child身份。"""
-        return run_worker._pi_stream_chunk(
-            {"job_id": child, "type": kind, "payload": payload}, run_id="parent", thread_id="thread"
-        )
-
-    text = project("message_delta", "child-a", {"content": "progress"})
-    assert text["stream_event"]["message_id"] == "pi-child-a"
-    assert text["stream_event"]["content"] == "progress"
-    tool = {"tool_call_id": "call-1", "name": "bash", "content": "first\nsecond"}
-    first = project("tool_update", "child-a", tool)["event"]["data"]
-    other = project("tool_update", "child-b", tool)["event"]["data"]
-    final = project("tool_result", "child-a", tool)["event"]["data"]
-    assert first["event"] == "tool-progress"
-    assert first["output"]["status"] == "running"
-    assert first["output"]["content"] == "first\nsecond"
-    assert first["tool_call_id"] != other["tool_call_id"]
-    assert first["tool_call_id"] == final["tool_call_id"]
-    assert final["event"] == "tool-finished"
-
-
-@pytest.mark.asyncio
-async def test_pi_execution_unknown_fails_without_releasing_for_retry(monkeypatch: pytest.MonkeyPatch):
-    """PI 启动后的未知结局只能失败当前 Run，不能创建新 attempt 重跑。"""
-    run_obj = _build_run()
-    run_obj.input_payload["runtime"] = {"executor": "pi"}
-    _patch_common(monkeypatch, run_obj)
-    manifest = {"manifest_version": 1, "policy": {"timeout_seconds": 60}}
-    terminal_calls: list[dict] = []
-
-    async def fake_get_attempt(*_args, **_kwargs):
-        return SimpleNamespace(id=7)
-
-    async def fake_execute(**_kwargs):
-        raise run_worker.PiExecutionUnknown("PI execution_unknown: transport lost")
-
-    async def fake_mark_terminal(run_id, status, error_type, error_message, **kwargs):
-        terminal_calls.append(
-            {
-                "run_id": run_id,
-                "status": status,
-                "error_type": error_type,
-                "error_message": error_message,
-                **kwargs,
-            }
-        )
-        run_obj.status = status
-        return run_worker.TerminalTransition(status=status, changed=True)
-
-    async def forbidden_retry(*args, **kwargs):
-        raise AssertionError(f"PI execution_unknown must not release for retry: {args}, {kwargs}")
-
-    async def noop(*args, **kwargs):
-        del args, kwargs
-
-    monkeypatch.setattr(run_worker, "build_default_pi_runtime_manifest", lambda: (manifest, "a" * 64))
-    monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", lambda **_kwargs: object())
-    monkeypatch.setattr(run_worker, "execute_pi_attempt", fake_execute)
-    monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
-    monkeypatch.setattr(run_worker, "release_run_lease_for_retry", forbidden_retry)
-    monkeypatch.setattr(run_worker, "_append_end_event", noop)
-    monkeypatch.setattr(run_worker, "dispatch_next_request", noop)
-
-    await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, "run-1")
-
-    assert len(terminal_calls) == 1
-    assert terminal_calls[0]["status"] == "failed"
-    assert terminal_calls[0]["error_type"] == "execution_unknown"
-    assert terminal_calls[0]["worker_id"].startswith("worker-pi:")
-
-
-@pytest.mark.asyncio
-async def test_pi_unknown_with_cleanup_failure_preserves_both_facts(monkeypatch: pytest.MonkeyPatch):
-    run_obj = _build_run()
-    run_obj.input_payload["runtime"] = {"executor": "pi"}
-    _patch_common(monkeypatch, run_obj)
-    manifest = {"manifest_version": 1, "policy": {"timeout_seconds": 60}}
-    cleanup_calls: list[tuple] = []
-    terminal_calls: list[dict] = []
-    order: list[str] = []
-
-    async def fake_get_attempt(*_args, **_kwargs):
-        return SimpleNamespace(id=7)
-
-    async def fake_execute(**_kwargs):
-        raise run_worker.PiCleanupFailed(
-            "PI cleanup_failed: delete unavailable",
-            primary=run_worker.PiExecutionUnknown("PI execution_unknown: transport lost"),
-        )
-
-    async def fake_record_cleanup(*args, **kwargs):
-        order.append("cleanup")
-        cleanup_calls.append((args, kwargs))
-
-    async def fake_mark_terminal(run_id, status, error_type, error_message, **kwargs):
-        order.append("terminal")
-        terminal_calls.append(
-            {
-                "run_id": run_id,
-                "status": status,
-                "error_type": error_type,
-                "error_message": error_message,
-                **kwargs,
-            }
-        )
-        run_obj.status = status
-        return run_worker.TerminalTransition(status=status, changed=True)
-
-    async def forbidden_retry(*args, **kwargs):
-        raise AssertionError(f"PI cleanup failure must not release for retry: {args}, {kwargs}")
-
-    async def noop(*args, **kwargs):
-        del args, kwargs
-
-    monkeypatch.setattr(run_worker, "build_default_pi_runtime_manifest", lambda: (manifest, "a" * 64))
-    monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", lambda **_kwargs: object())
-    monkeypatch.setattr(run_worker, "execute_pi_attempt", fake_execute)
-    monkeypatch.setattr(run_worker, "record_pi_cleanup_failure", fake_record_cleanup)
-    monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
-    monkeypatch.setattr(run_worker, "release_run_lease_for_retry", forbidden_retry)
-    monkeypatch.setattr(run_worker, "_append_end_event", noop)
-    monkeypatch.setattr(run_worker, "dispatch_next_request", noop)
-
-    await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, "run-1")
-
-    assert cleanup_calls[0][0][:3] == ("run-1", 7, terminal_calls[0]["worker_id"])
-    assert order == ["terminal", "cleanup"]
-    assert terminal_calls[0]["status"] == "failed"
-    assert terminal_calls[0]["error_type"] == "execution_unknown"
-
-
-@pytest.mark.asyncio
-async def test_pi_cancel_with_cleanup_failure_commits_cancel_before_orphan(monkeypatch: pytest.MonkeyPatch):
-    run_obj = _build_run()
-    run_obj.input_payload["runtime"] = {"executor": "pi"}
-    _patch_common(monkeypatch, run_obj)
-    manifest = {"manifest_version": 1, "policy": {"timeout_seconds": 60}}
-    order: list[str] = []
-
-    async def fake_get_attempt(*_args, **_kwargs):
-        return SimpleNamespace(id=7)
-
-    async def fake_execute(**_kwargs):
-        raise run_worker.PiCleanupFailed(
-            "PI cleanup_failed: delete unavailable",
-            primary=run_worker.PiExecutionCancelled("PI attempt cancelled"),
-        )
-
-    async def fake_finish_cancel(**_kwargs):
-        assert _kwargs["run"] is run_obj
-        order.append("cancelled")
-        run_obj.status = "cancelled"
-        return run_worker.TerminalTransition(status="cancelled", changed=True)
-
-    async def fake_record_cleanup(*_args, **_kwargs):
-        order.append("cleanup")
-
-    async def forbidden(*args, **kwargs):
-        raise AssertionError(f"unexpected retry/terminal transition: {args}, {kwargs}")
-
-    async def noop(*args, **kwargs):
-        del args, kwargs
-
-    monkeypatch.setattr(run_worker, "build_default_pi_runtime_manifest", lambda: (manifest, "a" * 64))
-    monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", lambda **_kwargs: object())
-    monkeypatch.setattr(run_worker, "execute_pi_attempt", fake_execute)
-    monkeypatch.setattr(run_worker, "_finish_user_cancel", fake_finish_cancel)
-    monkeypatch.setattr(run_worker, "record_pi_cleanup_failure", fake_record_cleanup)
-    monkeypatch.setattr(run_worker, "mark_run_terminal", forbidden)
-    monkeypatch.setattr(run_worker, "release_run_lease_for_retry", forbidden)
-    monkeypatch.setattr(run_worker, "dispatch_next_request", noop)
-
-    await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, "run-1")
-
-    assert order == ["cancelled", "cleanup"]
 
 
 def test_retry_requires_new_manifest_fingerprint_to_match_write_once_fact():
@@ -2006,3 +1766,19 @@ def test_retry_requires_new_manifest_fingerprint_to_match_write_once_fact():
     run_worker._require_persisted_manifest_match(persisted, recorded=False, fingerprint="a" * 64)
     with pytest.raises(RuntimeError, match="运行资产已在重试前变化"):
         run_worker._require_persisted_manifest_match(persisted, recorded=False, fingerprint="b" * 64)
+
+
+@pytest.mark.parametrize("run_type,runtime", [("chat", {"executor": "pi"}), ("sandbox", {})])
+async def test_retired_pi_job_never_enters_new_executor(monkeypatch, run_type, runtime):
+    """旧队列消息只能明确失败，不能静默作为 LangGraph 重跑。"""
+    run = _build_run()
+    run.run_type = run_type
+    run.input_payload["runtime"] = runtime
+    monkeypatch.setattr(run_worker, "_get_run", AsyncMock(return_value=run))
+    terminal = AsyncMock()
+    claim = AsyncMock(side_effect=AssertionError("旧 PI 不得取得新执行权"))
+    monkeypatch.setattr(run_worker, "mark_run_terminal", terminal)
+    monkeypatch.setattr(run_worker, "mark_run_running", claim)
+    await run_worker.process_agent_run({}, run.id)
+    terminal.assert_awaited_once_with(run.id, "failed", "pi_executor_retired", "PI 执行器已停用，旧任务不可续跑")
+    claim.assert_not_awaited()

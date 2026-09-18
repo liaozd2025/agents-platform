@@ -35,10 +35,14 @@ async def cancel_task(
     _authorization: AuthorizationContext = Depends(require_permission("system_task:manage")),
 ):
     """Request cancellation of a task."""
-    success = await tasker.cancel_task(task_id)
-    if not success:
+    task = await tasker.cancel_task(task_id)
+    if task is None:
         raise HTTPException(status_code=400, detail="Task cannot be cancelled")
-    return {"task_id": task_id, "status": "cancelled"}
+    return {
+        "task_id": task_id,
+        "status": task.status,
+        "cancel_requested": task.cancel_requested,
+    }
 
 
 @tasks.delete("/{task_id}")
@@ -49,5 +53,5 @@ async def delete_task(
     """Delete a task by id."""
     success = await tasker.delete_task(task_id)
     if not success:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=409, detail="Task must exist and be terminal before deletion")
     return {"task_id": task_id, "status": "deleted"}

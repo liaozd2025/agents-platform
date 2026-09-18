@@ -89,6 +89,7 @@ def _check_dimensions(total: int, rows: int, cols: int) -> int:
 def _xlsx_color(color, palette: list[str]) -> str | None:
     """将工作簿调色板和主题颜色转成受限 RGB 值。"""
     import colorsys
+
     from openpyxl.styles.colors import COLOR_INDEX
 
     if color is None:
@@ -184,6 +185,7 @@ def _read_xlsx(content: bytes) -> list:
 def _xls_empty_formulas(content: bytes, biff_version: int) -> set:
     """识别 BIFF 空公式缓存；xlrd 的 Cell 会将其与普通空文本合并。"""
     import struct
+
     from xlrd.compdoc import CompDoc
 
     stream = content

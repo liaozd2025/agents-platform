@@ -8,7 +8,7 @@ from sqlalchemy import select
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.services import chat_service
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Conversation, Message, Project, User
+from yuxi.storage.postgres.models_business import AgentRun, Conversation, Message, Project, User
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -24,7 +24,8 @@ def cleanup_test_knowledge_resources():
 
 
 @pytest.mark.asyncio
-async def test_knowledge_sources_round_trip_through_message_repository():
+@pytest.mark.parametrize("model_audit", [False, True])
+async def test_knowledge_sources_round_trip_through_message_repository(model_audit):
     """回读 PostgreSQL JSON 列，验证来源属于本次会话的 assistant 消息。"""
     uid = "pytest-source-" + uuid.uuid4().hex
     project_id = str(uuid.uuid4())
@@ -54,13 +55,56 @@ async def test_knowledge_sources_round_trip_through_message_repository():
             conversation = Conversation(thread_id=uid, uid=uid, project_id=project_id, agent_id="main", status="active")
             db.add(conversation)
             await db.flush()
-            await chat_service._save_ai_message(
-                ConversationRepository(db),
-                uid,
-                {"content": "回答"},
-                additional_metadata={"knowledge_sources": sources},
-                commit=False,
-            )
+            repo = ConversationRepository(db)
+            if model_audit:
+                run_id = str(uuid.uuid4())
+                db.add(
+                    AgentRun(
+                        id=run_id,
+                        conversation_id=conversation.id,
+                        conversation_thread_id=uid,
+                        runtime_scope_id=uid,
+                        agent_slug="main",
+                        uid=uid,
+                        request_id=uid,
+                        status="running",
+                        source="web",
+                        channel="web",
+                        run_type="chat",
+                        input_payload={},
+                    )
+                )
+                await db.flush()
+                db.add(
+                    Message(
+                        conversation_id=conversation.id,
+                        run_id=run_id,
+                        request_id=uid,
+                        role="assistant",
+                        message_type="model_audit",
+                        operation_id="model-current",
+                        execution_status="running",
+                        content="",
+                        extra_metadata={},
+                    )
+                )
+                await db.flush()
+                await chat_service._reconcile_model_audit_message(
+                    repo,
+                    run_id=run_id,
+                    operation_id="model-current",
+                    msg_dict={"content": "回答"},
+                    trace_info=None,
+                    additional_metadata={"knowledge_sources": sources},
+                )
+            else:
+                await chat_service._save_ai_message(
+                    repo,
+                    uid,
+                    {"content": "回答"},
+                    additional_metadata={"knowledge_sources": sources},
+                    commit=False,
+                )
             row = (
                 await db.execute(
                     select(Message.content, Message.extra_metadata).where(Message.conversation_id == conversation.id)

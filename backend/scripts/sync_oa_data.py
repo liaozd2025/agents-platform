@@ -80,8 +80,7 @@ async def run(args: argparse.Namespace) -> int:
     try:
         department_url = build_department_url(args.url)
         pg_manager.initialize()
-        await pg_manager.create_business_tables()
-        await pg_manager.ensure_business_schema()
+        await pg_manager.require_current_schema()
 
         LOGGER.info("开始读取旧 OA 数据并生成部门同步计划")
         code = user_migration.fetch_oa_access_code(args.url, args.license_file, args.timeout)

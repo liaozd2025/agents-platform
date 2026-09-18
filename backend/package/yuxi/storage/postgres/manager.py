@@ -8,6 +8,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from yuxi.config import get_int_env
 from yuxi.permissions.role_catalog import BUILTIN_ROLES
 from yuxi.storage.postgres.models_business import (
     AGENT_RUN_SHAPE_CONSTRAINT_NAME,
@@ -31,14 +32,50 @@ def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-BUSINESS_SCHEMA_VERSION = 5
-KNOWLEDGE_SCHEMA_VERSION = 1
+BUSINESS_SCHEMA_VERSION = 9
+KNOWLEDGE_SCHEMA_VERSION = 3
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
     "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS worker_id VARCHAR(128)",
     "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP WITHOUT TIME ZONE",
     "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMP WITHOUT TIME ZONE",
     "CREATE INDEX IF NOT EXISTS ix_agent_runs_status_lease_expires ON agent_runs(status, lease_expires_at)",
+)
+AGENT_RUN_LANGFUSE_SCHEMA_STATEMENTS = (
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS langfuse_trace_id VARCHAR(64)",
+)
+AGENT_RUN_CURSOR_SCHEMA_STATEMENTS = ("ALTER TABLE IF EXISTS agent_runs DROP COLUMN IF EXISTS last_event_id",)
+MESSAGE_AUDIT_SCHEMA_STATEMENTS = (
+    "ALTER TABLE IF EXISTS messages ADD COLUMN IF NOT EXISTS operation_id VARCHAR(128)",
+    "ALTER TABLE IF EXISTS messages ADD COLUMN IF NOT EXISTS started_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE IF EXISTS messages ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE IF EXISTS messages ADD COLUMN IF NOT EXISTS duration_ms BIGINT",
+    "ALTER TABLE IF EXISTS messages ADD COLUMN IF NOT EXISTS sequence BIGINT",
+    "ALTER TABLE IF EXISTS messages ADD COLUMN IF NOT EXISTS execution_status VARCHAR(32)",
+    "ALTER TABLE IF EXISTS messages ADD COLUMN IF NOT EXISTS usage JSONB",
+    "DROP INDEX IF EXISTS uq_messages_run_operation_id",
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_run_role_operation_id "
+        "ON messages(run_id, role, operation_id) WHERE operation_id IS NOT NULL"
+    ),
+    ("CREATE INDEX IF NOT EXISTS ix_messages_run_sequence ON messages(run_id, sequence) WHERE sequence IS NOT NULL"),
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'ck_messages_execution_status'
+              AND conrelid = 'messages'::regclass
+        ) THEN
+            ALTER TABLE messages
+            ADD CONSTRAINT ck_messages_execution_status
+            CHECK (
+                execution_status IS NULL OR execution_status IN
+                ('running', 'completed', 'failed', 'interrupted', 'abandoned')
+            );
+        END IF;
+    END $$
+    """,
 )
 AGENT_RUN_FACT_SCHEMA_STATEMENTS = (
     "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS manifest JSONB",
@@ -89,6 +126,11 @@ AGENT_RUN_FACT_SCHEMA_STATEMENTS = (
     "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS final_acked_at TIMESTAMP WITHOUT TIME ZONE",
     "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS cleanup_error TEXT",
     "ALTER TABLE IF EXISTS agent_run_attempts ADD COLUMN IF NOT EXISTS cleanup_failed_at TIMESTAMP WITHOUT TIME ZONE",
+)
+AGENT_RUN_TIMING_SCHEMA_STATEMENTS = (
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS prepared_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS first_output_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS first_model_request_at TIMESTAMP WITHOUT TIME ZONE",
 )
 WORKDIR_PATH_SCHEMA_STATEMENTS = (
     f"""
@@ -229,6 +271,50 @@ V071_WORKDIR_CUTOVER_STATEMENTS = (
     "ALTER TABLE IF EXISTS conversations ALTER COLUMN project_id SET NOT NULL",
     "CREATE INDEX IF NOT EXISTS ix_conversations_project_id ON conversations(project_id)",
 )
+KNOWLEDGE_FILE_TASK_OWNER_SCHEMA_STATEMENTS = (
+    "ALTER TABLE IF EXISTS knowledge_files ADD COLUMN IF NOT EXISTS processing_task_id VARCHAR(64)",
+    "ALTER TABLE IF EXISTS knowledge_files ADD COLUMN IF NOT EXISTS processing_owner VARCHAR(128)",
+    "CREATE INDEX IF NOT EXISTS ix_knowledge_files_processing_task_id ON knowledge_files(processing_task_id)",
+    """
+    UPDATE knowledge_files
+    SET status = CASE WHEN status = 'parsing' THEN 'error_parsing' ELSE 'error_indexing' END,
+        error_message = 'service_interrupted: 旧执行实例中断，处理结果未知，请重试',
+        processing_task_id = NULL,
+        processing_owner = NULL,
+        updated_at = timezone('utc', now())
+    WHERE status IN ('parsing', 'indexing')
+      AND processing_task_id IS NULL
+    """,
+)
+TASK_DURABLE_SCHEMA_STATEMENTS = (
+    "ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS handler_version INTEGER",
+    "UPDATE tasks SET handler_version = 0 WHERE handler_version IS NULL",
+    "ALTER TABLE IF EXISTS tasks ALTER COLUMN handler_version SET DEFAULT 1",
+    "ALTER TABLE IF EXISTS tasks ALTER COLUMN handler_version SET NOT NULL",
+    "ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS dedupe_key VARCHAR(64)",
+    "ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS worker_id VARCHAR(128)",
+    "ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMP WITHOUT TIME ZONE",
+    "ALTER TABLE IF EXISTS tasks ADD COLUMN IF NOT EXISTS timeout_seconds DOUBLE PRECISION",
+    "UPDATE tasks SET timeout_seconds = 21600.0 WHERE timeout_seconds IS NULL",
+    "ALTER TABLE IF EXISTS tasks ALTER COLUMN timeout_seconds SET DEFAULT 21600.0",
+    "ALTER TABLE IF EXISTS tasks ALTER COLUMN timeout_seconds SET NOT NULL",
+    "CREATE INDEX IF NOT EXISTS ix_tasks_status_lease_expires ON tasks(status, lease_expires_at)",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'uq_tasks_active_dedupe'
+              AND conrelid = 'tasks'::regclass
+        ) THEN
+            ALTER TABLE tasks
+            ADD CONSTRAINT uq_tasks_active_dedupe UNIQUE (type, dedupe_key);
+        END IF;
+    END $$
+    """,
+)
 RUNTIME_SCOPE_SCHEMA_STATEMENTS = (
     "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS runtime_scope_id VARCHAR(64)",
     (
@@ -309,8 +395,9 @@ class PostgresManager(metaclass=SingletonMeta):
                 json_deserializer=json.loads,
                 pool_pre_ping=True,
                 pool_recycle=1800,
-                pool_size=10,
-                max_overflow=20,
+                pool_size=get_int_env("POSTGRES_POOL_SIZE", 10),
+                max_overflow=get_int_env("POSTGRES_MAX_OVERFLOW", 20, minimum=0),
+                pool_timeout=get_int_env("POSTGRES_POOL_TIMEOUT_SECONDS", 30),
             )
 
             # 创建异步会话工厂
@@ -331,7 +418,8 @@ class PostgresManager(metaclass=SingletonMeta):
             # 创建 LangGraph 专属连接池
             self.langgraph_pool = AsyncConnectionPool(
                 conninfo=langgraph_db_url,
-                max_size=10,  # 根据你的 Agent 并发情况设置，通常 5-10 足够了
+                max_size=get_int_env("LANGGRAPH_POSTGRES_POOL_SIZE", 10),
+                timeout=get_int_env("LANGGRAPH_POSTGRES_POOL_TIMEOUT_SECONDS", 30),
                 kwargs={"autocommit": True},  # LangGraph Checkpoint 强依赖 autocommit
                 check=AsyncConnectionPool.check_connection,
             )
@@ -348,17 +436,17 @@ class PostgresManager(metaclass=SingletonMeta):
             raise RuntimeError("PostgreSQL manager not initialized. Please check configuration.")
 
     def get_langgraph_checkpointer(self) -> AsyncPostgresSaver:
-        """获取当前进程共享的 PostgreSQL LangGraph checkpointer。"""
+        """为本次构图创建独立 saver，共享有界连接池而不共享其实例锁。"""
         self._check_initialized()
         if self.langgraph_pool is None:
             raise RuntimeError("PostgreSQL LangGraph connection pool is not initialized.")
-        if self.langgraph_checkpointer is None:
-            self.langgraph_checkpointer = AsyncPostgresSaver(self.langgraph_pool)
-        return self.langgraph_checkpointer
+        return AsyncPostgresSaver(self.langgraph_pool)
 
     async def setup_langgraph_checkpointer(self) -> AsyncPostgresSaver:
-        """跨进程串行创建 LangGraph checkpoint 表并返回共享 checkpointer。"""
-        checkpointer = self.get_langgraph_checkpointer()
+        """跨进程串行创建 checkpoint 表，迁移实例不参与运行时构图。"""
+        if self.langgraph_checkpointer is None:
+            self.langgraph_checkpointer = self.get_langgraph_checkpointer()
+        checkpointer = self.langgraph_checkpointer
         if not self._langgraph_checkpointer_setup:
             async with self.langgraph_pool.connection() as connection:
                 await connection.execute("SELECT pg_advisory_lock(94721802)")
@@ -443,12 +531,13 @@ class PostgresManager(metaclass=SingletonMeta):
                 {"domain": domain, "version": version},
             )
 
-    async def require_current_schema(self, *, include_knowledge: bool) -> None:
+    async def require_current_schema(self) -> None:
         """只读校验运行进程需要的 Schema 域均为精确当前版本。"""
         versions = await self.get_schema_versions()
-        required = {"business": BUSINESS_SCHEMA_VERSION}
-        if include_knowledge:
-            required["knowledge"] = KNOWLEDGE_SCHEMA_VERSION
+        required = {
+            "business": BUSINESS_SCHEMA_VERSION,
+            "knowledge": KNOWLEDGE_SCHEMA_VERSION,
+        }
         mismatches = [
             f"{domain}={versions.get(domain, 'missing')} (required {version})"
             for domain, version in required.items()
@@ -459,7 +548,7 @@ class PostgresManager(metaclass=SingletonMeta):
             raise RuntimeError(f"Database schema migration is incomplete or incompatible: {detail}")
 
     async def create_knowledge_tables(self):
-        """创建完整模式使用的知识与评估表。"""
+        """创建知识与评估表。"""
         self._check_initialized()
         async with self.async_engine.begin() as conn:
             await conn.run_sync(KnowledgeBase.metadata.create_all)
@@ -471,6 +560,13 @@ class PostgresManager(metaclass=SingletonMeta):
         async with self.async_engine.begin() as conn:
             await conn.run_sync(BusinessBase.metadata.create_all)
         logger.info("PostgreSQL business tables created/checked")
+
+    async def upgrade_knowledge_schema_v1_to_v2(self) -> None:
+        """为知识文件处理中间态增加 Durable Task attempt owner。"""
+        self._check_initialized()
+        async with self.async_engine.begin() as conn:
+            for statement in KNOWLEDGE_FILE_TASK_OWNER_SCHEMA_STATEMENTS:
+                await conn.execute(text(statement))
 
     async def drop_tables(self):
         """删除所有表（慎用！）"""
@@ -521,9 +617,10 @@ class PostgresManager(metaclass=SingletonMeta):
             "ALTER TABLE IF EXISTS knowledge_files ADD COLUMN IF NOT EXISTS processing_params JSONB",
             "ALTER TABLE IF EXISTS knowledge_files ADD COLUMN IF NOT EXISTS is_folder BOOLEAN",
             "ALTER TABLE IF EXISTS knowledge_files ADD COLUMN IF NOT EXISTS error_message TEXT",
+            "ALTER TABLE IF EXISTS knowledge_files ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ",
+            *KNOWLEDGE_FILE_TASK_OWNER_SCHEMA_STATEMENTS,
             "ALTER TABLE IF EXISTS knowledge_files ADD COLUMN IF NOT EXISTS created_by VARCHAR(64)",
             "ALTER TABLE IF EXISTS knowledge_files ADD COLUMN IF NOT EXISTS updated_by VARCHAR(64)",
-            "ALTER TABLE IF EXISTS knowledge_files ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ",
             "ALTER TABLE IF EXISTS evaluation_datasets ADD COLUMN IF NOT EXISTS created_by VARCHAR(64)",
             "ALTER TABLE IF EXISTS evaluation_datasets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ",
             "ALTER TABLE IF EXISTS evaluation_datasets ADD COLUMN IF NOT EXISTS build_metadata JSONB",
@@ -1065,6 +1162,7 @@ class PostgresManager(metaclass=SingletonMeta):
             "ALTER TABLE IF EXISTS conversations ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE IF EXISTS conversations ADD COLUMN IF NOT EXISTS last_viewed_run_id VARCHAR(64)",
             "ALTER TABLE IF EXISTS mcp_servers ADD COLUMN IF NOT EXISTS env JSONB",
+            *AGENT_RUN_CURSOR_SCHEMA_STATEMENTS,
             """
             CREATE TABLE IF NOT EXISTS agent_envs (
                 id SERIAL PRIMARY KEY,
@@ -1145,6 +1243,68 @@ class PostgresManager(metaclass=SingletonMeta):
             "CREATE INDEX IF NOT EXISTS ix_agents_is_subagent ON agents(is_subagent)",
             "CREATE INDEX IF NOT EXISTS ix_agents_created_by ON agents(created_by)",
             """
+            CREATE TABLE IF NOT EXISTS scheduled_agent_jobs (
+                id VARCHAR(64) PRIMARY KEY,
+                uid VARCHAR(64) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+                creation_request_id VARCHAR(64) NOT NULL,
+                creation_intent_hash VARCHAR(64) NOT NULL,
+                project_id VARCHAR(64) NOT NULL,
+                agent_slug VARCHAR(64) NOT NULL,
+                name VARCHAR(255) NOT NULL,
+                prompt TEXT NOT NULL,
+                tool_approval_mode VARCHAR(32) NOT NULL DEFAULT 'default',
+                model_spec VARCHAR(512),
+                cron_expression VARCHAR(100) NOT NULL,
+                timezone VARCHAR(64) NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                deleted_at TIMESTAMP WITHOUT TIME ZONE,
+                next_run_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                CONSTRAINT fk_scheduled_agent_jobs_project_uid
+                    FOREIGN KEY (project_id, uid) REFERENCES projects(id, uid) ON DELETE CASCADE,
+                CONSTRAINT uq_scheduled_agent_jobs_uid_creation_request
+                    UNIQUE (uid, creation_request_id),
+                CONSTRAINT ck_scheduled_agent_jobs_tool_approval_mode
+                    CHECK (tool_approval_mode IN ('default', 'always_trust'))
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_scheduled_agent_jobs_uid ON scheduled_agent_jobs(uid)",
+            "CREATE INDEX IF NOT EXISTS ix_scheduled_agent_jobs_project_id ON scheduled_agent_jobs(project_id)",
+            "CREATE INDEX IF NOT EXISTS ix_scheduled_agent_jobs_deleted_at ON scheduled_agent_jobs(deleted_at)",
+            "CREATE INDEX IF NOT EXISTS ix_scheduled_agent_jobs_due ON scheduled_agent_jobs(enabled, next_run_at)",
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_agent_runs (
+                id VARCHAR(64) PRIMARY KEY,
+                job_id VARCHAR(64) NOT NULL REFERENCES scheduled_agent_jobs(id) ON DELETE CASCADE,
+                request_id VARCHAR(64) NOT NULL,
+                thread_id VARCHAR(64) NOT NULL,
+                trigger VARCHAR(16) NOT NULL DEFAULT 'scheduled',
+                occurrence_key VARCHAR(128) NOT NULL,
+                scheduled_for TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                project_id VARCHAR(64) NOT NULL,
+                agent_slug VARCHAR(64) NOT NULL,
+                conversation_title VARCHAR(255) NOT NULL,
+                prompt TEXT NOT NULL,
+                tool_approval_mode VARCHAR(32) NOT NULL,
+                model_spec VARCHAR(512),
+                status VARCHAR(32) NOT NULL DEFAULT 'dispatching',
+                error_message TEXT,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                CONSTRAINT uq_scheduled_agent_runs_job_occurrence UNIQUE (job_id, occurrence_key),
+                CONSTRAINT uq_scheduled_agent_runs_request UNIQUE (request_id),
+                CONSTRAINT uq_scheduled_agent_runs_thread UNIQUE (thread_id)
+            )
+            """,
+            (
+                "CREATE INDEX IF NOT EXISTS ix_scheduled_agent_runs_job_created "
+                "ON scheduled_agent_runs(job_id, created_at)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_scheduled_agent_runs_dispatching "
+                "ON scheduled_agent_runs(status, created_at)"
+            ),
+            """
             CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_default
             ON agents(is_default)
             WHERE is_default IS TRUE
@@ -1213,7 +1373,10 @@ class PostgresManager(metaclass=SingletonMeta):
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS channel VARCHAR(32) NOT NULL DEFAULT 'web'",
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS external_id VARCHAR(128)",
             *AGENT_RUN_LEASE_SCHEMA_STATEMENTS,
+            *AGENT_RUN_LANGFUSE_SCHEMA_STATEMENTS,
+            *MESSAGE_AUDIT_SCHEMA_STATEMENTS,
             *AGENT_RUN_FACT_SCHEMA_STATEMENTS,
+            *AGENT_RUN_TIMING_SCHEMA_STATEMENTS,
             (
                 "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS "
                 "origin_metadata JSONB NOT NULL DEFAULT '{}'::jsonb"
@@ -1609,7 +1772,7 @@ class PostgresManager(metaclass=SingletonMeta):
             BEGIN
                 FOREACH target_table IN ARRAY ARRAY['knowledge_bases', 'agents', 'skills'] LOOP
                     -- 这些资源表由知识库 schema 创建；空库初始化时尚未建表，不能提前执行兼容迁移。
-                    IF to_regclass('public.' || target_table) IS NOT NULL THEN
+                    IF to_regclass(target_table) IS NOT NULL THEN
                         EXECUTE format(
                             'ALTER TABLE %I ADD COLUMN IF NOT EXISTS organization_id_snapshot INTEGER', target_table
                         );
@@ -1628,7 +1791,7 @@ class PostgresManager(metaclass=SingletonMeta):
             """
             DO $$
             BEGIN
-                IF to_regclass('public.knowledge_bases') IS NOT NULL THEN
+                IF to_regclass('knowledge_bases') IS NOT NULL THEN
                     UPDATE knowledge_bases AS resource
                     SET organization_id_snapshot = users.department_id,
                         organization_path_snapshot = departments.path,
@@ -1641,7 +1804,7 @@ class PostgresManager(metaclass=SingletonMeta):
             """
             DO $$
             BEGIN
-                IF to_regclass('public.agents') IS NOT NULL THEN
+                IF to_regclass('agents') IS NOT NULL THEN
                     UPDATE agents AS resource
                     SET organization_id_snapshot = users.department_id,
                         organization_path_snapshot = departments.path,
@@ -1654,7 +1817,7 @@ class PostgresManager(metaclass=SingletonMeta):
             """
             DO $$
             BEGIN
-                IF to_regclass('public.skills') IS NOT NULL THEN
+                IF to_regclass('skills') IS NOT NULL THEN
                     UPDATE skills AS resource
                     SET organization_id_snapshot = users.department_id,
                         organization_path_snapshot = departments.path,
@@ -1669,7 +1832,7 @@ class PostgresManager(metaclass=SingletonMeta):
             DECLARE target_table TEXT;
             BEGIN
                 FOREACH target_table IN ARRAY ARRAY['knowledge_bases', 'agents', 'skills'] LOOP
-                    IF to_regclass('public.' || target_table) IS NOT NULL THEN
+                    IF to_regclass(target_table) IS NOT NULL THEN
                         EXECUTE format(
                             'UPDATE %I SET organization_snapshot_inferred = TRUE '
                             'WHERE organization_snapshot_inferred IS NULL', target_table
@@ -1684,6 +1847,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 END LOOP;
             END $$;
             """,
+            *TASK_DURABLE_SCHEMA_STATEMENTS,
         ]
         async with self.async_engine.begin() as conn:
             # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警

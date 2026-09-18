@@ -55,3 +55,16 @@ test('发送请求使用当前展示模型并同步 Conversation metadata', () =
   assert.match(sendBlock, /status !== 'rejected' && modelSpec/)
   assert.match(sendBlock, /thread\.metadata = \{ \.\.\.\(thread\.metadata \|\| \{\}\), model_spec: modelSpec \}/)
 })
+
+test('路由选择即使已预写当前线程也会加载消息', () => {
+  const routeSelectionBlock = source.slice(
+    source.indexOf('const selectThreadFromRoute'),
+    source.indexOf('const handleQuestionSubmit')
+  )
+
+  assert.doesNotMatch(
+    routeSelectionBlock,
+    /if \(currentThreadId\.value === threadId\) \{\s*return true\s*\}/
+  )
+  assert.match(routeSelectionBlock, /await selectChat\(threadId\)/)
+})

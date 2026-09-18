@@ -4,6 +4,41 @@
 
 同一版本的多次更新按功能归并。后续修复某项功能引入的问题时，直接更新原条目，避免同一问题在多个位置重复出现。当前版本的条目优先说明用户影响、操作变化和验证边界；实现细节只保留对升级、排障或贡献有帮助的部分。
 
+## v0.7.3（待发布）
+
+以下变更以 `v0.7.2` 正式 tag 为基线。0.7.3 新增定时智能体任务和主动上下文压缩，完善推理与工具结果展示、执行审计及后台任务恢复，并优化并发与解析依赖。CLI 沿用 0.1.4，本次应用更新不发布新的 CLI 包。
+
+### 升级注意事项
+
+- 数据库一次迁移 business 1/2/3/4/5/7 → 8、knowledge 1/2 → 3，无需经过未发布的中间版本。先停机并成套备份，再运行迁移器，最后协调重启 API 与 worker；旧知识文件的无 owner 处理中间态会标记失败，需要显式重试。操作见[生产部署与升级](../advanced/deployment.md)。
+- 移除 LITE 模式，部署统一包含知识库、图谱和评估能力；原 LITE 实例须补齐完整拓扑资源。
+- Sandbox 默认使用 `core` 规格；网页自动化部署须配置 `SANDBOX_RUNTIME_PROFILE=browser`，需要 Jupyter、code-server 等完整服务时使用 `full`。配置方式见[升级指南](../advanced/deployment.md)。
+- 移除内置内容安全检查能力及其配置入口；需要内容审核的部署须自行接入相应策略。
+- fork 默认对话模型和快速响应模型保持阿里云 `qwen3.7-max`，管理员已保存的模型选择保持优先。
+- History 接口独立返回 `runs`，移除消息上的 `run_started_at` / `run_finished_at`；外部客户端须通过消息的 `run_id` 读取对应 Run 的 `timing`，前后端需同步发布。契约见[线程阅读数据](../mechanisms/agent-runtime.md#线程阅读数据)。
+
+### 功能与修复
+
+- 新增用户定时智能体任务（Beta），支持 cron、时区、独立 Project 和立即运行；重叠执行跳过，错过的触发合并处理。边界见[定时任务决策](./decisions/implemented/2026-08-26-user-agent-scheduled-tasks.md)。
+- 支持空闲线程主动压缩上下文；达到预算 85% 时提示操作。自动压缩统一使用一个阈值，大工具结果保留完整文件及模型可读摘要，检索预览保留来源信息。
+- 完善 Model/Tool 增量审计和按 Run 分组的调试时间线，收紧审计与普通聊天记录的隔离；审计接口返回最新 500 条并明确标记截断，详见[审计接口决策](./decisions/implemented/2026-09-03-unify-message-audit-read-api.md)。
+- 修复硅基流动、OpenCode 与 GLM Coding Plan 推理内容在流式输出和历史回读中的丢失；旧记录仅恢复已保存内容。OpenCode/Go 请求补齐稳定会话头，修复 `MissingSessionID`；同时修复首块工具调用不显示及处理过程布局。配置差异见[推理适配决策](./decisions/implemented/2026-09-07-provider-reasoning-adapter.md)。
+- 修复普通 HTTP 环境创建 API Key 无响应（[#998](https://github.com/xerrors/Yuxi/issues/998)），重试沿用同一幂等请求 ID；公网部署仍须配置 HTTPS。
+- 修复知识库统计刷新命中过期缓存（[#997](https://github.com/xerrors/Yuxi/issues/997)）及带时区字段处理错误（[#988](https://github.com/xerrors/Yuxi/issues/988)）。
+- 修复共享智能体编辑时误删不可见的既有资源选择；运行时仍只使用当前用户有权访问的资源。新建托管 Project 使用可读目录名，既有 UUID 目录保持有效。
+- 修复子智能体禁用工具后仍可调用后端执行的问题；禁用状态在执行端拒绝工具访问（[#1001](https://github.com/xerrors/Yuxi/pull/1001)）。
+- 修复书籍分块偶发遗漏短文档标题、将不同节错误合并的问题；标题识别使用无放回抽样，短文档保留全部段落。
+
+### 运行与维护
+
+- 通用后台 Task 使用 PostgreSQL 持久执行意图与 ARQ worker，按 owner、heartbeat 和 lease 执行与收敛失联任务；知识库执行器和 Milvus 同步调用移出共享事件循环。
+- 优化任务领取、checkpoint 连接与模型请求前的等待，连接池可按 API/worker 分别配置；SSE 自适应轮询，取消改为 Redis key 轮询与 PostgreSQL 兜底。Sandbox 在首次文件或命令操作时创建，纯文本 Run 免去容器冷启动，首次工具调用仍可能等待启动。
+- AgentRun 持久保存准备完成、首次模型请求及首次输出时间，结果与历史统一派生阶段耗时；缺失指标保持为空。完成、取消和恢复按同一 Run 收敛 checkpoint、消息、审计与执行清理，保持同线程 FIFO 和 Workdir 持久化边界。
+- Office 解析使用 Docling slim，移除无消费者的解析依赖及 NLTK；PDF 解析路径保留。更新依赖审计负向控制，避免漏洞 fixture 被误当作生产依赖。
+- 精简测试中的重复准备、低信息量断言和无引用夹具，保留不同观察边界的 unit、真实 provider 探针与 E2E；测试运行器使用 readiness gate。并发评测统一为 `python -m backend.test.performance`，既有实测与环境限制见[并发优化决策](./decisions/implemented/2026-09-07-agent-concurrency-optimization.md)。
+- 更新文档首页、导航和并发配置说明，补齐迁移基线、模型配置与运行机制文档。
+
+## v0.7.2 (2026-08-26)
 ## v0.7.2 (2026-09-02)
 
 - Memory 开启时，Agent 上下文构建把账号资料按「关于我」画像同步到 `agents/USER.md`：称呼、部门（组织链路）、有值时的岗位与职级，保留手工内容；关闭 Memory 后清理该区块。工作区新建 `USER.md` 使用同一画像模板。
@@ -15,13 +50,12 @@
 - business schema 提升到 v4，已记录的 v1、v2、v3 由唯一 `storage-migrator` 执行幂等升级。升级前须备份持久数据并完成停机迁移；v4 尚未执行完整 shipping 升级演练。
 - CLI 增加 Agent 列表与详情查询，QA 分块修复标题前缀和超长边界，评估结果支持服务端筛选刷新；依赖更新包含 `transformers` 路径遍历漏洞修复。
 
-## v0.7.2.beta2 (2026-08-26)
 
 - 新增 H5“九典 AI 助手”历史会话一次性迁移工具：按固定截止时间读取指定应用的会话、消息和附件元数据，映射 OA UID 与 `default-chatbot` Agent，默认仅预检，显式执行时按会话事务写入并支持幂等跳过与失败清单。
 - 新增旧 OA 用户与部门一键同步脚本：固定先同步部门再同步用户，默认模拟预演并汇总结果，只有 `--apply` 才写入；同步文档补充服务器部署准备、预演、写入边界与异常处理说明。
 
 ::: warning Beta 升级说明
-beta2 延续 beta1 的存储与数据库迁移边界。从 v0.7.1 或更早版本升级时，仍须先完整备份 PostgreSQL、MinIO 和文件卷，并按[生产部署与升级](../advanced/deployment.md)执行停机迁移；不要只恢复其中一项。
+从 v0.7.1 或更早版本升级时，仍须先完整备份 PostgreSQL、MinIO 和文件卷，并按[生产部署与升级](../advanced/deployment.md)执行停机迁移；不要只恢复其中一项。
 :::
 
 - Project Workdir 内的 `write_file` 与 `edit_file` 在默认审批模式下可自动放行；Project 外写入和 `execute` 继续要求审批，Sandbox 文件权限边界不变。

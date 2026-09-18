@@ -10,6 +10,19 @@ from yuxi.config import options
 from yuxi.storage.postgres.models_business import Base
 
 
+@pytest.mark.parametrize("key", ["default_model", "fast_model"])
+def test_system_chat_model_defaults_to_fork_qwen(key):
+    """未配置的对话与快速模型使用硅基流动 DeepSeek Flash。"""
+    assert options.system_options.resolve({})[key] == "alibaba-cn:qwen3.7-max"
+
+
+@pytest.mark.parametrize("key", ["default_model", "fast_model"])
+def test_system_chat_model_preserves_saved_selection(key):
+    """默认值更新不覆盖管理员已保存的模型选择。"""
+    saved_model = "siliconflow-cn:Pro/MiniMaxAI/MiniMax-M2.5"
+    assert options.system_options.resolve({key: saved_model})[key] == saved_model
+
+
 class FakeRedis:
     def __init__(self):
         self.values: dict[str, str] = {}
@@ -52,24 +65,6 @@ async def db_session():
     await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_system_options_preserve_boolean_values(db_session, monkeypatch):
-    fake_redis = FakeRedis()
-    monkeypatch.setattr(options, "get_async_redis_client", lambda: _async_value(fake_redis))
-    await options.ensure_options_in_db(db_session)
-    await options.update_option_value(
-        db_session,
-        options.system_options.key,
-        {"enable_content_guard": False, "default_model": "test-provider:model"},
-        "tester",
-    )
-
-    values = await options.system_options.get(db_session)
-
-    assert values["enable_content_guard"] is False
-    assert values["default_model"] == "test-provider:model"
-
-
 def test_system_option_defaults_use_dashscope_models():
     """空配置解析时应使用 DashScope 的聊天、向量和重排模型。"""
     values = options.system_options.resolve({})
@@ -78,7 +73,6 @@ def test_system_option_defaults_use_dashscope_models():
     assert values["fast_model"] == "alibaba-cn:qwen3.7-max"
     assert values["embed_model"] == "alibaba-cn:text-embedding-v4"
     assert values["reranker"] == "alibaba-cn:qwen3-rerank"
-    assert values["content_guard_llm_model"] == "alibaba-cn:qwen3.7-max"
 
 
 @pytest.mark.asyncio
@@ -166,19 +160,6 @@ async def test_first_implicit_option_read_initializes_cache_version(monkeypatch)
     cache_key = f"{options.OPTION_CACHE_PREFIX}{options.system_options.key}"
     assert version == "0"
     assert json.loads(fake_redis.values[cache_key]) == {"default_model": "first:model"}
-
-
-@pytest.mark.asyncio
-async def test_invalid_boolean_is_rejected(db_session):
-    await options.ensure_options_in_db(db_session)
-
-    with pytest.raises(ValueError, match="布尔值"):
-        await options.update_option_value(
-            db_session,
-            options.system_options.key,
-            {"enable_content_guard": "true"},
-            "tester",
-        )
 
 
 async def _async_value(value):

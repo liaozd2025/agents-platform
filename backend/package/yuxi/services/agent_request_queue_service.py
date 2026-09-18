@@ -26,7 +26,10 @@ from yuxi.services.agent_run_service import (
     resolve_agent_run_config,
 )
 from yuxi.services.input_message_service import AgentRunInputMessage
-from yuxi.services.workdir_service import resolve_conversation_workdir_binding, resolve_conversation_workdir_path
+from yuxi.services.workdir_service import (
+    WorkdirBinding,
+    resolve_conversation_workdir_binding,
+)
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import AgentRun, AgentRunRequest, Message
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -69,6 +72,7 @@ class IntakeResult:
     run_id: str | None = None
     # FIFO 队内位置；未在排队（dispatched/rejected/已存在）时为 None。
     queue_position: int | None = None
+    workdir_binding: WorkdirBinding | None = None
 
 
 @dataclass(frozen=True)
@@ -77,9 +81,7 @@ class DispatchResult:
 
     request_id: str
     run_id: str
-    uid: str
-    workdir_path: str
-    materialize_managed: bool = False
+    workdir_binding: WorkdirBinding
 
 
 def validate_queue_policy(queue_policy: str) -> str:
@@ -111,8 +113,8 @@ async def intake_request(
     agent_backend: Any,
     model_spec: str | None = None,
     tool_approval_mode: str | None = None,
-    executor: str = "langgraph",
     meta: dict | None = None,
+    workdir_binding: WorkdirBinding | None = None,
 ) -> IntakeResult:
     """创建 request + Message，尝试立即派发。
 
@@ -126,8 +128,10 @@ async def intake_request(
     uid_str = str(uid)
     repo = AgentRunRequestRepository(db)
 
-    async def existing_intake_result() -> IntakeResult | None:
+    async def existing_intake_result(binding: WorkdirBinding | None = None) -> IntakeResult | None:
         """幂等：相同 request_id 已存在时返回既有 request/run 视图，不存在返回 None。"""
+        if binding is not None and (binding.uid != uid_str or binding.thread_id != thread_id):
+            raise RuntimeError("传入的 Workdir 绑定与请求作用域不一致")
         existing = await repo.get_by_request_id(request_id)
         if not existing:
             return None
@@ -141,9 +145,10 @@ async def intake_request(
             channel=channel,
             external_id=external_id,
             queue_policy=policy,
+            workdir_binding=binding,
         )
 
-    if result := await existing_intake_result():
+    if result := await existing_intake_result(workdir_binding):
         return result
 
     conversation = await _get_thread_conversation(
@@ -153,7 +158,20 @@ async def intake_request(
         thread_id=thread_id,
         lock=True,
     )
-    if result := await existing_intake_result():
+    if workdir_binding is None:
+        workdir_binding = await resolve_conversation_workdir_binding(
+            conversation=conversation,
+            uid=uid_str,
+            db=db,
+        )
+    elif (
+        workdir_binding.uid != uid_str
+        or workdir_binding.conversation_id != conversation.id
+        or workdir_binding.thread_id != conversation.thread_id
+        or workdir_binding.project_id != conversation.project_id
+    ):
+        raise RuntimeError("传入的 Workdir 绑定与 Conversation 不一致")
+    if result := await existing_intake_result(workdir_binding):
         return result
     existing_requests = await repo.list_queued(
         uid=uid_str,
@@ -202,8 +220,6 @@ async def intake_request(
             "model_spec": resolved_model_spec,
             "tool_approval_mode": resolved_tool_approval_mode,
         }
-        if executor == "pi":
-            input_payload["runtime"] = {"executor": "pi"}
 
     run_input_message = input_message.with_metadata(
         _build_message_metadata(request_id=request_id, source=source, input_message=input_message, meta=meta)
@@ -246,7 +262,7 @@ async def intake_request(
                 status=request_status,
             )
     except IntegrityError:
-        if result := await existing_intake_result():
+        if result := await existing_intake_result(workdir_binding):
             return result
         raise
 
@@ -259,7 +275,7 @@ async def intake_request(
             agent_slug=agent_slug,
             thread_id=thread_id,
             conversation_id=conversation.id,
-            workdir_path=await resolve_conversation_workdir_path(conversation=conversation, uid=uid_str, db=db),
+            workdir_binding=workdir_binding,
             expected_request_id=request_id if policy == "reject" else None,
         )
         if dispatched and dispatched.request_id == request_id:
@@ -272,6 +288,7 @@ async def intake_request(
                 message_id=persisted_message.id,
                 thread_id=thread_id,
                 run_id=dispatched.run_id,
+                workdir_binding=dispatched.workdir_binding,
             )
 
         if policy == "reject":
@@ -286,6 +303,7 @@ async def intake_request(
                 queue_policy=policy,
                 message_id=persisted_message.id,
                 thread_id=thread_id,
+                workdir_binding=workdir_binding,
             )
 
     if reject_without_immediate_dispatch:
@@ -295,6 +313,7 @@ async def intake_request(
             queue_policy=policy,
             message_id=persisted_message.id,
             thread_id=thread_id,
+            workdir_binding=workdir_binding,
         )
 
     return IntakeResult(
@@ -304,6 +323,7 @@ async def intake_request(
         message_id=persisted_message.id,
         thread_id=thread_id,
         queue_position=await repo.get_queue_position(request_id),
+        workdir_binding=workdir_binding,
     )
 
 
@@ -391,18 +411,16 @@ async def finalize_intake(
     *,
     db: AsyncSession,
     intake: IntakeResult,
-    uid: str,
-    workdir_path: str,
-    materialize_managed: bool = False,
 ) -> None:
     """调用方在 intake_request 后提交事务，并条件性将派发的 run 投入 ARQ。"""
+    binding = intake.workdir_binding
+    if binding is None:
+        raise RuntimeError(f"Request {intake.request_id} 缺少 Workdir 绑定，无法完成 intake")
     dispatch = (
         DispatchResult(
             request_id=intake.request_id,
             run_id=intake.run_id,
-            uid=str(uid),
-            workdir_path=workdir_path,
-            materialize_managed=materialize_managed,
+            workdir_binding=binding,
         )
         if intake.status == REQUEST_STATUS_DISPATCHED and intake.run_id
         else None
@@ -411,8 +429,8 @@ async def finalize_intake(
         await finalize_dispatch(db=db, dispatch=dispatch)
         return
     await db.commit()
-    if materialize_managed:
-        ensure_bound_user_workdir(str(uid), workdir_path)
+    if binding.materialize_managed:
+        ensure_bound_user_workdir(binding.uid, binding.workdir_path)
 
 
 async def finalize_dispatch(
@@ -422,8 +440,9 @@ async def finalize_dispatch(
 ) -> None:
     """提交事务并物化 Workdir，随后才把已创建的 run 投递给 ARQ。"""
     await db.commit()
-    if dispatch.materialize_managed:
-        ensure_bound_user_workdir(dispatch.uid, dispatch.workdir_path)
+    binding = dispatch.workdir_binding
+    if binding.materialize_managed:
+        ensure_bound_user_workdir(binding.uid, binding.workdir_path)
     await enqueue_agent_run(dispatch.run_id)
 
 
@@ -438,18 +457,16 @@ async def dispatch_next_request(
     供 run 完成后的下一个请求派发和恢复扫描调用。
     """
     run_id = None
-    workdir_path = None
-    materialize_managed = False
+    workdir_binding = None
     async with pg_manager.get_async_session_context() as db:
         conversation = await ConversationRepository(db).lock_conversation_by_thread_id(thread_id)
         if not _conversation_matches(conversation, uid=uid, agent_slug=agent_slug):
             return None
-        workdir_path, project = await resolve_conversation_workdir_binding(
+        workdir_binding = await resolve_conversation_workdir_binding(
             conversation=conversation,
             uid=str(uid),
             db=db,
         )
-        materialize_managed = project.directory_mode == "managed"
         active_run = await AgentRunRepository(db).get_active_run_by_thread_for_user(
             uid=str(uid),
             agent_slug=agent_slug,
@@ -465,17 +482,16 @@ async def dispatch_next_request(
                 agent_slug=agent_slug,
                 thread_id=thread_id,
                 conversation_id=conversation.id,
-                workdir_path=workdir_path,
-                materialize_managed=materialize_managed,
+                workdir_binding=workdir_binding,
             )
             if dispatch:
                 run_id = dispatch.run_id
 
     if run_id:
-        if not workdir_path:
+        if workdir_binding is None:
             raise RuntimeError(f"Conversation {thread_id} 缺少 Workdir 绑定，无法派发 Run")
-        if materialize_managed:
-            ensure_bound_user_workdir(str(uid), workdir_path)
+        if workdir_binding.materialize_managed:
+            ensure_bound_user_workdir(workdir_binding.uid, workdir_binding.workdir_path)
         await enqueue_agent_run(run_id)
         return run_id
     return None
@@ -486,8 +502,7 @@ async def recover_pending_dispatches() -> None:
     async with pg_manager.get_async_session_context() as db:
         pending_result = await db.execute(
             select(AgentRun.uid, AgentRun.agent_slug, AgentRun.conversation_thread_id).where(
-                AgentRun.status == "pending",
-                AgentRun.run_type != "sandbox",
+                AgentRun.status == "pending"
             )
         )
         scopes_result = await db.execute(
@@ -647,7 +662,7 @@ async def continue_thread_queue(
     if status != "paused":
         raise _queue_conflict("queue_not_paused", "当前队列不需要人工继续")
 
-    workdir_path, project = await resolve_conversation_workdir_binding(
+    workdir_binding = await resolve_conversation_workdir_binding(
         conversation=conversation,
         uid=str(uid),
         db=db,
@@ -659,8 +674,7 @@ async def continue_thread_queue(
         agent_slug=agent_slug,
         thread_id=thread_id,
         conversation_id=conversation.id,
-        workdir_path=workdir_path,
-        materialize_managed=project.directory_mode == "managed",
+        workdir_binding=workdir_binding,
     )
     if dispatched:
         return dispatched
@@ -750,6 +764,7 @@ async def _build_existing_intake_result(
     channel: str,
     external_id: str | None,
     queue_policy: str,
+    workdir_binding: WorkdirBinding | None = None,
 ) -> IntakeResult:
     expected_scope = (str(uid), agent_slug, thread_id, source, channel, external_id, queue_policy)
     actual_scope = (
@@ -773,6 +788,7 @@ async def _build_existing_intake_result(
         queue_position=await repo.get_queue_position(request.request_id)
         if request.status == REQUEST_STATUS_QUEUED
         else None,
+        workdir_binding=workdir_binding,
     )
 
 
@@ -834,6 +850,8 @@ async def _get_thread_conversation(
         else await repo.get_conversation_by_thread_id(thread_id)
     )
     if _conversation_matches(conversation, uid=uid, agent_slug=agent_slug):
+        if (conversation.extra_metadata or {}).get("source") == "pi_sandbox":
+            raise HTTPException(status_code=409, detail="历史 PI 对话仅可查看和下载，不能新增请求或恢复")
         return conversation
     raise HTTPException(status_code=404, detail="对话线程不存在")
 
@@ -895,8 +913,7 @@ async def _dispatch_ready_head(
     agent_slug: str,
     thread_id: str,
     conversation_id: int,
-    workdir_path: str,
-    materialize_managed: bool = False,
+    workdir_binding: WorkdirBinding,
     expected_request_id: str | None = None,
 ) -> DispatchResult | None:
     """只在 ready 状态派发 FIFO 队头。"""
@@ -926,8 +943,7 @@ async def _dispatch_ready_head(
         agent_slug=agent_slug,
         thread_id=thread_id,
         conversation_id=conversation_id,
-        workdir_path=workdir_path,
-        materialize_managed=materialize_managed,
+        workdir_binding=workdir_binding,
     )
 
 
@@ -939,8 +955,7 @@ async def _dispatch_locked_head(
     agent_slug: str,
     thread_id: str,
     conversation_id: int,
-    workdir_path: str,
-    materialize_managed: bool = False,
+    workdir_binding: WorkdirBinding,
 ) -> DispatchResult | None:
     """将已锁定的 queued 队头转换为 AgentRun，不提交事务。"""
     repo = AgentRunRequestRepository(db)
@@ -981,7 +996,5 @@ async def _dispatch_locked_head(
     return DispatchResult(
         request_id=head.request_id,
         run_id=run_id,
-        uid=uid,
-        workdir_path=workdir_path,
-        materialize_managed=materialize_managed,
+        workdir_binding=workdir_binding,
     )

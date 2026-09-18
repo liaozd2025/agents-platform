@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -78,3 +79,28 @@ def test_cleanup_preserves_selected_directory_and_removes_symlink_without_follow
 
     assert workdir.cleanup() is True
     assert workdir_root.exists() is False
+
+
+def test_stream_rejects_symlink_size_limit_and_changes_during_read(tmp_path, monkeypatch):
+    """流式下载拒绝符号链接、超限与读取期间被修改的文件。"""
+    project = "projects/11111111-1111-4111-8111-111111111111"
+    root = tmp_path / "workspace"
+    output = root / project / "outputs"
+    output.mkdir(parents=True)
+    monkeypatch.setattr(workspace_filesystem_module, "user_workspace_dir", lambda _uid: root)
+    workdir = Workdir.open_existing("user-1", project)
+    (output / "file.txt").write_bytes(b"x" * (2 * 1024 * 1024))
+    (output / "link.txt").symlink_to(output / "file.txt")
+    (output / "linked").symlink_to(output, target_is_directory=True)
+    for relative in ("link.txt", "linked/file.txt"):
+        with pytest.raises(PermissionError, match="symlink"):
+            list(workdir.iter_file_chunks(f"/outputs/{relative}", 4 * 1024 * 1024))
+    with pytest.raises(ValueError, match="transfer limit"):
+        list(workdir.iter_file_chunks("/outputs/file.txt", 1))
+    chunks = workdir.iter_file_chunks("/outputs/file.txt", 4 * 1024 * 1024)
+    assert len(next(chunks)) == 1024 * 1024
+    with (output / "file.txt").open("r+b") as target:
+        target.write(b"changed")
+        os.fsync(target.fileno())
+    with pytest.raises(ValueError, match="changed while reading"):
+        list(chunks)

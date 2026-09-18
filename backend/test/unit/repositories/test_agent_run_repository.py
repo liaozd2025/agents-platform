@@ -4,26 +4,14 @@ from datetime import timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from yuxi.repositories.agent_run_repository import AgentRunRepository, _requires_sandbox_runtime_cleanup
-from yuxi.storage.postgres.models_business import AgentRun, Base, Conversation, Message, SubagentThread
+
+from yuxi.repositories.agent_run_repository import AgentRunRepository
+from yuxi.storage.postgres.models_business import AgentRun, AgentRunAttempt, Base, Conversation, Message, SubagentThread
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
-
-
-@pytest.mark.parametrize(
-    ("run_type", "input_payload", "expected"),
-    [
-        ("chat", {}, True),
-        ("chat", {"runtime": {"executor": "pi"}}, False),
-        ("subagent", {}, False),
-    ],
-)
-async def test_sandbox_runtime_cleanup_excludes_pi_and_subagent(run_type, input_payload, expected):
-    run = AgentRun(run_type=run_type, input_payload=input_payload)
-
-    assert _requires_sandbox_runtime_cleanup(run) is expected
 
 
 @pytest_asyncio.fixture()
@@ -131,6 +119,12 @@ async def _seed_subagent_runs(db, *, relation_child_thread_id: str = "child-thre
     )
     await db.commit()
     return child_run
+
+
+async def _read_attempts(db, run_id: str) -> list[AgentRunAttempt]:
+    """直接读取 RunAttempt 事实表，作为独立测试 oracle。"""
+    attempts = list((await db.scalars(select(AgentRunAttempt).where(AgentRunAttempt.run_id == run_id))).all())
+    return sorted(attempts, key=lambda attempt: attempt.attempt_no)
 
 
 async def test_get_subagent_run_with_creator_returns_execution_pair(session):
@@ -798,55 +792,13 @@ async def test_mark_running_creates_single_attempt_for_initial_claim_and_live_ow
     _, second_acquired = await repository.mark_running(
         run.id, worker_id="worker-a:token-1", lease_seconds=60, now=now + timedelta(seconds=1)
     )
-    attempts = await repository.list_run_attempts(run.id)
+    attempts = await _read_attempts(session, run.id)
 
     assert first_acquired is True
     assert second_acquired is True
     assert [attempt.attempt_no for attempt in attempts] == [1]
     assert attempts[0].worker_id == "worker-a:token-1"
     assert attempts[0].finished_at is None
-
-
-async def test_pi_cleanup_failure_is_listed_and_cleared_only_for_observed_fact(session):
-    repository = AgentRunRepository(session)
-    run = await _seed_running_run(session, run_id="pi-cleanup-run", request_id="pi-cleanup-request")
-    now = utc_now_naive()
-    worker_id = "worker-a:token-1"
-    await repository.mark_running(
-        run.id,
-        worker_id=worker_id,
-        lease_seconds=60,
-        now=now,
-        attempt_metadata={
-            "adapter": "local",
-            "route_reason": "test",
-            "route_snapshot": {},
-            "runtime_manifest": {},
-            "runtime_manifest_digest": "a" * 64,
-        },
-    )
-    attempt = (await repository.list_run_attempts(run.id))[0]
-    attempt.error_type = "execution_unknown"
-    failed_at = now + timedelta(seconds=2)
-    await repository.record_pi_cleanup_failure(
-        run.id,
-        attempt_id=attempt.id,
-        worker_id=worker_id,
-        error_message="delete unavailable",
-        now=failed_at,
-    )
-
-    pending = await repository.list_pi_cleanup_failures()
-
-    assert pending[0]["attempt_id"] == attempt.id
-    assert pending[0]["uid"] == run.uid
-    assert pending[0]["instance_id"] is None
-    assert pending[0]["error_type"] == "execution_unknown"
-    assert await repository.lock_pi_cleanup_failure(attempt.id, failed_at=now) is False
-    assert await repository.lock_pi_cleanup_failure(attempt.id, failed_at=failed_at) is True
-    assert await repository.clear_pi_cleanup_failure(attempt.id, failed_at=now) is False
-    assert await repository.clear_pi_cleanup_failure(attempt.id, failed_at=failed_at) is True
-    assert await repository.list_pi_cleanup_failures() == []
 
 
 async def test_retry_release_then_reclaim_uses_new_attempt_no_and_keeps_old_fact(session):
@@ -866,7 +818,7 @@ async def test_retry_release_then_reclaim_uses_new_attempt_no_and_keeps_old_fact
     await repository.mark_running(
         run.id, worker_id="worker-b:token-2", lease_seconds=60, now=now + timedelta(seconds=3)
     )
-    attempts = await repository.list_run_attempts(run.id)
+    attempts = await _read_attempts(session, run.id)
 
     assert released is True
     assert blocked_before_cleanup is False
@@ -893,7 +845,7 @@ async def test_terminal_status_finishes_owner_attempt_with_matching_outcome(sess
     _, changed = await repository.set_terminal_status(
         run.id, status="completed", worker_id="worker-a:token-1", now=now + timedelta(seconds=2)
     )
-    attempts = await repository.list_run_attempts(run.id)
+    attempts = await _read_attempts(session, run.id)
 
     assert changed is True
     assert len(attempts) == 1
@@ -908,7 +860,7 @@ async def test_reconcile_closes_open_attempt_as_lease_expired(session):
 
     await repository.mark_running(run.id, worker_id="worker-dead:token-1", lease_seconds=10, now=now)
     reconciled, cancelled_descendants = await repository.reconcile_expired_leases(now=now + timedelta(seconds=11))
-    attempts = await repository.list_run_attempts(run.id)
+    attempts = await _read_attempts(session, run.id)
 
     assert [item.id for item in reconciled] == [run.id]
     assert cancelled_descendants == []
@@ -947,7 +899,7 @@ async def test_record_run_manifest_is_write_once_and_requires_live_owner(session
         worker_id="worker-a:token-1",
         now=now + timedelta(seconds=3),
     )
-    attempts = await repository.list_run_attempts(run.id)
+    attempts = await _read_attempts(session, run.id)
 
     assert recorded is True
     assert rewritten is False
@@ -965,6 +917,104 @@ async def test_record_run_manifest_is_write_once_and_requires_live_owner(session
             worker_id="worker-a:token-1",
             now=now + timedelta(seconds=61),
         )
+
+
+async def test_run_timing_is_write_once_and_requires_live_owner(session):
+    repository = AgentRunRepository(session)
+    run = await _seed_running_run(session, run_id="timing-run", request_id="timing-request")
+    now = utc_now_naive()
+    owner = "worker-a:token-1"
+
+    await repository.mark_running(run.id, worker_id=owner, lease_seconds=60, now=now)
+
+    with pytest.raises(ValueError, match="lease owner"):
+        await repository.record_prepared(
+            run.id,
+            worker_id="worker-stale:token-2",
+            observed_at=now + timedelta(seconds=1),
+            checked_at=now + timedelta(seconds=1),
+        )
+
+    with pytest.raises(ValueError, match="lease owner"):
+        await repository.record_prepared(
+            run.id,
+            worker_id=owner,
+            observed_at=now + timedelta(seconds=1),
+            checked_at=now + timedelta(seconds=61),
+        )
+
+    with pytest.raises(ValueError, match="不能早于创建时间"):
+        await repository.record_first_model_request(
+            run.id,
+            worker_id=owner,
+            observed_at=run.created_at - timedelta(seconds=1),
+            checked_at=now + timedelta(seconds=1),
+        )
+
+    _, prepared = await repository.record_prepared(
+        run.id,
+        worker_id=owner,
+        observed_at=now + timedelta(seconds=2),
+        checked_at=now + timedelta(seconds=2),
+    )
+    _, prepared_again = await repository.record_prepared(
+        run.id,
+        worker_id=owner,
+        observed_at=now + timedelta(seconds=3),
+        checked_at=now + timedelta(seconds=3),
+    )
+    _, first_output = await repository.record_first_output(
+        run.id,
+        worker_id=owner,
+        observed_at=now + timedelta(seconds=7),
+        checked_at=now + timedelta(seconds=7),
+    )
+    _, first_output_again = await repository.record_first_output(
+        run.id,
+        worker_id=owner,
+        observed_at=now + timedelta(seconds=8),
+        checked_at=now + timedelta(seconds=8),
+    )
+    _, first_model_request = await repository.record_first_model_request(
+        run.id,
+        worker_id=owner,
+        observed_at=now + timedelta(seconds=3),
+        checked_at=now + timedelta(seconds=3),
+    )
+    _, first_model_request_again = await repository.record_first_model_request(
+        run.id,
+        worker_id=owner,
+        observed_at=now + timedelta(seconds=4),
+        checked_at=now + timedelta(seconds=4),
+    )
+
+    assert prepared is True
+    assert prepared_again is False
+    assert first_output is True
+    assert first_output_again is False
+    assert first_model_request is True
+    assert first_model_request_again is False
+    assert run.prepared_at == now + timedelta(seconds=2)
+    assert run.first_model_request_at == now + timedelta(seconds=3)
+    assert run.first_output_at == now + timedelta(seconds=7)
+
+
+async def test_run_first_output_requires_prepared_timestamp(session):
+    repository = AgentRunRepository(session)
+    run = await _seed_running_run(session, run_id="unprepared-run", request_id="unprepared-request")
+    now = utc_now_naive()
+    owner = "worker-a:token-1"
+    await repository.mark_running(run.id, worker_id=owner, lease_seconds=60, now=now)
+
+    with pytest.raises(ValueError, match="不能早于准备完成时间"):
+        await repository.record_first_output(
+            run.id,
+            worker_id=owner,
+            observed_at=now + timedelta(seconds=1),
+            checked_at=now + timedelta(seconds=1),
+        )
+
+    assert run.first_output_at is None
 
 
 async def test_lock_memory_write_requires_current_top_level_lease_owner(session):

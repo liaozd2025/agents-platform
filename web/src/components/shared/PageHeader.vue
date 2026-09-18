@@ -61,7 +61,8 @@ function emitChange(item) {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 10px var(--page-padding);
+  height: 48px;
+  padding: 0 var(--page-padding);
   background-color: var(--light-60);
   backdrop-filter: blur(10px);
   position: sticky;
@@ -152,6 +153,27 @@ function emitChange(item) {
     width: 30%;
     position: absolute;
     animation: page-header-loading-bar-anim 1.5s infinite linear;
+  }
+}
+
+@media (max-width: 640px) {
+  .page-header {
+    height: auto;
+    min-height: 48px;
+    padding-block: 8px;
+    flex-wrap: wrap;
+  }
+
+  .page-header-left,
+  .page-header-tabs {
+    flex-wrap: wrap;
+  }
+
+  .page-header-tabs {
+    height: auto;
+    flex-shrink: 1;
+    padding-left: 0;
+    border-left: 0;
   }
 }
 

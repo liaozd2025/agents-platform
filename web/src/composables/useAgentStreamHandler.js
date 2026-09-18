@@ -23,9 +23,6 @@ const streamEventToMessageChunk = (streamEvent) => {
     if (streamEvent.reasoning_content) {
       chunk.reasoning_content = streamEvent.reasoning_content
     }
-    if (streamEvent.additional_reasoning_content) {
-      chunk.additional_kwargs = { reasoning_content: streamEvent.additional_reasoning_content }
-    }
     return chunk
   }
 
@@ -39,6 +36,7 @@ const streamEventToMessageChunk = (streamEvent) => {
           index: streamEvent.index || 0,
           id: streamEvent.tool_call_id,
           name: streamEvent.name,
+          complete: streamEvent.type === 'tool_call',
           args:
             streamEvent.type === 'tool_call_delta'
               ? streamEvent.args_delta || ''
@@ -49,15 +47,6 @@ const streamEventToMessageChunk = (streamEvent) => {
   }
 
   return null
-}
-
-const loadingMessageChunk = (chunk) => {
-  const semanticChunk = streamEventToMessageChunk(chunk?.stream_event)
-  if (semanticChunk) return semanticChunk
-
-  const msg = chunk?.msg
-  if (msg?.event) return null
-  return msg || null
 }
 
 // progress 和 finished 都是累计快照，不能按正文增量拼接。
@@ -76,6 +65,7 @@ const toolOutputMessage = (chunk) => {
   return {
     ...output,
     type: 'tool',
+    run_id: chunk.run_id,
     id,
     tool_call_id: output.tool_call_id || data.tool_call_id || id,
     ...(data.event === 'tool-progress' ? { status: 'running' } : {})
@@ -113,13 +103,23 @@ export function useAgentStreamHandler({
             const localHumanMessage = threadState.onGoingConv.msgChunks[resolvedRequestId]?.find(
               (item) => item?.type === 'human' || item?.role === 'user'
             )
+            const resolvedRunId =
+              request_id && chunk.stream_thread_id === threadId ? chunk.stream_run_id : null
+            const initMetadata = { ...(msg?.extra_metadata || {}) }
+            delete initMetadata.run_id
             const initMessage = {
               ...msg,
               id: msg?.id || resolvedRequestId,
+              created_at: msg.created_at || localHumanMessage?.created_at,
               extra_metadata: {
-                ...(msg?.extra_metadata || {}),
+                ...initMetadata,
                 request_id: resolvedRequestId
               }
+            }
+            delete initMessage.run_id
+            if (resolvedRunId) {
+              initMessage.run_id = resolvedRunId
+              initMessage.extra_metadata.run_id = resolvedRunId
             }
             if (localHumanMessage?.image_content && !initMessage.image_content) {
               initMessage.message_type = localHumanMessage.message_type || initMessage.message_type
@@ -134,7 +134,7 @@ export function useAgentStreamHandler({
 
       case 'loading':
         {
-          const messageChunk = loadingMessageChunk(chunk)
+          const messageChunk = streamEventToMessageChunk(chunk?.stream_event)
           if (messageChunk?.id) {
             messageChunk.run_id = chunk.run_id || messageChunk.run_id
             messageChunk.thread_id = threadId || messageChunk.thread_id
@@ -269,7 +269,7 @@ export function useAgentStreamHandler({
             threadState.pendingInterrupt = pendingInterrupt
           }
         }
-        // 如果有 message 字段，显示提示（例如：敏感内容检测）
+        // 如果有 message 字段，显示中断原因。
         if (chunkMessage) {
           message.info(chunkMessage)
         }

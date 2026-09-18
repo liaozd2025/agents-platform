@@ -4,6 +4,8 @@
 类型：bug-fix
 Owner：backend/package/yuxi/services/chat_service.py
 
+PI 执行相关部分由 [PI 退役决策](../implemented/2026-09-18-retire-pi-executor.md) 取代；本记录中的对应验证仅代表退役前版本。
+
 ## 问题
 
 普通问候在模型执行前创建沙盒，回复持久化后又等待沙盒销毁，用户因此承受与聊天无关的启动与收尾延迟。

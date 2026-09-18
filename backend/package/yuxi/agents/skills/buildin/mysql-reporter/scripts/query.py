@@ -8,19 +8,13 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import os
 import re
 import sys
-import time
 from typing import Any
 
 import pymysql
-from pymysql import MySQLError
+from _mysql_common import create_connection, load_mysql_config
 from pymysql.cursors import DictCursor
-
-
-class MySQLConnectionError(Exception):
-    """MySQL 连接异常"""
 
 
 class QueryTimeoutError(Exception):
@@ -54,12 +48,16 @@ class MySQLSecurityChecker:
 
     @classmethod
     def validate_sql(cls, sql: str) -> bool:
-        """验证SQL语句的安全性"""
-        if not sql:
+        """拒绝已知危险语法；数据库只读账号仍是最终权限边界。"""
+        # MySQL/MariaDB 可执行注释不能当普通注释删掉后放行。
+        if not sql or re.search(r"/\*(?:!|M!)", sql, re.IGNORECASE):
+            return False
+        # 在去注释前保守拒绝文件操作名，防止字符串中的注释符隐藏后续 SQL。
+        if re.search(r"\b(?:OUTFILE|DUMPFILE|LOAD_FILE)\b", sql, re.IGNORECASE):
             return False
 
         sql_clean = re.sub(r"--.*$", "", sql, flags=re.MULTILINE)
-        sql_clean = re.sub(r"/\*.*?\*/", "", sql_clean, flags=re.DOTALL)
+        sql_clean = re.sub(r"/\*.*?\*/", " ", sql_clean, flags=re.DOTALL)
         sql_upper = sql_clean.strip().upper()
         sql_without_trailing_semicolon = sql_upper.rstrip()
         if sql_without_trailing_semicolon.endswith(";"):
@@ -96,53 +94,6 @@ class MySQLSecurityChecker:
     def validate_timeout(cls, timeout: int) -> bool:
         """验证timeout参数"""
         return isinstance(timeout, int) and 1 <= timeout <= 600
-
-
-def load_mysql_config() -> dict[str, Any]:
-    config: dict[str, Any] = {
-        "host": os.getenv("MYSQL_HOST"),
-        "user": os.getenv("MYSQL_USER"),
-        "password": os.getenv("MYSQL_PASSWORD"),
-        "database": os.getenv("MYSQL_DATABASE"),
-        "port": int(os.getenv("MYSQL_PORT") or "3306"),
-        "charset": "utf8mb4",
-        "description": os.getenv("MYSQL_DATABASE_DESCRIPTION") or "默认 MySQL 数据库",
-    }
-
-    required_keys = ["host", "user", "password", "database"]
-    for key in required_keys:
-        if not config[key]:
-            raise MySQLConnectionError(
-                f"MySQL configuration missing required key: {key}, please check your environment variables."
-            )
-
-    return config
-
-
-def create_connection(config: dict[str, Any]) -> pymysql.Connection:
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            return pymysql.connect(
-                host=config["host"],
-                user=config["user"],
-                password=config["password"],
-                database=config["database"],
-                port=config["port"],
-                charset=config.get("charset", "utf8mb4"),
-                cursorclass=DictCursor,
-                connect_timeout=10,
-                read_timeout=60,
-                write_timeout=30,
-                autocommit=True,
-            )
-        except MySQLError as exc:
-            if attempt < max_retries - 1:
-                time.sleep(2**attempt)
-                continue
-            raise ConnectionError(f"MySQL connection failed: {exc}") from exc
-
-    raise ConnectionError("MySQL connection failed")
 
 
 def execute_query_with_timeout(

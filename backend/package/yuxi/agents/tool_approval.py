@@ -5,13 +5,10 @@ from langchain.agents.middleware import HumanInTheLoopMiddleware
 
 ToolApprovalMode = Literal["default", "always_trust"]
 
-# 系统级工具审批默认模式：请求与 Agent 配置都未指定时生效。当前默认完全信任（敏感工具自动执行）。
-DEFAULT_TOOL_APPROVAL_MODE: ToolApprovalMode = "always_trust"
+DEFAULT_TOOL_APPROVAL_MODE: ToolApprovalMode = "default"
 TOOL_APPROVAL_MODES = frozenset({"default", "always_trust"})
-SANDBOX_EXECUTION_TOOLS = frozenset({"write_file", "edit_file", "execute"})
-PI_DELEGATED_SANDBOX_TOOLS = SANDBOX_EXECUTION_TOOLS | {"ls", "glob", "grep", "ocr_parse_file"}
 # 默认审批模式下需要拦截或对子 Agent 隐藏的敏感 backend 工具。
-SENSITIVE_BACKEND_TOOLS = SANDBOX_EXECUTION_TOOLS
+SENSITIVE_BACKEND_TOOLS = frozenset({"write_file", "edit_file", "execute"})
 _ALLOWED_DECISIONS = ["approve", "reject"]
 
 
@@ -37,7 +34,6 @@ def create_tool_approval_middleware(
             "write_file": {"allowed_decisions": _ALLOWED_DECISIONS, "when": write_requires_approval},
             "edit_file": {"allowed_decisions": _ALLOWED_DECISIONS, "when": write_requires_approval},
             "execute": {"allowed_decisions": _ALLOWED_DECISIONS},
-            "pi_sandbox": {"allowed_decisions": _ALLOWED_DECISIONS},
         }
     )
 

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from yuxi.agents.buildin.chatbot import graph as chatbot_graph
+from yuxi.agents.context import BaseContext
 from yuxi.agents.tool_approval import create_tool_approval_middleware, normalize_tool_approval_mode
 
 PROJECT_ROOT = "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111"
@@ -22,10 +23,7 @@ def test_default_mode_auto_approves_writes_inside_current_project():
 
     assert _requires_approval(middleware, "write_file", f"{PROJECT_ROOT}/outputs/report.md") is False
     assert _requires_approval(middleware, "edit_file", f"{PROJECT_ROOT}/notes.md") is False
-    assert all(
-        config["allowed_decisions"] == ["approve", "reject"]
-        for config in middleware.interrupt_on.values()
-    )
+    assert all(config["allowed_decisions"] == ["approve", "reject"] for config in middleware.interrupt_on.values())
 
 
 def test_default_mode_keeps_project_external_writes_and_execute_behind_approval():
@@ -60,9 +58,12 @@ def test_default_mode_without_current_project_keeps_writes_behind_approval():
 
 @pytest.mark.asyncio
 async def test_chatbot_graph_assembles_approval_with_current_project(monkeypatch):
-    monkeypatch.setattr(chatbot_graph, "load_chat_model", lambda fully_specified_name: object())
     monkeypatch.setattr(chatbot_graph, "create_agent_filesystem_middleware", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(chatbot_graph, "create_summary_middleware", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        chatbot_graph,
+        "create_summary_middleware_from_context",
+        lambda _context, **_kwargs: object(),
+    )
 
     async def no_optional_middleware(_context):
         return None
@@ -85,6 +86,12 @@ async def test_chatbot_graph_assembles_approval_with_current_project(monkeypatch
 
 def test_always_trust_mode_does_not_build_approval_middleware():
     assert create_tool_approval_middleware("always_trust") is None
+
+
+def test_unspecified_approval_mode_uses_upstream_default():
+    mode = BaseContext().tool_approval_mode
+    assert mode == "default"
+    assert create_tool_approval_middleware(normalize_tool_approval_mode(mode)) is not None
 
 
 def test_unknown_tool_approval_mode_is_rejected():

@@ -12,7 +12,7 @@ agent_router_module = importlib.import_module("server.routers.agent_router")
 
 
 def _user(uid: str = "admin"):
-    return SimpleNamespace(uid=uid, department_id=1)
+    return SimpleNamespace(uid=uid, department_id=1, role_assignments=[])
 
 
 def _agent(slug: str, *, backend_id: str = "ChatbotAgent", is_subagent: bool = False):

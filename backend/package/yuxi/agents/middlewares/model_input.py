@@ -8,7 +8,7 @@ from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, Mod
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, merge_message_runs
 from langchain_openai import ChatOpenAI
 
-from yuxi.agents.tool_approval import PI_DELEGATED_SANDBOX_TOOLS
+from yuxi.agents.toolkits.buildin.tools import ocr_parse_file
 
 _TOOL_IMAGE_USER_TEXT = "Images returned by read_file are attached below. Inspect them when answering."
 _INVALID_TOOL_CALL_TEXT = (
@@ -36,14 +36,13 @@ _CONTINUE_TRUNCATED_RESPONSE = (
 class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
     """Bridge OpenAI tool images and translate explicit image capability errors."""
 
-    tools = []
+    tools = [ocr_parse_file]
 
     def wrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        request = _remove_pi_delegated_sandbox_tools(request)
         request = _normalize_invalid_tool_calls(request)
         image_paths = _read_file_image_paths(request.messages)
         request = _bridge_openai_tool_images(request)
@@ -51,7 +50,7 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
             return _continue_sync_model_response(request, handler)
         except Exception as exc:  # noqa: BLE001
             if _has_image(request.messages) and _is_image_input_rejection(exc):
-                return _pi_image_fallback_response(image_paths)
+                return _ocr_fallback_response(image_paths)
             raise
 
     async def awrap_model_call(
@@ -59,7 +58,6 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        request = _remove_pi_delegated_sandbox_tools(request)
         request = _normalize_invalid_tool_calls(request)
         image_paths = _read_file_image_paths(request.messages)
         request = _bridge_openai_tool_images(request)
@@ -67,7 +65,7 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
             return await _continue_async_model_response(request, handler)
         except Exception as exc:  # noqa: BLE001
             if _has_image(request.messages) and _is_image_input_rejection(exc):
-                return _pi_image_fallback_response(image_paths)
+                return _ocr_fallback_response(image_paths)
             raise
 
 
@@ -139,11 +137,6 @@ def _merge_continued_responses(responses: list[ModelResponse]) -> ModelResponse:
     if len(messages) == 1 and isinstance(messages[0], AIMessage) and isinstance(final_message, AIMessage):
         messages[0] = messages[0].model_copy(update={"response_metadata": final_message.response_metadata})
     return ModelResponse(result=messages, structured_response=responses[-1].structured_response)
-
-
-def _remove_pi_delegated_sandbox_tools(request: ModelRequest) -> ModelRequest:
-    tools = [tool for tool in request.tools or [] if tool.name not in PI_DELEGATED_SANDBOX_TOOLS]
-    return request.override(tools=tools) if len(tools) != len(request.tools or []) else request
 
 
 def _normalize_invalid_ai_message(message: AIMessage) -> tuple[AIMessage, bool]:
@@ -305,26 +298,22 @@ def _read_file_image_paths(messages: list[Any]) -> list[str]:
     return paths
 
 
-def _pi_image_fallback_response(image_paths: list[str]) -> ModelResponse:
+def _ocr_fallback_response(image_paths: list[str]) -> ModelResponse:
     if not image_paths:
-        return ModelResponse(result=[AIMessage(content="当前模型无法读取图片，且没有可供 PI 解析的文件路径。")])
+        return ModelResponse(result=[AIMessage(content="当前模型无法读取图片，且没有可供 OCR 工具解析的文件路径。")])
 
-    paths = "\n".join(f"- {path}" for path in image_paths)
     tool_calls = [
         {
-            "name": "pi_sandbox",
-            "args": {
-                "description": (
-                    f"读取并解析以下图片，提取其中的文字和关键信息；只返回解析结果，不修改原文件：\n{paths}"
-                )
-            },
-            "id": f"call_pi_{uuid4().hex}",
+            "name": "ocr_parse_file",
+            "args": {"file_path": path},
+            "id": f"call_ocr_{uuid4().hex}",
         }
+        for path in image_paths
     ]
     return ModelResponse(
         result=[
             AIMessage(
-                content="当前模型不支持图片输入，正在交给 PI Agent 在沙箱中解析。",
+                content="当前模型不支持图片输入，正在改用 OCR 工具提取图片文字。",
                 tool_calls=tool_calls,
             )
         ]
