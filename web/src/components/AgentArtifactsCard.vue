@@ -46,6 +46,7 @@
       selection-mode="directory"
       :active="saveDialogOpen"
       :disabled="pendingSaveFile ? isSaving(pendingSaveFile.path) : false"
+      :resolve-directory-label="projectsStore.resolveDirectoryLabel"
       @loading-change="pickerLoading = $event"
     />
   </a-modal>
@@ -58,6 +59,9 @@ import { Download, LoaderCircle, Save } from '@lucide/vue'
 import { threadApi } from '@/apis/agent_api'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import WorkspacePathPicker from '@/components/WorkspacePathPicker.vue'
+import { useProjectsStore } from '@/stores/projects'
+
+const projectsStore = useProjectsStore()
 
 const props = defineProps({
   artifacts: {
@@ -157,6 +161,8 @@ const saveToWorkspace = (file) => {
   pendingSaveFile.value = file
   selectedDestination.value = '/saved_artifacts'
   saveDialogOpen.value = true
+  // 目录选择器需要目录名称映射，才能把托管会话目录显示成可读名称
+  void projectsStore.ensureDirectoryLabels()
 }
 
 const closeSaveDialog = () => {

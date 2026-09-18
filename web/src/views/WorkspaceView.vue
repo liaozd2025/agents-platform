@@ -239,9 +239,11 @@ import {
 } from '@/apis/workspace_api'
 import GlobalSearchModal from '@/components/GlobalSearchModal.vue'
 import { normalizePreviewResponse } from '@/utils/file_preview'
+import { useProjectsStore } from '@/stores/projects'
 
 const userStore = useUserStore()
 const route = useRoute()
+const projectsStore = useProjectsStore()
 const runtimeCapabilitiesStore = useRuntimeCapabilitiesStore()
 const { knowledgeEnabled } = storeToRefs(runtimeCapabilitiesStore)
 
@@ -271,6 +273,14 @@ const openFileByPath = async (path) => {
 const knowledgeBreadcrumbItems = ref([])
 const workspaceBreadcrumbItems = ref(null)
 const entries = ref([])
+
+/** 给托管会话目录补展示名：主名称用项目名/会话标题，uuid 作为括号后缀；其余字段保持原值。 */
+const decorateWorkspaceEntries = (items) =>
+  items.map((entry) => {
+    if (!entry?.is_dir) return entry
+    const label = projectsStore.resolveDirectoryLabel(entry.path)
+    return label ? { ...entry, title: label.label, displaySuffix: `（${entry.name}）` } : entry
+  })
 const selectedEntry = ref(null)
 const selectedPaths = ref([])
 const selectionMode = ref(false)
@@ -487,8 +497,11 @@ const handleSelectionModeChange = (enabled) => {
 const loadWorkspaceEntries = async (path = '/') => {
   loadingTree.value = true
   try {
-    const response = await getWorkspaceTree(path)
-    entries.value = response.entries || []
+    // 名称映射先就绪，避免列表先显示 uuid 再被改写
+    await projectsStore.ensureDirectoryLabels()
+    // 带上未绑定的会话目录：个人空间要能看到每个 projects/<uuid>，才能按名称辨认来源
+    const response = await getWorkspaceTree(path, false, false, true)
+    entries.value = decorateWorkspaceEntries(response.entries || [])
     currentPath.value = path
     knowledgeBreadcrumbItems.value = []
     workspaceBreadcrumbItems.value = buildWorkspaceBreadcrumbItems()

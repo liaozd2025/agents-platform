@@ -187,6 +187,7 @@
           :active="visible && uploadMode === 'workspace'"
           :disabled="chunkLoading"
           :is-file-selectable="isWorkspaceFileSelectable"
+          :resolve-directory-label="projectsStore.resolveDirectoryLabel"
           @loading-change="workspaceLoading = $event"
         />
       </div>
@@ -307,6 +308,9 @@ import { buildChunkParamsPayload } from '@/utils/chunkUtils'
 import ChunkParamsConfig from '@/components/ChunkParamsConfig.vue'
 import OCRSelector from '@/components/OCRSelector.vue'
 import WorkspacePathPicker from '@/components/WorkspacePathPicker.vue'
+import { useProjectsStore } from '@/stores/projects'
+
+const projectsStore = useProjectsStore()
 
 const props = defineProps({
   visible: {
@@ -367,6 +371,8 @@ watch(
       selectedFolderId.value = props.currentFolderId
       isFolderUpload.value = props.isFolderMode
       uploadMode.value = props.mode || (props.isFolderMode ? 'folder' : 'file')
+      // 目录选择器需要目录名称映射，才能把托管会话目录显示成可读名称
+      void projectsStore.ensureDirectoryLabels()
     }
   }
 )
