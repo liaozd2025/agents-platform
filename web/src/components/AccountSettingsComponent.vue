@@ -91,6 +91,10 @@
               <span class="profile-label">UID</span>
               <span class="profile-value mono">{{ userStore.uid || '未设置' }}</span>
             </div>
+            <div class="profile-row">
+              <span class="profile-label">密码</span>
+              <button type="button" class="editable-value" @click="openPasswordModal">修改密码</button>
+            </div>
           </div>
         </div>
 
@@ -111,6 +115,48 @@
       </div>
       <UserConfigSettingsCard ref="userConfigRef" />
     </div>
+
+    <!-- 修改密码弹窗：由账户资料卡片里的「修改密码」按钮打开，走 PUT /api/auth/password（需填原密码） -->
+    <a-modal
+      v-model:open="passwordModalOpen"
+      title="修改密码"
+      :confirmLoading="changingPassword"
+      okText="保存新密码"
+      cancelText="取消"
+      :maskClosable="false"
+      width="420px"
+      class="password-modal"
+      @ok="submitPasswordChange"
+      @cancel="closePasswordModal"
+    >
+      <a-form layout="vertical" class="password-form" @submit.prevent>
+        <a-form-item label="原密码">
+          <a-input-password
+            v-model:value="passwordDraft.oldPassword"
+            :maxlength="64"
+            placeholder="请输入当前登录密码"
+            autocomplete="current-password"
+          />
+        </a-form-item>
+        <a-form-item label="新密码">
+          <a-input-password
+            v-model:value="passwordDraft.newPassword"
+            :maxlength="64"
+            :placeholder="`请输入新密码（至少 ${MIN_PASSWORD_LENGTH} 位）`"
+            autocomplete="new-password"
+          />
+        </a-form-item>
+        <a-form-item label="确认新密码">
+          <a-input-password
+            v-model:value="passwordDraft.confirmPassword"
+            :maxlength="64"
+            placeholder="请再次输入新密码"
+            autocomplete="new-password"
+            @press-enter="submitPasswordChange"
+          />
+        </a-form-item>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
@@ -120,6 +166,7 @@ import UserConfigSettingsCard from '@/components/UserConfigSettingsCard.vue'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { Building2, RefreshCw, ShieldCheck, Upload } from '@lucide/vue'
+import { authApi } from '@/apis/auth_api'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { useUserStore } from '@/stores/user'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
@@ -135,6 +182,16 @@ const userConfigRef = ref(null)
 const profileDraft = reactive({
   username: '',
   phone_number: ''
+})
+
+// 新密码最短长度，与后端 UserPasswordChange 的 min_length=8 保持一致
+const MIN_PASSWORD_LENGTH = 8
+const changingPassword = ref(false)
+const passwordModalOpen = ref(false)
+const passwordDraft = reactive({
+  oldPassword: '',
+  newPassword: '',
+  confirmPassword: ''
 })
 
 const avatarDefaultSrc = computed(() => (userStore.uid ? generatePixelAvatar(userStore.uid) : ''))
@@ -218,6 +275,64 @@ const saveField = async (field) => {
   }
 }
 
+// 清空密码输入框，避免明文长期停留在页面上
+const resetPasswordDraft = () => {
+  passwordDraft.oldPassword = ''
+  passwordDraft.newPassword = ''
+  passwordDraft.confirmPassword = ''
+}
+
+// 打开弹窗前先清空，避免上次失败留下的内容被误提交
+const openPasswordModal = () => {
+  resetPasswordDraft()
+  passwordModalOpen.value = true
+}
+
+const closePasswordModal = () => {
+  passwordModalOpen.value = false
+  resetPasswordDraft()
+}
+
+const submitPasswordChange = async () => {
+  const oldPassword = passwordDraft.oldPassword
+  const newPassword = passwordDraft.newPassword
+
+  // 前端只做必要的即时提示，最终规则以后端校验为准
+  if (!oldPassword) {
+    message.error('请输入原密码')
+    return
+  }
+  if (newPassword.length < MIN_PASSWORD_LENGTH) {
+    message.error(`新密码至少 ${MIN_PASSWORD_LENGTH} 位`)
+    return
+  }
+  if (newPassword === oldPassword) {
+    message.error('新密码不能与原密码相同')
+    return
+  }
+  if (newPassword !== passwordDraft.confirmPassword) {
+    message.error('两次输入的新密码不一致')
+    return
+  }
+
+  changingPassword.value = true
+  try {
+    await authApi.changePassword({ old_password: oldPassword, new_password: newPassword })
+    // 成功后关闭弹窗并清空表单；当前登录态不受影响，下次登录使用新密码
+    message.success('密码修改成功')
+    closePasswordModal()
+  } catch (error) {
+    // 失败时保留弹窗，方便用户直接修正原密码。
+    // base.js 出于防泄露考虑会把后端 400 的 detail 统一替换成「请求参数错误」，
+    // 因此这里按状态码补一句本表单最常见的失败原因，否则用户不知道错在哪。
+    console.error('修改密码失败:', error)
+    const reason = error?.status === 400 ? '请确认原密码是否正确' : error.message || '请稍后重试'
+    message.error(`修改失败：${reason}`)
+  } finally {
+    changingPassword.value = false
+  }
+}
+
 const validatePhoneNumber = (phone) => {
   if (!phone) return true
   const phoneRegex = /^1[3-9]\d{9}$/
@@ -285,6 +400,9 @@ watch(() => [userStore.username, userStore.phoneNumber], syncProfileDraft, { imm
     gap: 18px;
     background: var(--gray-25);
   }
+
+  // 安全设置相关样式已随「改成弹窗」移除：弹窗内容由 antd 挂到 body 下，
+  // 其表单样式写在根层级（见文件末尾 .password-form），不能嵌在 .account-settings 里。
 
   .profile-summary {
     display: flex;
@@ -446,6 +564,13 @@ watch(() => [userStore.username, userStore.phoneNumber], syncProfileDraft, { imm
 
 :deep(.spin) {
   animation: spin 1s linear infinite;
+}
+
+// 修改密码弹窗的表单：弹窗由 antd 挂到 body 下，写成根层级选择器才能命中
+.password-form {
+  :deep(.ant-form-item) {
+    margin-bottom: 14px;
+  }
 }
 
 @keyframes spin {
