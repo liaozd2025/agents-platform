@@ -140,6 +140,7 @@
               v-if="skill.isSuite"
               :suite="skill"
               :installed-slugs="[...installedPersonalSkillKeys]"
+              :installed-skills="installedSkillCards"
               @open="openRecommendedSuite"
             />
             <template v-else>
@@ -166,7 +167,7 @@
               >
                 <template #actions>
                   <button
-                    v-if="skill.sourceScope !== 'personal' && canManageSkill(skill)"
+                    v-if="canManageSkill(skill)"
                     type="button"
                     class="skill-enabled-action"
                     :class="{ enabled: skill.enabled !== false }"
@@ -222,7 +223,7 @@
           </div>
           <div class="skill-preview-actions">
             <a-switch
-              v-if="previewSkill.sourceScope !== 'personal' && canManageSkill(previewSkill)"
+              v-if="canManageSkill(previewSkill)"
               :checked="previewSkill.enabled !== false"
               :disabled="isSkillToggling(previewSkill.slug)"
               :loading="isSkillToggling(previewSkill.slug)"
@@ -275,6 +276,7 @@
       :flow="installFlow"
       @close="closeInstallFlow"
       @completed="handleInstallFlowCompleted"
+      @skills-changed="handleSkillsChanged"
     >
       <template #selection>
         <div class="remote-install-panel">
@@ -576,6 +578,7 @@ const RECOMMENDED_SUITES = [
     id: 'minimax-office-skills',
     name: 'MiniMax 办公文档套件',
     provider: 'MiniMax-AI',
+    category: 'creation',
     description:
       'MiniMax 开源的办公文档 Skills 合集，覆盖 DOCX、PDF、XLSX 与 PPTX 演示文稿的创建与格式化。',
     source: 'https://modelscope.cn/collections/MiniMax/MiniMax-Office-skills',
@@ -609,6 +612,7 @@ const RECOMMENDED_SUITES = [
     id: 'skill-builder-suite',
     name: 'Skill 能力与进化套件',
     provider: 'Community',
+    category: 'productivity',
     description: '用于 Agent 技能发现、创建、评测调优与自主进化的核心工具合集。',
     skills: [
       {
@@ -631,6 +635,186 @@ const RECOMMENDED_SUITES = [
       }
     ]
   },
+  {
+    id: 'anthropic-office-skills',
+    name: 'Anthropic 官方文档套件',
+    provider: 'Anthropic',
+    category: 'creation',
+    description:
+      'Anthropic 官方开源的文档 Skills，覆盖 PPTX 演示文稿、DOCX 文档、XLSX 表格与 PDF 的创建、编辑与分析。',
+    source: 'https://github.com/anthropics/skills',
+    skills: [
+      {
+        slug: 'pptx',
+        name: 'pptx',
+        description: '创建、编辑 PowerPoint 演示文稿，支持按内容规划分页、套用版式与批量生成幻灯片。'
+      },
+      {
+        slug: 'docx',
+        name: 'docx',
+        description: '创建、编辑与分析 Word 文档，支持样式、目录、批注与修订。'
+      },
+      {
+        slug: 'xlsx',
+        name: 'xlsx',
+        description: '创建、读取与分析 Excel 工作簿，支持公式、图表与财务格式。'
+      },
+      {
+        slug: 'pdf',
+        name: 'pdf',
+        description: 'PDF 读取、拆分合并、表单填写、水印与版面分析。'
+      }
+    ]
+  },
+  {
+    id: 'slide-visual-suite',
+    name: '演示文稿与视觉套件',
+    provider: 'Community',
+    category: 'creation',
+    description: '从文案到视觉再到路演：幻灯片内容撰写、版式与配色规范、投资人 Pitch Deck 与数据驱动幻灯片。',
+    skills: [
+      {
+        slug: 'presentation-content',
+        name: 'presentation-content',
+        source: 'https://modelscope.cn/skills/@aaronvanston/presentation-content',
+        description: '把想法写成适合演讲的幻灯片文案：有力标题、简练正文与有冲击力的要点。'
+      },
+      {
+        slug: 'presentation-design',
+        name: 'presentation-design',
+        source: 'https://modelscope.cn/skills/@aaronvanston/presentation-design',
+        description: '演示文稿视觉设计指导：布局模式、字体层级、配色规范与幻灯片构图规则。'
+      },
+      {
+        slug: 'presentation-pitch-deck',
+        name: 'presentation-pitch-deck',
+        source: 'https://modelscope.cn/skills/@aaronvanston/presentation-pitch-deck',
+        description: '按 Sequoia / YC 框架生成可独立阅读的路演稿，结论先行、无需讲者陪同。'
+      },
+      {
+        slug: 'presentation-creator',
+        name: 'presentation-creator',
+        source: 'https://modelscope.cn/skills/@getsentry/presentation-creator',
+        description: '用 React + Vite + Recharts 生成数据驱动的幻灯片应用，带图表与动画，产出单个 HTML 文件。'
+      }
+    ]
+  },
+  {
+    id: 'translation-writing-suite',
+    name: '翻译与写作套件',
+    provider: 'Community',
+    category: 'creation',
+    description: '多模式翻译与本地化：长文分块翻译、术语表一致性、PDF 文档翻译与多语言文档流水线。',
+    skills: [
+      {
+        slug: 'baoyu-translate',
+        name: 'baoyu-translate',
+        source: 'https://modelscope.cn/skills/@jimliu/baoyu-translate',
+        description:
+          '多模式翻译（快速 / 分析后翻译 / 精修润色），支持长文分块、术语表一致性与受众风格定制。'
+      },
+      {
+        slug: 'translate-pdf',
+        name: 'translate-pdf',
+        source: 'https://github.com/wshuyi/translate-pdf-skill',
+        description: '整篇 PDF 文档翻译，保留版面结构后再导出目标语言版本。'
+      },
+      {
+        slug: 'translation',
+        name: 'translation',
+        source: 'https://modelscope.cn/skills/@kostja94/translation',
+        description: '建立翻译工作流：术语表、风格指南与多语言内容的质量校对。'
+      },
+      {
+        slug: 'mkdocs-translations',
+        name: 'mkdocs-translations',
+        source: 'https://modelscope.cn/skills/@github/mkdocs-translations',
+        description: '为 mkdocs 文档站点批量生成多语言翻译，适合技术文档国际化。'
+      }
+    ]
+  },
+  {
+    id: 'de-ai-writing-suite',
+    name: '中文去 AI 味套件',
+    provider: 'Community',
+    category: 'creation',
+    description: '把中文文本从「像模型拼出来的稿子」改成「像母语者真的写出来的文章」：消除翻译腔、空泛结论与机械排版腔。',
+    skills: [
+      {
+        slug: 'humanizer-zh',
+        name: 'humanizer-zh',
+        source: 'https://github.com/ai-zixun/humanizer-zh',
+        description:
+          '中文「去 AI 味」改写：识别并修复翻译腔、空泛大词、公式化对照句、口号式结尾、列表堆砌与段落节奏，输出更自然的母语表达。'
+      }
+    ]
+  },
+  {
+    id: 'research-analysis-suite',
+    name: '研究与竞品分析套件',
+    provider: 'Community',
+    category: 'research',
+    description: '调研与汇报场景：客户与公司背景研究、用户研究结论提炼、人物画像整理与状态报告撰写。',
+    skills: [
+      {
+        slug: 'account-research',
+        name: 'account-research',
+        source: 'https://modelscope.cn/skills/@anthropics/account-research',
+        description: '对目标公司做背景与信号研究，输出账户级情报（需接入 Common Room 数据源）。'
+      },
+      {
+        slug: 'research-synthesis',
+        name: 'research-synthesis',
+        source: 'https://modelscope.cn/skills/@anthropics/research-synthesis',
+        description: '把访谈记录、问卷、可用性测试等原始素材提炼成主题、洞察与优先建议。'
+      },
+      {
+        slug: 'persona-researcher',
+        name: 'persona-researcher',
+        source: 'https://modelscope.cn/skills/@googleworkspace/persona-researcher',
+        description: '组织研究资料：管理参考文献、笔记与协作整理。'
+      },
+      {
+        slug: 'status-report',
+        name: 'status-report',
+        source: 'https://modelscope.cn/skills/@anthropics/status-report',
+        description: '生成含 KPI、风险与行动项的状态报告，用红黄绿总结项目健康度。'
+      }
+    ]
+  },
+  {
+    id: 'office-automation-suite',
+    name: '办公自动化套件',
+    provider: 'Community',
+    category: 'productivity',
+    description: '把重复的文档与表格工作自动化：Excel 表格智能处理、Word/PDF 程序化生成与多格式互转。',
+    skills: [
+      {
+        slug: 'wps-excel',
+        name: 'wps-excel',
+        source: 'https://modelscope.cn/skills/@lc2panda/wps-excel',
+        description: 'WPS 表格智能助手，用自然语言操控 Excel：公式编写、数据清洗与图表创建。'
+      },
+      {
+        slug: 'excel-automation',
+        name: 'excel-automation',
+        source: 'https://modelscope.cn/skills/@claude-office-skills/excel-automation',
+        description: 'Excel 自动化脚本与批量处理，适合循环改表、跑透视与生成报表。'
+      },
+      {
+        slug: 'docx-manipulation',
+        name: 'docx-manipulation',
+        source: 'https://modelscope.cn/skills/@claude-office-skills/docx-manipulation',
+        description: '用 python-docx 程序化创建、编辑与批量操作 Word 文档。'
+      },
+      {
+        slug: 'pdf-to-docx',
+        name: 'pdf-to-docx',
+        source: 'https://modelscope.cn/skills/@claude-office-skills/pdf-to-docx',
+        description: '用 pdf2docx 把 PDF 转成可编辑的 Word 文档。'
+      }
+    ]
+  }
 ]
 
 const router = useRouter()
@@ -767,8 +951,11 @@ const plazaGroups = computed(() =>
   SKILL_CATEGORIES.map((category) => ({
     key: category.key,
     title: category.label,
-    skills: recommendedSuiteCards.value.filter(
-      (suite) => matchesSearch(suite) && (category.key === 'all' || skillCategory(suite) === category.key)
+    skills: [
+      ...recommendedSuiteCards.value,
+      ...installedSkillCards.value.filter((skill) => isSystemSkill(skill))
+    ].filter(
+      (skill) => matchesSearch(skill) && (category.key === 'all' || skillCategory(skill) === category.key)
     )
   })).filter((group) => group.skills.length)
 )
@@ -1004,19 +1191,26 @@ const handleToggleCardSelect = (slug) => {
 const handleToggleSkillEnabled = async (skill) => {
   if (!skill || !canManageSkill(skill) || isSkillToggling(skill.slug)) return
   const enabled = skill.enabled === false
+  const isPersonal = skill.sourceScope === 'personal'
   togglingSkillSlugs.value.push(skill.slug)
   try {
-    const result = await skillApi.updateSkillEnabled(skill.slug, enabled)
+    const result = isPersonal
+      ? await skillApi.updatePersonalSkillEnabled(skill.slug, enabled)
+      : await skillApi.updateSkillEnabled(skill.slug, enabled)
     const updatedSkill = result?.data
+    // 个人与共享 Skill 允许同名，必须按作用域定位卡片，避免改到另一个版本。
     const index = skills.value.findIndex(
-      (item) => item.slug === skill.slug && item.source_scope !== 'personal'
+      (item) => item.slug === skill.slug && (item.source_scope === 'personal') === isPersonal
     )
     if (updatedSkill && index > -1) {
       skills.value[index] = updatedSkill
     } else {
       await fetchSkills()
     }
-    if (previewSkill.value?.slug === skill.slug) {
+    const isSamePreview =
+      previewSkill.value?.slug === skill.slug &&
+      previewSkill.value?.sourceScope === skill.sourceScope
+    if (isSamePreview) {
       previewSkill.value = updatedSkill
         ? { ...updatedSkill, sourceType: updatedSkill.source_type || 'upload' }
         : { ...previewSkill.value, enabled }
@@ -1201,8 +1395,14 @@ const openRecommendedSuite = (suite) => {
   openInstallFlow({
     kind: 'suite',
     suite,
-    installedSlugs: [...installedPersonalSkillKeys.value]
+    installedSlugs: [...installedPersonalSkillKeys.value],
+    installedSkills: installedSkillCards.value
   })
+}
+
+/** 套件内切换启用状态后，同步技能广场与我的技能列表。 */
+const handleSkillsChanged = () => {
+  void fetchSkills()
 }
 
 const handleInstallFlowCompleted = async ({ success, failed }) => {
