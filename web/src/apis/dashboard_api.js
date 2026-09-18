@@ -144,7 +144,7 @@ export const dashboardApi = {
    * @returns {Promise<Object>} - 所有统计数据
    */
   getAllStats: async (
-    { includeKnowledge = false, includeResources = false, departmentId = null } = {}
+    { includeKnowledge = true, includeResources = false, departmentId = null } = {}
   ) => {
     try {
       const requests = {

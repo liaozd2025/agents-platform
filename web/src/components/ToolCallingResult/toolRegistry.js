@@ -161,10 +161,15 @@ export const isSubagentToolCall = (toolCall) => SUBAGENT_TOOL_IDS.includes(getTo
 
 /** 工具快照不是完成事实；优先保留子 Run 的明确终态。 */
 export const getToolCallStatus = (toolCall) => {
-  const run = toolCall?.subagent_run
+  const parsed = parseToolCallResult(toolCall)
+  const run = toolCall?.subagent_run || (isSubagentToolCall(toolCall)
+    ? { status: parsed?.run_status || parsed?.active_run_status }
+    : null)
   if (run?.status === 'failed') return 'error'
   if (['cancelled', 'interrupted'].includes(run?.status)) return run.status
   if (run?.status === 'completed') return run.stop_reason === 'steer' ? 'steered' : 'completed'
+  const parsedStatus = parseToolCallResult(toolCall)?.status
+  if ([toolCall?.status, toolCall?.tool_call_result?.status, parsedStatus].some((status) => status === 'error' || status === 'failed')) return 'error'
   const status = toolCall?.tool_call_result?.status || toolCall?.status
   if (status === 'error' || status === 'failed') return 'error'
   if (['running', 'pending', 'cancel_requested'].includes(status)) return 'running'
@@ -183,13 +188,36 @@ export const getToolCallStatus = (toolCall) => {
 
 export const parseToolCallResult = (toolCall) => {
   const content = toolCall?.tool_call_result?.content ?? toolCall?.result
-  if (!content) return null
+  if (content == null || content === '') return null
   if (typeof content === 'object') return content
   try {
     return JSON.parse(content)
   } catch {
     return null
   }
+}
+
+/** 子智能体结果与补充运行信息中的状态，供详情和分组共同展示。 */
+export const getSubagentRunStatus = (toolCall) => {
+  if (getToolCallStatus(toolCall) === 'error') return 'error'
+  const result = parseToolCallResult(toolCall)
+  return (
+    result?.run_status ||
+    result?.active_run_status ||
+    result?.status ||
+    toolCall?.subagent_run?.status ||
+    ''
+  )
+}
+
+/** 统一工具行与分组的展示状态，保留子智能体特有的运行态。 */
+export const getToolCallDisplayStatus = (toolCall, activeSubagentToolCallIds) => {
+  const status = getToolCallStatus(toolCall)
+  if (status) return status
+  if (getToolCallId(toolCall) === 'task') {
+    return activeSubagentToolCallIds?.has(String(toolCall.id)) ? 'running' : 'completed'
+  }
+  return 'running'
 }
 
 export const enrichSubagentToolCall = (

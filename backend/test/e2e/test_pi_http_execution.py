@@ -144,7 +144,11 @@ async def pi_environment(e2e_client, e2e_headers):
         context["thread"] = response.json()["id"]
         context["project"] = response.json()["project_id"]
         context["workdir"] = response.json()["workdir_path"]
-        assert context["workdir"] == f"projects/{context['project']}"
+        async with database() as db:
+            assert (
+                await db.fetchval("SELECT workdir_path FROM projects WHERE id=$1", context["project"])
+                == context["workdir"]
+            )
         yield context
     finally:
         if context.get("queued_request"):

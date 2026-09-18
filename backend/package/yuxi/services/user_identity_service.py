@@ -55,15 +55,6 @@ def is_valid_phone_number(phone: str) -> bool:
     return bool(re.match(r"^1[3-9]\d{9}$", re.sub(r"[\s\-\(\)]", "", phone)))
 
 
-def normalize_phone_number(phone: str) -> str:
-    if not phone:
-        return ""
-    phone = re.sub(r"\D", "", phone)
-    if len(phone) == 11 and phone.startswith("1"):
-        return phone
-    return phone
-
-
 async def resolve_external_department(db, department_name: str | None) -> Department:
     """按外部身份部门名精确匹配已有组织节点，无法唯一定位时回落集团根。"""
 

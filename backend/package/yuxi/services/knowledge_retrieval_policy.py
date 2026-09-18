@@ -5,7 +5,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from yuxi.config.runtime import knowledge_capability_enabled
 
 _MENTION_RE = re.compile(r'@knowledge:(?:"((?:\\.|[^"\\])*)"|(\S+))')
 _NO_KB_PATTERNS = (
@@ -70,8 +69,6 @@ def classify_knowledge_intent(query: str) -> str:
 
 async def decide_knowledge_retrieval(query: str, user: Any) -> KnowledgeRetrievalDecision:
     """解析 @ 范围或动态选择当前用户可读的全局知识库。"""
-    if not knowledge_capability_enabled():
-        return KnowledgeRetrievalDecision("NO_KB", (), False)
     mentions = parse_knowledge_mentions(query)
     if not mentions and classify_knowledge_intent(query) == "NO_KB":
         return KnowledgeRetrievalDecision("NO_KB", (), False)

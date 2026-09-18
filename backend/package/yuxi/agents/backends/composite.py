@@ -48,6 +48,7 @@ class YuxiFilesystemMiddleware(FilesystemMiddleware):
         return ToolMessage(
             "用户沙箱文件必须通过 pi_sandbox 交给 PI Agent 处理。",
             tool_call_id=str(tool_call.get("id") or ""),
+            status="error",
         )
 
     def wrap_tool_call(self, request, handler):
@@ -146,9 +147,11 @@ def create_agent_filesystem_middleware(
     tool_token_limit_before_evict: int | None = None,
     *,
     backend: CompositeBackend,
+    disabled_tools: frozenset[str] = frozenset(),
 ) -> FilesystemMiddleware:
+    """构造文件系统中间件，在 ToolNode 注册前排除禁用工具。"""
     return YuxiFilesystemMiddleware(
         backend=backend,
         tool_token_limit_before_evict=tool_token_limit_before_evict,
-        tools=["read_file"],
+        tools=[name for name in ["read_file"] if name not in disabled_tools],
     )

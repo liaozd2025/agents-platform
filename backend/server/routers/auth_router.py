@@ -66,7 +66,6 @@ from yuxi.services.user_identity_service import generate_unique_uid, is_valid_ph
 from yuxi.services.user_management_service import (
     department_is_accessible,
     get_authorized_user,
-    list_authorized_users,
     list_authorized_users_page,
 )
 from yuxi.services.user_role_service import (

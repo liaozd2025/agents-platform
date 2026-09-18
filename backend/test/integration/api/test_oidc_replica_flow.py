@@ -126,6 +126,8 @@ async def test_oa_profile_survives_real_http_and_is_committed(mode):
     env = {
         **os.environ,
         "YUXI_ENV": "development",
+        "YUXI_INSTANCE_ID": "pytest-oidc-replicas",
+        "JWT_SECRET_KEY": "pytest-oidc-replica-shared-jwt-secret",
         "OA_SSO_ENABLED": "true",
         "OA_SSO_USERINFO_URL": f"{provider_url}/userinfo",
         "OA_SSO_COMPANY_CODE": "TEST",
@@ -190,6 +192,8 @@ async def test_oidc_callback_and_exchange_work_across_api_replicas():
     env = {
         **os.environ,
         "YUXI_ENV": "development",
+        "YUXI_INSTANCE_ID": "pytest-oidc-replicas",
+        "JWT_SECRET_KEY": "pytest-oidc-replica-shared-jwt-secret",
         "OIDC_ENABLED": "true",
         "OIDC_ISSUER_URL": issuer,
         "OIDC_CLIENT_ID": "oa-s0-local-client",
@@ -250,7 +254,7 @@ async def test_oidc_callback_and_exchange_work_across_api_replicas():
             )
 
         assert oa_login["uid"] == "oa:TEST:oa-s0-user"
-        assert oa_me_response.status_code == 200
+        assert oa_me_response.status_code == 200, oa_me_response.text
         assert oa_me_response.json()["uid"] == "oa:TEST:oa-s0-user"
         assert exchange_response.status_code == 200
         assert exchange_response.json()["department_id"] == ROOT_DEPARTMENT_ID

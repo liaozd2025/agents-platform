@@ -52,7 +52,7 @@ def plan_response(request: dict) -> tuple[str, str, dict | str]:
     expected_history = re.search(r"YUXI_PI_EXPECT_HISTORY:([0-9a-f]{32})", prompt)
     if expected_history and f"YUXI_PI_HTTP:{expected_history[1]}:" not in json.dumps(messages[:task_index]):
         raise ValueError("previous_pi_session_missing")
-    project_match = re.search(r"Project workspace is (/home/gem/user-data/projects/[0-9a-f-]+)\.", prompt)
+    project_match = re.search(r"Project workspace is (/home/gem/user-data/projects/[0-9a-f_-]+)\.", prompt)
     output_match = re.search(r"Put every generated deliverable under (/[^\s]+)\. ", prompt)
     if not project_match or not output_match:
         raise ValueError("assigned_directories_missing")

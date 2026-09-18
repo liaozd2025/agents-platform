@@ -39,8 +39,7 @@ async def user_management_test_users(test_client):
 
     pg_manager.initialize()
     await pg_manager.async_engine.dispose()
-    await pg_manager.create_tables()
-    await pg_manager.ensure_business_schema()
+    await pg_manager.require_current_schema()
 
     suffix = uuid.uuid4().hex[:10]
     password = f"Pw!{uuid.uuid4().hex}"

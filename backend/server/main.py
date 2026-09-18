@@ -20,9 +20,9 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from yuxi.config.runtime import knowledge_capability_enabled
 
 from server.routers import router
+from server.routers.knowledge_mcp_router import build_knowledge_mcp, configured_knowledge_mcp_url
 from server.utils.access_log_middleware import AccessLogMiddleware
 from server.utils.common_utils import setup_logging
 from server.utils.lifespan import lifespan
@@ -85,16 +85,14 @@ app = FastAPI(lifespan=lifespan)
 # 所有业务接口统一挂载到 /api，具体分组在 server.routers 中集中注册。
 app.include_router(router, prefix="/api")
 
-if knowledge_capability_enabled():
-    from server.routers.knowledge_mcp_router import build_knowledge_mcp, configured_knowledge_mcp_url
 
-    mcp_url = configured_knowledge_mcp_url()
-    if mcp_url:
-        mcp_server, _, mcp_router, oauth_routes, mcp_app = build_knowledge_mcp(mcp_url)
-        app.state.knowledge_mcp = mcp_server
-        app.include_router(mcp_router, prefix="/api")
-        app.router.routes.extend(oauth_routes)
-        app.mount("/", mcp_app)
+mcp_url = configured_knowledge_mcp_url()
+if mcp_url:
+    mcp_server, _, mcp_router, oauth_routes, mcp_app = build_knowledge_mcp(mcp_url)
+    app.state.knowledge_mcp = mcp_server
+    app.include_router(mcp_router, prefix="/api")
+    app.router.routes.extend(oauth_routes)
+    app.mount("/", mcp_app)
 
 # CORS 设置
 app.add_middleware(

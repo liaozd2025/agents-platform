@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost, apiPut, apiRequest } from './base'
+import { apiDelete, apiGet, apiPost, apiPut, apiRequest, buildQuery } from './base'
 
 /**
  * 知识库管理API模块
@@ -108,16 +108,6 @@ export const databaseApi = {
 // =============================================================================
 // === 文档管理分组 ===
 // =============================================================================
-
-const buildQuery = (params) => {
-  const query = new URLSearchParams()
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== '') {
-      query.set(key, String(value))
-    }
-  })
-  return query.toString()
-}
 
 export const documentApi = {
   /**

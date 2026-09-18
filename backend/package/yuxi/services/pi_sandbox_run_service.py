@@ -33,9 +33,7 @@ async def _compute_skill_digests(sources: dict[str, Path]) -> dict[str, str]:
     """在线程中计算 Skill 摘要，避免大目录扫描阻塞 worker 心跳。"""
 
     started_at = time.perf_counter()
-    items = await asyncio.gather(
-        *(asyncio.to_thread(compute_skill_dir_hash, source) for source in sources.values())
-    )
+    items = await asyncio.gather(*(asyncio.to_thread(compute_skill_dir_hash, source) for source in sources.values()))
     digests = dict(zip(sources, items, strict=True))
     logger.info(
         "PI 子 Run Skill 摘要计算完成: skills=%d elapsed=%.2fs",

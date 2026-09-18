@@ -2,7 +2,7 @@
   <BaseToolCall
     :tool-call="toolCall"
     :status="baseStatus"
-    :force-show-result="Boolean(displayResult)"
+    :force-show-result="hasDisplayResult"
   >
     <template #header>
       <div class="sep-header">
@@ -34,7 +34,7 @@ import { computed, inject } from 'vue'
 import BaseToolCall from '../BaseToolCall.vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { MessageProcessor } from '@/utils/messageProcessor'
-import { getToolCallStatus } from '../toolRegistry'
+import { getToolCallDisplayStatus, parseToolCallArgs } from '../toolRegistry'
 
 const props = defineProps({
   toolCall: {
@@ -47,16 +47,7 @@ const getThreadOngoingMessages = inject('getThreadOngoingMessages', null)
 const getSubagentThreadIdByToolCall = inject('getSubagentThreadIdByToolCall', null)
 const activeSubagentToolCallIds = inject('activeSubagentToolCallIds', null)
 
-const parsedArgs = computed(() => {
-  const args = props.toolCall.args || props.toolCall.function?.arguments
-  if (!args) return {}
-  if (typeof args === 'object') return args
-  try {
-    return JSON.parse(args)
-  } catch {
-    return {}
-  }
-})
+const parsedArgs = computed(() => parseToolCallArgs(props.toolCall))
 
 const subagentRun = computed(() => props.toolCall.subagent_run || null)
 const subagentDisplayName = computed(
@@ -77,16 +68,9 @@ const childThreadId = computed(
     (getSubagentThreadIdByToolCall ? getSubagentThreadIdByToolCall(props.toolCall.id) : '') ||
     ''
 )
-// 是否为当前真正在执行的子智能体调用（同一子线程的多次 steer 中只有最后一个为活跃）。
-const isActiveRun = computed(() =>
-  Boolean(activeSubagentToolCallIds?.value?.has(String(props.toolCall.id)))
-)
 const runStatus = computed(() => {
-  const status = getToolCallStatus(props.toolCall)
-  if (status) return status
-  if (isActiveRun.value) return 'running'
-  if ((props.toolCall.name || props.toolCall.function?.name) === 'pi_sandbox') return 'running'
-  return 'completed'
+  const status = getToolCallDisplayStatus(props.toolCall, activeSubagentToolCallIds?.value)
+  return status === 'error' ? 'failed' : status
 })
 const runStatusLabel = computed(() => {
   if (runStatus.value === 'completed') return '已完成'
@@ -105,10 +89,9 @@ const runStatusClass = computed(() => ({
 const baseStatus = runStatus
 // ongoing 期间 task 结果不流式：只展示工具结果，状态摘要不承载后端预览文本。
 const displayResult = computed(() => {
-  const toolResult = props.toolCall.tool_call_result?.content || props.toolCall.result
-  if (toolResult) return toolResult
-  return ''
+  return props.toolCall.tool_call_result?.content ?? props.toolCall.result ?? ''
 })
+const hasDisplayResult = computed(() => displayResult.value !== '')
 const shortDescription = computed(() => {
   const desc = description.value
   if (!desc) return ''

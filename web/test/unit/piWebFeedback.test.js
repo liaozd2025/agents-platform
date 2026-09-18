@@ -99,7 +99,7 @@ test('PI 工具累计快照替换正文并保持 running，最终结果覆盖快
     output('tool-progress', 'first', 'running')
     output('tool-progress', 'first\nsecond', 'running')
     let tool = displayedMessages(state).find((message) => message.run_id === runId).tool_calls[0]
-    assert.equal(tool.function.arguments, '{"command":"printf example"}')
+    assert.equal(tool.args, '{"command":"printf example"}')
     assert.equal(tool.tool_call_result.content, 'first\nsecond')
     assert.equal(getToolCallStatus(tool), 'running')
     output('tool-finished', `${runId}: final`, runId === 'child-1' ? 'success' : 'error')
