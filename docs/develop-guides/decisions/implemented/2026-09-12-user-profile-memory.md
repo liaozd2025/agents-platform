@@ -12,7 +12,7 @@ Owner：backend/package/yuxi/services/user_memory_service.py
 
 ## 决策
 
-UserRepository 查询当前用户、部门、Memory 开关与角色分配；仅写入启用角色的名称。上下文构建在读取 USER.md 前执行同步，chat、resume 与状态查看共用该入口。Workspace 提供 no-follow 文件读取与原子替换，资料同步完整读取最多 1 MiB，超过上限拒绝写入，保留原文件。用户关闭 Memory 时移除机器区块，手工内容继续遵循原有上下文加载规则。
+UserRepository 查询当前用户展示名、部门、Memory 开关与角色分配；仅写入启用角色的名称。展示名取 `display_name`（真实姓名），未维护时回退登录账号 `username`，`username` 只作为缺省值而不作为展示身份。上下文构建在读取 USER.md 前执行同步，chat、resume 与状态查看共用该入口。Workspace 提供 no-follow 文件读取与原子替换，资料同步完整读取最多 1 MiB，超过上限拒绝写入，保留原文件。用户关闭 Memory 时移除机器区块，手工内容继续遵循原有上下文加载规则。
 
 ## 替代方案
 
@@ -24,4 +24,4 @@ UserRepository 查询当前用户、部门、Memory 开关与角色分配；仅�
 
 ## 验证
 
-单元测试覆盖手工内容保留、幂等同步、Memory 关闭和文件／目录 symlink、超限文件拒绝。真实 PostgreSQL 集成测试通过上下文入口验证角色及部门更新、停用角色过滤、Memory 关闭、最终文件与模型输入一致。工程契约和完整后端回归的执行结果记录于 PR。
+单元测试覆盖手工内容保留、幂等同步、Memory 关闭和文件／目录 symlink、超限文件拒绝，并断言展示名优先于登录账号、展示名缺失时回退登录账号。真实 PostgreSQL 集成测试通过上下文入口验证角色及部门更新、停用角色过滤、Memory 关闭、展示名投影与回退、最终文件与模型输入一致。工程契约和完整后端回归的执行结果记录于 PR。
