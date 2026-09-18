@@ -1,14 +1,8 @@
 
-.PHONY: up down logs lint format seed reset test verify-trust audit-dependencies audit-licenses build-pi-sandbox
-.DEFAULT_GOAL := up
+.PHONY: up down logs lint format seed reset test verify-trust audit-dependencies audit-licenses
 
 PYTEST_ARGS ?=
 BACKEND_PYTHON ?= $(shell cat backend/.python-version)
-COMPOSE ?= docker compose
-
-build-pi-sandbox:
-	$(COMPOSE) build pi-sandbox-image
-	$(COMPOSE) run --rm --no-deps pi-sandbox-image
 
 up:
 	@if [ ! -f .env ]; then \
@@ -73,7 +67,6 @@ verify-trust:
 audit-dependencies:
 	cd backend && uv audit --locked --no-dev
 	cd packages/yuxi-cli && uv audit --locked --no-dev
-	cd backend/package/yuxi/pi_runner && npm audit --audit-level=high --omit=dev
 	cd web && pnpm audit --audit-level=high --prod
 	cd docs && pnpm audit --audit-level=high --prod
 	@if uv audit --script scripts/dependency-audit-fixtures/vulnerable.py > /tmp/yuxi-python-audit-negative.log 2>&1; then echo "Expected the vulnerable Python fixture to fail"; exit 1; fi

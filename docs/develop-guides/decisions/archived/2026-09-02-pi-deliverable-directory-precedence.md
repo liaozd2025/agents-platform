@@ -1,8 +1,10 @@
 # PI 交付目录优先级
 
-状态：implemented
+状态：archived
 类型：bug-fix
-Owner：backend/package/yuxi/pi_runner/runner.mjs
+Owner：docs/adr/0004-hybrid-pi-execution-seam.md
+
+本记录保存已退役方案的历史决定与证据。当前行为由 [PI 退役决策](../implemented/2026-09-18-retire-pi-executor.md) 取代。
 
 ## 问题
 

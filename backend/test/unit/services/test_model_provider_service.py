@@ -7,6 +7,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from yuxi.models.providers.builtin import BUILTIN_PROVIDERS
 from yuxi.models.providers.service import (
+    _normalize_model_item,
     _normalize_payload,
     _normalize_remote_model,
     _validate_request_body_overrides_scope,
@@ -354,3 +355,20 @@ def test_normalize_payload_allows_model_type_within_capabilities():
     sources = [model["source"] for model in payload["enabled_models"]]
     assert types == ["chat", "embedding"]
     assert sources == ["manual", "manual"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("reasoning", "true"),
+        ("context_length", True),
+        ("max_completion_tokens", -1),
+        ("input_modalities", "image"),
+        ("input_modalities", [{}]),
+        ("input_modalities", ["unknown"]),
+    ],
+)
+def test_model_capabilities_reject_invalid_values(field, value):
+    """模型能力字段在配置边界拒绝错误类型与非法值。"""
+    with pytest.raises(ValueError):
+        _normalize_model_item({"id": "m", "type": "chat", field: value})

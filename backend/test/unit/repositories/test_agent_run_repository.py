@@ -6,25 +6,12 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from yuxi.repositories.agent_run_repository import AgentRunRepository, _requires_sandbox_runtime_cleanup
+
+from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.storage.postgres.models_business import AgentRun, AgentRunAttempt, Base, Conversation, Message, SubagentThread
 from yuxi.utils.datetime_utils import utc_now_naive
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
-
-
-@pytest.mark.parametrize(
-    ("run_type", "input_payload", "expected"),
-    [
-        ("chat", {}, True),
-        ("chat", {"runtime": {"executor": "pi"}}, False),
-        ("subagent", {}, False),
-    ],
-)
-async def test_sandbox_runtime_cleanup_excludes_pi_and_subagent(run_type, input_payload, expected):
-    run = AgentRun(run_type=run_type, input_payload=input_payload)
-
-    assert _requires_sandbox_runtime_cleanup(run) is expected
 
 
 @pytest_asyncio.fixture()
@@ -812,48 +799,6 @@ async def test_mark_running_creates_single_attempt_for_initial_claim_and_live_ow
     assert [attempt.attempt_no for attempt in attempts] == [1]
     assert attempts[0].worker_id == "worker-a:token-1"
     assert attempts[0].finished_at is None
-
-
-async def test_pi_cleanup_failure_is_listed_and_cleared_only_for_observed_fact(session):
-    repository = AgentRunRepository(session)
-    run = await _seed_running_run(session, run_id="pi-cleanup-run", request_id="pi-cleanup-request")
-    now = utc_now_naive()
-    worker_id = "worker-a:token-1"
-    await repository.mark_running(
-        run.id,
-        worker_id=worker_id,
-        lease_seconds=60,
-        now=now,
-        attempt_metadata={
-            "adapter": "local",
-            "route_reason": "test",
-            "route_snapshot": {},
-            "runtime_manifest": {},
-            "runtime_manifest_digest": "a" * 64,
-        },
-    )
-    attempt = (await repository.list_run_attempts(run.id))[0]
-    attempt.error_type = "execution_unknown"
-    failed_at = now + timedelta(seconds=2)
-    await repository.record_pi_cleanup_failure(
-        run.id,
-        attempt_id=attempt.id,
-        worker_id=worker_id,
-        error_message="delete unavailable",
-        now=failed_at,
-    )
-
-    pending = await repository.list_pi_cleanup_failures()
-
-    assert pending[0]["attempt_id"] == attempt.id
-    assert pending[0]["uid"] == run.uid
-    assert pending[0]["instance_id"] is None
-    assert pending[0]["error_type"] == "execution_unknown"
-    assert await repository.lock_pi_cleanup_failure(attempt.id, failed_at=now) is False
-    assert await repository.lock_pi_cleanup_failure(attempt.id, failed_at=failed_at) is True
-    assert await repository.clear_pi_cleanup_failure(attempt.id, failed_at=now) is False
-    assert await repository.clear_pi_cleanup_failure(attempt.id, failed_at=failed_at) is True
-    assert await repository.list_pi_cleanup_failures() == []
 
 
 async def test_retry_release_then_reclaim_uses_new_attempt_no_and_keeps_old_fact(session):

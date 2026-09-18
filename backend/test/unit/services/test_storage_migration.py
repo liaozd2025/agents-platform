@@ -17,6 +17,9 @@ class _Session:
     def __init__(self, calls: list[object] | None = None):
         self.calls = calls
 
+    async def scalar(self, statement):
+        return None
+
     async def execute(self, statement):
         if self.calls is not None:
             self.calls.append(("execute", str(statement)))
@@ -28,7 +31,7 @@ class _Session:
 @pytest.mark.asyncio
 async def test_storage_migration_reads_legacy_schema_before_cutover(monkeypatch):
     calls: list[object] = []
-    sessions = [_Session(), _Session(), _Session(calls), _Session()]
+    sessions = [_Session(), _Session(), _Session(), _Session(calls), _Session(), _Session()]
 
     @asynccontextmanager
     async def session_context():
@@ -150,7 +153,7 @@ async def test_schema_ddl_only_runs_for_supported_business_upgrade(
     upgrades_business,
 ):
     calls: list[str] = []
-    sessions = [_Session(), _Session(), _Session()]
+    sessions = [_Session() for _ in range(5)]
 
     @asynccontextmanager
     async def session_context():
@@ -247,7 +250,7 @@ async def test_main_rejects_unsupported_business_schema_before_ddl(monkeypatch, 
 @pytest.mark.asyncio
 async def test_main_v2_business_schema_is_converged_and_versioned_as_current(monkeypatch):
     calls: list[str] = []
-    sessions = [_Session(), _Session(), _Session()]
+    sessions = [_Session() for _ in range(5)]
 
     @asynccontextmanager
     async def session_context():
@@ -342,7 +345,7 @@ async def test_failed_business_migration_does_not_record_version(monkeypatch):
 @pytest.mark.asyncio
 async def test_current_schema_does_not_rewrite_workdir_data(monkeypatch):
     calls: list[str] = []
-    sessions = [_Session(), _Session(), _Session()]
+    sessions = [_Session() for _ in range(5)]
 
     @asynccontextmanager
     async def session_context():

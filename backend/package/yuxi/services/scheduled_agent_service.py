@@ -16,10 +16,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.tool_approval import normalize_tool_approval_mode
-from yuxi.repositories.user_repository import UserRepository
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.project_repository import ProjectRepository
 from yuxi.repositories.scheduled_agent_repository import ScheduledAgentRepository
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.services.input_message_service import build_chat_input_message
 from yuxi.services.run_submission_service import RunOrigin, RunSubmissionCommand, submit_run_command
 from yuxi.storage.postgres.manager import pg_manager

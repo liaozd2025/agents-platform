@@ -44,7 +44,7 @@ test('tool approval modes and interrupt payloads follow their state contracts', 
       savedMode: 'always_trust',
       agentMode: 'always_trust'
     }),
-    'always_trust'
+    'default'
   )
 
   assert.deepEqual(buildToolApprovalDecisions({ 0: 'approve', 1: 'reject' }, 2), [

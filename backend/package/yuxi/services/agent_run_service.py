@@ -717,7 +717,7 @@ async def prepare_agent_run_creation_scope(
     current_uid: str,
     db: AsyncSession,
     request_id: str,
-    run_type: Literal["chat", "resume", "subagent", "sandbox"],
+    run_type: Literal["chat", "resume", "subagent"],
     agent_kind: Literal["main", "subagent"],
     created_by_run_id: str | None = None,
     subagent_thread_relation_id: int | None = None,
@@ -729,6 +729,8 @@ async def prepare_agent_run_creation_scope(
     conversation = await ConversationRepository(db).lock_conversation_by_thread_id(conversation_thread_id)
     if not conversation or conversation.uid != str(current_uid) or conversation.status == "deleted":
         raise HTTPException(status_code=404, detail="对话线程不存在")
+    if (conversation.extra_metadata or {}).get("source") == "pi_sandbox":
+        raise HTTPException(status_code=409, detail="历史 PI 对话仅可查看和下载，不能新增请求或恢复")
     # Conversation.agent_id 是历史字段名，实际保存的是 Agent.slug。
     if conversation.agent_id != agent_slug:
         raise HTTPException(status_code=409, detail="已有线程已绑定智能体，不能切换")
@@ -772,6 +774,9 @@ async def prepare_agent_run_creation_scope(
                 or parent_run.agent_slug != agent_slug
             ):
                 raise HTTPException(status_code=404, detail="被恢复的运行任务不存在")
+            parent_runtime = (parent_run.input_payload or {}).get("runtime") or {}
+            if parent_runtime.get("executor") == "pi" or parent_run.error_type == "pi_executor_retired":
+                raise HTTPException(status_code=409, detail="PI 执行器已停用，旧任务不可续跑")
             if parent_run.status != "interrupted":
                 raise HTTPException(status_code=409, detail="只有 interrupted run 可以恢复")
             latest_run = await run_repo.get_latest_chat_or_resume_run(

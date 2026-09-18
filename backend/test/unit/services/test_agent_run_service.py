@@ -1922,6 +1922,7 @@ def _patch_agent_run_creation(
     }
     if parent_run:
         parent_run.agent_slug = getattr(parent_run, "agent_slug", "default")
+        parent_run.error_type = getattr(parent_run, "error_type", None)
         runs_by_id["parent-run"] = parent_run
     db = _CreateRunDb(
         message_id=message_id,
@@ -1940,7 +1941,7 @@ def _patch_agent_run_creation(
 
         async def get_conversation_by_thread_id(self, thread_id: str):
             del thread_id
-            return SimpleNamespace(id=1, uid="user-1", status="active", agent_id="default")
+            return SimpleNamespace(id=1, uid="user-1", status="active", agent_id="default", extra_metadata={})
 
         async def lock_conversation_by_thread_id(self, thread_id: str):
             return await self.get_conversation_by_thread_id(thread_id)
@@ -2124,13 +2125,16 @@ async def test_create_resume_run_defaults_tool_approval_mode_for_legacy_parent(m
         created_by_run_id="parent-run",
     )
 
-    assert db.created_run_kwargs["input_payload"]["tool_approval_mode"] == "always_trust"
+    assert db.created_run_kwargs["input_payload"]["tool_approval_mode"] == agent_run_service.DEFAULT_TOOL_APPROVAL_MODE
 
 
 def test_resolve_tool_approval_mode_uses_request_then_agent_config_then_default():
     assert agent_run_service.resolve_agent_run_tool_approval_mode("default", "always_trust") == "default"
     assert agent_run_service.resolve_agent_run_tool_approval_mode(None, "always_trust") == "always_trust"
-    assert agent_run_service.resolve_agent_run_tool_approval_mode(None, None) == "always_trust"
+    assert (
+        agent_run_service.resolve_agent_run_tool_approval_mode(None, None)
+        == agent_run_service.DEFAULT_TOOL_APPROVAL_MODE
+    )
 
 
 def test_resolve_tool_approval_mode_rejects_unknown_value():

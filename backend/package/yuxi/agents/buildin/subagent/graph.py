@@ -24,18 +24,17 @@ from yuxi.agents.middlewares import (
     create_summary_middleware_from_context,
 )
 from yuxi.agents.middlewares.skills import SkillsMiddleware
-from yuxi.agents.middlewares.pi_sandbox import create_pi_sandbox_middleware
 from yuxi.agents.tool_approval import (
     DEFAULT_TOOL_APPROVAL_MODE,
-    PI_DELEGATED_SANDBOX_TOOLS,
+    SENSITIVE_BACKEND_TOOLS,
     normalize_tool_approval_mode,
 )
 from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
 from yuxi.models.chat import load_chat_model, resolve_chat_model_spec
 
-_SUBAGENT_DISABLED_TOOLS = (
-    frozenset({"present_artifacts", "ask_user_question", "install_skill"}) | PI_DELEGATED_SANDBOX_TOOLS
-)
+_SUBAGENT_DISABLED_TOOLS = frozenset({"present_artifacts", "ask_user_question", "install_skill"})
+# 默认审批模式额外隐藏敏感 backend 工具，避免子智能体绕过主线程逐项审批。
+_SUBAGENT_DISABLED_TOOLS_DEFAULT_MODE = _SUBAGENT_DISABLED_TOOLS | SENSITIVE_BACKEND_TOOLS
 
 
 def _tool_name(tool) -> str | None:
@@ -46,8 +45,11 @@ def _tool_name(tool) -> str | None:
     return name if isinstance(name, str) else None
 
 
-def _disabled_tools_for(_mode: str = "default") -> frozenset[str]:
-    return _SUBAGENT_DISABLED_TOOLS
+def _disabled_tools_for(mode: str) -> frozenset[str]:
+    # 调用方已在边界 normalize 过 mode，这里直接按值选择隐藏集合。
+    if mode == "always_trust":
+        return _SUBAGENT_DISABLED_TOOLS
+    return _SUBAGENT_DISABLED_TOOLS_DEFAULT_MODE
 
 
 def _filter_disabled_tools(tools, disabled_tools: frozenset[str]):
@@ -98,7 +100,6 @@ async def _build_middlewares(context, backend, tool_approval_mode: str):
             disabled_tools=_disabled_tools_for(tool_approval_mode),
         ),
         SkillsMiddleware(),
-        create_pi_sandbox_middleware(context),
         create_summary_middleware_from_context(context, backend=backend),
         TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
         PatchToolCallsMiddleware(),

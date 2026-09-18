@@ -21,7 +21,6 @@ BLOCK_BEFORE_RESPONSE_MARKER = "DETERMINISTIC_BLOCK_BEFORE_RESPONSE"
 TOOL_ERROR_MARKER = "DETERMINISTIC_TOOL_ERROR"
 LARGE_TOOL_RESULT_MARKER = "DETERMINISTIC_LARGE_TOOL_RESULT"
 LARGE_TOOL_CALL_ID = "call-large-tool-result"
-PI_LARGE_RESULT_MARKER = "DETERMINISTIC_PI_LARGE_RESULT"
 BLOCKING_REQUEST_TOKENS: set[str] = set()
 BLOCKING_REQUEST_TOKENS_LOCK = Lock()
 
@@ -41,10 +40,6 @@ def _validate_request(authorization: str | None, request: dict) -> str | None:
     serialized_messages = json.dumps(messages, ensure_ascii=False)
     if EXPECTED_OUTPUT not in serialized_messages:
         return "expected_input_missing"
-    if PI_LARGE_RESULT_MARKER in serialized_messages:
-        names = {item.get("function", {}).get("name") for item in request.get("tools", [])}
-        if {"bash", "submit_artifact"} <= names and "pi_sandbox" not in names:
-            return None
     if EXPECTED_PRELOADED_SKILL_MARKER not in serialized_messages:
         return "preloaded_skill_missing"
     tools = request.get("tools")
@@ -53,15 +48,27 @@ def _validate_request(authorization: str | None, request: dict) -> str | None:
         for item in tools or []
         if isinstance(item, dict) and isinstance(item.get("function"), dict)
     }
+    if "DETERMINISTIC_OFFICE_PATH:" in serialized_messages:
+        if "ocr_parse_file" not in tool_names:
+            return "office_parser_missing"
+        for message in messages:
+            if message.get("role") == "tool" and (
+                message.get("tool_call_id") != "call-office-parser"
+                or "Office backend content" not in str(message.get("content"))
+                or "/outputs/ocr/" not in str(message.get("content"))
+            ):
+                return "office_parser_result_missing"
+        return None
     subagent_child = "DETERMINISTIC_SUBAGENT_CHILD" in serialized_messages
     subagent_parent = "DETERMINISTIC_SUBAGENT_PARENT:" in serialized_messages
     if subagent_child:
-        if "write_file" in tool_names or "task" in tool_names or "pi_sandbox" not in tool_names:
+        trusted = "SUBAGENT_MODE:always_trust" in serialized_messages
+        if ("write_file" in tool_names) != trusted or "task" in tool_names:
             return "subagent_tool_policy_mismatch"
     elif EXPECTED_PRELOADED_TOOL not in tool_names:
         return "preloaded_tool_missing"
-    if LARGE_TOOL_RESULT_MARKER in serialized_messages and "pi_sandbox" not in tool_names:
-        return "pi_sandbox_tool_missing"
+    if LARGE_TOOL_RESULT_MARKER in serialized_messages and "execute" not in tool_names:
+        return "execute_tool_missing"
     tool_messages = [message for message in messages if isinstance(message, dict) and message.get("role") == "tool"]
     if subagent_child or subagent_parent:
         expected_call = "call-subagent-write" if subagent_child else "call-subagent-task"
@@ -89,7 +96,7 @@ def _validate_request(authorization: str | None, request: dict) -> str | None:
     return None
 
 
-def _stream_payloads(model: str, messages: list[dict], tools: list[dict]) -> list[dict]:
+def _stream_payloads(model: str, messages: list[dict]) -> list[dict]:
     serialized_messages = json.dumps(messages, ensure_ascii=False)
     common = {
         "id": "chatcmpl-yuxi-deterministic",
@@ -97,17 +104,14 @@ def _stream_payloads(model: str, messages: list[dict], tools: list[dict]) -> lis
         "created": int(time.time()),
         "model": model,
     }
-    pi_large_result = PI_LARGE_RESULT_MARKER in serialized_messages and any(
-        tool.get("function", {}).get("name") == "bash" for tool in tools
-    )
-    if pi_large_result or any(message.get("role") == "tool" for message in messages if isinstance(message, dict)):
+    if any(message.get("role") == "tool" for message in messages if isinstance(message, dict)):
         return [
             {
                 **common,
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"role": "assistant", "content": "X" * 13000 if pi_large_result else EXPECTED_OUTPUT},
+                        "delta": {"role": "assistant", "content": EXPECTED_OUTPUT},
                         "finish_reason": None,
                     }
                 ],
@@ -121,8 +125,12 @@ def _stream_payloads(model: str, messages: list[dict], tools: list[dict]) -> lis
 
     large_result = LARGE_TOOL_RESULT_MARKER in serialized_messages
     tool_call_id = LARGE_TOOL_CALL_ID if large_result else EXPECTED_TOOL_CALL_ID
-    tool_name = "pi_sandbox" if large_result else EXPECTED_PRELOADED_TOOL
-    if "DETERMINISTIC_SUBAGENT_CHILD" in serialized_messages:
+    tool_name = "execute" if large_result else EXPECTED_PRELOADED_TOOL
+    if "DETERMINISTIC_OFFICE_PATH:" in serialized_messages:
+        tool_call_id, tool_name = "call-office-parser", "ocr_parse_file"
+        path = re.search(r'DETERMINISTIC_OFFICE_PATH:(/[^\s"\\]+)', serialized_messages).group(1)
+        tool_arguments = json.dumps({"file_path": path})
+    elif "DETERMINISTIC_SUBAGENT_CHILD" in serialized_messages:
         tool_call_id, tool_name = "call-subagent-write", "write_file"
         path = re.search(r'SUBAGENT_PATH:(/[^\s"\\]+)', serialized_messages).group(1)
         tool_arguments = json.dumps({"file_path": path, "content": "subagent write verified"})
@@ -132,7 +140,7 @@ def _stream_payloads(model: str, messages: list[dict], tools: list[dict]) -> lis
         description = next(message["content"] for message in reversed(messages) if message.get("role") == "user")
         tool_arguments = json.dumps({"subagent_slug": slug, "description": description})
     elif large_result:
-        tool_arguments = json.dumps({"description": f"{PI_LARGE_RESULT_MARKER} {EXPECTED_OUTPUT}"})
+        tool_arguments = json.dumps({"command": "yes X | head -c 13000"})
     elif TOOL_ERROR_MARKER in serialized_messages:
         tool_arguments = "{}"
     else:
@@ -208,7 +216,7 @@ class ReplayHandler(BaseHTTPRequestHandler):
         serialized_messages = json.dumps(request["messages"], ensure_ascii=False)
         blocking_match = re.search(rf"{BLOCK_BEFORE_RESPONSE_MARKER}:([0-9a-f-]+)", serialized_messages)
         model = str(request["model"])
-        payloads = _stream_payloads(model, request["messages"], request.get("tools", []))
+        payloads = _stream_payloads(model, request["messages"])
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")

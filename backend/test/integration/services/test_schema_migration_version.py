@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 import os
 import uuid
 
@@ -12,7 +11,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi import storage_migration
-from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.storage.postgres.manager import BUSINESS_SCHEMA_VERSION, KNOWLEDGE_SCHEMA_VERSION, PostgresManager
 from yuxi.storage.postgres.models_business import Role, User, UserRoleAssignment
 from yuxi.storage.postgres.models_knowledge import KnowledgeBase, KnowledgeFile
@@ -174,8 +172,11 @@ async def test_merge_migration_retries_knowledge_after_business_commit(
     """业务域已升级后，知识域失败重试仍转换旧权限并保留文件 Owner。"""
     schema, admin_engine, engine, manager = await _create_isolated_manager("pytest_merge_retry")
     for name in (
-        "YUXI_USER_DATA_DIR", "YUXI_SKILL_DATA_DIR", "YUXI_SKILL_PROJECTION_DIR",
-        "YUXI_LEGACY_STORAGE_DIR", "YUXI_RUNTIME_DIR",
+        "YUXI_USER_DATA_DIR",
+        "YUXI_SKILL_DATA_DIR",
+        "YUXI_SKILL_PROJECTION_DIR",
+        "YUXI_LEGACY_STORAGE_DIR",
+        "YUXI_RUNTIME_DIR",
     ):
         monkeypatch.setenv(name, str(tmp_path / name))
     monkeypatch.setattr(storage_migration, "migrate_runtime_storage_identity", lambda: None)
@@ -189,15 +190,25 @@ async def test_merge_migration_retries_knowledge_after_business_commit(
         await manager.record_schema_version("business", business_version)
         await manager.record_schema_version("knowledge", knowledge_version)
         async with manager.get_async_session_context() as db:
-            db.add_all([
-                KnowledgeBase(kb_id="legacy", name="旧共享", kb_type="milvus", share_config=legacy),
-                KnowledgeBase(kb_id="current", name="新共享", kb_type="milvus", share_config=current),
-            ])
+            db.add_all(
+                [
+                    KnowledgeBase(kb_id="legacy", name="旧共享", kb_type="milvus", share_config=legacy),
+                    KnowledgeBase(kb_id="current", name="新共享", kb_type="milvus", share_config=current),
+                ]
+            )
             await db.flush()
-            db.add(KnowledgeFile(
-                file_id="owned", kb_id="legacy", filename="保留文件", status="indexing",
-                processing_task_id="task-owned", processing_owner="attempt-owned", chunk_count=7,
-            ))
+            db.add(
+                KnowledgeFile(
+                    file_id="owned",
+                    kb_id="legacy",
+                    filename="保留文件",
+                    status="indexing",
+                    processing_task_id="task-owned",
+                    processing_owner="attempt-owned",
+                    chunk_count=7,
+                )
+            )
+
         async def fail_knowledge():
             """在业务版本提交后中断知识迁移。"""
             raise RuntimeError("knowledge migration interrupted")
@@ -207,21 +218,28 @@ async def test_merge_migration_retries_knowledge_after_business_commit(
         with pytest.raises(RuntimeError, match="knowledge migration interrupted"):
             await storage_migration.main()
         manager = _scoped_manager(engine)
-        assert await manager.get_schema_versions() == {"business": 8, "knowledge": knowledge_version}
+        assert await manager.get_schema_versions() == {
+            "business": BUSINESS_SCHEMA_VERSION,
+            "knowledge": knowledge_version,
+        }
         for _ in range(2):
             manager = _scoped_manager(engine)
             monkeypatch.setattr(storage_migration, "pg_manager", manager)
             await storage_migration.main()
         manager = _scoped_manager(engine)
-        assert await manager.get_schema_versions() == {"business": 8, "knowledge": 3}
+        assert await manager.get_schema_versions() == {"business": 9, "knowledge": 3}
         async with manager.get_async_session_context() as db:
             rows = dict((await db.execute(text("SELECT kb_id, share_config FROM knowledge_bases"))).all())
             assert rows["legacy"] == {"version": 2, "read_scope": legacy, "manage_scope": legacy}
             assert rows["current"] == current
-            assert (await db.execute(text(
-                "SELECT filename,status,processing_task_id,processing_owner,chunk_count "
-                "FROM knowledge_files WHERE file_id='owned'"
-            ))).one() == ("保留文件", "indexing", "task-owned", "attempt-owned", 7)
+            assert (
+                await db.execute(
+                    text(
+                        "SELECT filename,status,processing_task_id,processing_owner,chunk_count "
+                        "FROM knowledge_files WHERE file_id='owned'"
+                    )
+                )
+            ).one() == ("保留文件", "indexing", "task-owned", "attempt-owned", 7)
     finally:
         await _drop_isolated_schema(schema, admin_engine, engine)
 
@@ -411,7 +429,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "ix_scheduled_agent_runs_job_created",
             "ix_scheduled_agent_runs_dispatching",
         }.issubset(scheduled_indexes)
-        assert BUSINESS_SCHEMA_VERSION == 8
+        assert BUSINESS_SCHEMA_VERSION == 9
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -557,7 +575,10 @@ async def test_unversioned_knowledge_baseline_adds_timestamp_before_owner_conver
         await manager.create_knowledge_tables()
         async with scoped_engine.begin() as connection:
             await connection.execute(
-                text("INSERT INTO knowledge_bases (kb_id, name, kb_type, organization_snapshot_inferred) VALUES ('legacy-kb', 'legacy', 'milvus', false)")
+                text(
+                    "INSERT INTO knowledge_bases (kb_id, name, kb_type, organization_snapshot_inferred) "
+                    "VALUES ('legacy-kb', 'legacy', 'milvus', false)"
+                )
             )
             await connection.execute(
                 text(
@@ -709,50 +730,6 @@ async def test_supported_business_versions_run_real_ddl_before_advancing_version
         await manager.record_schema_version("business", BUSINESS_SCHEMA_VERSION)
         await manager.record_schema_version("knowledge", KNOWLEDGE_SCHEMA_VERSION)
         await manager.require_current_schema()
-    finally:
-        if scoped_engine is not None:
-            await scoped_engine.dispose()
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        await admin_engine.dispose()
-
-
-async def test_pi_cleanup_lock_skips_concurrent_real_postgres_session() -> None:
-    """同一 cleanup fact 同时只能由一个 worker 执行外部清理。"""
-    schema = f"pytest_pi_cleanup_lock_{uuid.uuid4().hex[:16]}"
-    admin_engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
-    scoped_engine = None
-
-    try:
-        async with admin_engine.begin() as connection:
-            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        scoped_engine = create_async_engine(
-            os.environ["POSTGRES_URL"],
-            pool_pre_ping=True,
-            connect_args={"server_settings": {"search_path": schema}},
-        )
-        failed_at = datetime(2026, 8, 27, 12, 0, 0)
-        async with scoped_engine.begin() as connection:
-            await connection.execute(
-                text(
-                    "CREATE TABLE agent_run_attempts ("
-                    "id INTEGER PRIMARY KEY, adapter VARCHAR(32), cleanup_failed_at TIMESTAMP)"
-                )
-            )
-            await connection.execute(
-                text("INSERT INTO agent_run_attempts (id, adapter, cleanup_failed_at) VALUES (7, 'local', :failed_at)"),
-                {"failed_at": failed_at},
-            )
-
-        sessions = async_sessionmaker(scoped_engine, expire_on_commit=False)
-        async with sessions() as first, sessions() as second:
-            await first.begin()
-            await second.begin()
-            assert await AgentRunRepository(first).lock_pi_cleanup_failure(7, failed_at=failed_at) is True
-            assert await AgentRunRepository(second).lock_pi_cleanup_failure(7, failed_at=failed_at) is False
-            await first.commit()
-            assert await AgentRunRepository(second).lock_pi_cleanup_failure(7, failed_at=failed_at) is True
-            await second.rollback()
     finally:
         if scoped_engine is not None:
             await scoped_engine.dispose()

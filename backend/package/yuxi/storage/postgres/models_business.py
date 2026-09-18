@@ -52,10 +52,7 @@ OR (
      AND subagent_thread_relation_id IS NULL)
  OR (run_type = 'subagent'
      AND created_by_run_id IS NOT NULL
-     AND subagent_thread_relation_id IS NOT NULL)
- OR (run_type = 'sandbox'
-     AND created_by_run_id IS NOT NULL
-     AND subagent_thread_relation_id IS NULL))
+     AND subagent_thread_relation_id IS NOT NULL))
 )
 """
 PROJECT_STATUS_CONSTRAINT_NAME = "ck_projects_status"
@@ -1343,7 +1340,7 @@ class AgentRun(Base):
         String(32),
         nullable=False,
         default="chat",
-        comment="Run type: chat/resume/subagent/sandbox",
+        comment="Run type: chat/resume/subagent；sandbox 仅保留已终态历史",
     )
     input_message_id = Column(Integer, nullable=True, comment="Input message ID")
     output_message_id = Column(Integer, nullable=True, comment="Output message ID")
@@ -1453,7 +1450,8 @@ class AgentRunAttempt(Base):
     )
     attempt_no = Column(Integer, nullable=False, comment="Run 内递增的执行序号")
     worker_id = Column(String(128), nullable=False, comment="取得执行所有权的 owner token")
-    adapter = Column(String(32), nullable=True, comment="本 attempt 冻结的执行 adapter")
+    # PI 历史审计列保留，result_events 默认值也用于兼容旧库的 NOT NULL 列。
+    adapter = Column(String(32), nullable=True, comment="历史 PI attempt 执行 adapter")
     instance_id = Column(String(128), nullable=True, comment="adapter 创建的实例 ID")
     route_reason = Column(Text, nullable=True, comment="选择 adapter 的稳定理由")
     route_snapshot = Column(JSON_VALUE, nullable=True, comment="claim 时冻结的选路输入")

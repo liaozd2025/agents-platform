@@ -428,7 +428,7 @@ async def test_ensure_business_schema_adds_nonterminal_run_shape_constraint_with
     assert "ck_agent_runs_nonterminal_shape" in statements
     assert "run_type = 'resume'" in statements
     assert "run_type = 'subagent'" in statements
-    assert "run_type = 'sandbox'" in statements
+    assert "run_type = 'sandbox'" not in statements
     assert "DROP CONSTRAINT IF EXISTS ck_agent_runs_nonterminal_shape" in statements
     assert "NOT VALID" in statements
     assert "EXCEPTION WHEN duplicate_object" in statements

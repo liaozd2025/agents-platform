@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from yuxi.agents.buildin.chatbot import graph as chatbot_graph
+from yuxi.agents.context import BaseContext
 from yuxi.agents.tool_approval import create_tool_approval_middleware, normalize_tool_approval_mode
 
 PROJECT_ROOT = "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111"
@@ -85,6 +86,12 @@ async def test_chatbot_graph_assembles_approval_with_current_project(monkeypatch
 
 def test_always_trust_mode_does_not_build_approval_middleware():
     assert create_tool_approval_middleware("always_trust") is None
+
+
+def test_unspecified_approval_mode_uses_upstream_default():
+    mode = BaseContext().tool_approval_mode
+    assert mode == "default"
+    assert create_tool_approval_middleware(normalize_tool_approval_mode(mode)) is not None
 
 
 def test_unknown_tool_approval_mode_is_rejected():

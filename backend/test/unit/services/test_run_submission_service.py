@@ -171,7 +171,6 @@ async def test_submit_run_command_shares_conversation_intake_and_finalize(monkey
         ),
         request_metadata={"request_id": "req-1", "channel": "spoofed"},
         model_spec="provider:model",
-        executor="pi",
         create_conversation=True,
         conversation_title="Agent Call Run",
         conversation_project_id="11111111-1111-4111-8111-111111111111",
@@ -191,15 +190,13 @@ async def test_submit_run_command_shares_conversation_intake_and_finalize(monkey
     assert calls["intake"]["channel"] == "api"
     assert calls["intake"]["external_id"] == "external-1"
     assert calls["intake"]["origin_metadata"] == {"agent_invocation_meta": {"trace_id": "trace-1"}}
-    assert calls["intake"]["executor"] == "pi"
+    assert "executor" not in calls["intake"]
     assert calls["intake"]["meta"] == {
         "request_id": "req-1",
         "channel": "api",
         "agent_invocation_meta": {"trace_id": "trace-1"},
     }
-    assert calls["intake"]["workdir_binding"].workdir_path == (
-        "projects/11111111-1111-4111-8111-111111111111"
-    )
+    assert calls["intake"]["workdir_binding"].workdir_path == ("projects/11111111-1111-4111-8111-111111111111")
     assert result == {
         "request_id": "req-1",
         "status": "dispatched",

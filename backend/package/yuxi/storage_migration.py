@@ -39,6 +39,7 @@ from yuxi.storage_migrations.v072_runtime_identity import (
     migrate_runtime_storage_identity,
     runtime_storage_requires_quiescence,
 )
+from yuxi.storage_migrations.v073_pi_retirement import apply_pi_retirement, inspect_pi_retirement
 
 _QUIESCENCE_TOKEN_ENV = "YUXI_STORAGE_MIGRATION_QUIESCENCE_TOKEN"
 _QUIESCENCE_FILE_ENV = "YUXI_STORAGE_MIGRATION_QUIESCENCE_FILE"
@@ -125,7 +126,7 @@ async def main() -> None:
                 "business",
                 business_version,
                 BUSINESS_SCHEMA_VERSION,
-                upgrade_from=(1, 2, 3, 4, 5, 7),
+                upgrade_from=(1, 2, 3, 4, 5, 7, 8),
             )
             knowledge_version = versions.get("knowledge")
             _require_supported_version(
@@ -134,6 +135,12 @@ async def main() -> None:
                 KNOWLEDGE_SCHEMA_VERSION,
                 upgrade_from=(1, 2),
             )
+
+            pi_run_ids, pi_request_ids = set(), set()
+            if business_version != BUSINESS_SCHEMA_VERSION:
+                pi_run_ids, pi_request_ids, retires_pi = await inspect_pi_retirement(pg_manager)
+                if retires_pi:
+                    _require_quiescence_proof()
 
             if business_version is None:
                 await pg_manager.create_business_tables()
@@ -149,6 +156,9 @@ async def main() -> None:
                 await pg_manager.ensure_business_schema()
                 if business_version is None:
                     await pg_manager.setup_langgraph_checkpointer()
+                async with pg_manager.get_async_session_context() as session:
+                    await apply_pi_retirement(session, pi_run_ids, pi_request_ids)
+                    await session.commit()
                 await pg_manager.record_schema_version("business", BUSINESS_SCHEMA_VERSION)
 
             if knowledge_version is None:

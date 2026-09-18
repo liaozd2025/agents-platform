@@ -1,8 +1,10 @@
 # PI 沙箱任务的可靠交付与持续协作
 
-状态：implemented
+状态：archived
 类型：feature
-Owner：backend/package/yuxi/services/pi_execution_service.py
+Owner：docs/adr/0004-hybrid-pi-execution-seam.md
+
+本记录保存已退役方案的历史决定与证据。当前行为由 [PI 退役决策](../implemented/2026-09-18-retire-pi-executor.md) 取代。
 
 ## 问题
 

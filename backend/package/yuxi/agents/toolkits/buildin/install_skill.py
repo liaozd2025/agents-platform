@@ -21,14 +21,12 @@ SANDBOX_PATH_HINT = "请使用当前 Project Workdir 下的目录，或 /home/ge
 
 class InstallSkillInput(BaseModel):
     source: str = Field(
-        description=(
-            "PI Agent 已准备好的 Sandbox Skill 目录，必须位于当前 Project Workdir 或 "
-            "/home/gem/user-data/ 下。Git 来源需先用 pi_sandbox 下载到上述目录。"
-        )
+        description="Skill 来源，支持两种格式:\n"
+        "1. Sandbox 路径: 当前 Project Workdir 或 /home/gem/user-data/ 下的绝对路径\n"
+        "2. Git 仓库: owner/repo 或完整 GitHub URL"
     )
     skill_names: list[str] | None = Field(
-        default=None,
-        description="保留兼容字段；Sandbox 路径安装时忽略。",
+        default=None, description="Git 安装时指定要安装的 skill slug 列表（至少一个）。Sandbox 路径安装时忽略此参数。"
     )
 
 
@@ -115,6 +113,7 @@ async def _run_install_task(
         )
 
         installed_slugs: list[str] = []
+        failed_items: list[dict] = []
         config_success = True
 
         if source.startswith("/"):
@@ -131,19 +130,34 @@ async def _run_install_task(
                 item = await install_personal_skill_dir(uid, source_dir)
                 installed_slugs = [item.slug]
         else:
-            return Command(
-                update={
-                    "messages": [
-                        ToolMessage(
-                            content=(
-                                "错误：Git 下载必须交给 pi_sandbox；先让 PI Agent 把目标 Skill 下载到当前 "
-                                "Project Workdir，再用该 Sandbox 目录调用 install_skill。"
-                            ),
-                            tool_call_id=tool_call_id,
-                        )
-                    ]
-                }
-            )
+            if not skill_names:
+                return Command(
+                    update={
+                        "messages": [
+                            ToolMessage(
+                                content="错误：从 Git 安装时必须通过 skill_names 指定技能名称",
+                                tool_call_id=tool_call_id,
+                            )
+                        ]
+                    }
+                )
+
+            from yuxi.agents.skills.remote_install import prepare_remote_skills_batch
+
+            preparation = await prepare_remote_skills_batch(source=source, skills=skill_names)
+            try:
+                for result in preparation.results:
+                    if not result.get("success"):
+                        failed_items.append(result)
+                        continue
+                    try:
+                        item = await install_personal_skill_dir(uid, result["source_dir"])
+                        installed_slugs.append(item.slug)
+                    except Exception as e:
+                        failed_items.append({"slug": result["slug"], "success": False, "error": str(e)})
+
+            finally:
+                await preparation.cleanup()
 
         if installed_slugs:
             async with pg_manager.get_async_session_context() as db:
@@ -156,9 +170,12 @@ async def _run_install_task(
             lines.append(f"已安装 Skill: {', '.join(installed_slugs)}")
             for slug in installed_slugs:
                 lines.append(f"Skill 路径: {VIRTUAL_PERSONAL_SKILLS_PATH}/{slug}/SKILL.md")
+        if failed_items:
+            for item in failed_items:
+                lines.append(f"安装失败 ({item['slug']}): {item.get('error', '未知错误')}")
         if not config_success:
             lines.append("Skill 已安装，但当前 Agent 配置未更新，请手动启用")
-        if not installed_slugs:
+        if not installed_slugs and not failed_items:
             lines.append("未发现需要安装的 Skill")
 
         return Command(

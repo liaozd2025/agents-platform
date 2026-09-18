@@ -1,8 +1,10 @@
 # 混合 PI 执行复用 AgentRun 与 provisioner
 
-状态：accepted
+状态：superseded
 类型：architecture
 Owner：`backend/package/yuxi/services/run_worker.py`
+
+当前方案由 [移除 PI 统一沙箱执行扩展](0005-retire-pi-sandbox-delegation.md) 取代；本记录仅保存历史设计。
 
 ## 问题
 

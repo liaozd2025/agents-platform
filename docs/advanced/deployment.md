@@ -66,8 +66,9 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml --profile all up 
 
 ### 从 v0.7.2 升级的变化
 
-本 fork 接受 business=1/2/3/4/5 及上游 v0.7.3 的 business=7，统一升级到 business=8。knowledge=1/2 升级到 knowledge=3，包含文件任务 Owner 与 fork 共享权限 v2 的转换。两个域分别在迁移成功后记录版本，部分失败可重试；未知版本会被拒绝，不要手工修改版本表绕过结构校验。
+本 fork 接受 business=1/2/3/4/5/7/8，统一升级到 business=9。knowledge=1/2 升级到 knowledge=3，包含文件任务 Owner 与 fork 共享权限 v2 的转换。两个域分别在迁移成功后记录版本，部分失败可重试；未知版本会被拒绝，不要手工修改版本表绕过结构校验。
 
+- PI 专属执行器已移除，普通 Agent/SubAgent 使用上游文件、命令工具和审批机制。历史 PI 结果与交付文件可读可下载，旧任务及已批准待执行的恢复请求不再续跑；迁移会关闭对应执行意图，父对话可以发送新消息。沙箱镜像及资源配置见[沙盒配置](../agents/sandbox-architecture.md)。
 - LITE 模式已移除，原 LITE 部署须补齐 Milvus、etcd、Neo4j 等完整拓扑资源，并清理失效的 LITE 配置。
 - Sandbox 默认规格为 `SANDBOX_RUNTIME_PROFILE=core`，不启动浏览器、browser MCP、VNC、Jupyter、code-server 或 NodeJS REPL 服务。依赖网页自动化的部署在 `.env.prod` 设置 `SANDBOX_RUNTIME_PROFILE=browser`；需要完整交互式开发环境时设置 `full`。升级时重新创建 provisioner，规格对随后创建的沙盒生效；能力范围见[沙盒配置](../agents/sandbox-architecture.md)。
 - 通用后台任务改由独立 worker 执行。迁移后须用同一版本协调启动 API 与 worker；混用旧 worker 不能满足新版本的就绪条件。

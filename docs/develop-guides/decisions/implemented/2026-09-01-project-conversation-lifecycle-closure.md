@@ -4,6 +4,8 @@
 类型：bug-fix
 Owner：backend/package/yuxi/repositories/project_repository.py
 
+PI 执行相关部分由 [PI 退役决策](../implemented/2026-09-18-retire-pi-executor.md) 取代；本记录中的对应验证仅代表退役前版本。
+
 ## 问题
 
 Project 删除与普通显式 Conversation 创建使用同一 Project 行锁，但运行中的父 Agent 可以经 SubAgent 或 PI Sandbox 服务在 deleted Project 下新增 Conversation 与 Run。聊天输入区创建 Project 后只更新组件局部列表，侧边栏不会同步；侧边栏“最近”视图还把 `updated_at` 当作主要时间，改变了原有按 `created_at` 排序的契约。

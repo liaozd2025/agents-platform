@@ -14,9 +14,9 @@ from yuxi.permissions.authorization import parse_department_ancestor_ids
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
     APIKey,
-    ScheduledAgentJob,
     Department,
     Role,
+    ScheduledAgentJob,
     User,
     UserConfig,
     UserRoleAssignment,

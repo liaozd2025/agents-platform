@@ -113,7 +113,6 @@ async def intake_request(
     agent_backend: Any,
     model_spec: str | None = None,
     tool_approval_mode: str | None = None,
-    executor: str = "langgraph",
     meta: dict | None = None,
     workdir_binding: WorkdirBinding | None = None,
 ) -> IntakeResult:
@@ -221,8 +220,6 @@ async def intake_request(
             "model_spec": resolved_model_spec,
             "tool_approval_mode": resolved_tool_approval_mode,
         }
-        if executor == "pi":
-            input_payload["runtime"] = {"executor": "pi"}
 
     run_input_message = input_message.with_metadata(
         _build_message_metadata(request_id=request_id, source=source, input_message=input_message, meta=meta)
@@ -505,8 +502,7 @@ async def recover_pending_dispatches() -> None:
     async with pg_manager.get_async_session_context() as db:
         pending_result = await db.execute(
             select(AgentRun.uid, AgentRun.agent_slug, AgentRun.conversation_thread_id).where(
-                AgentRun.status == "pending",
-                AgentRun.run_type != "sandbox",
+                AgentRun.status == "pending"
             )
         )
         scopes_result = await db.execute(
@@ -854,6 +850,8 @@ async def _get_thread_conversation(
         else await repo.get_conversation_by_thread_id(thread_id)
     )
     if _conversation_matches(conversation, uid=uid, agent_slug=agent_slug):
+        if (conversation.extra_metadata or {}).get("source") == "pi_sandbox":
+            raise HTTPException(status_code=409, detail="历史 PI 对话仅可查看和下载，不能新增请求或恢复")
         return conversation
     raise HTTPException(status_code=404, detail="对话线程不存在")
 

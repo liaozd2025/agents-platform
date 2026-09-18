@@ -21,7 +21,6 @@ from test.live_api_cleanup import (
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.project_repository import ProjectRepository
 from yuxi.services.agent_run_service import prepare_agent_run_creation_scope
-from yuxi.services.pi_sandbox_run_service import PiSandboxRunService
 from yuxi.services.project_service import delete_project_view
 from yuxi.services.subagent_run_service import SubagentRunService
 from yuxi.storage.postgres.models_business import (
@@ -515,119 +514,6 @@ async def test_project_delete_waits_for_real_subagent_conversation_creation(
         assert project_status == "deleted"
         assert child_conversation_id in {row["id"] for row in rows}
         assert {row["status"] for row in rows} == {"deleted"}
-    finally:
-        allow_child_creation.set()
-        tasks = [task for task in (creator_task, delete_task) if task is not None]
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def test_project_delete_waits_for_real_pi_sandbox_conversation_creation(
-    monkeypatch: pytest.MonkeyPatch,
-    project_lifecycle_database,
-):
-    """真实 PI Sandbox 写入边界与 Project 删除使用同一行锁。"""
-
-    session_factory, uid, project_id = project_lifecycle_database
-    parent_thread_id = f"pytest-pi-parent-{uuid.uuid4()}"
-    parent_run_id = f"pytest-pi-run-{uuid.uuid4()}"
-    child_boundary_reached = asyncio.Event()
-    allow_child_creation = asyncio.Event()
-    original_ensure_child = PiSandboxRunService._ensure_child_conversation
-
-    parent_conversation_id = await _create_lifecycle_conversation(
-        session_factory,
-        uid=uid,
-        project_id=project_id,
-        thread_id=parent_thread_id,
-        label="pi-project-delete-race",
-        status="active",
-    )
-    async with session_factory() as session:
-        session.add(
-            AgentRun(
-                id=parent_run_id,
-                conversation_thread_id=parent_thread_id,
-                runtime_scope_id=parent_thread_id,
-                agent_slug="default-chatbot",
-                uid=uid,
-                request_id=f"request-{uuid.uuid4()}",
-                conversation_id=parent_conversation_id,
-                input_payload={"model_spec": "provider:model"},
-                status="running",
-                run_type="chat",
-            )
-        )
-        await session.commit()
-
-    async def pause_before_child_creation(self, **kwargs):
-        child_boundary_reached.set()
-        await allow_child_creation.wait()
-        return await original_ensure_child(self, **kwargs)
-
-    async def prepare_scope(**kwargs):
-        conversation = await ConversationRepository(kwargs["db"]).get_conversation_by_thread_id(
-            kwargs["conversation_thread_id"]
-        )
-        return SimpleNamespace(conversation=conversation, existing_run=None)
-
-    async def create_input(**_kwargs):
-        return SimpleNamespace(id=1)
-
-    async def persist_run(**_kwargs):
-        return SimpleNamespace(id="pi-child-run"), True
-
-    monkeypatch.setattr(PiSandboxRunService, "_ensure_child_conversation", pause_before_child_creation)
-    monkeypatch.setattr(
-        "yuxi.services.pi_sandbox_run_service.agent_run_service.prepare_agent_run_creation_scope", prepare_scope
-    )
-    monkeypatch.setattr(
-        "yuxi.services.pi_sandbox_run_service.agent_run_service.create_agent_run_input_message", create_input
-    )
-    monkeypatch.setattr("yuxi.services.pi_sandbox_run_service.agent_run_service.persist_agent_run_record", persist_run)
-    monkeypatch.setattr("yuxi.services.pi_sandbox_run_service.compute_skill_dir_hash", lambda _path: "unused")
-
-    async def create_pi_child():
-        async with session_factory() as session:
-            return await PiSandboxRunService(session).start(
-                uid=uid,
-                created_by_run_id=parent_run_id,
-                description="读取项目文件",
-                tool_call_id=f"call-{uuid.uuid4()}",
-                skill_slugs=[],
-                skill_sources={},
-                skill_runtime_paths={},
-            )
-
-    async def delete_project():
-        async with session_factory() as session:
-            return await delete_project_view(uid=uid, project_id=project_id, db=session)
-
-    creator_task = asyncio.create_task(create_pi_child())
-    delete_task = None
-    try:
-        await asyncio.wait_for(child_boundary_reached.wait(), timeout=5)
-        delete_task = asyncio.create_task(delete_project())
-        await asyncio.sleep(0.05)
-        assert not delete_task.done()
-
-        allow_child_creation.set()
-        await asyncio.wait_for(creator_task, timeout=5)
-        delete_result = await asyncio.wait_for(delete_task, timeout=5)
-        assert delete_result["deleted_conversations"] == 2
-
-        async with _database_connection() as database:
-            project_status = await database.fetchval("SELECT status FROM projects WHERE id = $1", project_id)
-            conversation_statuses = await database.fetch(
-                "SELECT status FROM conversations WHERE project_id = $1",
-                project_id,
-            )
-
-        assert project_status == "deleted"
-        assert len(conversation_statuses) == 2
-        assert {row["status"] for row in conversation_statuses} == {"deleted"}
     finally:
         allow_child_creation.set()
         tasks = [task for task in (creator_task, delete_task) if task is not None]

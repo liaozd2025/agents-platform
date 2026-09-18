@@ -1,8 +1,10 @@
 # 恢复 PI Agent 沙箱 child Run
 
-状态：implemented
+状态：archived
 类型：bug-fix
-Owner：backend/package/yuxi/agents/middlewares/pi_sandbox.py
+Owner：docs/adr/0004-hybrid-pi-execution-seam.md
+
+本记录保存已退役方案的历史决定与证据。当前行为由 [PI 退役决策](../implemented/2026-09-18-retire-pi-executor.md) 取代。
 
 ## 问题
 
@@ -12,7 +14,7 @@ Owner：backend/package/yuxi/agents/middlewares/pi_sandbox.py
 
 ## 决策
 
-普通 Chat、Resume 和 SubAgent 继续由 LangGraph 编排。模型侧所有用户沙箱读取、搜索、写入、编辑、OCR 和命令执行统一进入 `pi_sandbox`；每次调用持久化为 `run_type=sandbox` 的 PI child AgentRun，并在父 worker 槽位内复用父 Run 的 runtime scope 与 Project Workdir。child attempt 明确记录 `executor=pi`、PI runtime manifest、模型与已选 Skill 快照。
+普通 Chat、Resume 和 SubAgent 继续由 LangGraph 编排。模型侧用户沙箱读取、搜索、写入、编辑和命令执行统一进入 `pi_sandbox`；每次调用持久化为 `run_type=sandbox` 的 PI child AgentRun，并在父 worker 槽位内复用父 Run 的 runtime scope 与 Project Workdir。child attempt 明确记录 `executor=pi`、PI runtime manifest、模型与已选 Skill 快照。文档内容提取通过 `ocr_parse_file` 在后端执行。PI 执行能力的退役边界见[待实施决策](../implemented/2026-09-18-retire-pi-executor.md)。
 
 直接 `read_file` 只保留给可信共享或个人 Skill 根目录，其他直接沙箱工具在最终模型工具边界移除，并在 Tool execution 边界 fail-closed 重定向到 `pi_sandbox`，因此历史 checkpoint 也不能绕过。Agent 发起的远程 Skill 安装先通过 `pi_sandbox` 准备文件，再走既有确定性安装服务。
 
@@ -37,7 +39,7 @@ PI JSONL 使用独立的 32 MiB 总流上限，单事件仍限制为 16 KiB；�
 - LangGraph 拥有对话和工具编排，PI Agent 唯一拥有用户沙箱任务执行，不保留双执行路径。
 - PI child 与父 Run 共享沙箱生命周期；child 结束或失败不能释放父实例，只清理自己的确定性输出目录。
 - 模型凭据只经沙箱临时文件传入 runner，并在解析前删除；Project outputs 与日志不保存凭据。
-- `run_type=sandbox` 约束在 business schema v3 引入；当前 v1、v2、v3 部署必须按[数据库 Schema 迁移 Owner](./2026-08-24-versioned-schema-migration-owner.md)由唯一 storage migrator 升级至 v4，API 和 worker 在版本不匹配时 fail-closed。
+- `run_type=sandbox` 约束在 business schema v3 引入；当前 v1、v2、v3 部署必须按[数据库 Schema 迁移 Owner](../implemented/2026-08-24-versioned-schema-migration-owner.md)由唯一 storage migrator 升级至 v4，API 和 worker 在版本不匹配时 fail-closed。
 - 一次纯文本模型节点最多产生四次 provider 请求；超过该上限的任务以失败收敛，避免无限续写和费用失控。
 - PI runner 的一次最终回复同样最多产生四次模型请求；final ACK 与取消并发时以已提交结果为准。
 - PI 工具参数与结果事件单项限制为 16 KiB；完整产物继续由既有 outputs/ref 契约承载，不把大输出塞入 Redis 事件。

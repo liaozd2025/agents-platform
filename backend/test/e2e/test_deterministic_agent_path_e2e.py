@@ -8,10 +8,12 @@ import json
 import os
 import shutil
 import uuid
+from io import BytesIO
 
 import asyncpg
 import httpx
 import pytest
+from docx import Document
 from e2e_helpers import cancel_run, consume_events, delete_agent, postgres_dsn, wait_for_run
 from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend, get_sandbox_provider
 from yuxi.config import get_skill_projection_dir
@@ -90,6 +92,31 @@ async def test_replay_rejects_requests_outside_deterministic_contract() -> None:
             "tool_execution_result_missing",
         ),
     ]
+    office_messages = [
+        {"role": "system", "content": EXPECTED_PRELOADED_SKILL_MARKER},
+        {"role": "user", "content": f"{EXPECTED_OUTPUT} DETERMINISTIC_OFFICE_PATH:/report.docx"},
+    ]
+    cases.extend(
+        [
+            (
+                {"Authorization": "Bearer ci-replay-key"},
+                {**valid_body, "messages": office_messages},
+                "office_parser_missing",
+            ),
+            (
+                {"Authorization": "Bearer ci-replay-key"},
+                {
+                    **valid_body,
+                    "tools": [{"type": "function", "function": {"name": "ocr_parse_file"}}],
+                    "messages": [
+                        *office_messages,
+                        {"role": "tool", "tool_call_id": "call-office-parser", "content": "error"},
+                    ],
+                },
+                "office_parser_result_missing",
+            ),
+        ]
+    )
 
     async with httpx.AsyncClient(base_url="http://sandbox-provisioner:8766", timeout=5) as client:
         for headers, body, expected_error in cases:
@@ -351,11 +378,14 @@ async def test_subagent_worker_enforces_inherited_write_policy(e2e_client, e2e_h
             message for message in state.json()["messages"] if message.get("tool_call_id") == "call-subagent-write"
         ]
         assert len(results) == 1, state.json()["messages"]
-        assert results[0]["status"] == "error"
-        assert "pi_sandbox" in results[0]["content"]
-        assert not probe_path.exists(), "两种审批模式均不能绕过 PI 写入共享 Workdir"
-        if audit:
-            assert audit["execution_status"] == "failed", audit
+        assert results[0]["status"] == ("error" if mode == "default" else "success")
+        assert probe_path.parent.is_dir(), probe_path
+        if mode == "default":
+            assert "不可用" in results[0]["content"]
+            assert not probe_path.exists(), "被拒绝的子智能体调用不能写入共享 Workdir"
+        else:
+            assert audit and audit["execution_status"] == "completed", audit
+            assert probe_path.read_text(encoding="utf-8") == "subagent write verified"
     finally:
         if run_id:
             await cancel_run(e2e_client, e2e_headers, run_id)
@@ -369,6 +399,78 @@ async def test_subagent_worker_enforces_inherited_write_policy(e2e_client, e2e_h
                 assert response.status_code in {200, 404}, response.text
         for slug in reversed(agents):
             await delete_agent(e2e_client, e2e_headers, slug)
+        await _delete_provider(e2e_client, e2e_headers)
+
+
+async def test_office_content_extraction_uses_backend_without_pi_child(e2e_client, e2e_headers):
+    """真实 HTTP、worker、沙箱传输和 Docling 产物证明正文提取不启动 PI。"""
+    me = await e2e_client.get("/api/auth/me", headers=e2e_headers)
+    assert me.status_code == 200, me.text
+    await _create_provider(e2e_client, e2e_headers)
+    slug = await _create_agent(e2e_client, e2e_headers, str(me.json()["uid"]))
+    thread_id = None
+    try:
+        created = await e2e_client.post(
+            "/api/chat/thread",
+            headers=e2e_headers,
+            json={"agent_id": slug, "title": make_test_conversation_title("office-parser")},
+        )
+        assert created.status_code == 200, created.text
+        thread_id = str(created.json()["id"])
+        workdir = created.json()["workdir_path"]
+        source = BytesIO()
+        document = Document()
+        document.add_paragraph("Office backend content 37")
+        document.save(source)
+        uploaded = await e2e_client.post(
+            "/api/viewer/filesystem/upload",
+            headers=e2e_headers,
+            data={"thread_id": thread_id, "parent_path": "/"},
+            files={"files": ("office-parser.docx", source.getvalue())},
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        submitted = await e2e_client.post(
+            "/api/agent/runs",
+            headers=e2e_headers,
+            json={
+                "agent_slug": slug,
+                "thread_id": thread_id,
+                "query": (
+                    f"{EXPECTED_OUTPUT} DETERMINISTIC_OFFICE_PATH:/home/gem/user-data/{workdir}/office-parser.docx"
+                ),
+                "meta": {"request_id": f"office-parser-{uuid.uuid4()}"},
+            },
+        )
+        assert submitted.status_code == 200, submitted.text
+        run_id = str(submitted.json()["run_id"])
+        run = await wait_for_run(e2e_client, e2e_headers, run_id)
+        assert run["status"] == "completed", run
+        result = await e2e_client.get(f"/api/agent/runs/{run_id}/result", headers=e2e_headers)
+        assert result.json()["output"] == EXPECTED_OUTPUT, result.text
+        base = f"/api/chat/thread/{thread_id}/artifacts/home/gem/user-data/{workdir}"
+        parsed = await e2e_client.get(f"{base}/outputs/ocr/office-parser.md", headers=e2e_headers)
+        assert parsed.status_code == 200, parsed.text
+        assert "Office backend content 37" in parsed.text
+        original = await e2e_client.get(f"{base}/office-parser.docx", headers=e2e_headers, params={"download": "true"})
+        assert original.status_code == 200
+        assert original.content == source.getvalue()
+        conn = await asyncpg.connect(postgres_dsn())
+        try:
+            assert await conn.fetchval("SELECT count(*) FROM agent_runs WHERE created_by_run_id = $1", run_id) == 0
+            assert (
+                await conn.fetchval(
+                    "SELECT execution_status FROM messages WHERE run_id = $1 AND message_type = 'tool_audit' "
+                    "AND operation_id = 'call-office-parser'",
+                    run_id,
+                )
+                == "completed"
+            )
+        finally:
+            await conn.close()
+    finally:
+        if thread_id:
+            await e2e_client.delete(f"/api/chat/thread/{thread_id}", headers=e2e_headers)
+        await delete_agent(e2e_client, e2e_headers, slug)
         await _delete_provider(e2e_client, e2e_headers)
 
 
@@ -832,7 +934,7 @@ async def test_resume_with_offloaded_tool_result_publishes_stream_owned_audit(
     e2e_client: httpx.AsyncClient,
     e2e_headers: dict[str, str],
 ) -> None:
-    """审批恢复后的 PI 大结果不得被 State offload 摘要覆盖原始 Tool 审计。"""
+    """审批恢复后的大结果 State 不得覆盖已关闭的原始 Tool 审计。"""
     me_response = await e2e_client.get("/api/auth/me", headers=e2e_headers)
     assert me_response.status_code == 200, me_response.text
     uid = str(me_response.json()["uid"])
@@ -925,7 +1027,7 @@ async def test_resume_with_offloaded_tool_result_publishes_stream_owned_audit(
         assert len(audit["content"]) > 3 * 1024 * 4
         raw_metadata = audit["extra_metadata"]
         metadata = json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
-        assert metadata["tool_name"] == "pi_sandbox"
+        assert metadata["tool_name"] == "execute"
         assert metadata["output"]["content"] == audit["content"]
 
         sandbox = ProvisionerSandboxBackend(thread_id=thread_id, uid=uid, workdir_path=workdir_path)

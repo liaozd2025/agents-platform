@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
-from sqlalchemy.orm.attributes import flag_modified
 
 from yuxi.storage.postgres.models_business import (
     AGENT_RUN_TERMINAL_STATUSES,
@@ -33,21 +30,6 @@ RUN_STATUS_TO_DELIVERY_STATUS = {
 }
 
 TOP_LEVEL_RUN_TYPES = ("chat", "resume")
-
-
-def _canonical_json(payload: dict) -> str:
-    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def _payload_digest(payload: dict) -> str:
-    return hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
-
-
-def _requires_sandbox_runtime_cleanup(run: AgentRun) -> bool:
-    """判断终态 Run 是否拥有官方 Sandbox runtime。"""
-
-    runtime = run.input_payload.get("runtime") if isinstance(run.input_payload, dict) else None
-    return run.run_type != "subagent" and not (isinstance(runtime, dict) and runtime.get("executor") == "pi")
 
 
 class AgentRunRepository:
@@ -454,7 +436,6 @@ class AgentRunRepository:
         worker_id: str,
         lease_seconds: float,
         now: datetime | None = None,
-        attempt_metadata: dict | None = None,
     ) -> tuple[AgentRun | None, bool]:
         """由一个 worker 原子取得或续接尚未过期的 Run ownership。"""
         if not worker_id.strip():
@@ -499,18 +480,6 @@ class AgentRunRepository:
             max_attempt_no = await self.db.scalar(
                 select(func.coalesce(func.max(AgentRunAttempt.attempt_no), 0)).where(AgentRunAttempt.run_id == run.id)
             )
-            fields = dict(attempt_metadata or {})
-            allowed_fields = {
-                "adapter",
-                "route_reason",
-                "route_snapshot",
-                "runtime_manifest",
-                "runtime_manifest_digest",
-            }
-            if fields.keys() - allowed_fields:
-                raise ValueError("attempt_metadata 包含不支持的字段")
-            if fields and set(fields) != allowed_fields:
-                raise ValueError("PI attempt_metadata 必须同时冻结 adapter、route 与 Runtime Manifest")
             self.db.add(
                 AgentRunAttempt(
                     run_id=run.id,
@@ -519,7 +488,6 @@ class AgentRunRepository:
                     started_at=current_time,
                     heartbeat_at=current_time,
                     lease_expires_at=run.lease_expires_at,
-                    **fields,
                 )
             )
         else:
@@ -590,7 +558,7 @@ class AgentRunRepository:
         run.worker_id = None
         run.heartbeat_at = None
         run.lease_expires_at = None
-        run.runtime_cleanup_pending = _requires_sandbox_runtime_cleanup(run)
+        run.runtime_cleanup_pending = run.run_type != "subagent"
         run.updated_at = current_time
         await self._finish_open_attempt(
             run_id,
@@ -632,61 +600,28 @@ class AgentRunRepository:
             .with_for_update(skip_locked=True)
         )
         runs = list(result.scalars().all())
-        creator = aliased(AgentRun)
-        creator_cannot_resume = ~or_(
-            creator.status == "pending",
-            and_(
-                creator.status.in_(LEASED_RUN_STATUSES),
-                creator.worker_id.is_not(None),
-                creator.lease_expires_at.is_not(None),
-                creator.lease_expires_at > current_time,
-            ),
-        )
-        pending_sandbox = and_(
-            AgentRun.run_type == "sandbox",
-            AgentRun.status == "pending",
-            AgentRun.worker_id.is_(None),
-            AgentRun.created_by_run_id.is_not(None),
-        )
-        orphaned_result = await self.db.execute(
-            select(AgentRun)
-            .join(creator, creator.id == AgentRun.created_by_run_id)
-            .where(pending_sandbox, creator_cannot_resume)
-            .with_for_update(of=(AgentRun, creator), skip_locked=True)
-        )
-        runs.extend(orphaned_result.scalars().all())
-        creator_exists = select(creator.id).where(creator.id == AgentRun.created_by_run_id).exists()
-        missing_creator_result = await self.db.execute(
-            select(AgentRun).where(pending_sandbox, ~creator_exists).with_for_update(of=AgentRun, skip_locked=True)
-        )
-        runs.extend(missing_creator_result.scalars().all())
         runs.sort(key=lambda run: run.created_by_run_id is not None)
         reconciled_runs: list[AgentRun] = []
         cancelled_descendants: list[tuple[str, str]] = []
         for run in runs:
             if run.status in TERMINAL_RUN_STATUSES:
                 continue
-            orphaned_sandbox = run.run_type == "sandbox" and run.status == "pending"
             run.status = "failed"
-            run.error_type = "sandbox_parent_unavailable" if orphaned_sandbox else "worker_lease_expired"
-            run.error_message = (
-                "父 Run 已无法继续接管 PI child；本次运行结果未知，需按 at-least-once 语义检查副作用。"
-                if orphaned_sandbox
-                else "执行 worker 的 lease 已过期；本次运行结果未知，需按 at-least-once 语义检查副作用。"
-            )
+            run.error_type = "worker_lease_expired"
+            run.error_message = "执行 worker 的 lease 已过期；本次运行结果未知，需按 at-least-once 语义检查副作用。"
             run.finished_at = current_time
             run.updated_at = current_time
             run.worker_id = None
             run.heartbeat_at = None
             run.lease_expires_at = None
-            run.runtime_cleanup_pending = _requires_sandbox_runtime_cleanup(run)
+            run.runtime_cleanup_pending = run.run_type != "subagent"
             await self._project_input_delivery_status(run)
             await self._close_running_audits(run.id, execution_status="abandoned", now=current_time)
             await self._close_open_attempts(
                 run.id,
-                outcome="parent_unavailable" if orphaned_sandbox else "lease_expired",
-                error_type=run.error_type,
-                error_message=run.error_message,
+                outcome="lease_expired",
+                error_type="worker_lease_expired",
+                error_message="执行 worker 的 lease 已过期；本次运行结果未知。",
                 now=current_time,
             )
             reconciled_runs.append(run)
@@ -730,6 +665,33 @@ class AgentRunRepository:
             await self.db.flush()
         return run_ids
 
+    async def retire_pi_runs_for_storage_migration(self, run_ids: set[str]) -> None:
+        """仅在迁移已证明停机后关闭旧 PI 任务及其审批等待。"""
+        if not run_ids:
+            return
+        result = await self.db.execute(
+            select(AgentRun).where(AgentRun.id.in_(run_ids)).order_by(AgentRun.id).with_for_update()
+        )
+        now = utc_now_naive()
+        for run in result.scalars():
+            if run.status in TERMINAL_RUN_STATUSES and run.status != "interrupted":
+                continue
+            run.status = "failed"
+            run.error_type = "pi_executor_retired"
+            run.error_message = "PI 执行器已停用；旧任务不会续跑，请在原对话发送新消息"
+            run.finished_at = now
+            run.updated_at = now
+            run.worker_id = None
+            run.heartbeat_at = None
+            run.lease_expires_at = None
+            run.runtime_cleanup_pending = False
+            await self._project_input_delivery_status(run)
+            await self._close_running_audits(run.id, execution_status="abandoned", now=now)
+            await self._close_open_attempts(
+                run.id, outcome="failed", error_type=run.error_type, error_message=run.error_message, now=now
+            )
+        await self.db.flush()
+
     async def request_cancel_execution_tree(
         self,
         *,
@@ -770,6 +732,9 @@ class AgentRunRepository:
 
     async def cancel_active_execution_tree_descendants(self, root_run: AgentRun) -> list[tuple[str, str]]:
         """在父 Run 状态事务内请求仍活跃的 execution tree 后代停止。"""
+
+        if root_run.run_type == "subagent":
+            return []
 
         current_time = utc_now_naive()
         cancelled: list[tuple[str, str]] = []
@@ -874,7 +839,7 @@ class AgentRunRepository:
         run.worker_id = None
         run.heartbeat_at = None
         run.lease_expires_at = None
-        run.runtime_cleanup_pending = _requires_sandbox_runtime_cleanup(run)
+        run.runtime_cleanup_pending = run.run_type != "subagent"
         await self._project_input_delivery_status(run)
         audit_status = {
             "completed": "abandoned",
@@ -1092,348 +1057,6 @@ class AgentRunRepository:
             .order_by(AgentRunAttempt.attempt_no.asc(), AgentRunAttempt.id.asc())
         )
         return list(result.scalars().all())
-
-    async def get_current_run_attempt(self, run_id: str, *, worker_id: str) -> AgentRunAttempt | None:
-        """读取当前 lease owner 的开放 attempt。"""
-
-        return await self._get_open_attempt(run_id, worker_id=worker_id)
-
-    async def require_pi_attempt_owner(self, run_id: str, *, attempt_id: int, worker_id: str) -> AgentRun:
-        """控制输入前确认当前PI attempt仍由有效lease持有。"""
-        run = await self._lock_run(run_id)
-        attempt = await self._get_open_attempt(run_id, worker_id=worker_id)
-        if run is None or attempt is None or attempt.id != attempt_id or attempt.adapter != "local":
-            raise ValueError("PI 控制输入不属于当前attempt")
-        self._require_lease_owner(run, worker_id=worker_id, now=utc_now_naive(), action="发送 PI 控制输入")
-        return run
-
-    async def get_previous_pi_session(self, *, run_id: str, uid: str, project_id: str) -> dict | None:
-        """仅从同用户、Project、child 会话的已 ACK 历史选取明确 session。"""
-        current = await self.db.scalar(
-            select(AgentRun)
-            .join(Conversation, Conversation.id == AgentRun.conversation_id)
-            .where(
-                AgentRun.id == run_id,
-                AgentRun.uid == str(uid),
-                AgentRun.run_type == "sandbox",
-                Conversation.uid == str(uid),
-                Conversation.project_id == project_id,
-                Conversation.status == "subagent",
-            )
-        )
-        if current is None:
-            raise ValueError("PI session 当前运行的用户、Project 或 child 会话不匹配")
-        row = (
-            await self.db.execute(
-                select(AgentRun, AgentRunAttempt, Message)
-                .join(AgentRunAttempt, AgentRunAttempt.run_id == AgentRun.id)
-                .join(Message, and_(Message.id == AgentRun.output_message_id, Message.run_id == AgentRun.id))
-                .where(
-                    AgentRun.uid == str(uid),
-                    AgentRun.conversation_id == current.conversation_id,
-                    AgentRun.run_type == "sandbox",
-                    AgentRun.status == "completed",
-                    AgentRun.id != current.id,
-                    AgentRunAttempt.final_acked_at.is_not(None),
-                    AgentRunAttempt.final_acked_at <= current.created_at,
-                )
-                .order_by(AgentRunAttempt.final_acked_at.desc(), AgentRunAttempt.id.desc())
-                .limit(1)
-            )
-        ).first()
-        if row is None:
-            return None
-        prior, attempt, message = row
-        pi = (message.extra_metadata or {}).get("pi") or {}
-        expected = f"pi-runs/{hashlib.sha256(f'{prior.id}:{attempt.id}'.encode()).hexdigest()[:24]}"
-        if pi.get("output_subdir") != expected or not isinstance(pi.get("session"), dict):
-            raise ValueError("已 ACK 的 PI session 引用不完整")
-        return {"run_id": prior.id, "attempt_id": attempt.id, "output_subdir": expected, "ref": pi["session"]}
-
-    async def bind_pi_instance(
-        self,
-        run_id: str,
-        *,
-        attempt_id: int,
-        instance_id: str,
-        worker_id: str,
-        now: datetime | None = None,
-    ) -> bool:
-        """由当前 owner write-once 绑定 adapter 创建的实例。"""
-
-        if not instance_id.strip():
-            raise ValueError("PI instance_id 不能为空")
-        run = await self._lock_run(run_id)
-        current_time = now or utc_now_naive()
-        if run is None:
-            raise ValueError(f"AgentRun 不存在: {run_id}")
-        self._require_lease_owner(run, worker_id=worker_id, now=current_time, action="绑定 PI instance")
-        attempt = await self.db.scalar(
-            select(AgentRunAttempt)
-            .where(AgentRunAttempt.id == attempt_id, AgentRunAttempt.run_id == run_id)
-            .with_for_update()
-        )
-        if attempt is None or attempt.finished_at is not None or attempt.worker_id != worker_id:
-            raise ValueError("只有当前 PI attempt 可以绑定 instance")
-        if attempt.instance_id is not None:
-            if attempt.instance_id != instance_id:
-                raise ValueError("PI attempt 已绑定其他 instance")
-            return False
-        attempt.instance_id = instance_id
-        attempt.updated_at = current_time
-        await self.db.flush()
-        return True
-
-    async def record_pi_envelope(
-        self,
-        run_id: str,
-        *,
-        attempt_id: int,
-        envelope: dict,
-        worker_id: str,
-        now: datetime | None = None,
-        steer_authorized: bool = False,
-    ) -> dict[str, bool]:
-        """幂等持久化 PI envelope；final 与 Message、Run 终态在同一事务。"""
-
-        run = await self._lock_run(run_id)
-        if run is None:
-            raise ValueError(f"AgentRun 不存在: {run_id}")
-        attempt = await self.db.scalar(
-            select(AgentRunAttempt)
-            .where(AgentRunAttempt.id == attempt_id, AgentRunAttempt.run_id == run_id)
-            .with_for_update()
-        )
-        if attempt is None:
-            raise ValueError("PI attempt 不存在")
-        self._validate_pi_envelope(run, attempt, envelope)
-
-        if envelope["type"] in {"message_delta", "tool_update"}:
-            if attempt.finished_at is not None or attempt.worker_id != worker_id:
-                raise ValueError("只有当前 PI attempt 可以发布临时事件")
-            self._require_lease_owner(run, worker_id=worker_id, now=now or utc_now_naive(), action="发布 PI 临时事件")
-            return {"ack": True, "duplicate": False}
-
-        events = list(attempt.result_events or [])
-        existing = next((item for item in events if item.get("event_id") == envelope["event_id"]), None)
-        if existing is not None:
-            if _canonical_json(existing) != _canonical_json(envelope):
-                raise ValueError("同一 PI event_id 的 envelope 内容冲突")
-            return {"ack": True, "duplicate": True}
-
-        current_time = now or utc_now_naive()
-        if attempt.finished_at is not None or attempt.worker_id != worker_id:
-            raise ValueError("只有当前 PI attempt 可以持久化新结果")
-        self._require_lease_owner(run, worker_id=worker_id, now=current_time, action="持久化 PI 结果")
-        if any(item.get("sequence") == envelope["sequence"] for item in events):
-            raise ValueError("同一 PI attempt 的 sequence 不可重复")
-
-        # ponytail: T2 事件量很小，先随 attempt 保存；出现大流量日志时再拆事件表。
-        events.append(dict(envelope))
-        attempt.result_events = events
-        flag_modified(attempt, "result_events")
-        attempt.updated_at = current_time
-        if envelope["type"] != "final":
-            await self.db.flush()
-            return {"ack": True, "duplicate": False}
-
-        payload = envelope["payload"]
-        stop_reason = payload.get("stop_reason")
-        if stop_reason not in {None, "steer"} or (stop_reason == "steer" and not steer_authorized):
-            raise ValueError("PI 让位缺少所属根Run的引导事实")
-        text = payload.get("text")
-        if not isinstance(text, str) or not text:
-            raise ValueError("PI final payload 缺少文本结果")
-        output_subdir = str(payload.get("output_subdir") or "")
-        expected_output_subdir = f"pi-runs/{hashlib.sha256(f'{run.id}:{attempt.id}'.encode()).hexdigest()[:24]}"
-        if output_subdir != expected_output_subdir:
-            raise ValueError("PI final payload 缺少有效输出目录")
-        message = Message(
-            conversation_id=run.conversation_id,
-            role="assistant",
-            content=text,
-            message_type="text",
-            extra_metadata={
-                "pi": {
-                    "artifact": payload.get("artifact"),
-                    "patch": payload.get("patch"),
-                    "session": payload.get("session"),
-                    "output_subdir": output_subdir,
-                    "runtime_manifest_digest": envelope["runtime_manifest_digest"],
-                    "stop_reason": stop_reason,
-                }
-            },
-            run_id=run.id,
-            request_id=run.request_id,
-            delivery_status="complete",
-        )
-        self.db.add(message)
-        await self.db.flush()
-        run.output_message_id = message.id
-        attempt.final_acked_at = current_time
-        _, changed = await self.set_terminal_status(
-            run_id,
-            status="completed",
-            token_usage=self._pi_token_usage(payload.get("token_usage"), attempt.runtime_manifest),
-            worker_id=worker_id,
-            now=current_time,
-        )
-        if not changed:
-            raise ValueError("PI final 未能提交当前 Run 终态")
-        return {"ack": True, "duplicate": False}
-
-    @staticmethod
-    def _pi_token_usage(usage: dict | None, manifest: dict | None) -> dict:
-        """校验 PI wire 用量与当前模型归属，未知不伪装为已上报零消耗。"""
-        if usage is None:
-            return {"available": False}
-        counters = ("model_call_count", "usage_reported_call_count", "usage_unavailable_call_count")
-        if not isinstance(usage, dict) or usage.get("schema_version") != 2:
-            raise ValueError("PI token_usage schema 无效")
-        if any(type(usage.get(key)) is not int or usage[key] < 0 for key in counters):
-            raise ValueError("PI token_usage 调用计数无效")
-        count, reported, unavailable = (usage[key] for key in counters)
-        if reported + unavailable != count or usage.get("complete") is not (count > 0 and reported == count):
-            raise ValueError("PI token_usage 上报状态不一致")
-        total = usage.get("total")
-        keys = ("input_tokens", "output_tokens", "total_tokens")
-        if not isinstance(total, dict) or any(type(total.get(key)) is not int or total[key] < 0 for key in keys):
-            raise ValueError("PI token_usage token 计数无效")
-        if total["input_tokens"] + total["output_tokens"] != total["total_tokens"]:
-            raise ValueError("PI token_usage 总量不一致")
-        model = (manifest or {}).get("model") or {}
-        spec = model.get("spec") or f"yuxi:{model.get('model_id')}"
-        models = usage.get("models")
-        if not isinstance(models, dict) or set(models) != {spec}:
-            raise ValueError("PI token_usage 模型归属不一致")
-        bucket = models[spec]
-        if not isinstance(bucket, dict) or any(bucket.get(key) != usage[key] for key in counters[:2]):
-            raise ValueError("PI token_usage 模型调用计数不一致")
-        observed = bucket.get("usage") or {}
-        if reported == 0:
-            if observed or any(total.values()):
-                raise ValueError("PI 未上报用量不能声明已知 token 数量")
-        elif any(observed.get(key) != total[key] for key in keys) or total["total_tokens"] == 0:
-            raise ValueError("PI token_usage 模型总量不一致")
-        return usage
-
-    async def record_pi_cleanup_failure(
-        self,
-        run_id: str,
-        *,
-        attempt_id: int,
-        worker_id: str,
-        error_message: str,
-        now: datetime | None = None,
-    ) -> None:
-        """在 attempt 事实上记录无法确认的实例清理，供 orphan 收敛读取。"""
-
-        attempt = await self.db.scalar(
-            select(AgentRunAttempt)
-            .where(AgentRunAttempt.id == attempt_id, AgentRunAttempt.run_id == run_id)
-            .with_for_update()
-        )
-        if attempt is None or attempt.worker_id != worker_id or attempt.adapter != "local":
-            raise ValueError("PI cleanup failure 与 attempt 归属不一致")
-        current_time = now or utc_now_naive()
-        attempt.cleanup_error = error_message
-        attempt.cleanup_failed_at = current_time
-        attempt.updated_at = current_time
-        await self.db.flush()
-
-    async def list_pi_cleanup_failures(self, *, limit: int = 100) -> list[dict]:
-        """读取需要重试删除的 Local PI attempt。"""
-
-        result = await self.db.execute(
-            select(
-                AgentRunAttempt.id.label("attempt_id"),
-                AgentRunAttempt.run_id,
-                AgentRunAttempt.instance_id,
-                AgentRunAttempt.error_type,
-                AgentRunAttempt.final_acked_at,
-                AgentRunAttempt.cleanup_failed_at,
-                AgentRun.uid,
-                AgentRun.run_type,
-                AgentRun.runtime_scope_id,
-                AgentRun.input_payload,
-            )
-            .join(AgentRun, AgentRun.id == AgentRunAttempt.run_id)
-            .where(
-                AgentRunAttempt.adapter == "local",
-                AgentRunAttempt.cleanup_failed_at.is_not(None),
-            )
-            .order_by(AgentRunAttempt.cleanup_failed_at, AgentRunAttempt.id)
-            .limit(limit)
-        )
-        return [dict(row) for row in result.mappings().all()]
-
-    async def clear_pi_cleanup_failure(
-        self,
-        attempt_id: int,
-        *,
-        failed_at: datetime,
-        now: datetime | None = None,
-    ) -> bool:
-        """仅清除本次已成功收敛的 orphan 事实。"""
-
-        result = await self.db.execute(
-            update(AgentRunAttempt)
-            .where(
-                AgentRunAttempt.id == attempt_id,
-                AgentRunAttempt.adapter == "local",
-                AgentRunAttempt.cleanup_failed_at == failed_at,
-            )
-            .values(
-                cleanup_error=None,
-                cleanup_failed_at=None,
-                updated_at=now or utc_now_naive(),
-            )
-        )
-        await self.db.flush()
-        return result.rowcount == 1
-
-    async def lock_pi_cleanup_failure(self, attempt_id: int, *, failed_at: datetime) -> bool:
-        """跳过其他 worker 正在收敛的同一 PI cleanup 事实。"""
-
-        locked_id = await self.db.scalar(
-            select(AgentRunAttempt.id)
-            .where(
-                AgentRunAttempt.id == attempt_id,
-                AgentRunAttempt.adapter == "local",
-                AgentRunAttempt.cleanup_failed_at == failed_at,
-            )
-            .with_for_update(skip_locked=True)
-        )
-        return locked_id is not None
-
-    @staticmethod
-    def _validate_pi_envelope(run: AgentRun, attempt: AgentRunAttempt, envelope: dict) -> None:
-        """校验 envelope 的 attempt 归属及 payload/ref 摘要。"""
-
-        required = {
-            "job_id",
-            "attempt_id",
-            "adapter",
-            "event_id",
-            "sequence",
-            "type",
-            "runtime_manifest_digest",
-        }
-        if not isinstance(envelope, dict) or not required.issubset(envelope):
-            raise ValueError("PI envelope 缺少必填字段")
-        if (
-            envelope["job_id"] != run.id
-            or str(envelope["attempt_id"]) != str(attempt.id)
-            or envelope["adapter"] != attempt.adapter
-            or envelope["runtime_manifest_digest"] != attempt.runtime_manifest_digest
-        ):
-            raise ValueError("PI envelope 与 attempt 归属不一致")
-        value_key = "payload" if "payload" in envelope else "ref" if "ref" in envelope else None
-        if value_key is None or not isinstance(envelope[value_key], dict):
-            raise ValueError("PI envelope 必须包含对象 payload 或 ref")
-        digest_key = f"{value_key}_digest"
-        if envelope.get(digest_key) != _payload_digest(envelope[value_key]):
-            raise ValueError(f"PI envelope {digest_key} 不匹配")
 
     async def _get_open_attempt(self, run_id: str, *, worker_id: str | None = None) -> AgentRunAttempt | None:
         """读取该 Run 仍开放（未终结）的 attempt；指定 worker 时限定为当前 owner。"""

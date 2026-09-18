@@ -21,7 +21,6 @@ from yuxi.agents.middlewares import (
     create_summary_middleware_from_context,
 )
 from yuxi.agents.middlewares.skills import SkillsMiddleware
-from yuxi.agents.middlewares.pi_sandbox import create_pi_sandbox_middleware
 from yuxi.agents.middlewares.subagent_task import create_subagent_task_middleware
 from yuxi.agents.tool_approval import (
     DEFAULT_TOOL_APPROVAL_MODE,
@@ -45,7 +44,6 @@ async def _build_middlewares(context, backend):
             backend=backend,
         ),
         SkillsMiddleware(),
-        create_pi_sandbox_middleware(context),
     ]
     memory_middleware = await create_memory_middleware(context)
     if memory_middleware:

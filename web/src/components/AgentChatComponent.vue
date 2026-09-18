@@ -579,7 +579,7 @@
                   <div class="state-collapse-inner">
                     <div id="state-section-todos" class="state-section-content">
                       <p v-if="displaySubagentRuns.length" class="state-section-hint">
-                        仅反映主 Agent 计划；PI 与子智能体执行进度见下方。
+                        仅反映主 Agent 计划；子智能体执行进度见下方。
                       </p>
                       <div class="todo-panel-list">
                         <div

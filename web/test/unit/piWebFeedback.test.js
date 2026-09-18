@@ -7,7 +7,6 @@ import { renderToString } from 'vue/server-renderer'
 import { createServer } from 'vite'
 import { MessageProcessor } from '../../src/utils/messageProcessor.js'
 import { getSubagentRunTokenUsage } from '../../src/utils/subagentRuns.js'
-import { getToolApprovalSummary } from '../../src/utils/toolApproval.js'
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 let server
@@ -201,10 +200,6 @@ test('PI 的已让位、取消和中断不显示成功，交付工具具有中�
   )
   assert.equal(getToolName('submit_artifact'), '交付文件')
   assert.equal(getToolCallStatus({ name: 'pi_sandbox', result: '历史结果' }), 'completed')
-  assert.equal(
-    getToolApprovalSummary({ name: 'pi_sandbox', args: { description: '整理项目报告' } }),
-    '整理项目报告'
-  )
 })
 
 const reportedUsage = {

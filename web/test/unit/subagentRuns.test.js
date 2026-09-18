@@ -189,7 +189,7 @@ test('状态面板区分主 Agent 计划与 Agent 执行统计', () => {
   )
 
   assert.match(source, />主 Agent 计划</)
-  assert.match(source, /仅反映主 Agent 计划；PI 与子智能体执行进度见下方。/)
+  assert.match(source, /仅反映主 Agent 计划；子智能体执行进度见下方。/)
   assert.match(source, /\{\{ totalSubagentRunCount \}\}/)
   assert.match(source, /run\.status_counts/)
 })

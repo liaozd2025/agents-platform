@@ -1,5 +1,8 @@
 # PI 沙箱 Web 协作体验实施规格
 
+本页为历史 PI 功能规格；当前执行与兼容范围见 [PI 退役决策](../develop-guides/decisions/implemented/2026-09-18-retire-pi-executor.md).
+
+
 本规格面向实施者与 Reviewer，承接 PI 沙箱代码走查及用户的 implement-spec 请求。目标是让 Web 中的 PI 任务可靠执行、正确交付、持续反馈并续接项目上下文。最终交付为一个完成验证和独立 Review 的 PR。
 
 ## 边界与验收

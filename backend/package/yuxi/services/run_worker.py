@@ -10,26 +10,15 @@ import uuid
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 from arq.worker import RetryJob, func
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError
-from yuxi.agents.backends.paths import (
-    VIRTUAL_PERSONAL_SKILLS_PATH,
-    VIRTUAL_SKILLS_PATH,
-    runtime_workdir_path,
-)
+from yuxi.agents.backends.paths import runtime_workdir_path
 from yuxi.agents.backends.sandbox.provider import get_sandbox_provider
 from yuxi.agents.callbacks.model_request_timing import FirstModelRequestRecorder
 from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
-from yuxi.agents.skills.service import (
-    compute_skill_dir_hash,
-    get_personal_skills_root_dir,
-    get_user_skills_root_dir,
-    init_builtin_skills,
-    is_valid_skill_slug,
-)
+from yuxi.agents.skills.service import init_builtin_skills
 from yuxi.config import get_int_env
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.repositories.user_repository import UserRepository
@@ -40,19 +29,6 @@ from yuxi.services.agent_request_queue_service import (
 from yuxi.services.agent_run_manifest_service import build_run_manifest_result, compute_manifest_fingerprint
 from yuxi.services.chat_service import get_agent_state_view, stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
-from yuxi.services.pi_execution_service import (
-    LocalPiAdapter,
-    PiCleanupFailed,
-    PiExecutionCancelled,
-    PiExecutionUnknown,
-    PiRuntimeMismatch,
-    PI_RUNNER_PATH,
-    build_default_pi_runtime_manifest,
-    build_pi_runtime_manifest,
-    execute_pi_attempt,
-    resolve_pi_model_runtime,
-    snapshot_pi_context,
-)
 from yuxi.services.run_queue_service import (
     RUN_RECONCILIATION_SECONDS,
     WORKER_HEALTH_INTERVAL_SECONDS,
@@ -95,7 +71,7 @@ RUN_CANCEL_POLL_SECONDS = 0.2
 RUN_DURABLE_CANCEL_POLL_SECONDS = 1.0
 RUN_LEASE_SECONDS = 120
 RUN_HEARTBEAT_SECONDS = 30
-SUPPORTED_RUN_TYPES = {"chat", "resume", "subagent", "sandbox"}
+SUPPORTED_RUN_TYPES = {"chat", "resume", "subagent"}
 WORKER_ID = f"worker-{uuid.uuid4().hex}"
 _RECONCILIATION_TASK_KEY = "agent_run_reconciliation_task"
 _TASK_RECONCILIATION_TASK_KEY = "durable_task_reconciliation_task"
@@ -108,19 +84,6 @@ def worker_max_jobs() -> int:
         if "YUXI_WORKER_MAX_JOBS" in os.environ
         else get_int_env("ARQ_MAX_JOBS", 10)
     )
-
-
-async def _compute_skill_digest_async(source: Path, slug: str) -> str:
-    """在线程中计算单个 Skill 摘要，避免目录遍历阻塞事件循环。"""
-
-    started_at = time.perf_counter()
-    digest = await asyncio.to_thread(compute_skill_dir_hash, source)
-    logger.info(
-        "PI Runtime Skill 摘要校验完成: slug=%s elapsed=%.2fs",
-        slug,
-        time.perf_counter() - started_at,
-    )
-    return digest
 
 
 class RetryableRunError(RetryJob):
@@ -178,29 +141,6 @@ async def _validate_run_workdir_binding(run: AgentRun) -> AuthorizedWorkdir:
                 or creator_binding.project_id != binding.project_id
             ):
                 raise NonRetryableRunError("SubAgent Run 的 runtime scope 不属于创建者执行树")
-        elif run.run_type == "sandbox":
-            creator_id = str(run.created_by_run_id or "").strip()
-            if not creator_id:
-                raise NonRetryableRunError("Sandbox Run 缺少创建者")
-            repo = AgentRunRepository(db)
-            creator_run = await repo.get_run_for_user(creator_id, str(run.uid))
-            if creator_run is None or creator_run.run_type not in {"chat", "resume", "subagent"}:
-                raise NonRetryableRunError("Sandbox Run 的创建者非法")
-            if creator_run.status != "running":
-                raise NonRetryableRunError("Sandbox Run 的创建者已不再执行")
-            creator_binding = await resolve_authorized_workdir(
-                thread_id=str(creator_run.conversation_thread_id),
-                uid=str(run.uid),
-                db=db,
-            )
-            runtime = run.input_payload.get("runtime") if isinstance(run.input_payload, dict) else None
-            if (
-                persisted_scope != str(creator_run.runtime_scope_id)
-                or creator_binding.project_id != binding.project_id
-                or not isinstance(runtime, dict)
-                or str(runtime.get("workdir_path") or "") != binding.workdir_path
-            ):
-                raise NonRetryableRunError("Sandbox Run 的 runtime scope 不属于创建者执行树")
     return binding
 
 
@@ -458,83 +398,15 @@ async def _flush_writer_best_effort(writer: ChunkedEventWriter) -> None:
         logger.warning(f"Failed to flush non-authoritative AgentRun events: run={writer.run_id}", exc_info=True)
 
 
-async def mark_run_running(run_id: str, worker_id: str, attempt_metadata: dict | None = None) -> bool:
+async def mark_run_running(run_id: str, worker_id: str) -> bool:
     async with pg_manager.get_async_session_context() as db:
         repo = AgentRunRepository(db)
         _, acquired = await repo.mark_running(
             run_id,
             worker_id=worker_id,
             lease_seconds=RUN_LEASE_SECONDS,
-            attempt_metadata=attempt_metadata,
         )
         return acquired
-
-
-async def get_current_run_attempt(run_id: str, worker_id: str):
-    """读取 worker 当前拥有的开放 attempt。"""
-
-    async with pg_manager.get_async_session_context() as db:
-        return await AgentRunRepository(db).get_current_run_attempt(run_id, worker_id=worker_id)
-
-
-async def bind_pi_instance(run_id: str, attempt_id: int, instance_id: str, worker_id: str) -> bool:
-    """在独立事务中 write-once 绑定 PI instance。"""
-
-    async with pg_manager.get_async_session_context() as db:
-        return await AgentRunRepository(db).bind_pi_instance(
-            run_id,
-            attempt_id=attempt_id,
-            instance_id=instance_id,
-            worker_id=worker_id,
-        )
-
-
-async def record_pi_envelope(
-    run_id: str, attempt_id: int, envelope: dict, worker_id: str, *, steer_authorized: bool = False
-) -> dict[str, bool]:
-    """持久化 PI envelope，并只在 durable commit 后返回 ACK。"""
-
-    async with pg_manager.get_async_session_context() as db:
-        return await AgentRunRepository(db).record_pi_envelope(
-            run_id,
-            attempt_id=attempt_id,
-            envelope=envelope,
-            worker_id=worker_id,
-            steer_authorized=steer_authorized,
-        )
-
-
-async def _pi_steer_pending(run_id: str, attempt_id: int, worker_id: str) -> bool:
-    """只读取当前PI所属根Run的原队列引导事实，不消费用户输入。"""
-    from yuxi.services.agent_request_queue_service import should_end_run_for_steer
-
-    async with pg_manager.get_async_session_context() as db:
-        repo = AgentRunRepository(db)
-        run = await repo.require_pi_attempt_owner(run_id, attempt_id=attempt_id, worker_id=worker_id)
-        root = run
-        if root.run_type == "sandbox":
-            root = await repo.get_run_for_user(str(root.created_by_run_id), str(run.uid))
-        if root is not None and root.run_type == "subagent":
-            pair = await repo.get_subagent_run_with_creator(
-                uid=str(run.uid), created_by_run_id=str(root.created_by_run_id), run_id=root.id
-            )
-            root = pair[0] if pair is not None else None
-        if root is None or root.run_type not in {"chat", "resume"} or root.runtime_scope_id != run.runtime_scope_id:
-            raise ValueError("PI 引导目标不属于当前执行树")
-        root_id = root.id
-    return await should_end_run_for_steer(root_id)
-
-
-async def record_pi_cleanup_failure(run_id: str, attempt_id: int, worker_id: str, error_message: str) -> None:
-    """持久化无法确认删除的 PI instance，避免 orphan 只留在日志。"""
-
-    async with pg_manager.get_async_session_context() as db:
-        await AgentRunRepository(db).record_pi_cleanup_failure(
-            run_id,
-            attempt_id=attempt_id,
-            worker_id=worker_id,
-            error_message=error_message,
-        )
 
 
 async def renew_run_lease(run_id: str, worker_id: str) -> bool:
@@ -636,73 +508,6 @@ async def reconcile_pending_runtime_cleanups() -> list[str]:
                 thread_id=run.conversation_thread_id,
             )
         cleaned.append(run.id)
-    return cleaned
-
-
-async def reconcile_pi_cleanup_failures() -> list[int]:
-    """重试持久化的 Local PI orphan，并在确认删除后清除失败事实。"""
-
-    async with pg_manager.get_async_session_context() as db:
-        pending_attempts = await AgentRunRepository(db).list_pi_cleanup_failures()
-    cleaned: list[int] = []
-    for attempt in pending_attempts:
-        cleared = False
-        async with pg_manager.get_async_session_context() as db:
-            repo = AgentRunRepository(db)
-            if not await repo.lock_pi_cleanup_failure(
-                int(attempt["attempt_id"]),
-                failed_at=attempt["cleanup_failed_at"],
-            ):
-                continue
-            try:
-                input_payload = attempt.get("input_payload") if isinstance(attempt.get("input_payload"), dict) else {}
-                runtime = input_payload.get("runtime") if isinstance(input_payload.get("runtime"), dict) else {}
-                reuse_sandbox = attempt.get("run_type") == "sandbox"
-                if reuse_sandbox:
-                    # 重建的 adapter 不持有原命令句柄；根执行树确认回收后才能清除 child orphan。
-                    owner = await repo.get_run_for_user(str(attempt["run_id"]), str(attempt["uid"]))
-                    ancestors = set()
-                    while owner is not None and owner.run_type in {"sandbox", "subagent"} and owner.created_by_run_id:
-                        if owner.id in ancestors or owner.runtime_scope_id != attempt.get("runtime_scope_id"):
-                            raise ValueError("PI cleanup 的执行树归属不一致")
-                        ancestors.add(owner.id)
-                        owner = await repo.get_run_for_user(str(owner.created_by_run_id), str(attempt["uid"]))
-                    if (
-                        owner is None
-                        or owner.run_type not in {"chat", "resume"}
-                        or owner.runtime_scope_id != attempt.get("runtime_scope_id")
-                        or owner.status not in TERMINAL_RUN_STATUSES
-                        or owner.runtime_cleanup_pending
-                    ):
-                        continue
-                adapter_kwargs = {
-                    "uid": str(attempt["uid"]),
-                    "run_id": str(attempt["run_id"]),
-                    "attempt_id": str(attempt["attempt_id"]),
-                }
-                if reuse_sandbox:
-                    adapter_kwargs.update(
-                        runtime_scope_id=str(attempt.get("runtime_scope_id") or ""),
-                        workdir_path=str(runtime.get("workdir_path") or ""),
-                        reuse_sandbox=True,
-                    )
-                adapter = LocalPiAdapter(**adapter_kwargs)
-                preserve_outputs = attempt["final_acked_at"] is not None or attempt["error_type"] == "execution_unknown"
-                await adapter.stop(str(attempt["instance_id"] or ""), preserve_outputs=preserve_outputs)
-            except Exception:
-                logger.error(
-                    "Failed to reconcile Local PI cleanup: run=%s attempt=%s",
-                    attempt["run_id"],
-                    attempt["attempt_id"],
-                    exc_info=True,
-                )
-                continue
-            cleared = await repo.clear_pi_cleanup_failure(
-                int(attempt["attempt_id"]),
-                failed_at=attempt["cleanup_failed_at"],
-            )
-        if cleared:
-            cleaned.append(int(attempt["attempt_id"]))
     return cleaned
 
 
@@ -812,10 +617,7 @@ def _is_last_try(ctx) -> bool:
 def _is_retryable_exception(exc: Exception) -> bool:
     if isinstance(exc, NonRetryableRunError):
         return False
-    return isinstance(
-        exc,
-        RetryableRunError | OperationalError | ConnectionError | TimeoutError | asyncio.TimeoutError,
-    )
+    return isinstance(exc, (RetryableRunError, OperationalError, ConnectionError, TimeoutError, asyncio.TimeoutError))
 
 
 def _worker_identity(ctx) -> str:
@@ -905,78 +707,6 @@ def _map_chunk_to_run_event(chunk: dict) -> tuple[str, dict]:
     if status == "finished":
         return "end", {"status": "completed", "chunk": chunk}
     return "custom", {"name": f"yuxi.{status}", "chunk": chunk}
-
-
-def _pi_stream_chunk(envelope: dict, *, run_id: str, thread_id: str) -> dict | None:
-    """按child Run隔离PI正文和工具，复用既有SSE协议。"""
-
-    event_type = envelope.get("type")
-    payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
-    message_id = f"pi-{envelope.get('job_id') or run_id}"
-    if event_type == "message_delta":
-        return {
-            "status": "loading",
-            "run_id": run_id,
-            "thread_id": thread_id,
-            "stream_event": {
-                "type": "message_delta",
-                "message_id": message_id,
-                "content": str(payload.get("content") or ""),
-                "thread_id": thread_id,
-                "namespace": [],
-            },
-        }
-    original_id = str(payload.get("tool_call_id") or "").strip()
-    tool_call_id = f"{message_id}:{original_id}"
-    name = str(payload.get("name") or "").strip()
-    if event_type not in {"tool_call", "tool_result", "tool_update"} or not original_id or not name:
-        return None
-    if event_type == "tool_call":
-        return {
-            "status": "loading",
-            "run_id": run_id,
-            "thread_id": thread_id,
-            "stream_event": {
-                "type": "tool_call",
-                "message_id": message_id,
-                "tool_call_id": tool_call_id,
-                "name": name,
-                "args": payload.get("args") if payload.get("args") is not None else {},
-                "index": envelope.get("sequence") or 0,
-                "thread_id": thread_id,
-                "namespace": [],
-            },
-        }
-
-    content = payload.get("content")
-    if not isinstance(content, str):
-        content = json.dumps(content, ensure_ascii=False)
-    return {
-        "status": "stream_event",
-        "run_id": run_id,
-        "thread_id": thread_id,
-        "event": {
-            "method": "tools",
-            "namespace": [],
-            "thread_id": thread_id,
-            "data": {
-                "event": "tool-progress" if event_type == "tool_update" else "tool-finished",
-                "tool_call_id": tool_call_id,
-                "output": {
-                    "type": "tool",
-                    "id": tool_call_id,
-                    "tool_call_id": tool_call_id,
-                    "name": name,
-                    "content": content,
-                    "status": "running"
-                    if event_type == "tool_update"
-                    else "error"
-                    if payload.get("is_error")
-                    else "success",
-                },
-            },
-        },
-    }
 
 
 async def _append_end_event(run_id: str, status: str, *, thread_id: str | None, payload: dict | None = None):
@@ -1103,16 +833,6 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
             raise asyncio.CancelledError
 
 
-async def _snapshot_pi_run_context(run: AgentRun) -> tuple[dict, dict | None]:
-    """按已授权 child 身份选择历史，再从 Workdir 固化本次模型上下文。"""
-    binding = await _validate_run_workdir_binding(run)
-    async with pg_manager.get_async_session_context() as db:
-        previous = await AgentRunRepository(db).get_previous_pi_session(
-            run_id=run.id, uid=str(run.uid), project_id=binding.project_id
-        )
-    return await asyncio.to_thread(snapshot_pi_context, binding.workdir, previous)
-
-
 async def process_agent_run(ctx, run_id: str):
     """执行队列中的 AgentRun，并只从 run 列和输入消息恢复运行参数。"""
     run = await _get_run(run_id)
@@ -1142,88 +862,11 @@ async def process_agent_run(ctx, run_id: str):
             raise NonRetryableRunError(f"Run {run_id} 在 runtime cleanup 后不存在")
 
     worker_id = _run_owner_token(ctx)
-    pi_runtime: tuple[dict, str] | None = None
-    pi_credentials: dict | None = None
-    pi_skill_sources: dict[str, Path] = {}
-    pi_previous_session = None
-    reuse_pi_sandbox = False
-    runtime_payload = run.input_payload.get("runtime") if isinstance(run.input_payload, dict) else None
-    pi_requested = isinstance(runtime_payload, dict) and runtime_payload.get("executor") == "pi"
-    if pi_requested and run.run_type not in {"chat", "sandbox"}:
-        await mark_run_terminal(
-            run_id,
-            "failed",
-            "pi_input_unsupported",
-            "PI executor 仅支持普通文本 Chat Run 或内部 Sandbox Run",
-        )
+    runtime = run.input_payload.get("runtime") if isinstance(run.input_payload, dict) else None
+    if run.run_type == "sandbox" or (isinstance(runtime, dict) and runtime.get("executor") == "pi"):
+        await mark_run_terminal(run_id, "failed", "pi_executor_retired", "PI 执行器已停用，旧任务不可续跑")
         return
-    if run.run_type == "sandbox" and not pi_requested:
-        await mark_run_terminal(
-            run_id,
-            "failed",
-            "invalid_runtime_payload",
-            "Sandbox Run 必须使用 PI executor",
-        )
-        return
-    if pi_requested:
-        try:
-            if run.run_type == "sandbox":
-                pi_model, pi_credentials = resolve_pi_model_runtime(run.input_payload.get("model_spec"))
-                raw_slugs = runtime_payload.get("skill_slugs") or []
-                raw_digests = runtime_payload.get("skill_digests") or {}
-                raw_paths = runtime_payload.get("skill_runtime_paths") or {}
-                if (
-                    not isinstance(raw_slugs, list)
-                    or not isinstance(raw_digests, dict)
-                    or not isinstance(raw_paths, dict)
-                    or any(not isinstance(slug, str) or not is_valid_skill_slug(slug) for slug in raw_slugs)
-                ):
-                    raise ValueError("PI sandbox runtime Skill 快照无效")
-                skill_slugs = list(dict.fromkeys(raw_slugs))
-                if set(raw_digests) != set(skill_slugs) or set(raw_paths) != set(skill_slugs):
-                    raise ValueError("PI sandbox runtime Skill 摘要或路径不完整")
-                for slug in skill_slugs:
-                    runtime_path = str(raw_paths[slug])
-                    if runtime_path == f"{VIRTUAL_SKILLS_PATH}/{slug}":
-                        source = get_user_skills_root_dir(str(run.uid)) / slug
-                    elif runtime_path == f"{VIRTUAL_PERSONAL_SKILLS_PATH}/{slug}":
-                        source = get_personal_skills_root_dir(str(run.uid)) / slug
-                    else:
-                        raise ValueError(f"PI sandbox runtime Skill 路径无效: {slug}")
-                    digest = await _compute_skill_digest_async(source, slug)
-                    if digest != raw_digests[slug]:
-                        raise ValueError(f"PI sandbox runtime Skill 已变化: {slug}")
-                    pi_skill_sources[slug] = source
-                pi_context, pi_previous_session = await _snapshot_pi_run_context(run)
-                pi_runtime = build_pi_runtime_manifest(
-                    runner_path=PI_RUNNER_PATH,
-                    skill_sources=pi_skill_sources,
-                    skill_runtime_paths={slug: str(raw_paths[slug]) for slug in skill_slugs},
-                    model=pi_model,
-                    context=pi_context,
-                )
-                reuse_pi_sandbox = True
-            else:
-                pi_runtime = await asyncio.to_thread(build_default_pi_runtime_manifest)
-        except Exception as exc:
-            await mark_run_terminal(
-                run_id,
-                "failed",
-                "runtime_manifest_invalid",
-                f"PI Runtime Manifest 构建失败，执行未开始：{exc}",
-            )
-            return
-    attempt_metadata = None
-    if pi_runtime is not None:
-        manifest, manifest_digest = pi_runtime
-        attempt_metadata = {
-            "adapter": "local",
-            "route_reason": "t2_local_only",
-            "route_snapshot": {"rule_version": "t2-local-only"},
-            "runtime_manifest": manifest,
-            "runtime_manifest_digest": manifest_digest,
-        }
-    if not await mark_run_running(run_id, worker_id, attempt_metadata):
+    if not await mark_run_running(run_id, worker_id):
         logger.info(f"Run lease is owned elsewhere or expired, skip: {run_id}")
         return
 
@@ -1240,7 +883,7 @@ async def process_agent_run(ctx, run_id: str):
         interval_ms=LOADING_FLUSH_INTERVAL_MS,
         max_chars=LOADING_FLUSH_MAX_CHARS,
     )
-    # Run 已取得 lease 后立即启动心跳，覆盖后续环境校验、Skill 准备等可能耗时的前置流程。
+    # 取得 lease 后立即续租，覆盖 Skill 准备和运行清单固化。
     await run_ctx.start()
     model_request_recorder = FirstModelRequestRecorder()
     try:
@@ -1353,187 +996,6 @@ async def process_agent_run(ctx, run_id: str):
                     worker_id=worker_id,
                 )
                 return
-
-        if pi_runtime is not None:
-            manifest, manifest_digest = pi_runtime
-            attempt = await get_current_run_attempt(run_id, worker_id)
-            if attempt is None:
-                raise RuntimeError("当前 PI attempt 不存在")
-            parent_event_target = None
-            if run_type == "sandbox" and run.created_by_run_id:
-                creator_run = await _get_run(str(run.created_by_run_id))
-                if creator_run is None or str(creator_run.uid) != str(run.uid):
-                    raise NonRetryableRunError("Sandbox Run 的创建者不可用于事件路由")
-                parent_event_target = (str(creator_run.id), str(creator_run.conversation_thread_id))
-            adapter_kwargs = {
-                "uid": str(user.uid),
-                "run_id": run_id,
-                "attempt_id": str(attempt.id),
-            }
-            steer_observed = False
-            last_steer_check = 0.0
-
-            async def check_steer() -> bool:
-                """限频查询原队列；记录真实观测以校验final让位原因。"""
-                nonlocal steer_observed, last_steer_check
-                if steer_observed:
-                    return True
-                now = asyncio.get_running_loop().time()
-                if now - last_steer_check < 0.5:
-                    return False
-                last_steer_check = now
-                steer_observed = await _pi_steer_pending(run_id, attempt.id, worker_id)
-                return steer_observed
-
-            if reuse_pi_sandbox:
-                adapter_kwargs.update(
-                    runtime_scope_id=str(run.runtime_scope_id),
-                    workdir_path=workdir_binding.workdir_path,
-                    skill_sources=pi_skill_sources,
-                    reuse_sandbox=True,
-                    credentials=pi_credentials,
-                    steer_check=check_steer,
-                )
-            adapter = LocalPiAdapter(
-                **adapter_kwargs,
-            )
-
-            async def persist_pi_result(envelope: dict) -> dict[str, bool]:
-                authorization = {}
-                if envelope["type"] == "final" and envelope.get("payload", {}).get("stop_reason") == "steer":
-                    if not steer_observed:
-                        raise ValueError("PI 未观测到所属根Run的引导请求")
-                    authorization["steer_authorized"] = True
-                ack = await record_pi_envelope(run_id, attempt.id, envelope, worker_id, **authorization)
-                if ack.get("duplicate"):
-                    return ack
-                if envelope["type"] in {"tool_call", "tool_result", "tool_update", "message_delta"}:
-                    targets = [(run_id, thread_id)]
-                    if parent_event_target is not None:
-                        targets.append(parent_event_target)
-                    for target_run_id, target_thread_id in targets:
-                        chunk = _pi_stream_chunk(
-                            envelope,
-                            run_id=target_run_id,
-                            thread_id=target_thread_id,
-                        )
-                        if chunk:
-                            await _append_run_event_best_effort(
-                                target_run_id,
-                                "messages",
-                                {"chunk": chunk},
-                                thread_id=target_thread_id,
-                            )
-                elif envelope["type"] != "final":
-                    await _append_run_event_best_effort(
-                        run_id,
-                        "custom",
-                        {"name": f"yuxi.pi.{envelope['type']}", "envelope": envelope},
-                        thread_id=thread_id,
-                    )
-                return ack
-
-            try:
-                pi_attempt = {
-                    "run_id": run_id,
-                    "attempt_id": str(attempt.id),
-                    "manifest": manifest,
-                    "manifest_digest": manifest_digest,
-                }
-                if reuse_pi_sandbox:
-                    pi_attempt["task"] = normalized_input_message.content
-                    if pi_previous_session is not None:
-                        pi_attempt["previous_session"] = pi_previous_session
-                await execute_pi_attempt(
-                    attempt=pi_attempt,
-                    adapter=adapter,
-                    result_sink=persist_pi_result,
-                    cancel_event=run_ctx.cancel_event,
-                    instance_sink=lambda instance_id: bind_pi_instance(
-                        run_id,
-                        attempt.id,
-                        instance_id,
-                        worker_id,
-                    ),
-                )
-            except PiExecutionCancelled as exc:
-                raise asyncio.CancelledError(f"run {run_id} PI execution cancelled") from exc
-            except PiRuntimeMismatch as exc:
-                transition = await mark_run_terminal(
-                    run_id,
-                    "failed",
-                    "runtime_mismatch",
-                    str(exc),
-                    worker_id=worker_id,
-                )
-                if transition.changed:
-                    await _append_end_event(
-                        run_id,
-                        transition.status or "failed",
-                        thread_id=thread_id,
-                        payload={"error_type": "runtime_mismatch"},
-                    )
-                return
-            except PiExecutionUnknown as exc:
-                transition = await mark_run_terminal(
-                    run_id,
-                    "failed",
-                    "execution_unknown",
-                    str(exc),
-                    worker_id=worker_id,
-                )
-                if transition.changed:
-                    await _append_end_event(
-                        run_id,
-                        transition.status or "failed",
-                        thread_id=thread_id,
-                        payload={"error_type": "execution_unknown"},
-                    )
-                return
-            except PiCleanupFailed as exc:
-                primary = exc.primary
-                if isinstance(primary, PiExecutionCancelled) or await _confirmed_user_cancel(run_id):
-                    await _finish_user_cancel(
-                        run_id=run_id,
-                        request_id=request_id,
-                        thread_id=thread_id,
-                        current_user=user,
-                        worker_id=worker_id,
-                        writer=writer,
-                        run=run,
-                    )
-                    await record_pi_cleanup_failure(run_id, attempt.id, worker_id, str(exc))
-                    logger.info(f"Run PI cancellation settled with cleanup orphan: run={run_id}")
-                    return
-                error_type = (
-                    "execution_unknown"
-                    if isinstance(primary, PiExecutionUnknown)
-                    else "runtime_mismatch"
-                    if isinstance(primary, PiRuntimeMismatch)
-                    else "cleanup_failed"
-                )
-                transition = await mark_run_terminal(
-                    run_id,
-                    "failed",
-                    error_type,
-                    str(primary or exc),
-                    worker_id=worker_id,
-                )
-                await record_pi_cleanup_failure(run_id, attempt.id, worker_id, str(exc))
-                if transition.changed:
-                    await _append_end_event(
-                        run_id,
-                        transition.status or "failed",
-                        thread_id=thread_id,
-                        payload={"error_type": error_type},
-                    )
-                return
-            except Exception as exc:
-                if await _confirmed_user_cancel(run_id):
-                    raise asyncio.CancelledError(f"run {run_id} PI result rejected after cancellation") from exc
-                raise
-            await _append_end_event(run_id, "completed", thread_id=thread_id)
-            return
 
         # 运行清单必须在真正构造执行上下文前固化；固化失败时执行不得开始。
         try:
@@ -2010,12 +1472,7 @@ async def process_agent_run(ctx, run_id: str):
         if final_run and final_run.status == "cancelled":
             await clear_cancel_signal(run_id)
         # completed 后尝试派发线程的下一个排队请求
-        if (
-            final_run
-            and final_run.run_type != "sandbox"
-            and final_run.status == "completed"
-            and not final_run.runtime_cleanup_pending
-        ):
+        if final_run and final_run.status == "completed" and not final_run.runtime_cleanup_pending:
             await dispatch_next_request(
                 uid=uid,
                 agent_slug=agent_slug,
@@ -2043,9 +1500,6 @@ async def _reconcile_agent_run_leases_forever() -> None:
             cleaned_ids = await reconcile_pending_runtime_cleanups()
             if cleaned_ids:
                 logger.warning(f"Reconciled pending runtime cleanups: count={len(cleaned_ids)}")
-            pi_cleaned_ids = await reconcile_pi_cleanup_failures()
-            if pi_cleaned_ids:
-                logger.warning(f"Reconciled Local PI cleanup failures: count={len(pi_cleaned_ids)}")
             await recover_pending_dispatches()
             await recover_scheduled_dispatches()
             await claim_and_dispatch_due_jobs()
@@ -2126,7 +1580,6 @@ async def _worker_startup(ctx):
     if reconciled_ids:
         logger.warning(f"Reconciled expired AgentRun leases at startup: count={len(reconciled_ids)}")
     await reconcile_pending_runtime_cleanups()
-    await reconcile_pi_cleanup_failures()
     await recover_pending_dispatches()
     await reconcile_and_publish_tasks()
     await _publish_task_reconciliation_health()

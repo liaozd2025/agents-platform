@@ -1696,20 +1696,25 @@ async def test_nonterminal_run_shape_constraint_preserves_terminal_legacy_rows(l
         await db.commit()
 
         sandbox_id = f"shape-sandbox-{suffix}"
-        db.add(
-            AgentRun(
-                id=sandbox_id,
-                conversation_thread_id=f"sandbox-thread-{suffix}",
-                runtime_scope_id=f"root-scope-{suffix}",
-                agent_slug="main",
-                uid=f"shape-user-{suffix}",
-                status="pending",
-                request_id=f"shape-sandbox-request-{suffix}",
-                run_type="sandbox",
-                created_by_run_id=legacy_id,
-                input_payload={"runtime": {"executor": "pi"}},
-            )
+        sandbox = AgentRun(
+            id=sandbox_id,
+            conversation_thread_id=f"sandbox-thread-{suffix}",
+            runtime_scope_id=f"root-scope-{suffix}",
+            agent_slug="main",
+            uid=f"shape-user-{suffix}",
+            status="pending",
+            request_id=f"shape-sandbox-request-{suffix}",
+            run_type="sandbox",
+            created_by_run_id=legacy_id,
+            input_payload={"runtime": {"executor": "pi"}},
         )
+        db.add(sandbox)
+        with pytest.raises(IntegrityError, match="ck_agent_runs_nonterminal_shape"):
+            await db.flush()
+        await db.rollback()
+
+        sandbox.status = "completed"
+        db.add(sandbox)
         await db.commit()
 
         db.add(

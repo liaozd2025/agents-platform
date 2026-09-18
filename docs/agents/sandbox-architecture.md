@@ -76,7 +76,7 @@ Compose 中的 `sandbox-provisioner` 使用以下变量：
 | `SANDBOX_MAX_INSTANCES` | 当前 provisioner 管理的实例总上限 | `6` |
 | `SANDBOX_MAX_INSTANCES_PER_USER` | 每个用户的实例上限 | `4` |
 
-API/worker 使用 `SANDBOX_CAPACITY_WAIT_SECONDS` 控制容量不足时的准备等待，默认 60 秒；`YUXI_WORKER_MAX_JOBS` 控制每个 worker 的并发，默认 4。满额创建返回 `sandbox_capacity_exhausted`，既有运行在准备阶段有界等待；超过等待预算以 `sandbox_capacity_timeout` 失败，其他创建错误不重试。该预算只约束容量等待，镜像拉取和首次健康检查仍使用各自超时。
+`YUXI_WORKER_MAX_JOBS` 控制每个 worker 的并发，默认 4。满额创建返回 `sandbox_capacity_exhausted`；工具直接报告容量不足。镜像拉取和首次健康检查使用各自超时。
 
 容量由单个 provisioner 进程内的创建锁与真实实例清单共同裁决。Docker 槽位使用不同容器/网络前缀；Kubernetes 槽位使用独立 namespace，且每个槽位只运行一个 provisioner。上述默认预算面向使用外部模型 API 的单机部署，生产并发仍需结合 CPU、常驻服务和代表性任务校准。
 
@@ -179,11 +179,7 @@ services:
 docker compose up -d
 ```
 
-启动依赖先构建 PI 派生镜像并比较镜像中的 Runner 摘要、PI 版本和依赖完整性，再允许 provisioner 启动。设置 `SANDBOX_IMAGE` 时，检查使用指定预构建镜像，保留其原始内容和供给引用；镜像缺失或与当前源码不匹配时，启动明确失败。开发和生产 Compose 使用同一检查路径。
-
-PI 派生镜像还修正基础镜像的 `/shell/write`，将控制输入送入当前进程的 PTY；预构建镜像检查同时验证该补丁。未包含修补的镜像即使 Runner 摘要相同也不能通过启动检查。
-
-需要单独构建或检查镜像时运行 `make build-pi-sandbox`。生产配置可通过 `COMPOSE='docker compose --env-file .env.prod -f docker-compose.prod.yml'` 传给该目标；该命令只在本地构建和校验，不发布镜像。
+动态沙箱默认使用 AIO Sandbox `1.11.0`。`SANDBOX_IMAGE` 可以指定其他兼容镜像；部署侧需要验证所用 Skill 的命令、字体与转换依赖。API 后端的 Office 解析、预览依赖与该镜像分别维护，详见[文档处理与 OCR](../advanced/document-processing.md)。
 
 provisioner 只在第一次文件或命令操作时创建动态沙盒，刚启动时看不到沙盒容器是正常的。先检查 provisioner：
 

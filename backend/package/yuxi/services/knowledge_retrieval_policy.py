@@ -5,7 +5,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-
 _MENTION_RE = re.compile(r'@knowledge:(?:"((?:\\.|[^"\\])*)"|(\S+))')
 _NO_KB_PATTERNS = (
     "你好",

@@ -142,14 +142,61 @@ async def test_install_skill_rejects_subagent_runtime_before_install(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_install_skill_git_source_must_be_prepared_by_pi():
+async def test_install_skill_git_source_requires_skill_names():
     result = await install_skill_module._run_install_task(
         "owner/repo",
         _runtime(uid="user-1", thread_id="thread-1"),
         "tool-1",
     )
 
-    assert "必须交给 pi_sandbox" in result.update["messages"][0].content
+    assert "必须通过 skill_names 指定技能名称" in result.update["messages"][0].content
+
+
+@pytest.mark.asyncio
+async def test_install_skill_git_source_installs_and_cleans_prepared_directory(monkeypatch, tmp_path):
+    """Git 来源复用远程准备流程，安装后保留结果并清理临时目录。"""
+    from yuxi.agents.skills import remote_install
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    skill_dir = staging / "demo"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# Demo", encoding="utf-8")
+    installed = tmp_path / "installed.md"
+
+    async def prepare(*, source, skills):
+        assert source == "owner/repo"
+        assert skills == ["demo"]
+        return remote_install.RemoteSkillsBatchPreparation(
+            temp_home=str(staging),
+            results=[{"slug": "demo", "success": True, "source_dir": skill_dir}],
+        )
+
+    async def install(uid, source_dir):
+        assert uid == "user-1"
+        installed.write_bytes((source_dir / "SKILL.md").read_bytes())
+        return SimpleNamespace(slug="demo")
+
+    async def enable(_db, *, thread_id, uid, skill_slugs):
+        assert (thread_id, uid, skill_slugs) == ("thread-1", "user-1", ["demo"])
+        return True
+
+    monkeypatch.setattr(remote_install, "prepare_remote_skills_batch", prepare)
+    monkeypatch.setattr(skill_service, "install_personal_skill_dir", install)
+    monkeypatch.setattr(skill_service, "enable_personal_skills_for_agent_config", enable)
+    monkeypatch.setattr(
+        install_skill_module.pg_manager, "get_async_session_context", lambda: _AsyncSessionContext(None)
+    )
+    result = await install_skill_module._run_install_task(
+        "owner/repo", _runtime(uid="user-1", thread_id="thread-1"), "tool-1", skill_names=["demo"]
+    )
+
+    assert installed.read_text(encoding="utf-8") == "# Demo"
+    assert not staging.exists()
+    assert result.update["messages"][0].content.splitlines() == [
+        "已安装 Skill: demo",
+        "Skill 路径: /home/gem/user-data/agents/skills/demo/SKILL.md",
+    ]
 
 
 @pytest.mark.asyncio

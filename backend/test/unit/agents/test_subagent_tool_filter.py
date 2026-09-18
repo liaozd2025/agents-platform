@@ -30,7 +30,7 @@ def test_filter_disabled_tools_keeps_allowed_tools_order():
     assert [subagent_graph._tool_name(tool) for tool in filtered] == ["search", "calculator"]
 
 
-def test_filter_disabled_tools_never_exposes_direct_sandbox_execution_tools():
+def test_filter_disabled_tools_removes_sensitive_backend_tools_only_in_default_mode():
     tools = [
         SimpleNamespace(name="read_file"),
         SimpleNamespace(name="write_file"),
@@ -44,7 +44,12 @@ def test_filter_disabled_tools_never_exposes_direct_sandbox_execution_tools():
     always_trust_filtered = subagent_graph._filter_disabled_tools(
         tools, subagent_graph._disabled_tools_for("always_trust")
     )
-    assert [subagent_graph._tool_name(tool) for tool in always_trust_filtered] == ["read_file"]
+    assert [subagent_graph._tool_name(tool) for tool in always_trust_filtered] == [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "execute",
+    ]
 
 
 @pytest.mark.asyncio
@@ -120,7 +125,7 @@ def test_filesystem_middleware_does_not_register_disabled_tools_in_default_mode(
     always_trust = create_agent_filesystem_middleware(
         backend=backend, disabled_tools=subagent_graph._disabled_tools_for("always_trust")
     )
-    assert {tool.name for tool in always_trust.tools} == {"read_file"}
+    assert {"write_file", "edit_file", "execute"} <= {tool.name for tool in always_trust.tools}
 
 
 @pytest.mark.asyncio
@@ -175,7 +180,7 @@ async def test_subagent_tool_filter_middleware_allows_enabled_tool_execution(use
 
 
 @pytest.mark.asyncio
-async def test_subagent_tool_filter_middleware_keeps_pi_delegation_in_always_trust():
+async def test_subagent_tool_filter_middleware_allows_sensitive_tools_in_always_trust():
     middleware = subagent_graph._SubAgentToolFilterMiddleware("always_trust")
     executed = []
 
@@ -185,5 +190,5 @@ async def test_subagent_tool_filter_middleware_keeps_pi_delegation_in_always_tru
 
     result = await middleware.awrap_tool_call(_ToolCallRequest("write_file"), handler)
 
-    assert executed == []
-    assert result.status == "error"
+    assert executed == ["write_file"]
+    assert result == "executed"

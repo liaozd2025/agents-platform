@@ -4,7 +4,6 @@ import asyncio
 from contextlib import asynccontextmanager
 import importlib
 import os
-from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -631,139 +630,6 @@ async def test_cleanup_reconciler_reenqueues_pending_retry_without_worker_restar
         thread_id=run_obj.conversation_thread_id,
     )
     append_end.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_pi_cleanup_reconciler_retries_persisted_orphan(monkeypatch: pytest.MonkeyPatch):
-    """一次删除失败必须保留事实，后续周期成功后才清除。"""
-    pending = True
-    failed_at = run_worker.datetime(2026, 8, 27, 12, 0, 0)
-    stop_calls: list[tuple[str, bool]] = []
-    cleared: list[tuple[int, object]] = []
-    locked: list[tuple[int, object]] = []
-
-    @asynccontextmanager
-    async def fake_session_ctx():
-        yield object()
-
-    class Repo:
-        def __init__(self, _db):
-            pass
-
-        async def list_pi_cleanup_failures(self):
-            if not pending:
-                return []
-            return [
-                {
-                    "attempt_id": 7,
-                    "run_id": "run-1",
-                    "instance_id": None,
-                    "error_type": "execution_unknown",
-                    "final_acked_at": None,
-                    "cleanup_failed_at": failed_at,
-                    "uid": "user-1",
-                }
-            ]
-
-        async def clear_pi_cleanup_failure(self, attempt_id: int, *, failed_at):
-            nonlocal pending
-            cleared.append((attempt_id, failed_at))
-            pending = False
-            return True
-
-        async def lock_pi_cleanup_failure(self, attempt_id: int, *, failed_at):
-            locked.append((attempt_id, failed_at))
-            return True
-
-    class Adapter:
-        calls = 0
-
-        def __init__(self, **kwargs):
-            assert kwargs == {"uid": "user-1", "run_id": "run-1", "attempt_id": "7"}
-
-        async def stop(self, instance_id: str, *, preserve_outputs: bool):
-            type(self).calls += 1
-            stop_calls.append((instance_id, preserve_outputs))
-            if type(self).calls == 1:
-                raise TimeoutError("provisioner still unavailable")
-
-    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session_ctx)
-    monkeypatch.setattr(run_worker, "AgentRunRepository", Repo)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", Adapter)
-
-    assert await run_worker.reconcile_pi_cleanup_failures() == []
-    assert pending is True
-    assert await run_worker.reconcile_pi_cleanup_failures() == [7]
-    assert stop_calls == [("", True), ("", True)]
-    assert locked == [(7, failed_at), (7, failed_at)]
-    assert cleared == [(7, failed_at)]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("root_status", "cleanup_pending", "expected_cleaned"),
-    [("running", False, []), ("completed", True, []), ("completed", False, [7])],
-)
-async def test_pi_child_orphan_waits_for_root_runtime_cleanup(
-    monkeypatch: pytest.MonkeyPatch, root_status, cleanup_pending, expected_cleaned
-):
-    """新建 adapter 不能凭关闭空句柄清除仍可能运行的 child 命令。"""
-    root = _build_run()
-    root.id = "root-run"
-    root.run_type = "resume"
-    root.created_by_run_id = "historical-chat"
-    root.status = root_status
-    root.runtime_cleanup_pending = cleanup_pending
-    historical = _build_run()
-    historical.id = "historical-chat"
-    historical.status = "completed"
-    child = _build_run()
-    child.run_type = "sandbox"
-    child.created_by_run_id = root.id
-    cleared = []
-
-    @asynccontextmanager
-    async def session_context():
-        yield object()
-
-    class Repo:
-        def __init__(self, _db):
-            pass
-
-        async def list_pi_cleanup_failures(self):
-            return [
-                {
-                    "attempt_id": 7,
-                    "run_id": child.id,
-                    "uid": child.uid,
-                    "run_type": "sandbox",
-                    "runtime_scope_id": child.runtime_scope_id,
-                    "cleanup_failed_at": "failed-at",
-                    "final_acked_at": None,
-                    "error_type": "execution_unknown",
-                    "instance_id": "sandbox-1",
-                }
-            ]
-
-        async def lock_pi_cleanup_failure(self, *_args, **_kwargs):
-            return True
-
-        async def get_run_for_user(self, run_id, uid):
-            assert uid == child.uid
-            return {child.id: child, root.id: root, historical.id: historical}.get(run_id)
-
-        async def clear_pi_cleanup_failure(self, attempt_id, **_kwargs):
-            cleared.append(attempt_id)
-            return True
-
-    stop = AsyncMock()
-    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", session_context)
-    monkeypatch.setattr(run_worker, "AgentRunRepository", Repo)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", lambda **_kwargs: SimpleNamespace(stop=stop))
-    assert await run_worker.reconcile_pi_cleanup_failures() == expected_cleaned
-    assert cleared == expected_cleaned
-    if not expected_cleaned:
-        stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1619,10 +1485,6 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         calls.append("reconcile_pending_runtime_cleanups")
         return []
 
-    async def fake_reconcile_pi_cleanup_failures():
-        calls.append("reconcile_pi_cleanup_failures")
-        return []
-
     async def fake_reconciliation_loop():
         calls.append("reconciliation_loop")
 
@@ -1653,7 +1515,6 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "reconcile_pending_runtime_cleanups",
         fake_reconcile_pending_runtime_cleanups,
     )
-    monkeypatch.setattr(run_worker, "reconcile_pi_cleanup_failures", fake_reconcile_pi_cleanup_failures)
     monkeypatch.setattr(run_worker, "_publish_reconciliation_health", fake_publish_reconciliation_health)
     monkeypatch.setattr(run_worker, "_publish_task_reconciliation_health", fake_publish_task_reconciliation_health)
     monkeypatch.setattr(run_worker, "_reconcile_agent_run_leases_forever", fake_reconciliation_loop)
@@ -1678,7 +1539,6 @@ async def test_worker_startup_ensures_builtin_mcp_servers(monkeypatch: pytest.Mo
         "init_builtin_skills",
         "reconcile_expired_run_leases",
         "reconcile_pending_runtime_cleanups",
-        "reconcile_pi_cleanup_failures",
         "recover_pending_dispatches",
         "reconcile_and_publish_tasks",
         "publish_task_reconciliation_health",
@@ -1900,417 +1760,25 @@ async def test_manifest_persist_failure_fails_run_before_execution(
     assert "执行未开始" in terminal_calls[0]["error_message"]
 
 
-@pytest.mark.asyncio
-async def test_process_agent_run_routes_pi_without_entering_langgraph(monkeypatch: pytest.MonkeyPatch):
-    """PI 请求在 claim 时冻结 manifest，并只进入统一 PI execution seam。"""
-    run_obj = _build_run()
-    run_obj.input_payload["runtime"] = {"executor": "pi"}
-    _patch_common(monkeypatch, run_obj)
-    manifest = {"manifest_version": 1, "policy": {"timeout_seconds": 60}}
-    digest = "a" * 64
-    captured: dict[str, object] = {}
-
-    async def fake_mark_running(run_id, worker_id, attempt_metadata=None):
-        captured["claim"] = (run_id, worker_id, attempt_metadata)
-        return True
-
-    async def fake_get_attempt(run_id, worker_id):
-        captured["attempt_lookup"] = (run_id, worker_id)
-        return SimpleNamespace(id=7)
-
-    async def fake_bind(run_id, attempt_id, instance_id, worker_id):
-        captured["instance"] = (run_id, attempt_id, instance_id, worker_id)
-        return True
-
-    async def fake_record(run_id, attempt_id, envelope, worker_id):
-        captured["envelope"] = (run_id, attempt_id, envelope, worker_id)
-        run_obj.status = "completed"
-        return {"ack": True, "duplicate": False}
-
-    class Adapter:
-        def __init__(self, **kwargs):
-            captured["adapter"] = kwargs
-
-    async def fake_execute(**kwargs):
-        captured["execution"] = kwargs["attempt"]
-        await kwargs["instance_sink"]("sandbox-1")
-        await kwargs["result_sink"](
-            {
-                "job_id": "run-1",
-                "attempt_id": "7",
-                "adapter": "local",
-                "event_id": "final-1",
-                "sequence": 0,
-                "type": "final",
-                "runtime_manifest_digest": digest,
-                "payload": {"text": "YUXI_PI_GOLDEN_V1"},
-                "payload_digest": "b" * 64,
-            }
-        )
-        return []
-
-    async def forbidden(*args, **kwargs):
-        raise AssertionError(f"LangGraph path must not run: {args}, {kwargs}")
-
-    async def noop(*args, **kwargs):
-        del args, kwargs
-
-    monkeypatch.setattr(run_worker, "build_default_pi_runtime_manifest", lambda: (manifest, digest))
-    monkeypatch.setattr(run_worker, "mark_run_running", fake_mark_running)
-    monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
-    monkeypatch.setattr(run_worker, "bind_pi_instance", fake_bind)
-    monkeypatch.setattr(run_worker, "record_pi_envelope", fake_record)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", Adapter)
-    monkeypatch.setattr(run_worker, "execute_pi_attempt", fake_execute)
-    monkeypatch.setattr(run_worker, "persist_run_manifest", forbidden)
-    monkeypatch.setattr(run_worker, "stream_agent_chat", forbidden)
-    monkeypatch.setattr(run_worker, "dispatch_next_request", noop)
-
-    await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, "run-1")
-
-    claim = captured["claim"]
-    worker_id = claim[1]
-    assert claim[0] == "run-1"
-    assert claim[2] == {
-        "adapter": "local",
-        "route_reason": "t2_local_only",
-        "route_snapshot": {"rule_version": "t2-local-only"},
-        "runtime_manifest": manifest,
-        "runtime_manifest_digest": digest,
-    }
-    assert captured["attempt_lookup"] == ("run-1", worker_id)
-    assert captured["adapter"] == {"uid": "user-1", "run_id": "run-1", "attempt_id": "7"}
-    assert captured["instance"] == ("run-1", 7, "sandbox-1", worker_id)
-    assert captured["execution"] == {
-        "run_id": "run-1",
-        "attempt_id": "7",
-        "manifest": manifest,
-        "manifest_digest": digest,
-    }
-
-
-@pytest.mark.asyncio
-async def test_sandbox_run_reuses_parent_runtime_and_executes_pi_task(monkeypatch: pytest.MonkeyPatch):
-    """Sandbox child 必须以 PI adapter 复用父 runtime，并留下 attempt 清单。"""
-
-    run_obj = _build_run()
-    run_obj.run_type = "sandbox"
-    run_obj.conversation_thread_id = "pi-child-thread"
-    run_obj.runtime_scope_id = "root-thread"
-    run_obj.created_by_run_id = "parent-run"
-    run_obj.input_payload["runtime"] = {
-        "executor": "pi",
-        "parent_thread_id": "spoofed-thread",
-        "workdir_path": "projects/11111111-1111-4111-8111-111111111111",
-        "skill_slugs": ["report"],
-        "skill_digests": {"report": "d" * 64},
-        "skill_runtime_paths": {"report": "/home/gem/skills/report"},
-    }
-    _patch_common(monkeypatch, run_obj)
-    parent_run = SimpleNamespace(
-        id="parent-run",
-        uid=run_obj.uid,
-        conversation_thread_id="parent-thread",
-    )
-
-    async def fake_get_run(run_id: str):
-        return parent_run if run_id == "parent-run" else run_obj
-
-    monkeypatch.setattr(run_worker, "_get_run", fake_get_run)
-    manifest = {"manifest_version": 1, "policy": {"timeout_seconds": 600}}
-    digest = "a" * 64
-    credentials = {"api_key": "secret", "headers": {}, "auth_header": True}
-    captured: dict[str, object] = {}
-    published_events: list[tuple[str, str, dict, str | None]] = []
-
-    async def fake_mark_running(run_id, worker_id, attempt_metadata=None):
-        captured["claim"] = (run_id, worker_id, attempt_metadata)
-        return True
-
-    async def fake_get_attempt(*_args, **_kwargs):
-        return SimpleNamespace(id=7)
-
-    async def fake_record(_run_id, _attempt_id, envelope, _worker_id):
-        if envelope["type"] == "final":
-            run_obj.status = "completed"
-        return {"ack": True, "duplicate": False}
-
-    async def fake_publish(run_id, event_type, payload, *, thread_id=None):
-        published_events.append((run_id, event_type, payload, thread_id))
-        return True
-
-    class Adapter:
-        def __init__(self, **kwargs):
-            captured["adapter"] = kwargs
-
-    async def fake_execute(**kwargs):
-        captured["execution"] = kwargs["attempt"]
-        await kwargs["instance_sink"]("sandbox-parent")
-        await kwargs["result_sink"](
-            {
-                "type": "tool_call",
-                "payload": {"tool_call_id": "pi-tool-1", "name": "bash", "args": {"command": "pwd"}},
-            }
-        )
-        await kwargs["result_sink"](
-            {
-                "type": "tool_result",
-                "payload": {
-                    "tool_call_id": "pi-tool-1",
-                    "name": "bash",
-                    "content": "ok",
-                    "is_error": False,
-                },
-            }
-        )
-        await kwargs["result_sink"](
-            {
-                "type": "final",
-                "payload": {"text": "done"},
-            }
-        )
-        return []
-
-    def fake_build_manifest(**kwargs):
-        captured["manifest_args"] = kwargs
-        return manifest, digest
-
-    async def forbidden(*args, **kwargs):
-        raise AssertionError(f"Sandbox child must not enter LangGraph or queue dispatch: {args}, {kwargs}")
-
-    monkeypatch.setattr(run_worker, "resolve_pi_model_runtime", lambda _spec: ({"model_id": "m"}, credentials))
-    monkeypatch.setattr(run_worker, "get_user_skills_root_dir", lambda _uid: Path("/projection"))
-    monkeypatch.setattr(run_worker, "compute_skill_dir_hash", lambda path: "d" * 64 if path.name == "report" else "")
-    monkeypatch.setattr(run_worker, "build_pi_runtime_manifest", fake_build_manifest)
-    monkeypatch.setattr(
-        run_worker, "_snapshot_pi_run_context", AsyncMock(return_value=({"project_instructions": []}, None))
-    )
-    monkeypatch.setattr(run_worker, "mark_run_running", fake_mark_running)
-    monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
-    monkeypatch.setattr(run_worker, "bind_pi_instance", AsyncMock(return_value=True))
-    monkeypatch.setattr(run_worker, "record_pi_envelope", fake_record)
-    monkeypatch.setattr(run_worker, "_append_run_event_best_effort", fake_publish)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", Adapter)
-    monkeypatch.setattr(run_worker, "execute_pi_attempt", fake_execute)
-    monkeypatch.setattr(run_worker, "persist_run_manifest", forbidden)
-    monkeypatch.setattr(run_worker, "stream_agent_chat", forbidden)
-    monkeypatch.setattr(run_worker, "dispatch_next_request", forbidden)
-
-    await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, run_obj.id)
-
-    assert callable(captured["adapter"].pop("steer_check"))
-    assert captured["adapter"] == {
-        "uid": "user-1",
-        "run_id": "run-1",
-        "attempt_id": "7",
-        "runtime_scope_id": "root-thread",
-        "workdir_path": "projects/11111111-1111-4111-8111-111111111111",
-        "skill_sources": {"report": Path("/projection/report")},
-        "reuse_sandbox": True,
-        "credentials": credentials,
-    }
-    assert captured["execution"] == {
-        "run_id": "run-1",
-        "attempt_id": "7",
-        "manifest": manifest,
-        "manifest_digest": digest,
-        "task": "hello",
-    }
-    assert captured["claim"][2]["runtime_manifest_digest"] == digest
-    standard_events = [event for event in published_events if event[1] == "messages"]
-    assert {(event[0], event[3]) for event in standard_events} == {
-        ("run-1", "pi-child-thread"),
-        ("parent-run", "parent-thread"),
-    }
-    assert {event[2]["chunk"]["status"] for event in standard_events} == {"loading", "stream_event"}
-
-
-def test_pi_stream_projection_keeps_child_text_and_tool_snapshots_separate():
-    """同一provider工具ID在不同child中隔离，快照不会冒充完成。"""
-
-    def project(kind, child, payload):
-        """投影到父Run，保留child身份。"""
-        return run_worker._pi_stream_chunk(
-            {"job_id": child, "type": kind, "payload": payload}, run_id="parent", thread_id="thread"
-        )
-
-    text = project("message_delta", "child-a", {"content": "progress"})
-    assert text["stream_event"]["message_id"] == "pi-child-a"
-    assert text["stream_event"]["content"] == "progress"
-    tool = {"tool_call_id": "call-1", "name": "bash", "content": "first\nsecond"}
-    first = project("tool_update", "child-a", tool)["event"]["data"]
-    other = project("tool_update", "child-b", tool)["event"]["data"]
-    final = project("tool_result", "child-a", tool)["event"]["data"]
-    assert first["event"] == "tool-progress"
-    assert first["output"]["status"] == "running"
-    assert first["output"]["content"] == "first\nsecond"
-    assert first["tool_call_id"] != other["tool_call_id"]
-    assert first["tool_call_id"] == final["tool_call_id"]
-    assert final["event"] == "tool-finished"
-
-
-@pytest.mark.asyncio
-async def test_pi_execution_unknown_fails_without_releasing_for_retry(monkeypatch: pytest.MonkeyPatch):
-    """PI 启动后的未知结局只能失败当前 Run，不能创建新 attempt 重跑。"""
-    run_obj = _build_run()
-    run_obj.input_payload["runtime"] = {"executor": "pi"}
-    _patch_common(monkeypatch, run_obj)
-    manifest = {"manifest_version": 1, "policy": {"timeout_seconds": 60}}
-    terminal_calls: list[dict] = []
-
-    async def fake_get_attempt(*_args, **_kwargs):
-        return SimpleNamespace(id=7)
-
-    async def fake_execute(**_kwargs):
-        raise run_worker.PiExecutionUnknown("PI execution_unknown: transport lost")
-
-    async def fake_mark_terminal(run_id, status, error_type, error_message, **kwargs):
-        terminal_calls.append(
-            {
-                "run_id": run_id,
-                "status": status,
-                "error_type": error_type,
-                "error_message": error_message,
-                **kwargs,
-            }
-        )
-        run_obj.status = status
-        return run_worker.TerminalTransition(status=status, changed=True)
-
-    async def forbidden_retry(*args, **kwargs):
-        raise AssertionError(f"PI execution_unknown must not release for retry: {args}, {kwargs}")
-
-    async def noop(*args, **kwargs):
-        del args, kwargs
-
-    monkeypatch.setattr(run_worker, "build_default_pi_runtime_manifest", lambda: (manifest, "a" * 64))
-    monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", lambda **_kwargs: object())
-    monkeypatch.setattr(run_worker, "execute_pi_attempt", fake_execute)
-    monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
-    monkeypatch.setattr(run_worker, "release_run_lease_for_retry", forbidden_retry)
-    monkeypatch.setattr(run_worker, "_append_end_event", noop)
-    monkeypatch.setattr(run_worker, "dispatch_next_request", noop)
-
-    await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, "run-1")
-
-    assert len(terminal_calls) == 1
-    assert terminal_calls[0]["status"] == "failed"
-    assert terminal_calls[0]["error_type"] == "execution_unknown"
-    assert terminal_calls[0]["worker_id"].startswith("worker-pi:")
-
-
-@pytest.mark.asyncio
-async def test_pi_unknown_with_cleanup_failure_preserves_both_facts(monkeypatch: pytest.MonkeyPatch):
-    run_obj = _build_run()
-    run_obj.input_payload["runtime"] = {"executor": "pi"}
-    _patch_common(monkeypatch, run_obj)
-    manifest = {"manifest_version": 1, "policy": {"timeout_seconds": 60}}
-    cleanup_calls: list[tuple] = []
-    terminal_calls: list[dict] = []
-    order: list[str] = []
-
-    async def fake_get_attempt(*_args, **_kwargs):
-        return SimpleNamespace(id=7)
-
-    async def fake_execute(**_kwargs):
-        raise run_worker.PiCleanupFailed(
-            "PI cleanup_failed: delete unavailable",
-            primary=run_worker.PiExecutionUnknown("PI execution_unknown: transport lost"),
-        )
-
-    async def fake_record_cleanup(*args, **kwargs):
-        order.append("cleanup")
-        cleanup_calls.append((args, kwargs))
-
-    async def fake_mark_terminal(run_id, status, error_type, error_message, **kwargs):
-        order.append("terminal")
-        terminal_calls.append(
-            {
-                "run_id": run_id,
-                "status": status,
-                "error_type": error_type,
-                "error_message": error_message,
-                **kwargs,
-            }
-        )
-        run_obj.status = status
-        return run_worker.TerminalTransition(status=status, changed=True)
-
-    async def forbidden_retry(*args, **kwargs):
-        raise AssertionError(f"PI cleanup failure must not release for retry: {args}, {kwargs}")
-
-    async def noop(*args, **kwargs):
-        del args, kwargs
-
-    monkeypatch.setattr(run_worker, "build_default_pi_runtime_manifest", lambda: (manifest, "a" * 64))
-    monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", lambda **_kwargs: object())
-    monkeypatch.setattr(run_worker, "execute_pi_attempt", fake_execute)
-    monkeypatch.setattr(run_worker, "record_pi_cleanup_failure", fake_record_cleanup)
-    monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
-    monkeypatch.setattr(run_worker, "release_run_lease_for_retry", forbidden_retry)
-    monkeypatch.setattr(run_worker, "_append_end_event", noop)
-    monkeypatch.setattr(run_worker, "dispatch_next_request", noop)
-
-    await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, "run-1")
-
-    assert cleanup_calls[0][0][:3] == ("run-1", 7, terminal_calls[0]["worker_id"])
-    assert order == ["terminal", "cleanup"]
-    assert terminal_calls[0]["status"] == "failed"
-    assert terminal_calls[0]["error_type"] == "execution_unknown"
-
-
-@pytest.mark.asyncio
-async def test_pi_cancel_with_cleanup_failure_commits_cancel_before_orphan(monkeypatch: pytest.MonkeyPatch):
-    run_obj = _build_run()
-    run_obj.input_payload["runtime"] = {"executor": "pi"}
-    _patch_common(monkeypatch, run_obj)
-    manifest = {"manifest_version": 1, "policy": {"timeout_seconds": 60}}
-    order: list[str] = []
-
-    async def fake_get_attempt(*_args, **_kwargs):
-        return SimpleNamespace(id=7)
-
-    async def fake_execute(**_kwargs):
-        raise run_worker.PiCleanupFailed(
-            "PI cleanup_failed: delete unavailable",
-            primary=run_worker.PiExecutionCancelled("PI attempt cancelled"),
-        )
-
-    async def fake_finish_cancel(**_kwargs):
-        assert _kwargs["run"] is run_obj
-        order.append("cancelled")
-        run_obj.status = "cancelled"
-        return run_worker.TerminalTransition(status="cancelled", changed=True)
-
-    async def fake_record_cleanup(*_args, **_kwargs):
-        order.append("cleanup")
-
-    async def forbidden(*args, **kwargs):
-        raise AssertionError(f"unexpected retry/terminal transition: {args}, {kwargs}")
-
-    async def noop(*args, **kwargs):
-        del args, kwargs
-
-    monkeypatch.setattr(run_worker, "build_default_pi_runtime_manifest", lambda: (manifest, "a" * 64))
-    monkeypatch.setattr(run_worker, "get_current_run_attempt", fake_get_attempt)
-    monkeypatch.setattr(run_worker, "LocalPiAdapter", lambda **_kwargs: object())
-    monkeypatch.setattr(run_worker, "execute_pi_attempt", fake_execute)
-    monkeypatch.setattr(run_worker, "_finish_user_cancel", fake_finish_cancel)
-    monkeypatch.setattr(run_worker, "record_pi_cleanup_failure", fake_record_cleanup)
-    monkeypatch.setattr(run_worker, "mark_run_terminal", forbidden)
-    monkeypatch.setattr(run_worker, "release_run_lease_for_retry", forbidden)
-    monkeypatch.setattr(run_worker, "dispatch_next_request", noop)
-
-    await run_worker.process_agent_run({"worker_id": "worker-pi", "job_try": 1}, "run-1")
-
-    assert order == ["cancelled", "cleanup"]
-
-
 def test_retry_requires_new_manifest_fingerprint_to_match_write_once_fact():
     persisted = SimpleNamespace(manifest_fingerprint="a" * 64)
 
     run_worker._require_persisted_manifest_match(persisted, recorded=False, fingerprint="a" * 64)
     with pytest.raises(RuntimeError, match="运行资产已在重试前变化"):
         run_worker._require_persisted_manifest_match(persisted, recorded=False, fingerprint="b" * 64)
+
+
+@pytest.mark.parametrize("run_type,runtime", [("chat", {"executor": "pi"}), ("sandbox", {})])
+async def test_retired_pi_job_never_enters_new_executor(monkeypatch, run_type, runtime):
+    """旧队列消息只能明确失败，不能静默作为 LangGraph 重跑。"""
+    run = _build_run()
+    run.run_type = run_type
+    run.input_payload["runtime"] = runtime
+    monkeypatch.setattr(run_worker, "_get_run", AsyncMock(return_value=run))
+    terminal = AsyncMock()
+    claim = AsyncMock(side_effect=AssertionError("旧 PI 不得取得新执行权"))
+    monkeypatch.setattr(run_worker, "mark_run_terminal", terminal)
+    monkeypatch.setattr(run_worker, "mark_run_running", claim)
+    await run_worker.process_agent_run({}, run.id)
+    terminal.assert_awaited_once_with(run.id, "failed", "pi_executor_retired", "PI 执行器已停用，旧任务不可续跑")
+    claim.assert_not_awaited()

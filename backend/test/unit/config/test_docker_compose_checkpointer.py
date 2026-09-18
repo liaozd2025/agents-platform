@@ -135,26 +135,18 @@ def test_worker_healthcheck_uses_arq_health_contract_in_development_and_producti
         ]
 
 
-def test_compose_provisions_the_buildable_pi_image_with_resource_budgets():
-    """开发和生产都从同一源码构建 PI 镜像并传递执行预算。"""
+def test_compose_uses_upstream_sandbox_without_pi_builder_and_keeps_resource_budgets():
+    """开发和生产使用普通沙箱镜像，并保留通用资源预算。"""
     project_root = _project_root()
     for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
         compose = yaml.safe_load((project_root / filename).read_text())
-        builder = compose["services"]["pi-sandbox-image"]
-        environment = dict(item.split("=", 1) for item in compose["services"]["sandbox-provisioner"]["environment"])
-        assert environment["SANDBOX_IMAGE"] == "${SANDBOX_IMAGE:-" + builder["image"] + "}"
-        assert builder["build"]["context"] == "."
-        assert builder["build"]["dockerfile"] == "docker/pi_sandbox/Dockerfile"
-        assert builder["build"]["target"] == "${SANDBOX_IMAGE:+prebuilt}"
-        assert builder["build"]["args"]["SANDBOX_PREBUILT_IMAGE"] == "${SANDBOX_IMAGE:-scratch}"
-        assert "SANDBOX_IMAGE" not in builder["image"]
-        assert builder["pull_policy"] == "build"
-        assert not builder.get("profiles")
-        assert builder["entrypoint"] == ["node", "/opt/yuxi-pi-verify.mjs"]
-        assert compose["services"]["sandbox-provisioner"]["depends_on"]["pi-sandbox-image"] == {
-            "condition": "service_completed_successfully"
-        }
-        assert "./backend/package/yuxi/pi_runner:/opt/yuxi-pi-expected:ro" in builder["volumes"]
+        assert "pi-sandbox-image" not in compose["services"]
+        provisioner = compose["services"]["sandbox-provisioner"]
+        assert "pi-sandbox-image" not in provisioner["depends_on"]
+        environment = dict(item.split("=", 1) for item in provisioner["environment"])
+        assert environment["SANDBOX_IMAGE"] == (
+            "${SANDBOX_IMAGE:-enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0}"
+        )
         assert environment["SANDBOX_MEMORY_MB"] == "${SANDBOX_MEMORY_MB:-4096}"
         assert environment["SANDBOX_MAX_INSTANCES"] == "${SANDBOX_MAX_INSTANCES:-6}"
         assert environment["SANDBOX_MAX_INSTANCES_PER_USER"] == "${SANDBOX_MAX_INSTANCES_PER_USER:-4}"
@@ -166,7 +158,9 @@ def test_worker_starts_owned_entrypoint_in_development_and_production():
     project_root = _project_root()
     for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
         compose = yaml.safe_load((project_root / filename).read_text())
-        assert "python -m server.worker_main" in str(compose["services"]["worker"].get("entrypoint", "")) + str(compose["services"]["worker"].get("command", ""))
+        assert "python -m server.worker_main" in str(compose["services"]["worker"].get("entrypoint", "")) + str(
+            compose["services"]["worker"].get("command", "")
+        )
 
 
 def test_arq_dependency_changes_trigger_real_dispatch_regression():

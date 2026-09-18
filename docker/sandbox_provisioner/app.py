@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field, model_validator
 logger = logging.getLogger(__name__)
 
 SANDBOX_ENV_FILE = Path(__file__).parent / "sandbox.env"
-DEFAULT_SANDBOX_IMAGE = "yuxi-pi-sandbox:0.7.3"
+DEFAULT_SANDBOX_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0"
 SANDBOX_RUNTIME_ENVIRONMENTS = {
     "core": {
         "DISABLE_BROWSER": "true",

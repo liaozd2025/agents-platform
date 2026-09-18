@@ -4,6 +4,8 @@
 类型：feature
 Owner：backend/package/yuxi/storage/postgres/manager.py
 
+PI 执行相关部分由 [PI 退役决策](../implemented/2026-09-18-retire-pi-executor.md) 取代；本记录中的对应验证仅代表退役前版本。
+
 ## 问题
 
 fork 与上游从共同基线分别演进。直接覆盖会丢失 PI 执行、组织权限、知识库 MCP、用户资料及界面定制；仅消除文本冲突不能证明升级可用。

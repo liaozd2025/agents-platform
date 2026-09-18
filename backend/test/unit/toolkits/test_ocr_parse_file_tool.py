@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from pathlib import Path
+from io import BytesIO
 
 import pytest
+from docx import Document
+from langchain_core.messages import ToolMessage
 
+from yuxi.agents.backends import create_agent_filesystem_middleware
+from yuxi.agents.buildin.subagent.graph import _SubAgentToolFilterMiddleware
+from yuxi.agents.middlewares.model_input import ImageInputCompatibilityMiddleware
 from yuxi.services import ocr_service
 from yuxi.agents.toolkits.buildin import tools as buildin_tools
 from yuxi.agents.toolkits.buildin.tools import ocr_parse_file
@@ -59,6 +65,44 @@ def _runtime(
         ),
         state={},
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subagent", [False, True])
+async def test_office_tool_passes_execution_filters_and_parses_docx(monkeypatch, subagent):
+    """主、子 Agent 经真实执行过滤后在后端解析 DOCX，并保存完整 Markdown。"""
+    _mock_system_options(monkeypatch)
+    source = BytesIO()
+    document = Document()
+    document.add_paragraph("Office backend content")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Item"
+    table.cell(0, 1).text = "Quantity"
+    table.cell(1, 0).text = "Sample"
+    table.cell(1, 1).text = "37"
+    document.save(source)
+    path = f"{_runtime().context.workdir_path}/uploads/report.docx"
+    files = _patch_sandbox_backend(monkeypatch, {path: source.getvalue()})
+    tools = {tool.name: tool for tool in ImageInputCompatibilityMiddleware().tools}
+    assert "ocr_parse_file" in tools
+    filesystem = create_agent_filesystem_middleware(backend=SimpleNamespace())
+    request = SimpleNamespace(tool_call={"name": "ocr_parse_file", "id": "parse-office", "args": {"file_path": path}})
+
+    async def parse(request):
+        result = await tools[request.tool_call["name"]].coroutine(file_path=path, runtime=_runtime())
+        assert "Office backend content" in result["preview"]
+        assert "37" in files[result["parsed_path"]].decode()
+        assert files[path] == source.getvalue()
+        return ToolMessage(content=result["parsed_path"], tool_call_id="parse-office")
+
+    async def execute(request):
+        return await filesystem.awrap_tool_call(request, parse)
+
+    result = (
+        await _SubAgentToolFilterMiddleware().awrap_tool_call(request, execute) if subagent else await execute(request)
+    )
+    assert result.status == "success"
+    assert result.content.endswith("/outputs/ocr/report.md")
 
 
 @pytest.mark.asyncio
