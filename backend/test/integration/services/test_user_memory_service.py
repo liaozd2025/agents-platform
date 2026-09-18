@@ -10,7 +10,7 @@ from yuxi.services import user_memory_service
 
 from yuxi.agents.context import build_agent_input_context
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import Department, Role, User, UserConfig, UserRoleAssignment
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, Department, User, UserConfig
 from yuxi.workspace.filesystem import Workspace
 from yuxi.workspace.paths import ensure_user_workspace
 
@@ -35,27 +35,32 @@ async def close_profile_database():
 
 
 @pytest.mark.asyncio
-async def test_profile_sync_uses_current_roles_and_preserves_manual_content(tmp_path, monkeypatch):
-    """真实角色变更、停用和 Memory 关闭均影响下一次模型输入。"""
+async def test_profile_sync_uses_current_profile_and_preserves_manual_content(tmp_path, monkeypatch):
+    """真实资料变更与 Memory 关闭均影响下一次模型输入，角色不进入用户资料。"""
     monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path))
     pg_manager.initialize()
     uid = "pytest-memory-" + uuid.uuid4().hex
     async with pg_manager.get_async_session_context() as db:
         department = Department(name=uid, path="/")
-        role = Role(code=uid, name="资料测试角色", default_scope_type="self", is_active=True)
-        db.add_all([department, role])
+        db.add(department)
         await db.flush()
+        # 补上真实物化路径，用于验证「集团 > 部门」组织链路（不是单写部门名）
+        department.path = f"/{ROOT_DEPARTMENT_ID}/{department.id}/"
+        await db.flush()
+        root = await db.get(Department, ROOT_DEPARTMENT_ID)
+        assert root is not None, "资料同步测试需要现有集团根节点"
+        expected_department = f"{root.name} > {uid}"
         user = User(
             username=uid,
             display_name="资料测试姓名",
             uid=uid,
             password_hash="unused-test-hash",
             department_id=department.id,
+            oa_station_name="资料测试岗位",
+            oa_job_level_name="资料测试职级",
         )
         config = UserConfig(uid=uid, enable_memory=True)
         db.add_all([user, config])
-        await db.flush()
-        db.add(UserRoleAssignment(user_id=user.id, role_id=role.id, scope_mode="inherit"))
         await db.flush()
         ensure_user_workspace(uid)
         workspace = Workspace(uid)
@@ -70,27 +75,30 @@ async def test_profile_sync_uses_current_roles_and_preserves_manual_content(tmp_
             return content
 
         content = await context()
-        # 真实资料同步必须写展示姓名，而不是登录账号
-        assert "- 用户名：资料测试姓名" in content
-        assert f"- 用户名：{uid}" not in content
-        assert f"- 部门：{uid}" in content
-        assert "- 角色：资料测试角色" in content
+        # 真实资料同步必须写展示姓名、岗位与职级，而不是登录账号
+        assert "- 称呼：资料测试姓名" in content
+        assert f"- 称呼：{uid}" not in content
+        # 部门写组织链路，不是只写直属部门名
+        assert f"- 部门：{expected_department}" in content
+        assert "- 岗位：资料测试岗位" in content
+        assert "- 职级：资料测试职级" in content
+        # 角色进入模型上下文会造成误导，用户资料里不得出现；UID 对模型没有决策价值
+        assert "- 角色" not in content
+        assert "- UID" not in content
         assert "unused-test-hash" not in content
         # 展示姓名缺失时回退登录账号
         user.display_name = None
         await db.flush()
-        assert f"- 用户名：{uid}" in await context()
+        assert f"- 称呼：{uid}" in await context()
         user.display_name = "资料测试姓名"
         await db.flush()
         department.name = "更新部门"
-        role.name = "更新角色"
+        user.oa_station_name = "更新岗位"
+        user.oa_job_level_name = "更新职级"
         await db.flush()
         updated = await context()
-        assert "更新部门" in updated and "更新角色" in updated
-        assert "资料测试角色" not in updated
-        role.is_active = False
-        await db.flush()
-        assert "- 角色：未分配" in await context()
+        assert "更新部门" in updated and "更新岗位" in updated and "更新职级" in updated
+        assert "资料测试岗位" not in updated and "资料测试职级" not in updated
         config.enable_memory = False
         await db.flush()
         assert await context() == "手工偏好：中文\n"

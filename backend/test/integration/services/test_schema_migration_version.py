@@ -11,8 +11,10 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from yuxi import storage_migration
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.storage.postgres.manager import BUSINESS_SCHEMA_VERSION, PostgresManager
+from yuxi.storage.postgres.models_business import Role, User, UserRoleAssignment
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -39,8 +41,89 @@ def _scoped_manager(engine) -> PostgresManager:
     manager = object.__new__(PostgresManager)
     PostgresManager.__init__(manager)
     manager.async_engine = engine
+    manager.AsyncSession = async_sessionmaker(engine, expire_on_commit=False)
     manager._initialized = True
     return manager
+
+
+async def test_v4_migrator_adds_oa_profile_columns_and_preserves_existing_data(tmp_path, monkeypatch) -> None:
+    """从已发布 v4 经真实迁移入口补列，重复执行不清空用户资料。"""
+    schema = f"pytest_profile_upgrade_{uuid.uuid4().hex[:16]}"
+    admin_engine = create_async_engine(os.environ["POSTGRES_URL"])
+    scoped_engine = create_async_engine(
+        os.environ["POSTGRES_URL"], connect_args={"server_settings": {"search_path": schema}}
+    )
+    for name in (
+        "YUXI_USER_DATA_DIR",
+        "YUXI_SKILL_DATA_DIR",
+        "YUXI_LEGACY_STORAGE_DIR",
+        "YUXI_SKILL_PROJECTION_DIR",
+        "NLTK_DATA",
+    ):
+        monkeypatch.setenv(name, str(tmp_path / name))
+    monkeypatch.setenv("LITE_MODE", "true")
+    monkeypatch.setattr(storage_migration, "runtime_storage_requires_quiescence", lambda: False)
+    monkeypatch.setattr(storage_migration, "migrate_runtime_storage_identity", lambda: None)
+    try:
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        manager = _scoped_manager(scoped_engine)
+        await manager.create_business_tables()
+        await manager.create_schema_version_table()
+        await manager.record_schema_version("business", 4)
+        async with manager.get_async_session_context() as session:
+            session.add(
+                User(
+                    username="profile-upgrade",
+                    uid="profile-upgrade",
+                    password_hash="unused-test-hash",
+                    display_name="保留姓名",
+                    role_assignments=[
+                        UserRoleAssignment(
+                            role=Role(
+                                code="superadmin", name="迁移测试管理员", default_scope_type="all", is_active=True
+                            ),
+                            scope_mode="inherit",
+                        )
+                    ],
+                )
+            )
+        async with scoped_engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE users DROP COLUMN oa_station_name"))
+            await connection.execute(text("ALTER TABLE users DROP COLUMN oa_job_level_name"))
+
+        for attempt in range(2):
+            manager = _scoped_manager(scoped_engine)
+            monkeypatch.setattr(storage_migration, "pg_manager", manager)
+            await storage_migration.main()
+            async with scoped_engine.begin() as connection:
+                row = (
+                    await connection.execute(
+                        text(
+                            "SELECT display_name, oa_station_name, oa_job_level_name "
+                            "FROM users WHERE uid = 'profile-upgrade'"
+                        )
+                    )
+                ).one()
+                expected_profile = ("保留姓名", None, None) if attempt == 0 else ("保留姓名", "保留岗位", "保留职级")
+                assert tuple(row) == expected_profile
+                assert (
+                    await connection.scalar(
+                        text("SELECT version FROM yuxi_schema_migrations WHERE domain = 'business'")
+                    )
+                    == 5
+                )
+                await connection.execute(
+                    text(
+                        "UPDATE users SET oa_station_name = '保留岗位', oa_job_level_name = '保留职级' "
+                        "WHERE uid = 'profile-upgrade'"
+                    )
+                )
+    finally:
+        await scoped_engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
 
 
 async def test_schema_migration_lock_serializes_real_postgres_sessions() -> None:

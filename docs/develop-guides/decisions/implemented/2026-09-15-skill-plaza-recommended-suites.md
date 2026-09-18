@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：`web/src/components/extensions/SkillCardList.vue`（`RECOMMENDED_SUITES` 是推荐列表的唯一事实源）
+Owner：web/src/components/extensions/SkillCardList.vue
 
 ## 问题
 
@@ -11,6 +11,8 @@ Owner：`web/src/components/extensions/SkillCardList.vue`（`RECOMMENDED_SUITES`
 首版扩充了 5 组套件，但其中 4 组实际装不上。在真实沙箱（`_RemoteSkillSandbox`）中复现后确认根因：**沙箱出网到 `github.com:443` 严重抖动**（连续 3 次探测为 timeout / timeout / 200，耗时 7.8s），而 `npx skills add` 内部走 `git clone https://github.com/<owner>/<repo>`，必须打 `github.com`；同一批 `prepare_remote_skills_batch` 里有的组成功、有的组失败，就是抖动造成的。仓库越大越容易失败：`claude-office-skills/skills` 约 854KB，`jimliu/baoyu-skills` 拉取 90 秒仍未完成（已 14.7MB）。失败时后端只会返回统一的 `CLI 安装失败`，真实 CLI 报错被吞掉。
 
 ## 决策
+
+`RECOMMENDED_SUITES` 是推荐列表的唯一事实源。
 
 保留既有逻辑与安装链路不变，**只调整 `RECOMMENDED_SUITES` 的数据**：把 4 组装不上的套件改为按技能指定白名单内的 `modelscope.cn` 镜像来源（`https://modelscope.cn/skills/@<owner>/<skill>`），因为这些镜像在沙箱内可稳定访问、逐技能实测全部安装成功。
 

@@ -36,7 +36,9 @@ def test_workspace_root_creates_default_agent_context_files(tmp_path: Path, monk
     assert (root / "agents" / "AGENTS.md").read_text(encoding="utf-8") == (
         "# AGENTS\n\n以下是约束 Agent 行为的一些要求\n"
     )
-    assert (root / "agents" / "USER.md").read_text(encoding="utf-8") == ("# USER\n\n以下是有关用户的一些信息\n")
+    assert (root / "agents" / "USER.md").read_text(encoding="utf-8") == (
+        "# 关于我\n\n<!-- 账号资料由系统同步，请勿手改；沟通偏好等内容请写在区块外。 -->\n"
+    )
     assert (root / "agents" / "MEMORY.md").read_text(encoding="utf-8") == (
         "# MEMORY\n\n以下是 Agent 需要记住的一些信息\n"
     )

@@ -31,7 +31,7 @@ def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-BUSINESS_SCHEMA_VERSION = 4
+BUSINESS_SCHEMA_VERSION = 5
 KNOWLEDGE_SCHEMA_VERSION = 1
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
@@ -879,6 +879,10 @@ class PostgresManager(metaclass=SingletonMeta):
         stmts = [
             # 展示姓名与登录账号分离，存量库启动时幂等补列；不回填或改写账号。
             "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS display_name VARCHAR(100)",
+            # OA 反查得到的岗位名，只用于用户资料展示；存量库幂等补列，不参与登录与权限判断。
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS oa_station_name VARCHAR(100)",
+            # OA 职级展示文本，只用于用户资料展示；存量库幂等补列。
+            "ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS oa_job_level_name VARCHAR(100)",
             """
             CREATE TABLE IF NOT EXISTS roles (
                 id SERIAL PRIMARY KEY,
