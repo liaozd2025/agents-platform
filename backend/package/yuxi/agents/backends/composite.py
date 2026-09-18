@@ -19,6 +19,7 @@ from .sandbox import ProvisionerSandboxBackend
 # 避免 read_file/offload 循环：该工具自带分页与引用语义。
 _TOOL_RESULT_EVICTION_EXEMPT_TOOLS = frozenset(TOOLS_EXCLUDED_FROM_EVICTION) | {"open_kb_document"}
 
+
 class YuxiFilesystemMiddleware(FilesystemMiddleware):
     """允许按需读取已知文本；路径权限由实际 sandbox backend 执行。"""
 

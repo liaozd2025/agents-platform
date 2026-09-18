@@ -9,8 +9,8 @@ import re
 import shlex
 import time
 import uuid
-from contextlib import aclosing, suppress
 from collections.abc import Awaitable, Callable
+from contextlib import aclosing, suppress
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any

@@ -39,6 +39,7 @@ from yuxi.services.agent_run_manifest_service import build_run_manifest_result, 
 from yuxi.services.chat_service import get_agent_state_view, stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.services.pi_execution_service import (
+    PI_RUNNER_PATH,
     LocalPiAdapter,
     PiCleanupFailed,
     PiExecutionCancelled,
@@ -46,7 +47,6 @@ from yuxi.services.pi_execution_service import (
     PiModelFailed,
     PiResultPersistenceFailed,
     PiRuntimeMismatch,
-    PI_RUNNER_PATH,
     build_default_pi_runtime_manifest,
     build_pi_runtime_manifest,
     execute_pi_attempt,

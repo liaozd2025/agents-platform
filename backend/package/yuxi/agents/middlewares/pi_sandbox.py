@@ -14,13 +14,13 @@ from langchain_core.tools import StructuredTool
 from langgraph.prebuilt.tool_node import ToolRuntime
 from langgraph.types import Command
 
+import yuxi.services.agent_run_service as agent_run_service
 from yuxi.agents.backends.paths import VIRTUAL_PERSONAL_SKILLS_PATH, VIRTUAL_SKILLS_PATH
 from yuxi.agents.skills.service import (
     get_personal_skills_root_dir,
     get_user_skills_root_dir,
     normalize_string_list,
 )
-import yuxi.services.agent_run_service as agent_run_service
 from yuxi.services.pi_sandbox_run_service import PiSandboxRunService, execute_pi_sandbox_run
 from yuxi.services.subagent_run_service import subagent_run_urls
 from yuxi.storage.postgres.manager import pg_manager

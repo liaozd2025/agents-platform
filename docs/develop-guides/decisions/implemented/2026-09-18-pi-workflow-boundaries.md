@@ -57,3 +57,5 @@ docker compose exec -T api uv run --no-sync --no-dev pytest test/e2e/test_pi_loc
 ```
 
 集成与 E2E 必须串行执行：集成测试的 session fixture 会清理该测试环境所有沙箱。全量 unit 中未修改的 `test_enabling_memory_syncs_user_profile_immediately` 失败已在 9f38f125 基线复现，同名模块与 APIRouter 导致 monkeypatch 目标错误；不将全量 unit 标记为通过。
+
+仓库完整源树环境的容量、Compose挂载和OA同步测试有12项失败，已在未改动的 `origin/main` 0c0259da 同名测试中复现。本地容器与CI的测试环境不同，不用容器内通过数替代完整源树结果。CI还受MinIO镜像拉取和Pages配置阻塞；未修改模块的既有格式问题保留，不宣称远端检查全绿。
