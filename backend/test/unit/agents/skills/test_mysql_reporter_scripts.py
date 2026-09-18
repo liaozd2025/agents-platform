@@ -133,6 +133,16 @@ def test_mysql_reporter_query_security_validates_sql_and_timeout():
         "SELECT * FROM users; DROP TABLE users": False,
         "SELECT * FROM users; CREATE TABLE audit_log(id INT)": False,
         "SELECT * FROM users; SET @unsafe = 1": False,
+        "SELECT 'report' INTO OUTFILE '/tmp/report.txt'": False,
+        "SELECT 'report' INTO/**/DUMPFILE '/tmp/report.bin'": False,
+        "SELECT LOAD_FILE('/etc/passwd')": False,
+        "SELECT LOAD_FILE/**/('/etc/passwd')": False,
+        "SELECT '-- comment' INTO OUTFILE '/tmp/report.txt'": False,
+        "SELECT 1 INTO # comment\n OUTFILE '/tmp/report.txt'": False,
+        "SELECT 'report' /*!50000 INTO OUTFILE '/tmp/report.txt' */": False,
+        "SELECT 1 /*M!100100 INTO OUTFILE '/tmp/report.txt' */": False,
+        "SELECT 1 /*!50000 + 1 */": False,
+        "SELECT 1 /*M!100100 + 1 */": False,
     }
 
     for sql, expected in sql_cases.items():

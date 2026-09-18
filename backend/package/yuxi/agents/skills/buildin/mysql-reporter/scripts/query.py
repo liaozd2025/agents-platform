@@ -48,12 +48,16 @@ class MySQLSecurityChecker:
 
     @classmethod
     def validate_sql(cls, sql: str) -> bool:
-        """验证SQL语句的安全性"""
-        if not sql:
+        """拒绝已知危险语法；数据库只读账号仍是最终权限边界。"""
+        # MySQL/MariaDB 可执行注释不能当普通注释删掉后放行。
+        if not sql or re.search(r"/\*(?:!|M!)", sql, re.IGNORECASE):
+            return False
+        # 在去注释前保守拒绝文件操作名，防止字符串中的注释符隐藏后续 SQL。
+        if re.search(r"\b(?:OUTFILE|DUMPFILE|LOAD_FILE)\b", sql, re.IGNORECASE):
             return False
 
         sql_clean = re.sub(r"--.*$", "", sql, flags=re.MULTILINE)
-        sql_clean = re.sub(r"/\*.*?\*/", "", sql_clean, flags=re.DOTALL)
+        sql_clean = re.sub(r"/\*.*?\*/", " ", sql_clean, flags=re.DOTALL)
         sql_upper = sql_clean.strip().upper()
         sql_without_trailing_semicolon = sql_upper.rstrip()
         if sql_without_trailing_semicolon.endswith(";"):

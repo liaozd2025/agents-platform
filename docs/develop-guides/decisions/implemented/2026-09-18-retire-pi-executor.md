@@ -15,7 +15,7 @@ fork 在上游 Agent/SubAgent 与普通沙箱之外增加 PI 执行链，并将�
 - 保留历史 PI 结果的查看与下载，停止旧 PI 任务续跑；只读兼容不提供新 PI 执行入口。business schema 9 在停机证明后将活动 PI、等待 PI 审批及已批准尚未完成的恢复任务收敛为失败，保留输入、结果、attempt 和文件。
 - 旧 PI child 对话拒绝新增请求和恢复。父对话停在 PI 审批时，只退役该 PI 等待以允许新消息；普通审批与用户提问等待保持原语义。保留现有历史 attempt 列，避免移除 ORM 默认值影响普通 Run 插入。
 - 保留后端 Docling Slim、旧 XLS 转换和 Office 预览所需的 LibreOffice；采用上游普通沙箱镜像默认值，不迁入另一分支的 Office 增量镜像。
-- OA、组织权限、知识库、预览和普通子智能体通用界面修复等无关 fork 功能保留。当前范围为代码与隔离验证，不包含生产部署或清除用户数据。
+- OA、组织权限、知识库、预览和普通子智能体通用界面修复等无关 fork 功能保留。mysql-reporter 保留对 MySQL/MariaDB 可执行注释及 OUTFILE、DUMPFILE、LOAD_FILE 的拒绝，并通过内置 Skill 版本更新同步；数据库只读账号仍是最终权限边界。当前范围为代码与隔离验证，不包含生产部署或清除用户数据。
 
 术语见仓库 [CONTEXT.md](https://github.com/liaozd2025/agents-platform/blob/main/CONTEXT.md)，方向取代 [混合 PI 执行 ADR](../../../adr/0004-hybrid-pi-execution-seam.md)。[退役 ADR](../../../adr/0005-retire-pi-sandbox-delegation.md)只记录取舍，本记录拥有实施验收。
 
