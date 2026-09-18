@@ -6,6 +6,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   rm,
   symlink,
   writeFile,
@@ -62,7 +63,7 @@ async function runTaskScenario(
           {
             index: 0,
             delta: {},
-            finish_reason: typeof step === "string" ? "stop" : "tool_calls",
+            finish_reason: options.finishReason || (typeof step === "string" ? "stop" : "tool_calls"),
           },
         ],
         usage:
@@ -133,6 +134,11 @@ async function runTaskScenario(
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line));
+    if (code === 0) {
+      const startup = events.find((event) => event.type === "log" && event.payload?.message === "pi_started");
+      assert.ok(startup?.payload.timings_ms, "successful execution reports its startup phases");
+      for (const value of Object.values(startup.payload.timings_ms)) assert.ok(Number.isFinite(value) && value >= 0);
+    }
     await verify({ project, output, code, stderr, events, requests });
   } finally {
     server.closeAllConnections();
@@ -144,6 +150,95 @@ async function runTaskScenario(
 
 const bash = (command) => ({ name: "bash", args: { command } });
 const submit = (path) => ({ name: "submit_artifact", args: { path } });
+
+test("runTask rejects provider error after partial text without publishing final", async () => {
+  await runTaskScenario(
+    () => ["Partial answer before provider failure"],
+    async ({ code, stderr, events, output }) => {
+      assert.notEqual(code, 0);
+      assert.match(stderr, /Provider finish_reason: content_filter/);
+      assert.equal(events.some(event => event.type === "final"), false);
+      const failure = events.find(event => event.type === "error").payload;
+      assert.equal(failure.code, "model_failed");
+      assert.equal(failure.stop_reason, "error");
+      assert.equal(failure.token_usage.model_call_count, 1);
+      const [sessionFile] = await readdir(resolve(output, "pi-session"));
+      const session = (await readFile(resolve(output, "pi-session", sessionFile), "utf8"))
+        .trim().split("\n").map(JSON.parse);
+      const assistant = session.find(entry => entry.type === "message" && entry.message?.role === "assistant").message;
+      assert.equal(assistant.stopReason, "error");
+      assert.match(JSON.stringify(assistant.content), /Partial answer before provider failure/);
+    },
+    async () => ({ finishReason: "content_filter" }),
+  );
+});
+
+for (const stage_status of ["completed", "needs_input", "failed"]) {
+  test(`runTask returns ${stage_status} stage evidence and only completed deliverables`, async () => {
+    const stage = {
+      stage_status,
+      checks: ["report.txt contains verified source count: 3"],
+      unresolved_items: stage_status === "completed" ? [] : ["Missing business scope"],
+    };
+    await runTaskScenario(
+      (_project, output) => [
+        bash(`printf 3 > '${output}/report.txt'`),
+        submit("report.txt"),
+        { name: "submit_artifact", args: stage },
+        "Stage reported.",
+      ],
+      async ({ code, stderr, output, events, requests }) => {
+        assert.equal(code, 0, stderr);
+        const final = events.at(-1).payload;
+        for (const [key, value] of Object.entries(stage)) assert.deepEqual(final[key], value);
+        assert.equal(final.artifact.files.length, stage_status === "completed" ? 1 : 0);
+        assert.equal(await readFile(resolve(output, "report.txt"), "utf8"), "3");
+        assert.ok(await readFile(resolve(output, final.session.path), "utf8"));
+        assert.doesNotMatch(JSON.stringify(requests[0].messages), /do not perform visual review|overriding any Skill visual-review/);
+      },
+    );
+  });
+}
+
+test("runTask rejects incomplete stage declarations without inventing completion", async () => {
+  await runTaskScenario(
+    () => [
+      { name: "submit_artifact", args: {} },
+      { name: "submit_artifact", args: { stage_status: "completed", checks: [] } },
+      { name: "submit_artifact", args: { stage_status: "needs_input", checks: [], unresolved_items: [] } },
+      "Legacy final without a valid stage declaration.",
+    ],
+    async ({ code, stderr, events }) => {
+      assert.equal(code, 0, stderr);
+      assert.equal(events.filter(event => event.type === "tool_result" && event.payload.is_error).length, 3);
+      assert.equal(events.at(-1).payload.stage_status, undefined);
+    },
+  );
+});
+
+test("runtime inspect validates installed files without loading the agent SDK", async () => {
+  const temp = await mkdtemp("/tmp/pi-inspect-");
+  try {
+    const hook = resolve(temp, "block-sdk.mjs");
+    await writeFile(hook, `import { registerHooks } from 'node:module';
+registerHooks({ resolve(specifier, context, nextResolve) {
+  if (specifier.startsWith('@earendil-works/') || specifier === 'typebox')
+    throw new Error('inspect must not initialize the agent SDK');
+  return nextResolve(specifier, context);
+} });`);
+    const child = spawn(process.execPath, ["--import", hook, "/opt/yuxi-pi-runner/runner.mjs", "--inspect"]);
+    let stdout = "", stderr = "";
+    child.stdout.on("data", chunk => stdout += chunk);
+    child.stderr.on("data", chunk => stderr += chunk);
+    assert.equal(await new Promise(done => child.once("close", done)), 0, stderr);
+    const actual = JSON.parse(stdout);
+    assert.equal(actual.runner_digest, digest(await readFile("/opt/yuxi-pi-runner/runner.mjs")));
+    assert.equal(actual.pi_version, "0.84.2");
+    assert.ok(actual.skills);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
 
 test("runTask streams text and cumulative tool snapshots, then yields after the complete tool batch", async () => {
   let sent = false;
@@ -160,6 +255,7 @@ test("runTask streams text and cumulative tool snapshots, then yields after the 
       assert.equal(await readFile(resolve(project, "second.done"), "utf8"), "complete");
       assert.equal(events.filter(e => e.type === "control_ack").length, 1);
       assert.equal(events.at(-1).payload.stop_reason, "steer");
+      assert.equal(events.at(-1).payload.stage_status, "needs_input");
       assert.equal(events.at(-1).payload.token_usage.total.total_tokens, 30);
       assert.equal(events.filter(e => e.type === "message_delta").map(e => e.payload.content).join(""), "开始执行");
       assert.ok(events.some(e => e.type === "tool_update"));

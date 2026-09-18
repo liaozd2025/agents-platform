@@ -1,12 +1,14 @@
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from yuxi.agents.middlewares import pi_sandbox
 
 
 @pytest.mark.asyncio
-async def test_pi_sandbox_delegates_complete_task_and_returns_project_artifacts(monkeypatch, tmp_path):
+@pytest.mark.parametrize("stage_status", [None, "completed", "needs_input", "failed"])
+async def test_pi_sandbox_delegates_complete_task_and_returns_project_artifacts(monkeypatch, tmp_path, stage_status):
     shared_root = tmp_path / "shared"
     skill_dir = shared_root / "dept-work-report"
     skill_dir.mkdir(parents=True)
@@ -46,6 +48,10 @@ async def test_pi_sandbox_delegates_complete_task_and_returns_project_artifacts(
             "output": "done",
             "thread_id": "pi-child-thread",
             "pi": {
+                "stage_status": stage_status,
+                "checks": ["原始数据共 80 行，总额 2400"],
+                "unresolved_items": ["需确认退货是否计入销售额"] if stage_status == "needs_input" else [],
+                "source_run_id": "original-edit-run",
                 "output_subdir": "pi-runs/0123456789abcdef01234567",
                 "artifact": {"files": [{"path": "report.sources.md"}]},
             },
@@ -62,15 +68,20 @@ async def test_pi_sandbox_delegates_complete_task_and_returns_project_artifacts(
     command = await middleware.tools[0].coroutine(
         description="读取周报并生成月报来源索引",
         runtime=SimpleNamespace(tool_call_id="call-1"),
+        source_run_id="original-edit-run",
     )
 
     assert middleware.tools[0].name == "pi_sandbox"
     assert calls[0]["skill_sources"] == {"dept-work-report": skill_dir}
     assert calls[0]["skill_runtime_paths"] == {"dept-work-report": "/home/gem/skills/dept-work-report"}
     assert calls[1] == {"executed": "child-run"}
-    assert command.update["artifacts"] == [
-        "/home/gem/user-data/projects/project-1/outputs/pi-runs/0123456789abcdef01234567/report.sources.md"
-    ]
+    if stage_status in {"needs_input", "failed"}:
+        assert "artifacts" not in command.update
+        assert "已登记的交付物" not in command.update["messages"][0].content
+    else:
+        assert command.update["artifacts"] == [
+            "/home/gem/user-data/projects/project-1/outputs/pi-runs/0123456789abcdef01234567/report.sources.md"
+        ]
     assert command.update["subagent_runs"] == [
         {
             "id": "call-1",
@@ -84,3 +95,31 @@ async def test_pi_sandbox_delegates_complete_task_and_returns_project_artifacts(
         }
     ]
     assert "done" in command.update["messages"][0].content
+    assert "child-run" in command.update["messages"][0].content
+    assert "original-edit-run" in command.update["messages"][0].content
+    assert "原始数据共 80 行，总额 2400" in command.update["messages"][0].content
+    assert command.update["messages"][0].status == ("error" if stage_status == "failed" else "success")
+    if stage_status is None:
+        assert "未报告，需核对业务结果" in command.update["messages"][0].content
+    if stage_status == "needs_input":
+        assert "需确认退货是否计入销售额" in command.update["messages"][0].content
+    assert calls[0]["source_run_id"] == "original-edit-run"
+
+    monkeypatch.setattr(
+        pi_sandbox.agent_run_service,
+        "load_agent_run_result",
+        AsyncMock(
+            return_value={
+                "status": "failed",
+                "thread_id": "pi-child-thread",
+                "error": {"message": "PI 续接来源无效"},
+            }
+        ),
+    )
+    failed = await middleware.tools[0].coroutine(
+        description="修正原稿", runtime=SimpleNamespace(tool_call_id="call-2"), source_run_id="bad-source"
+    )
+    message = failed.update["messages"][0]
+    assert message.status == "error"
+    assert "PI 续接来源无效" in message.content
+    assert "新上下文" not in message.content

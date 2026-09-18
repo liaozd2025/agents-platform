@@ -7,11 +7,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 import yuxi.services.agent_run_service as agent_run_service
+from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.agents.backends.paths import VIRTUAL_PERSONAL_SKILLS_PATH, VIRTUAL_SKILLS_PATH
 from yuxi.agents.skills.service import compute_skill_dir_hash, is_valid_skill_slug, normalize_string_list
+from yuxi.agents.tool_approval import DEFAULT_TOOL_APPROVAL_MODE, require_pi_delegation_approval
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.project_repository import ProjectRepository
@@ -33,12 +33,10 @@ async def _compute_skill_digests(sources: dict[str, Path]) -> dict[str, str]:
     """在线程中计算 Skill 摘要，避免大目录扫描阻塞 worker 心跳。"""
 
     started_at = time.perf_counter()
-    items = await asyncio.gather(
-        *(asyncio.to_thread(compute_skill_dir_hash, source) for source in sources.values())
-    )
+    items = await asyncio.gather(*(asyncio.to_thread(compute_skill_dir_hash, source) for source in sources.values()))
     digests = dict(zip(sources, items, strict=True))
     logger.info(
-        "PI 子 Run Skill 摘要计算完成: skills=%d elapsed=%.2fs",
+        "PI 子 Run Skill 摘要计算完成: skills={} elapsed={:.3f}s",
         len(digests),
         time.perf_counter() - started_at,
     )
@@ -64,11 +62,18 @@ class PiSandboxRunService:
         skill_slugs: list[str],
         skill_sources: dict[str, str | Path],
         skill_runtime_paths: dict[str, str],
+        source_run_id: str | None = None,
+        continue_session: bool | None = None,
     ) -> PiSandboxStartResult:
         """固化 Project、模型和 Skill 快照并幂等创建 PI child Run。"""
 
+        started_at = time.perf_counter()
         if not description.strip() or not tool_call_id.strip():
             raise ValueError("PI 沙箱任务和 tool_call_id 不能为空")
+        if source_run_id is not None:
+            source_run_id = source_run_id.strip()
+            if not source_run_id or continue_session is False:
+                raise ValueError("PI 续接来源不能为空，且不能与 continue_session=false 同时指定")
         slugs = [slug for slug in normalize_string_list(skill_slugs) if is_valid_skill_slug(slug)]
         sources = {slug: Path(skill_sources[slug]) for slug in slugs if slug in skill_sources}
         runtime_paths = {slug: str(skill_runtime_paths.get(slug) or "") for slug in slugs}
@@ -88,6 +93,11 @@ class PiSandboxRunService:
             raise ValueError("父运行已不再执行，不能启动 PI 沙箱")
         if creator_run.run_type == "sandbox":
             raise ValueError("PI 沙箱不能递归创建 PI 沙箱")
+        parent_payload = creator_run.input_payload if isinstance(creator_run.input_payload, dict) else {}
+        require_pi_delegation_approval(
+            creator_run_type=creator_run.run_type,
+            tool_approval_mode=parent_payload.get("tool_approval_mode", DEFAULT_TOOL_APPROVAL_MODE),
+        )
 
         parent_conversation = await self.conv_repo.get_conversation_by_id(creator_run.conversation_id)
         if parent_conversation is None or parent_conversation.uid != str(uid):
@@ -136,7 +146,9 @@ class PiSandboxRunService:
         if scope.existing_run:
             return PiSandboxStartResult(run=scope.existing_run, created=False)
 
-        parent_payload = creator_run.input_payload if isinstance(creator_run.input_payload, dict) else {}
+        # Project 行锁使同一共享 runtime 的检查与 Run 登记处于串行事务内。
+        await self.run_repo.require_pi_scope_available(creator_run)
+
         model_spec = str(parent_payload.get("model_spec") or "").strip()
         if not model_spec:
             raise ValueError("父运行任务缺少模型快照")
@@ -171,6 +183,8 @@ class PiSandboxRunService:
                     "skill_slugs": slugs,
                     "skill_digests": skill_digests,
                     "skill_runtime_paths": runtime_paths,
+                    "source_run_id": source_run_id,
+                    "continue_session": bool(source_run_id or continue_session),
                 },
             },
             persisted_input_message=persisted_input,
@@ -180,6 +194,9 @@ class PiSandboxRunService:
         )
         if created:
             await self.db.commit()
+        logger.info(
+            "PI timing run={} phase=registration elapsed_ms={:.3f}", run.id, (time.perf_counter() - started_at) * 1000
+        )
         return PiSandboxStartResult(run=run, created=created)
 
     async def _ensure_child_conversation(

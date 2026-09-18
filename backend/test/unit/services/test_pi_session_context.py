@@ -1,8 +1,11 @@
 """PI 上下文快照与逐模型能力的边界回归。"""
 
 import hashlib
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -10,6 +13,7 @@ from yuxi.models.providers.cache import ModelInfo
 from yuxi.models.providers.service import _normalize_model_item
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.services import pi_execution_service as pi
+from yuxi.services import run_worker
 from yuxi.workspace import filesystem
 from yuxi.workspace.workdir import Workdir
 
@@ -48,6 +52,92 @@ def test_context_snapshot_is_bounded_and_rejects_symlinks_and_changed_session(pr
     (root / "AGENTS.md").write_bytes(b"x" * (65536 + 1))
     with pytest.raises(ValueError, match="transfer limit"):
         pi.snapshot_pi_context(workdir, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "runtime,frozen,expected",
+    [
+        ({"continue_session": False}, "absent", None),
+        ({"continue_session": True}, "absent", "B"),
+        ({"source_run_id": "A", "continue_session": True}, "absent", "A"),
+        ({"source_run_id": "B", "continue_session": True}, "A", "A"),
+        ({"continue_session": True}, None, None),
+        ({}, "absent", "B"),
+        ({"source_run_id": "A", "continue_session": True}, "A", "changed"),
+    ],
+)
+async def test_history_snapshot_uses_frozen_source_on_replay(project, monkeypatch, runtime, frozen, expected):
+    """新任务显式选择来源，重放不能被后来历史或参数改绑。"""
+    workdir, root = project
+    sources = {}
+    for name in ("A", "B"):
+        path = root / f"outputs/pi-runs/{name}/pi-session/history.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(name)
+        sources[name] = {
+            "run_id": name,
+            "output_subdir": f"pi-runs/{name}",
+            "ref": {"path": "pi-session/history.jsonl", "sha256": hashlib.sha256(name.encode()).hexdigest()},
+        }
+    attempts = (
+        []
+        if frozen == "absent"
+        else [SimpleNamespace(runtime_manifest={"context": {"session_source": sources.get(frozen)}})]
+    )
+    if expected == "changed":
+        attempts[0].runtime_manifest["context"]["session_source"] = {**sources["A"], "attempt_id": "different"}
+    repo = SimpleNamespace(list_run_attempts=AsyncMock(return_value=attempts))
+    repo.get_previous_pi_session = AsyncMock(side_effect=lambda **args: sources[args["source_run_id"] or "B"])
+
+    @asynccontextmanager
+    async def database():
+        yield object()
+
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", database)
+    monkeypatch.setattr(run_worker, "AgentRunRepository", lambda _db: repo)
+    monkeypatch.setattr(
+        run_worker,
+        "_validate_run_workdir_binding",
+        AsyncMock(return_value=SimpleNamespace(project_id="project", workdir=workdir)),
+    )
+    run = SimpleNamespace(id="current", uid="user", input_payload={"runtime": runtime})
+    if expected == "changed":
+        with pytest.raises(ValueError, match="已固化的续接来源发生变化"):
+            await run_worker._snapshot_pi_run_context(run)
+        return
+    context, snapshot = await run_worker._snapshot_pi_run_context(run)
+    assert context["session_source"] == sources.get(expected)
+    assert (snapshot or {}).get("content") == expected
+    if expected is None:
+        repo.get_previous_pi_session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_explicit_legacy_continue_without_history_is_an_error(project, monkeypatch):
+    """旧 true 找不到历史时不能冒充一次全新任务。"""
+    workdir, _root = project
+
+    @asynccontextmanager
+    async def database():
+        yield object()
+
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", database)
+    monkeypatch.setattr(
+        run_worker,
+        "AgentRunRepository",
+        lambda _db: SimpleNamespace(
+            list_run_attempts=AsyncMock(return_value=[]), get_previous_pi_session=AsyncMock(return_value=None)
+        ),
+    )
+    monkeypatch.setattr(
+        run_worker,
+        "_validate_run_workdir_binding",
+        AsyncMock(return_value=SimpleNamespace(project_id="project", workdir=workdir)),
+    )
+    run = SimpleNamespace(id="current", uid="user", input_payload={"runtime": {"continue_session": True}})
+    with pytest.raises(ValueError, match="来源"):
+        await run_worker._snapshot_pi_run_context(run)
 
 
 @pytest.mark.parametrize(
@@ -128,5 +218,5 @@ def test_pi_final_usage_rejects_untrusted_counts_and_model_attribution(mutation)
         usage["total"] = {key: 0 for key in total}
         usage["models"]["p:m"]["usage"] = dict(usage["total"])
     with pytest.raises(ValueError, match="PI token_usage"):
-        AgentRunRepository._pi_token_usage(usage, {"model": {"spec": "p:m"}})
-    assert AgentRunRepository._pi_token_usage(valid, {"model": {"spec": "p:m"}}) == valid
+        AgentRunRepository.pi_token_usage(usage, {"model": {"spec": "p:m"}})
+    assert AgentRunRepository.pi_token_usage(valid, {"model": {"spec": "p:m"}}) == valid

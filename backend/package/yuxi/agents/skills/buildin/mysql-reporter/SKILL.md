@@ -6,17 +6,26 @@ description: "生成 MySQL 查询报表并生成可视化图表。当用户需�
 
 # MySQL 报表技能
 
-根据用户的指令，通过终端脚本访问 MySQL 数据库，并结合图表绘制工具构建 SQL 查询报告。
+根据用户的指令，由主智能体协调知识口径、PI 查询阶段和 Charts MCP，生成有完整数据依据的报表。
 
 ## 操作流程
 
-1. 理解用户的指令，明确报表的需求和目标
-2. 通过 terminal 进入技能目录：`cd /home/gem/skills/mysql-reporter`
-3. 使用 `uv run scripts/list_tables.py` 查看可用表；如果脚本提示缺少 MySQL 配置，按“环境变量缺失处理”回复用户
-4. 必要时用 `uv run scripts/describe_table.py --table 表名` 查看表结构
-5. 生成正确且高效的只读 SQL，通过 `uv run scripts/query.py --sql "SQL语句" --timeout 60` 执行查询并获取结果
-6. 使用 Charts MCP 生成图表
-7. 将图表以 markdown 图片格式嵌入报表
+1. 主智能体读取并激活本 Skill，确认指标口径、时间范围和筛选条件；知识库检索继续使用主智能体的知识工具。缺少必需口径或用户决定时先补齐。
+2. 主智能体将已确认口径、必要证据或已下载的原始文件路径、验收要求交给 `pi_sandbox`。一次 PI 阶段完成表结构检查、查询、完整数据导出和数据核验；不要逐条 SQL 拆成委派。
+3. PI 在 `/home/gem/skills/mysql-reporter` 下使用 `uv run scripts/list_tables.py` 查看可用表，必要时用 `uv run scripts/describe_table.py --table 表名` 查看结构。
+4. PI 生成只读 SQL，通过 `uv run scripts/query.py --sql "SQL语句" --timeout 60` 查询。需要完整明细时增加 `--output-json <绝对文件路径>`，使用本次 PI 分配的交付目录中尚不存在的文件名；父目录须存在。
+5. PI 核对查询范围、真实行数和汇总口径，提交导出文件及简短核验记录，向主智能体返回路径和未解决项。缺配置或业务口径时返回 `needs_input`，明确所缺输入；查询或导出失败返回 `failed`，不可用残缺数据宣称完成。
+6. 主智能体读取数据与核验记录后调用 Charts MCP 生成图表；PI 没有 Charts MCP 或知识工具，不能在 PI 阶段等待这些工具。图表以 `![描述](图片URL)` 嵌入报表。MCP 不可用时明确说明，仍可交付已核验的 Markdown 表格，不宣称图表已生成。
+7. `html-preview` 已可用且适合摘要时，由主智能体输出静态组件。用户需要可下载报告时，图表等新输入齐备后再委派 PI 装配最终文件；这属于后续阶段，不重复查询已验收数据。
+
+## 数据完整性与交接
+
+- 查询输出首行包含 `row_count`、`displayed_row_count` 和 `truncated`。`row_count` 是本次 SQL 实际返回的行数，受 SQL 自身的 WHERE、GROUP BY、LIMIT 等条件约束，不代表整个业务表的记录数。
+- 终端表格只预览最多 50 行、约 10000 字符。`truncated=true` 只说明展示不全；即使展示 0 行，也不能据此判断无数据，更不能拿展示子集计算全量指标。
+- `--output-json` 导出本次 SQL 返回的全部行，包含 `row_count`、`truncated=false` 和 `rows`。Decimal、日期等值以字符串保留；金额计算按十进制处理。汇总指标优先由 SQL 对确认的完整范围聚合，不用 LIMIT 或预览截断冒充全量统计。
+- 当前脚本一次获取查询结果；大数据量先限定业务范围或在数据库聚合，不执行无界明细查询。导出不覆盖已有文件，修改或再次导出使用新文件名。
+- PI 交接要说明查询口径、时间范围、实际行数、预览是否截断，以及核对了哪些合计或异常。主智能体核对关键值与来源后交付，文件存在或 PI completed 不等于报表正确。
+- 父子智能体共享 Project Workdir。新 PI 上下文不隔离文件；不同阶段使用各自分配的交付路径，同一输入或结果文件的修改串行进行，不覆盖原始证据。
 
 ## 环境变量缺失处理
 
@@ -34,16 +43,19 @@ description: "生成 MySQL 查询报表并生成可视化图表。当用户需�
 
 如果执行脚本时出现 `MySQL configuration missing required key`，不要继续猜测连接信息或编造报表。应明确告诉用户：需要在个人设置中的「沙盒环境变量」里配置缺失的 `MYSQL_*` 变量；保存后仅对新建沙盒生效，需要重新发起任务或新建会话后再执行。
 
+`MYSQL_USER` 必须由数据库管理员预先配置为报表专用只读账号，只授予所需库表的读取权限，不授予写入、DDL、FILE 或管理权限。不要向沙盒提供管理员或可写账号。脚本的 SQL 文本检查仅拦截已知危险语法，不能替代数据库授权；PI 拥有 bash，因此 Skill 的“只用脚本”也不是权限边界。账号权限未确认时交回主智能体请求确认，不自行授予或修改权限。
+
 ## 关键约束
 
 - 生成的 SQL 查询必须正确且高效，避免全表扫描
 - MySQL 操作必须通过本技能 `scripts/` 下的 CLI 脚本执行，不要调用平台内置 MySQL tools
+- 禁止 SQL 的 OUTFILE、DUMPFILE、LOAD_FILE 和可执行注释；文件导出只使用 `--output-json` 写入 PI 本次交付目录。检查器保守拒绝这些操作名，不尝试解析全部 MySQL 语法。
 - 不要在报表或错误说明中输出 `MYSQL_PASSWORD` 等敏感环境变量的值，只能说明缺少哪些变量名
 - 图表生成工具的返回结果不会默认渲染，必须在最终报表中以 `![描述](图片URL)` 格式嵌入
 - 只返回报表相关的结论，不要返回原始 SQL 查询语句
 
-## 允许的工具
+## 执行职责
 
-- terminal：执行 `scripts/list_tables.py`、`scripts/describe_table.py`、`scripts/query.py`
-- Charts MCP：生成可视化图表
-- 网络检索工具：必要时补充背景信息
+- 主智能体：Skill 激活、用户沟通、知识库/网络检索、Charts MCP、最终回答与验收。
+- PI：通过 bash 执行本 Skill 的 CLI 脚本，读取输入、核验查询数据、导出和装配文件。
+- 完整 Skill 可以跨多个执行者；只有当前执行者具备全部工具且输入齐备的连续工作，才属于一次完整阶段。

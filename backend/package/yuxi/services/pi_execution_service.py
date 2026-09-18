@@ -7,6 +7,7 @@ import base64
 import hashlib
 import inspect
 import json
+import time
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -18,6 +19,7 @@ from yuxi.agents.skills.service import compute_skill_dir_hash, is_valid_skill_sl
 from yuxi.models.providers.cache import model_cache
 from yuxi.services.agent_run_manifest_service import canonical_json, compute_manifest_fingerprint
 from yuxi.utils import get_docker_safe_url
+from yuxi.utils.logging_config import logger
 from yuxi.workspace.paths import ensure_bound_user_workdir
 from yuxi.workspace.workdir import Workdir
 
@@ -56,6 +58,19 @@ class PiExecutionCancelled(RuntimeError):
 
 class PiExecutionUnknown(RuntimeError):
     """PI 已启动，但调用方无法证明其执行或结果提交结局。"""
+
+
+class PiResultPersistenceFailed(RuntimeError):
+    """PI 结果被确定性持久化约束拒绝，重复提交同一结果无效。"""
+
+
+class PiModelFailed(RuntimeError):
+    """Runner 已确认模型失败，部分输出不能作为成功结果。"""
+
+    def __init__(self, message: str, *, token_usage: dict | None = None):
+        """保留当前 attempt 已发生的模型用量。"""
+        super().__init__(message)
+        self.token_usage = token_usage
 
 
 class PiCleanupFailed(RuntimeError):
@@ -236,9 +251,24 @@ async def _call_sink(result_sink, envelope: dict) -> Any:
     return await result if inspect.isawaitable(result) else result
 
 
+def _jsonb_safe_value(value: Any) -> Any:
+    """仅把 wire 文本中的 NUL 可见化；原始 session 和文件字节不变。"""
+    if isinstance(value, str):
+        return value.replace("\x00", "\\u0000")
+    if isinstance(value, list):
+        return [_jsonb_safe_value(item) for item in value]
+    if isinstance(value, dict):
+        cleaned = {_jsonb_safe_value(key): _jsonb_safe_value(item) for key, item in value.items()}
+        if len(cleaned) != len(value):
+            raise ValueError("PI event 的 NUL 键转换产生冲突")
+        return cleaned
+    return value
+
+
 def build_pi_envelope(*, attempt: dict, adapter_name: str, event: dict) -> dict:
     """把 Runner 事件包装成可幂等持久化的统一 envelope。"""
 
+    event = _jsonb_safe_value(event)
     event_id = str(event.get("event_id") or "").strip()
     event_type = str(event.get("type") or "").strip()
     sequence = event.get("sequence")
@@ -319,9 +349,10 @@ async def execute_pi_attempt(
     preserve_outputs = False
     primary_error: BaseException | None = None
     refs: dict[str, dict] = {}
+    sink_seconds = 0.0
 
     async def accept_event(event: dict) -> None:
-        nonlocal final_acked, preserve_outputs
+        nonlocal final_acked, preserve_outputs, sink_seconds
         if cancel_event is not None and cancel_event.is_set() and not final_acked_event.is_set():
             raise PiExecutionCancelled("PI attempt cancelled before result ACK")
         envelope = build_pi_envelope(attempt=attempt, adapter_name=adapter.name, event=event)
@@ -339,22 +370,36 @@ async def execute_pi_attempt(
             # commit 可能成功而 ACK 响应被取消；提交开始后不能据未收到响应删除产物。
             preserve_outputs = True
         for sink_try in range(2):
+            sink_started = time.perf_counter()
             try:
                 response = await _call_sink(result_sink, envelope)
                 break
-            except Exception:
+            except Exception as exc:
+                cause = getattr(exc, "orig", exc)
+                sqlstate = getattr(cause, "sqlstate", None) or getattr(cause, "pgcode", "") or ""
+                if isinstance(cause, (ValueError, TypeError)) or sqlstate[:2] in {"22", "23", "42"}:
+                    raise PiResultPersistenceFailed(f"PI result_persistence_failed: {exc}") from exc
                 if sink_try == 1:
                     raise
+            finally:
+                sink_seconds += time.perf_counter() - sink_started
         if envelope["type"] == "final" and isinstance(response, dict) and response.get("ack") is True:
             final_acked = True
             preserve_outputs = True
             final_acked_event.set()
 
+    create_started = time.perf_counter()
     instance_id = await adapter.create(attempt)
+    create_seconds = time.perf_counter() - create_started
+    inspect_seconds = 0.0
     try:
         if instance_sink is not None:
             await _call_sink(instance_sink, instance_id)
-        validate_pi_runtime(manifest, await adapter.inspect(instance_id))
+        inspect_started = time.perf_counter()
+        try:
+            validate_pi_runtime(manifest, await adapter.inspect(instance_id))
+        finally:
+            inspect_seconds = time.perf_counter() - inspect_started
         try:
             events = await _execute_until_cancelled(
                 adapter,
@@ -373,6 +418,9 @@ async def execute_pi_attempt(
             return events
         except PiExecutionCancelled:
             raise
+        except (PiResultPersistenceFailed, PiModelFailed):
+            preserve_outputs = True
+            raise
         except SandboxProcessCleanupError as exc:
             preserve_outputs = True
             raise PiCleanupFailed(f"PI cleanup_failed: {exc}", primary=exc.primary or exc) from exc
@@ -383,10 +431,21 @@ async def execute_pi_attempt(
         primary_error = exc
         raise
     finally:
+        stop_started = time.perf_counter()
         try:
             await adapter.stop(instance_id, preserve_outputs=preserve_outputs)
         except Exception as exc:
             raise PiCleanupFailed(f"PI cleanup_failed: {exc}", primary=primary_error) from exc
+        finally:
+            logger.info(
+                "PI timing run={} attempt={} create_ms={:.3f} inspect_ms={:.3f} sink_ms={:.3f} stop_ms={:.3f}",
+                attempt.get("run_id"),
+                attempt.get("attempt_id"),
+                create_seconds * 1000,
+                inspect_seconds * 1000,
+                sink_seconds * 1000,
+                (time.perf_counter() - stop_started) * 1000,
+            )
 
 
 class LocalPiAdapter:
@@ -561,10 +620,28 @@ class LocalPiAdapter:
                 max_output_bytes=PI_MAX_EVENT_STREAM_BYTES,
                 **control_kwargs,
             )
-            if result.exit_code not in {0, None}:
-                raise RuntimeError(result.output or "Local PI Runner 执行失败")
             if pending.strip():
                 await consume_output("\n")
+            if result.exit_code not in {0, None}:
+                model_failure = next(
+                    (
+                        event["payload"]
+                        for event in reversed(events)
+                        if event.get("type") == "error" and event.get("payload", {}).get("code") == "model_failed"
+                    ),
+                    None,
+                )
+                if model_failure is not None:
+                    model_failure = _jsonb_safe_value(model_failure)
+                    raise PiModelFailed(
+                        f"PI model_failed ({model_failure.get('stop_reason')}): {model_failure.get('message')}",
+                        token_usage=model_failure.get("token_usage"),
+                    )
+                # 正常 JSONL 已属于本 attempt 的事件，不把整段轨迹再次塞入父模型上下文。
+                detail = "\n".join(invalid_lines[-8:]) or (
+                    result.output if not events or result.output.startswith("Error:") else "未收到有效完成结果"
+                )
+                raise RuntimeError(f"Local PI Runner 执行失败（exit={result.exit_code}）：{detail[-2000:]}")
             if invalid_lines:
                 raise RuntimeError("Local PI Runner 返回无效 JSONL")
             return events

@@ -12,20 +12,6 @@ import {
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
-import { Type } from "typebox";
-
-import {
-  createAgentSession,
-  DefaultResourceLoader,
-  ModelRuntime,
-  SessionManager,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import {
-  fauxAssistantMessage,
-  fauxProvider,
-  fauxToolCall,
-} from "@earendil-works/pi-ai";
 
 const PROTOCOL = "yuxi.pi-jsonl.v1";
 const OUTPUTS_ROOT = resolve(process.cwd(), "outputs");
@@ -54,6 +40,19 @@ const runnerPath = fileURLToPath(import.meta.url);
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
+// 完整性检查只读取已安装文件；加载 SDK 属于真正执行任务时的开销。
+if (process.argv[2] === "--inspect") {
+  const report = `${JSON.stringify(await inspectRuntime())}\n`;
+  await new Promise(done => process.stdout.write(report, done));
+  process.exit(0);
+}
+const sdkStartedAt = performance.now();
+const { Type } = await import("typebox");
+const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
+  await import("@earendil-works/pi-coding-agent");
+const { fauxAssistantMessage, fauxProvider, fauxToolCall } = await import("@earendil-works/pi-ai");
+const sdkLoadMs = performance.now() - sdkStartedAt;
+
 /** 构造 PI 任务提示，并让本次交付目录覆盖任务中的冲突路径。 */
 function buildTaskPrompt(task, projectRoot, outputRoot) {
   // ponytail: 先用提示优先级保留通用 workspace 写入；模型再次越界时再增加 write-set gate。
@@ -67,7 +66,19 @@ function buildTaskPrompt(task, projectRoot, outputRoot) {
     "Only explicitly submitted files are delivered; do not submit dependencies, caches or temporary files. " +
     "Submit again after editing a submitted file. Tasks without deliverable files need not submit anything. " +
     "Limits: 200 files, 64 MiB per file, 256 MiB total. Project edits remain in the Project workspace; " +
-    "the delivery patch describes added deliverable files only, not the Project source diff."
+    "the delivery patch describes added deliverable files only, not the Project source diff. " +
+    "Follow the applicable Skill and finish this stage including its checks before returning. " +
+    "Keep the final reply concise: completion state, deliverable paths, verification evidence and unresolved items. " +
+    "For document tasks, save the checked key content and verification evidence as a text file alongside the deliverable, " +
+    "and submit that file so the parent can inspect it without repeating this task. " +
+    "Use the verification method required by the task and applicable Skill, including visual checks when required. " +
+    "Before the final reply, call submit_artifact with stage_status (completed, needs_input, or failed), " +
+    "checks (performed checks and their evidence), and unresolved_items; omit path when reporting only the stage result. " +
+    "Use needs_input when required knowledge, tools, external input, or a user decision must come from the parent. " +
+    "Use failed when this stage cannot be completed. Neither status delivers files as approved artifacts; " +
+    "intermediate files and the session remain available for inspection. " +
+    "Do not repeat full source text or tool traces in the final reply. " +
+    "If knowledge or a user decision is missing, describe the specific missing input for the parent; do not invent it."
   );
 }
 
@@ -240,15 +251,34 @@ async function inspectOutputFile(root, path) {
 }
 
 /** 登记当前 attempt 的明确交付物，历史会话工具消息不重放登记。 */
-function createArtifactTool(root, artifacts) {
+function createArtifactTool(root, artifacts, stage) {
   return {
     name: "submit_artifact",
     label: "交付文件",
     description:
-      "登记当前交付目录内的普通文件。path 是相对路径；修改后须重新登记。",
-    parameters: Type.Object({ path: Type.String() }),
+      "登记当前交付目录内的普通文件或阶段结论。path 是相对路径；修改后须重新登记。阶段结论须包含检查证据与未解决项。",
+    parameters: Type.Object({
+      path: Type.Optional(Type.String()),
+      stage_status: Type.Optional(Type.Union([
+        Type.Literal("completed"), Type.Literal("needs_input"), Type.Literal("failed"),
+      ])),
+      checks: Type.Optional(Type.Array(Type.String())),
+      unresolved_items: Type.Optional(Type.Array(Type.String())),
+    }),
     executionMode: "sequential",
-    async execute(_id, { path }) {
+    async execute(_id, { path, stage_status, checks, unresolved_items }) {
+      if (stage_status !== undefined) {
+        if (!Array.isArray(checks) || !Array.isArray(unresolved_items))
+          throw new Error("PI stage result requires checks and unresolved_items");
+        if (stage_status !== "completed" && !unresolved_items.some(item => item.trim()))
+          throw new Error("PI incomplete stage requires an unresolved item");
+      } else if (checks !== undefined || unresolved_items !== undefined || path === undefined) {
+        throw new Error("PI submission requires path or stage_status");
+      }
+      if (path === undefined) {
+        Object.assign(stage, { stage_status, checks, unresolved_items });
+        return { content: [{ type: "text", text: `已登记阶段结论 ${stage_status}` }], details: { ...stage } };
+      }
       if (
         [
           ".pi-agent",
@@ -271,6 +301,7 @@ function createArtifactTool(root, artifacts) {
       if (total > MAX_OUTPUT_BYTES)
         throw new Error("PI output exceeds 256 MiB total size limit");
       artifacts.set(path, item);
+      if (stage_status !== undefined) Object.assign(stage, { stage_status, checks, unresolved_items });
       return {
         content: [
           { type: "text", text: `已登记 ${path} (${item.size} bytes)` },
@@ -514,12 +545,19 @@ async function promptUntilComplete(session, prompt, didYield = () => false) {
           ? prompt
           : `${CONTINUE_TRUNCATED_RESPONSE}\n\nPartial response so far:\n${parts.join("")}`;
       await session.prompt(continuationPrompt);
+      if (["error", "aborted"].includes(lastAssistant?.stopReason)) {
+        const error = new Error(lastAssistant.errorMessage || `PI model stopped: ${lastAssistant.stopReason}`);
+        error.stopReason = lastAssistant.stopReason;
+        throw error;
+      }
       if (didYield()) return parts.join("").trim();
       if (!lastAssistant)
         throw new Error("PI completed without a final assistant message");
       parts.push(assistantText(lastAssistant));
-      if (!TRUNCATED_STOP_REASONS.has(lastAssistant.stopReason))
+      if (lastAssistant.stopReason === "stop")
         return parts.join("").trim();
+      if (!TRUNCATED_STOP_REASONS.has(lastAssistant.stopReason))
+        throw new Error(`PI model stopped without completion: ${lastAssistant.stopReason}`);
       if (continuation === MAX_TRUNCATION_CONTINUATIONS)
         throw new Error("PI response repeatedly reached the model output limit");
     }
@@ -743,6 +781,7 @@ function taskTokenUsage(session, manager, before, firstEntry, model) {
 }
 
 async function runTask(job, outputRoot) {
+  const startedAt = performance.now();
   const model = job.manifest?.model;
   if (!model || typeof job.task !== "string" || !job.task.trim())
     throw new Error("PI task or model is missing");
@@ -811,8 +850,10 @@ async function runTask(job, outputRoot) {
   });
   const piModel = modelRuntime.getModel("yuxi", model.model_id);
   if (!piModel) throw new Error("PI model registration failed");
+  const modelReadyAt = performance.now();
   const projectRoot = process.cwd();
   const artifacts = new Map();
+  const stage = {};
   const { settingsManager, resourceLoader } = await createResources(
     projectRoot,
     job.manifest,
@@ -823,12 +864,13 @@ async function runTask(job, outputRoot) {
     projectRoot,
     sessionDir,
   );
+  const resourcesReadyAt = performance.now();
   const { session } = await createAgentSession({
     cwd: projectRoot,
     modelRuntime,
     model: piModel,
     tools: job.manifest.policy.tools,
-    customTools: [createArtifactTool(outputRoot, artifacts)],
+    customTools: [createArtifactTool(outputRoot, artifacts, stage)],
     resourceLoader,
     settingsManager,
     sessionManager,
@@ -840,7 +882,16 @@ async function runTask(job, outputRoot) {
   const stream = subscribeToolEvents(session, emitEvent);
   const control = installYieldControl(session, job, emitEvent);
   try {
-    emitEvent("log", { message: "pi_started", model: model.model_id });
+    emitEvent("log", {
+      message: "pi_started", model: model.model_id,
+      timings_ms: {
+        sdk_load: sdkLoadMs,
+        model_runtime: modelReadyAt - startedAt,
+        resources_and_history: resourcesReadyAt - modelReadyAt,
+        agent_session: performance.now() - resourcesReadyAt,
+        before_first_model: sdkLoadMs + performance.now() - startedAt,
+      },
+    });
     let text = await promptUntilComplete(
       session,
       buildTaskPrompt(job.task, process.cwd(), outputRoot),
@@ -848,13 +899,23 @@ async function runTask(job, outputRoot) {
     );
     control.close();
     stream.flush();
-    if (control.didYield) text = "已完成当前工具批次，已让位给待处理的引导请求。";
+    if (control.didYield) {
+      text = "已完成当前工具批次，已让位给待处理的引导请求。";
+      Object.assign(stage, {
+        stage_status: "needs_input",
+        checks: stage.checks || [],
+        unresolved_items: ["待主图处理引导请求。"],
+      });
+    }
     if (!text)
       throw new Error("PI completed without a final assistant message");
     const sessionPath = session.sessionFile;
     if (!sessionPath || !(await stat(sessionPath)).isFile())
       throw new Error("PI session was not persisted");
-    const refs = await createOutputRefs(outputRoot, artifacts);
+    const refs = await createOutputRefs(
+      outputRoot,
+      ["needs_input", "failed"].includes(stage.stage_status) ? new Map() : artifacts,
+    );
     const sessionRef = {
       path: relative(outputRoot, sessionPath).replaceAll("\\", "/"),
       sha256: sha256(await readFile(sessionPath)),
@@ -863,8 +924,9 @@ async function runTask(job, outputRoot) {
     emitEvent("patch", refs.patch);
     emitEvent("session", sessionRef);
     emitEvent("final", {
-        text,
-        ...(control.didYield ? { stop_reason: "steer" } : {}),
+      text,
+      ...stage,
+      ...(control.didYield ? { stop_reason: "steer" } : {}),
       output_subdir: job.output_subdir,
       artifact: refs.artifact,
       patch: refs.patch,
@@ -877,6 +939,17 @@ async function runTask(job, outputRoot) {
         model,
       ),
     });
+  } catch (error) {
+    if (["error", "aborted"].includes(error.stopReason)) {
+      stream.flush();
+      emitEvent("error", {
+        code: "model_failed",
+        stop_reason: error.stopReason,
+        message: error.message,
+        token_usage: taskTokenUsage(session, sessionManager, beforeTokens, firstEntry, model),
+      });
+    }
+    throw error;
   } finally {
     control.close();
     stream.close();
@@ -884,9 +957,7 @@ async function runTask(job, outputRoot) {
   }
 }
 
-if (process.argv[2] === "--inspect") {
-  process.stdout.write(`${JSON.stringify(await inspectRuntime())}\n`);
-} else {
+{
   let job;
   if (process.argv[2] === "--job") {
     const jobPath = String(process.argv[3] || "");

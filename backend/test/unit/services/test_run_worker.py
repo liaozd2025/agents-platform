@@ -1105,6 +1105,7 @@ async def test_process_agent_run_retryable_error_retries_then_completes(monkeypa
 @pytest.mark.asyncio
 async def test_finish_run_terminal_loser_does_not_append_end_event(monkeypatch: pytest.MonkeyPatch):
     events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(run_worker, "_read_run_token_usage_from_state", AsyncMock(return_value=None))
 
     async def fake_mark_terminal(run_id: str, status: str, **kwargs):
         del run_id, status, kwargs
@@ -1842,8 +1843,16 @@ def test_pi_stream_projection_keeps_child_text_and_tool_snapshots_separate():
 
 
 @pytest.mark.asyncio
-async def test_pi_execution_unknown_fails_without_releasing_for_retry(monkeypatch: pytest.MonkeyPatch):
-    """PI 启动后的未知结局只能失败当前 Run，不能创建新 attempt 重跑。"""
+@pytest.mark.parametrize(
+    ("error_class", "error_type"),
+    [
+        (run_worker.PiExecutionUnknown, "execution_unknown"),
+        (run_worker.PiModelFailed, "model_failed"),
+        (run_worker.PiResultPersistenceFailed, "result_persistence_failed"),
+    ],
+)
+async def test_pi_failure_keeps_reason_without_releasing_for_retry(monkeypatch, error_class, error_type):
+    """PI 失败保留具体原因，不创建新 attempt 重放文件副作用。"""
     run_obj = _build_run()
     run_obj.input_payload["runtime"] = {"executor": "pi"}
     _patch_common(monkeypatch, run_obj)
@@ -1854,7 +1863,7 @@ async def test_pi_execution_unknown_fails_without_releasing_for_retry(monkeypatc
         return SimpleNamespace(id=7)
 
     async def fake_execute(**_kwargs):
-        raise run_worker.PiExecutionUnknown("PI execution_unknown: transport lost")
+        raise error_class("PI failed")
 
     async def fake_mark_terminal(run_id, status, error_type, error_message, **kwargs):
         terminal_calls.append(
@@ -1888,12 +1897,20 @@ async def test_pi_execution_unknown_fails_without_releasing_for_retry(monkeypatc
 
     assert len(terminal_calls) == 1
     assert terminal_calls[0]["status"] == "failed"
-    assert terminal_calls[0]["error_type"] == "execution_unknown"
+    assert terminal_calls[0]["error_type"] == error_type
     assert terminal_calls[0]["worker_id"].startswith("worker-pi:")
 
 
 @pytest.mark.asyncio
-async def test_pi_unknown_with_cleanup_failure_preserves_both_facts(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(
+    ("error_class", "error_type"),
+    [
+        (run_worker.PiExecutionUnknown, "execution_unknown"),
+        (run_worker.PiModelFailed, "model_failed"),
+        (run_worker.PiResultPersistenceFailed, "result_persistence_failed"),
+    ],
+)
+async def test_pi_primary_failure_with_cleanup_failure_preserves_both_facts(monkeypatch, error_class, error_type):
     run_obj = _build_run()
     run_obj.input_payload["runtime"] = {"executor": "pi"}
     _patch_common(monkeypatch, run_obj)
@@ -1908,7 +1925,7 @@ async def test_pi_unknown_with_cleanup_failure_preserves_both_facts(monkeypatch:
     async def fake_execute(**_kwargs):
         raise run_worker.PiCleanupFailed(
             "PI cleanup_failed: delete unavailable",
-            primary=run_worker.PiExecutionUnknown("PI execution_unknown: transport lost"),
+            primary=error_class("PI failed"),
         )
 
     async def fake_record_cleanup(*args, **kwargs):
@@ -1950,7 +1967,7 @@ async def test_pi_unknown_with_cleanup_failure_preserves_both_facts(monkeypatch:
     assert cleanup_calls[0][0][:3] == ("run-1", 7, terminal_calls[0]["worker_id"])
     assert order == ["terminal", "cleanup"]
     assert terminal_calls[0]["status"] == "failed"
-    assert terminal_calls[0]["error_type"] == "execution_unknown"
+    assert terminal_calls[0]["error_type"] == error_type
 
 
 @pytest.mark.asyncio
@@ -2006,3 +2023,31 @@ def test_retry_requires_new_manifest_fingerprint_to_match_write_once_fact():
     run_worker._require_persisted_manifest_match(persisted, recorded=False, fingerprint="a" * 64)
     with pytest.raises(RuntimeError, match="运行资产已在重试前变化"):
         run_worker._require_persisted_manifest_match(persisted, recorded=False, fingerprint="b" * 64)
+
+
+@pytest.mark.asyncio
+async def test_validate_sandbox_binding_rejects_preexisting_default_subagent_pi(monkeypatch):
+    """已落库请求也必须在实际执行前重新检查普通子图审批边界。"""
+    run = _build_run()
+    run.run_type = "sandbox"
+    run.created_by_run_id = "subagent"
+
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    monkeypatch.setattr(run_worker.pg_manager, "get_async_session_context", fake_session)
+    monkeypatch.setattr(
+        run_worker, "resolve_authorized_workdir", AsyncMock(return_value=SimpleNamespace(conversation_id=7))
+    )
+    monkeypatch.setattr(
+        run_worker.AgentRunRepository,
+        "get_run_for_user",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                run_type="subagent", status="running", input_payload={"tool_approval_mode": "default"}
+            )
+        ),
+    )
+    with pytest.raises(ValueError, match="交回主智能体"):
+        await run_worker._validate_run_workdir_binding(run)

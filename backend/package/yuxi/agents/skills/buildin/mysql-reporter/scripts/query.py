@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import json
 import os
 import re
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import pymysql
@@ -54,12 +56,16 @@ class MySQLSecurityChecker:
 
     @classmethod
     def validate_sql(cls, sql: str) -> bool:
-        """验证SQL语句的安全性"""
-        if not sql:
+        """拒绝已知危险语法；数据库只读账号仍是最终权限边界。"""
+        # MySQL/MariaDB 可执行注释不能当普通注释删掉后放行。
+        if not sql or re.search(r"/\*(?:!|M!)", sql, re.IGNORECASE):
+            return False
+        # 在去注释前保守拒绝文件操作名，防止字符串中的注释符隐藏后续 SQL。
+        if re.search(r"\b(?:OUTFILE|DUMPFILE|LOAD_FILE)\b", sql, re.IGNORECASE):
             return False
 
         sql_clean = re.sub(r"--.*$", "", sql, flags=re.MULTILINE)
-        sql_clean = re.sub(r"/\*.*?\*/", "", sql_clean, flags=re.DOTALL)
+        sql_clean = re.sub(r"/\*.*?\*/", " ", sql_clean, flags=re.DOTALL)
         sql_upper = sql_clean.strip().upper()
         sql_without_trailing_semicolon = sql_upper.rstrip()
         if sql_without_trailing_semicolon.endswith(";"):
@@ -177,36 +183,27 @@ def execute_query_with_timeout(
 
 
 def limit_result_size(result: list, max_chars: int = 10000) -> list:
-    """限制结果大小"""
-    if not result:
-        return result
-
-    result_str = str(result)
-    if len(result_str) > max_chars:
-        limited_result = []
-        current_chars = 0
-        for row in result:
-            row_str = str(row)
-            if current_chars + len(row_str) > max_chars:
-                break
-            limited_result.append(row)
-            current_chars += len(row_str)
-        return limited_result
-
-    return result
+    """按字符预算截取展示行，不修改完整查询结果。"""
+    limited_result = []
+    current_chars = 0
+    for row in result:
+        row_chars = len(str(row))
+        if current_chars + row_chars > max_chars:
+            break
+        limited_result.append(row)
+        current_chars += row_chars
+    return limited_result
 
 
 def format_query_result(result: list[dict[str, Any]]) -> str:
+    """输出真实行数和预览截断状态，避免把未展示误报为无数据。"""
+    limited_result = limit_result_size(result[:50])
+    truncated = len(limited_result) < len(result)
+    result_str = json.dumps(
+        {"row_count": len(result), "displayed_row_count": len(limited_result), "truncated": truncated}
+    )
     if not result:
-        return "查询执行成功，但没有返回任何结果"
-
-    limited_result = limit_result_size(result, max_chars=10000)
-
-    if len(limited_result) < len(result):
-        warning = f"\n\n⚠️ 警告: 查询结果过大，只显示了前 {len(limited_result)} 行（共 {len(result)} 行）。\n"
-        warning += "建议使用更精确的查询条件或使用LIMIT子句来减少返回的数据量。"
-    else:
-        warning = ""
+        return result_str + "\n\n查询执行成功，但没有返回任何结果"
 
     if limited_result:
         columns = list(limited_result[0].keys())
@@ -224,20 +221,19 @@ def format_query_result(result: list[dict[str, Any]]) -> str:
             row_str = "| " + " | ".join(f"{str(row.get(col, '')):<{col_widths[col]}}" for col in columns) + " |"
             rows.append(row_str)
 
-        result_str = f"查询结果（共 {len(limited_result)} 行）:\n\n"
+        result_str += f"\n\n查询结果（共 {len(result)} 行，展示 {len(limited_result)} 行）:\n\n"
         result_str += header + "\n" + separator + "\n"
-        result_str += "\n".join(rows[:50])
-
-        if len(rows) > 50:
-            result_str += f"\n\n... 还有 {len(rows) - 50} 行未显示 ..."
-
-        result_str += warning
-        return result_str
-
-    return "查询执行成功，但返回数据为空"
+        result_str += "\n".join(rows)
+    if truncated:
+        result_str += (
+            "\n\n预览已截断，不能用于全量汇总或判断无数据。"
+            "需要完整明细时使用 --output-json 导出；汇总指标应由 SQL 对完整范围聚合。"
+        )
+    return result_str
 
 
-def run_query(sql: str, timeout: int) -> str:
+def run_query(sql: str, timeout: int, output_json: str | None = None) -> str:
+    """查询后按需导出全部明细，stdout 仅提供带截断标志的预览。"""
     if not MySQLSecurityChecker.validate_sql(sql):
         raise ValueError("SQL语句包含不安全的操作或可能的注入攻击，请检查SQL语句")
 
@@ -248,7 +244,18 @@ def run_query(sql: str, timeout: int) -> str:
     connection = create_connection(config)
     try:
         result = execute_query_with_timeout(connection, sql, timeout=timeout or 60)
-        return format_query_result(result)
+        if output_json:
+            # 独占创建防止覆盖旧结果或跟随同名符号链接；父目录由 PI 准备。
+            with Path(output_json).open("x", encoding="utf-8") as output:
+                json.dump(
+                    {"row_count": len(result), "truncated": False, "rows": result},
+                    output,
+                    ensure_ascii=False,
+                    default=str,
+                )
+                output.write("\n")
+        preview = format_query_result(result)
+        return preview + (f"\n\n完整结果已导出：{output_json}" if output_json else "")
     finally:
         if connection.open:
             connection.close()
@@ -279,13 +286,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="执行只读 MySQL SQL 查询")
     parser.add_argument("--sql", required=True, help="要执行的SQL查询语句")
     parser.add_argument("--timeout", type=int, default=60, help="查询超时时间（秒），默认60秒，最大600秒")
+    parser.add_argument("--output-json", help="完整结果 JSON 路径，父目录须已存在，不覆盖已有文件")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        print(run_query(args.sql, args.timeout))
+        print(run_query(args.sql, args.timeout, args.output_json))
         return 0
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
