@@ -2058,6 +2058,30 @@ async def test_personal_skill_list_reads_current_workspace_state(
 
 
 @pytest.mark.asyncio
+async def test_personal_skill_enabled_state_is_persisted_and_excluded_from_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    root = _personal_skill_root(tmp_path, monkeypatch)
+    _write_personal_skill(root, "demo", "personal")
+
+    updated = await svc.update_personal_skill_enabled("user-1", "demo", enabled=False)
+
+    assert updated.enabled is False
+    assert (await svc.list_personal_skills("user-1"))[0].enabled is False
+
+    class FakeRepo:
+        def __init__(self, _db):
+            pass
+
+        async def list_enabled(self):
+            return []
+
+    monkeypatch.setattr(svc, "SkillRepository", FakeRepo)
+    assert await svc.list_accessible_skills(None, _user("user-1")) == []
+
+
+@pytest.mark.asyncio
 async def test_personal_skill_overrides_shared_skill_and_drops_dependencies(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

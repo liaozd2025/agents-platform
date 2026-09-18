@@ -75,6 +75,7 @@ DEFAULT_SKILL_SHARE_CONFIG = {"access_level": "user", "department_ids": [], "use
 BUILTIN_SKILL_SHARE_CONFIG = {"access_level": "global", "department_ids": [], "user_uids": []}
 SKILL_DRAFT_TTL_SECONDS = 60 * 60
 PERSONAL_SKILL_SOURCE_TYPE = "personal"
+PERSONAL_SKILL_STATE_FILE = ".yuxi-skill-state.json"
 _USER_SKILLS_LOCK = threading.Lock()
 _USER_SKILLS_LOCKS: dict[str, threading.Lock] = {}
 _USER_SKILL_PROJECTION_LOCK_SCOPE = "yuxi:skills:user-projection:v1:"
@@ -611,6 +612,7 @@ async def list_accessible_skills(
         _list_accessible_shared_skills(db, user, require_enabled=require_enabled),
         list_personal_skills(str(user.uid)),
     )
+    personal_items = [item for item in personal_items if item.enabled]
     personal_by_slug = {item.slug: item for item in personal_items}
 
     effective: dict[str, ResolvedSkill] = {}
@@ -1000,6 +1002,11 @@ async def delete_personal_skill(uid: str, slug: str) -> None:
     await asyncio.to_thread(shutil.rmtree, skill_dir)
 
 
+async def update_personal_skill_enabled(uid: str, slug: str, *, enabled: bool) -> ResolvedSkill:
+    """更新个人 Skill 的启用状态，并返回当前持久化结果。"""
+    return await asyncio.to_thread(_update_personal_skill_enabled_sync, uid, slug, enabled)
+
+
 async def enable_personal_skills_for_agent_config(
     db: AsyncSession,
     *,
@@ -1073,7 +1080,7 @@ def _resolved_personal_skill(uid: str, root: Path, metadata: dict[str, Any]) -> 
         source_type=PERSONAL_SKILL_SOURCE_TYPE,
         source_scope=PERSONAL_SKILL_SOURCE_TYPE,
         source_dir=source_dir,
-        enabled=True,
+        enabled=bool(metadata.get("enabled", True)),
         created_by=uid,
         share_config=None,
         tool_dependencies=[],
@@ -1097,10 +1104,49 @@ def _scan_personal_skills(uid: str) -> list[ResolvedSkill]:
             metadata = parse_skill_dir_metadata(entry)
             if metadata["slug"] != entry.name:
                 raise ValueError("目录名必须与 SKILL.md slug 一致")
+            metadata["enabled"] = _read_personal_skill_enabled(entry)
             items.append(_resolved_personal_skill(uid, root, metadata))
         except Exception as exc:
             logger.warning(f"跳过无法解析的个人 Skill: uid={uid}, slug={entry.name}, error={exc}")
     return items
+
+
+def _read_personal_skill_enabled(skill_dir: Path) -> bool:
+    """读取个人 Skill 的本地启用状态；旧 Skill 默认启用。"""
+    state_path = skill_dir / PERSONAL_SKILL_STATE_FILE
+    if not state_path.exists():
+        return True
+    if state_path.is_symlink() or not state_path.is_file():
+        raise ValueError("个人 Skill 状态文件非法")
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("个人 Skill 状态文件无效") from exc
+    return bool(state.get("enabled", True))
+
+
+def _update_personal_skill_enabled_sync(uid: str, slug: str, enabled: bool) -> ResolvedSkill:
+    """原子写入个人 Skill 状态，避免半写入被运行时读取。"""
+    root = _personal_skills_root(uid)
+    skill_dir = _resolve_personal_skill_dir(root, slug)
+    if not skill_dir.is_dir():
+        raise ValueError("个人 Skill 不存在")
+    metadata = parse_skill_dir_metadata(skill_dir)
+    if metadata["slug"] != slug:
+        raise ValueError("个人 Skill 目录与元数据不一致")
+
+    state_path = skill_dir / PERSONAL_SKILL_STATE_FILE
+    if state_path.is_symlink():
+        raise ValueError("个人 Skill 状态文件非法")
+    temp_path = skill_dir / f".{PERSONAL_SKILL_STATE_FILE}.{uuid.uuid4().hex}.tmp"
+    try:
+        temp_path.write_text(json.dumps({"enabled": bool(enabled)}), encoding="utf-8")
+        os.replace(temp_path, state_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    metadata["enabled"] = bool(enabled)
+    return _resolved_personal_skill(uid, root, metadata)
 
 
 def _install_personal_skill_dir_sync(

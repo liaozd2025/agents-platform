@@ -44,7 +44,11 @@
     <template #name="{ row }">
       <span class="name-cell">
         <FileTypeIcon :name="row.name || row.path" :is-dir="row.is_dir" :size="17" />
-        <span class="entry-name" :title="row.title || row.name">{{ row.title || row.name }}</span>
+        <!-- 托管会话目录显示「可读名称（原始目录名）」，其余条目仍显示原始名称 -->
+        <span class="entry-name" :title="row.name || row.path">
+          <span class="entry-name-text">{{ row.title || row.name }}</span>
+          <span v-if="row.displaySuffix" class="entry-name-sub">{{ row.displaySuffix }}</span>
+        </span>
       </span>
     </template>
 
@@ -223,10 +227,24 @@ const handleBreadcrumbClick = ({ item, index }) => {
 }
 
 .entry-name {
+  display: inline-flex;
   min-width: 0;
+  align-items: baseline;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.entry-name-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 托管会话目录的原始目录名（uuid），跟在可读名称后的灰色小字 */
+.entry-name-sub {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
 }
 
 .more-action {

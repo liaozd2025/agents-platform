@@ -36,6 +36,7 @@ from yuxi.agents.skills.service import (
     update_skill_dependencies,
     update_skill_enabled,
     update_skill_file,
+    update_personal_skill_enabled,
     update_skill_share_config,
     user_can_manage_skill,
 )
@@ -341,6 +342,23 @@ async def delete_personal_skill_route(
     except Exception as e:
         logger.error(f"Failed to delete personal Skill '{slug}': {e}")
         raise HTTPException(status_code=500, detail="删除个人 Skill 失败")
+
+
+@user_skills.put("/personal/{slug}/enabled")
+async def update_personal_skill_enabled_route(
+    slug: str,
+    payload: SkillEnabledUpdateRequest,
+    authorization: AuthorizationContext = Depends(require_permission("skill:use")),
+):
+    current_user = authorization.user
+    try:
+        item = await update_personal_skill_enabled(str(current_user.uid), slug, enabled=payload.enabled)
+        return {"success": True, "data": _serialize_skill_for_user(item, authorization)}
+    except ValueError as e:
+        _raise_from_value_error(e)
+    except Exception as e:
+        logger.error(f"Failed to update personal Skill enabled '{slug}': {e}")
+        raise HTTPException(status_code=500, detail="更新个人 Skill 启用状态失败")
 
 
 @user_skills.delete("/install-drafts/{draft_id}")

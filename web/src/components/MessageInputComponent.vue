@@ -1107,8 +1107,30 @@ const handleMentionDeletion = (e) => {
   return true
 }
 
+// 组合态回车时间窗兜底的长度（毫秒）：Safari 在 compositionend 之后紧接着派发的那次
+// 回车事件上 isComposing 可能已为 false，只靠事件字段会漏判，因此用时间窗补一层。
+const COMPOSITION_ENTER_GUARD_MS = 100
+// 最近一次组合态结束的时刻，0 表示本次会话尚未发生过组合态
+let lastCompositionEndAt = 0
+
+// 判断本次 keydown 是否属于输入法组合态（预编辑）内部的按键，属于时不参与发送与弹窗导航。
+// 四道判据：组件自身维护的组合态标记、事件自带的 isComposing、keyCode 229（部分输入法
+// 只上报 Process 键）、以及 compositionend 之后的极短时间窗（Safari 时序兜底）。
+const isImeCompositionKey = (e) => {
+  if (isComposing.value || e.isComposing || e.keyCode === 229) {
+    return true
+  }
+
+  return e.key === 'Enter' && Date.now() - lastCompositionEndAt < COMPOSITION_ENTER_GUARD_MS
+}
+
 // 处理键盘事件
 const handleKeyPress = (e) => {
+  // 组合态内的按键交给输入法处理，避免"确认上屏"的回车被误判为发送或弹窗确认
+  if (isImeCompositionKey(e)) {
+    return
+  }
+
   // @ 提及键盘导航
   if (mentionPopupVisible.value) {
     if (['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
@@ -1221,6 +1243,8 @@ const handleCompositionStart = () => {
 
 const handleCompositionEnd = () => {
   isComposing.value = false
+  // 记录组合结束时刻，供 isImeCompositionKey 的时间窗兜底使用
+  lastCompositionEndAt = Date.now()
   handleInput()
 }
 

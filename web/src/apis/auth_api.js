@@ -164,6 +164,11 @@ async function updateProfile(profileData) {
   return apiPut('/api/auth/profile', profileData)
 }
 
+// 普通用户自助修改自己的登录密码；后端会校验原密码，成功后返回 { message }
+async function changePassword(passwordData) {
+  return apiPut('/api/auth/password', passwordData)
+}
+
 async function impersonateUser(userId) {
   return apiPost(`/api/auth/impersonate/${encodeURIComponent(userId)}`, {})
 }
@@ -193,6 +198,7 @@ export const authApi = {
   uploadAvatar,
   getCurrentUser,
   updateProfile,
+  changePassword,
   impersonateUser,
   getOIDCConfig,
   getOIDCLoginUrl,

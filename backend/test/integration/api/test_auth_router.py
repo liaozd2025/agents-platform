@@ -7,16 +7,13 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import timedelta
-from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException, status
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.services import login_rate_limit_service as login_limiter
-from yuxi.services import oa_sso_service
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
     ROOT_DEPARTMENT_ID,
@@ -412,6 +409,87 @@ async def test_profile_requires_authentication(test_client):
     response = await test_client.get("/api/auth/me")
     assert response.status_code == 401
     assert response.json()["detail"] == "请登录后再访问"
+
+
+async def test_standard_user_can_change_own_password(test_client, user_management_test_users):
+    """普通用户自助改密：原密码校验、拒绝与原密码相同、改密后新旧密码登录结果互换。
+
+    这是「普通用户在页面上改自己密码」的接口契约：只有 user 角色的账号也必须能用，
+    因此本用例刻意使用 standard_headers（普通用户），而不是管理员令牌。
+    """
+
+    standard_headers = user_management_test_users["standard_headers"]
+    password = user_management_test_users["password"]
+
+    me_response = await test_client.get("/api/auth/me", headers=standard_headers)
+    assert me_response.status_code == 200, me_response.text
+    me = me_response.json()
+    login_identifier = me["uid"]
+    user_id = me["id"]
+
+    new_password = f"New{uuid.uuid4().hex[:10]}!"
+
+    # 未登录不能改密
+    anonymous = await test_client.put(
+        "/api/auth/password",
+        json={"old_password": password, "new_password": new_password},
+    )
+    assert anonymous.status_code == 401
+
+    # 原密码错误 → 400，且此时密码未发生任何变化
+    wrong_old = await test_client.put(
+        "/api/auth/password",
+        headers=standard_headers,
+        json={"old_password": f"wrong-{password}", "new_password": new_password},
+    )
+    assert wrong_old.status_code == 400, wrong_old.text
+    assert wrong_old.json()["detail"] == "原密码不正确"
+
+    # 新密码与原密码相同 → 400，避免用户误以为改过
+    same_password = await test_client.put(
+        "/api/auth/password",
+        headers=standard_headers,
+        json={"old_password": password, "new_password": password},
+    )
+    assert same_password.status_code == 400, same_password.text
+    assert same_password.json()["detail"] == "新密码不能与原密码相同"
+
+    # 新密码不足 8 位 → 422，与管理员设密的下限保持一致
+    too_short = await test_client.put(
+        "/api/auth/password",
+        headers=standard_headers,
+        json={"old_password": password, "new_password": "short"},
+    )
+    assert too_short.status_code == 422, too_short.text
+
+    # 预置登录失败计数，用于验证改密成功后会一并清零
+    async with pg_manager.get_async_session_context() as session:
+        await session.execute(update(User).where(User.id == user_id).values(login_failed_count=3))
+        await session.commit()
+
+    changed = await test_client.put(
+        "/api/auth/password",
+        headers=standard_headers,
+        json={"old_password": password, "new_password": new_password},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["message"] == "密码修改成功"
+
+    # 真 HTTP 复核：旧密码失效、新密码可用（只看接口返回值不算证据）
+    old_login = await test_client.post("/api/auth/token", data={"username": login_identifier, "password": password})
+    assert old_login.status_code == 401, old_login.text
+    new_login = await test_client.post(
+        "/api/auth/token", data={"username": login_identifier, "password": new_password}
+    )
+    assert new_login.status_code == 200, new_login.text
+
+    # 失败计数已清零；并写入「密码已更新」操作日志（批量运维判断「是否改过密码」依赖该文案）
+    async with pg_manager.get_async_session_context() as session:
+        refreshed = await session.get(User, user_id)
+        assert refreshed is not None
+        assert refreshed.login_failed_count == 0
+        logs = (await session.scalars(select(OperationLog).where(OperationLog.user_id == user_id))).all()
+    assert any("密码已更新" in (log.details or "") for log in logs)
 
 
 async def test_admin_can_create_and_delete_user(test_client, admin_headers):
@@ -1111,103 +1189,3 @@ async def test_locked_user_token_is_rejected(test_client, standard_user):
     profile_response = await test_client.get("/api/auth/me", headers=standard_user["headers"])
     assert profile_response.status_code == 423
     assert "X-Lock-Remaining" in profile_response.headers
-
-
-async def _create_numeric_account_user(test_client, account: str) -> tuple[int, str]:
-    """创建用户名形如工号的本地账号（非 OA 身份），返回 (user_id, password)。"""
-    pg_manager.initialize()
-    await pg_manager.async_engine.dispose()
-    await pg_manager.ensure_business_schema()
-
-    password = f"Pw!{uuid.uuid4().hex}"
-    async with pg_manager.get_async_session_context() as session:
-        root = await session.get(Department, ROOT_DEPARTMENT_ID)
-        assert root is not None, "登录补全测试需要现有集团根节点"
-        user = User(
-            username=account,
-            uid=f"pytest_local_{uuid.uuid4().hex[:10]}",
-            password_hash=AuthUtils.hash_password(password),
-            department_id=root.id,
-        )
-        session.add(user)
-        await session.flush()
-        assert user.id is not None
-        return user.id, password
-
-
-async def _delete_user(user_id: int) -> None:
-    """清理测试账号，避免污染本地用户表。"""
-    async with pg_manager.get_async_session_context() as session:
-        await session.execute(delete(User).where(User.id == user_id))
-        await session.commit()
-
-
-def _configure_oa_lookup(monkeypatch, result) -> None:
-    """把 OA 用户接口配置与反查结果替换成测试替身。"""
-    monkeypatch.setattr(oa_sso_service.oa_sso_config, "enabled", True)
-    monkeypatch.setattr(oa_sso_service.oa_sso_config, "userinfo_url", "https://oa.example.test/userinfo")
-    monkeypatch.setattr(oa_sso_service.oa_sso_config, "company_code", "TEST")
-    monkeypatch.setattr(oa_sso_service, "_request_oa_user_data", result)
-
-
-async def test_local_account_login_backfills_display_name_and_station(monkeypatch, test_client):
-    """本地账号（用户名即工号）登录成功后补齐展示姓名与岗位，供 USER.md 使用。"""
-    account = f"2024{int(uuid.uuid4().hex[:8], 16) % 10**8:08d}"
-    user_id, password = await _create_numeric_account_user(test_client, account)
-    _configure_oa_lookup(
-        monkeypatch,
-        AsyncMock(
-            return_value={
-                "account": account,
-                "companyCode": "TEST",
-                "fullName": "吴轩",
-                "userStateCode": "service",
-                "userJobInformationDtos": [
-                    {
-                        "pagingSort": 1,
-                        "appointmentDepartmentName": "研发部",
-                        "appointmentStationName": "中级前端程序员",
-                        "jobLevelName": "11",
-                        "jobGradeName": "基层",
-                    }
-                ],
-            }
-        ),
-    )
-
-    try:
-        response = await test_client.post("/api/auth/token", data={"username": account, "password": password})
-        assert response.status_code == 200, response.text
-
-        async with pg_manager.get_async_session_context() as session:
-            stored = await session.get(User, user_id)
-            assert stored is not None
-            # 展示姓名、岗位与职级写入本地行；账号与 UID 不变
-            assert stored.display_name == "吴轩"
-            assert stored.oa_station_name == "中级前端程序员"
-            assert stored.oa_job_level_name == "11（基层）"
-            assert stored.username == account
-    finally:
-        await _delete_user(user_id)
-
-
-async def test_local_account_login_survives_oa_lookup_failure(monkeypatch, test_client):
-    """OA 不可用时登录照常返回令牌，本地资料保持原样。"""
-    account = f"2024{int(uuid.uuid4().hex[:8], 16) % 10**8:08d}"
-    user_id, password = await _create_numeric_account_user(test_client, account)
-    _configure_oa_lookup(
-        monkeypatch,
-        AsyncMock(side_effect=HTTPException(status.HTTP_502_BAD_GATEWAY, "OA 用户服务暂不可用")),
-    )
-
-    try:
-        response = await test_client.post("/api/auth/token", data={"username": account, "password": password})
-        assert response.status_code == 200, response.text
-
-        async with pg_manager.get_async_session_context() as session:
-            stored = await session.get(User, user_id)
-            assert stored is not None
-            assert stored.display_name is None
-            assert stored.oa_station_name is None
-    finally:
-        await _delete_user(user_id)

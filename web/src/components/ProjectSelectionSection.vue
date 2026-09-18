@@ -175,6 +175,7 @@
           :active="createModalOpen"
           :disabled="creatingProject"
           include-unbound-project-dirs
+          :resolve-directory-label="projectsStore.resolveDirectoryLabel"
         />
       </div>
     </div>
@@ -282,6 +283,9 @@ const openCreateModal = (selectedPath = '') => {
   projectCreationRequestId.value = requestId()
   linkedPath.value = selectedPath
   createModalOpen.value = true
+  // 目录选择器展示托管会话目录需要项目名与会话标题，弹窗打开时补一次数据。
+  if (!projects.value.length) void loadProjects()
+  void projectsStore.ensureDirectoryLabels()
 }
 
 const handleCreateProject = async () => {

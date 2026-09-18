@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -60,7 +62,7 @@ async def test_enabling_memory_syncs_user_profile_immediately(session, monkeypat
     async def fake_sync(*, db, uid):
         calls.append((db, uid))
 
-    monkeypatch.setattr("server.routers.user_router.sync_user_profile_to_memory", fake_sync)
+    monkeypatch.setattr(importlib.import_module("server.routers.user_router"), "sync_user_profile_to_memory", fake_sync)
 
     await update_user_config(
         UserConfigSchema(enable_memory=True),
