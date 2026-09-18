@@ -107,6 +107,7 @@
                     :hide-tool-calls="true"
                     :mention="mentionConfig"
                     @retry="retryMessage(displayItem.message)"
+                    @open-attachment="openAttachmentPreview"
                   >
                   </AgentMessageComponent>
                   <ToolCallsGroupComponent
@@ -1294,6 +1295,14 @@ const openArtifactPreview = (file) => {
   }
 
   openPanelPreview(file)
+}
+
+// 用户消息气泡里的附件卡片点击：带上附件原始文件名，在右侧面板打开预览。
+// 附件路径是 Sandbox runtime 虚拟路径，面板按 artifact 预览接口读取
+// （doc/docx/ppt/pptx 由后端转 PDF 后内联返回）。
+const openAttachmentPreview = (attachment) => {
+  if (!attachment?.path) return
+  openArtifactPreview({ path: attachment.path, name: attachment.name })
 }
 
 const closePanelPreviewTab = (path) => {
