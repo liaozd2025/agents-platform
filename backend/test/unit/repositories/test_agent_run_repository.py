@@ -1001,3 +1001,89 @@ async def test_lock_memory_write_requires_current_top_level_lease_owner(session)
             request_id="memory-request",
             now=now + timedelta(seconds=2),
         )
+
+
+@pytest.mark.parametrize(
+    "status,error_type",
+    [
+        ("pending", None),
+        ("running", None),
+        ("failed", "execution_unknown"),
+        ("failed", "cleanup_failed"),
+        ("failed", "result_persistence_failed"),
+        ("failed", "worker_lease_expired"),
+        ("failed", "sandbox_parent_unavailable"),
+    ],
+)
+async def test_pi_scope_rejects_sibling_branches(session, status, error_type):
+    """普通子图的 PI 与根图共享执行域，不能换分支绕过停止边界。"""
+    child = await _seed_subagent_runs(session)
+    root = await session.get(AgentRun, "parent-run")
+    blocked = AgentRun(
+        id="pi-sibling",
+        conversation_thread_id="pi-sibling-thread",
+        runtime_scope_id="parent-thread",
+        agent_slug="main",
+        uid="user-1",
+        request_id="pi-sibling-request",
+        input_payload={},
+        run_type="sandbox",
+        created_by_run_id=root.id,
+        status=status,
+        error_type=error_type,
+    )
+    session.add(blocked)
+    await session.flush()
+    with pytest.raises(ValueError, match="共享运行域.*pi-sibling"):
+        await AgentRunRepository(session).require_pi_scope_available(child)
+    await AgentRunRepository(session).require_pi_scope_available(child, exclude_run_id=blocked.id)
+
+
+async def test_pi_scope_preserves_resume_stop_but_allows_new_chat(session):
+    """恢复旧执行树保留失败事实，新一轮 chat 不永久继承历史错误。"""
+    child = await _seed_subagent_runs(session)
+    root = await session.get(AgentRun, "parent-run")
+    session.add(
+        AgentRun(
+            id="pi-failed",
+            conversation_thread_id="pi-child-thread",
+            runtime_scope_id=root.runtime_scope_id,
+            agent_slug="worker",
+            uid=root.uid,
+            request_id="pi-failed-request",
+            input_payload={},
+            run_type="sandbox",
+            created_by_run_id=child.id,
+            status="failed",
+            error_type="execution_unknown",
+        )
+    )
+    resume = AgentRun(
+        id="resume-root",
+        conversation_thread_id=root.conversation_thread_id,
+        runtime_scope_id=root.runtime_scope_id,
+        agent_slug="main",
+        uid=root.uid,
+        request_id="resume-request",
+        input_payload={},
+        run_type="resume",
+        created_by_run_id=root.id,
+        status="pending",
+    )
+    session.add(resume)
+    await session.flush()
+    with pytest.raises(ValueError, match="pi-failed"):
+        await AgentRunRepository(session).require_pi_scope_available(resume)
+    fresh = AgentRun(
+        id="new-chat",
+        conversation_thread_id=root.conversation_thread_id,
+        runtime_scope_id=root.runtime_scope_id,
+        agent_slug="main",
+        uid=root.uid,
+        request_id="fresh-request",
+        input_payload={},
+        run_type="chat",
+    )
+    await AgentRunRepository(session).require_pi_scope_available(fresh)
+    root.runtime_scope_id = "another-runtime"
+    await AgentRunRepository(session).require_pi_scope_available(root)

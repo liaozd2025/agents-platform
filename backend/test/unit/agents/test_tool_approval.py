@@ -3,7 +3,11 @@ from types import SimpleNamespace
 import pytest
 
 from yuxi.agents.buildin.chatbot import graph as chatbot_graph
-from yuxi.agents.tool_approval import create_tool_approval_middleware, normalize_tool_approval_mode
+from yuxi.agents.tool_approval import (
+    create_tool_approval_middleware,
+    normalize_tool_approval_mode,
+    require_pi_delegation_approval,
+)
 
 PROJECT_ROOT = "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111"
 
@@ -22,10 +26,7 @@ def test_default_mode_auto_approves_writes_inside_current_project():
 
     assert _requires_approval(middleware, "write_file", f"{PROJECT_ROOT}/outputs/report.md") is False
     assert _requires_approval(middleware, "edit_file", f"{PROJECT_ROOT}/notes.md") is False
-    assert all(
-        config["allowed_decisions"] == ["approve", "reject"]
-        for config in middleware.interrupt_on.values()
-    )
+    assert all(config["allowed_decisions"] == ["approve", "reject"] for config in middleware.interrupt_on.values())
 
 
 def test_default_mode_keeps_project_external_writes_and_execute_behind_approval():
@@ -90,3 +91,10 @@ def test_always_trust_mode_does_not_build_approval_middleware():
 def test_unknown_tool_approval_mode_is_rejected():
     with pytest.raises(ValueError, match="不支持的 tool_approval_mode"):
         normalize_tool_approval_mode("unknown")
+
+
+@pytest.mark.parametrize(
+    "creator_run_type,mode", [("chat", "default"), ("resume", "default"), ("subagent", "always_trust")]
+)
+def test_pi_approved_main_graph_and_trusted_subagent_keep_execution(creator_run_type, mode):
+    require_pi_delegation_approval(creator_run_type=creator_run_type, tool_approval_mode=mode)

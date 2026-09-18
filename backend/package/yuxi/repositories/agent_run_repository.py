@@ -267,6 +267,79 @@ class AgentRunRepository:
         )
         return result.scalar_one_or_none()
 
+    async def require_pi_scope_available(self, creator_run: AgentRun, *, exclude_run_id: str | None = None) -> None:
+        """在调用方持有 Project 行锁时，拒绝共享 PI 并发和当前执行树的未确认结果。"""
+        root = creator_run
+        if root.run_type == "subagent":
+            pair = await self.get_subagent_run_with_creator(
+                uid=root.uid, created_by_run_id=str(root.created_by_run_id), run_id=root.id
+            )
+            root = pair[0] if pair is not None else None
+        if (
+            root is None
+            or root.run_type not in TOP_LEVEL_RUN_TYPES
+            or root.runtime_scope_id != creator_run.runtime_scope_id
+        ):
+            raise ValueError("PI 委派不属于有效主运行执行树")
+
+        # resume 沿持久恢复链继承停止边界；新 chat 不受历史已结束执行树的错误永久阻断。
+        root_ids = [root.id]
+        while root.run_type == "resume":
+            previous = await self.get_run_for_user(str(root.created_by_run_id), str(root.uid))
+            if (
+                previous is None
+                or previous.id in root_ids
+                or previous.run_type not in TOP_LEVEL_RUN_TYPES
+                or previous.conversation_thread_id != root.conversation_thread_id
+                or previous.runtime_scope_id != root.runtime_scope_id
+            ):
+                raise ValueError("PI 委派的主运行恢复链无效")
+            root_ids.append(previous.id)
+            root = previous
+
+        parent = aliased(AgentRun)
+        pending_cleanup = (
+            select(AgentRunAttempt.id)
+            .where(AgentRunAttempt.run_id == AgentRun.id, AgentRunAttempt.cleanup_failed_at.is_not(None))
+            .exists()
+        )
+        blocked = await self.db.scalar(
+            select(AgentRun)
+            .outerjoin(parent, parent.id == AgentRun.created_by_run_id)
+            .where(
+                AgentRun.uid == str(creator_run.uid),
+                AgentRun.runtime_scope_id == str(creator_run.runtime_scope_id),
+                AgentRun.run_type == "sandbox",
+                AgentRun.id != exclude_run_id if exclude_run_id is not None else True,
+                or_(
+                    AgentRun.status.notin_(TERMINAL_RUN_STATUSES),
+                    pending_cleanup,
+                    and_(
+                        AgentRun.error_type.in_(
+                            [
+                                "execution_unknown",
+                                "cleanup_failed",
+                                "result_persistence_failed",
+                                "worker_lease_expired",
+                                "sandbox_parent_unavailable",
+                            ]
+                        ),
+                        or_(
+                            AgentRun.created_by_run_id.in_(root_ids),
+                            and_(parent.run_type == "subagent", parent.created_by_run_id.in_(root_ids)),
+                        ),
+                    ),
+                ),
+            )
+            .order_by(AgentRun.created_at, AgentRun.id)
+            .limit(1)
+        )
+        if blocked is not None:
+            raise ValueError(
+                f"共享运行域中的 PI Run {blocked.id} 仍在执行或结果、清理未确认，不能再次委派。"
+                "等待当前任务结束；失败时保留已有文件并核实状态，不要重新生成整份任务。"
+            )
+
     async def get_active_run_by_runtime_scope_for_user(
         self,
         *,
@@ -1080,6 +1153,17 @@ class AgentRunRepository:
         expected_output_subdir = f"pi-runs/{hashlib.sha256(f'{run.id}:{attempt.id}'.encode()).hexdigest()[:24]}"
         if output_subdir != expected_output_subdir:
             raise ValueError("PI final payload 缺少有效输出目录")
+        stage_status = payload.get("stage_status")
+        if stage_status not in (None, "completed", "needs_input", "failed"):
+            raise ValueError("PI final stage_status 无效")
+        for key in ("checks", "unresolved_items"):
+            if not isinstance(payload.get(key, []), list) or any(
+                not isinstance(item, str) for item in payload.get(key, [])
+            ):
+                raise ValueError(f"PI final {key} 必须是字符串列表")
+        artifact = payload.get("artifact")
+        if stage_status in {"needs_input", "failed"} and isinstance(artifact, dict) and artifact.get("files"):
+            raise ValueError("PI 未完成阶段不能登记正式交付物")
         message = Message(
             conversation_id=run.conversation_id,
             role="assistant",
@@ -1096,6 +1180,9 @@ class AgentRunRepository:
                         ((attempt.runtime_manifest or {}).get("context") or {}).get("session_source") or {}
                     ).get("run_id"),
                     "stop_reason": stop_reason,
+                    "stage_status": stage_status,
+                    "checks": payload.get("checks", []),
+                    "unresolved_items": payload.get("unresolved_items", []),
                 }
             },
             run_id=run.id,
@@ -1109,7 +1196,7 @@ class AgentRunRepository:
         _, changed = await self.set_terminal_status(
             run_id,
             status="completed",
-            token_usage=self._pi_token_usage(payload.get("token_usage"), attempt.runtime_manifest),
+            token_usage=self.pi_token_usage(payload.get("token_usage"), attempt.runtime_manifest),
             worker_id=worker_id,
             now=current_time,
         )
@@ -1118,7 +1205,7 @@ class AgentRunRepository:
         return {"ack": True, "duplicate": False}
 
     @staticmethod
-    def _pi_token_usage(usage: dict | None, manifest: dict | None) -> dict:
+    def pi_token_usage(usage: dict | None, manifest: dict | None) -> dict:
         """校验 PI wire 用量与当前模型归属，未知不伪装为已上报零消耗。"""
         if usage is None:
             return {"available": False}

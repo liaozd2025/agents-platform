@@ -18,7 +18,10 @@ from yuxi.services.pi_execution_service import (
     PiCleanupFailed,
     PiExecutionCancelled,
     PiExecutionUnknown,
+    PiModelFailed,
+    PiResultPersistenceFailed,
     PiRuntimeMismatch,
+    build_pi_envelope,
     build_pi_runtime_manifest,
     execute_pi_attempt,
     resolve_pi_model_runtime,
@@ -118,6 +121,28 @@ def _model_info(*, api_key: str = "", headers: dict[str, str] | None = None):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend_failure", [False, True])
+async def test_local_runner_failure_does_not_repeat_event_trace(backend_failure):
+    """父任务只收到失败摘要，已记录的正常事件不再次占用上下文。"""
+
+    async def stream(_command, consume, **_kwargs):
+        """模拟已输出事件后的进程失败。"""
+        trace = '{"type":"log","payload":{"message":"already-recorded"}}\n'
+        await consume(trace if backend_failure else trace + "specific runner failure\n")
+        output = "Error: specific runner failure" if backend_failure else trace + "specific runner failure\n"
+        return SimpleNamespace(exit_code=1, output=output, truncated=False)
+
+    adapter = LocalPiAdapter.__new__(LocalPiAdapter)
+    adapter._backend = SimpleNamespace(id="sandbox", aexecute_stream=stream)
+    adapter._stopped = False
+    adapter._output_subdir = "pi-runs/0123456789abcdef01234567"
+    adapter._attempt_id = "1"
+    with pytest.raises(RuntimeError, match="specific runner failure") as error:
+        await adapter.execute("sandbox", {"manifest": {"policy": {"timeout_seconds": 1}}})
+    assert "already-recorded" not in str(error.value)
+
+
 def test_pi_model_runtime_rejects_missing_authentication(monkeypatch):
     monkeypatch.setattr(pi_execution_service.model_cache, "get_model_info", lambda _spec: _model_info())
 
@@ -173,6 +198,116 @@ def _manifest(tmp_path: Path) -> tuple[dict, str, dict]:
         "skill_bundle": manifest["skill_bundle"],
     }
     return manifest, digest, actual
+
+
+def test_envelope_nul_is_visible_before_hashing_without_mutating_source():
+    """JSONB 文本与键可安全保存，摘要只覆盖转换后的值。"""
+    event = {
+        "event_id": "tool-1",
+        "sequence": 0,
+        "type": "tool_result",
+        "payload": {"content": ["raw\x00text", {"key\x00": "literal\\u0000"}]},
+    }
+    envelope = build_pi_envelope(
+        attempt={"run_id": "run", "attempt_id": "1", "manifest_digest": "digest"},
+        adapter_name="local",
+        event=event,
+    )
+    assert envelope["payload"] == {"content": ["raw\\u0000text", {"key\\u0000": "literal\\u0000"}]}
+    assert envelope["payload_digest"] == hashlib.sha256(canonical_json(envelope["payload"]).encode()).hexdigest()
+    assert event["payload"]["content"][0] == "raw\x00text"
+    with pytest.raises(ValueError, match="键转换产生冲突"):
+        build_pi_envelope(
+            attempt={"run_id": "run", "attempt_id": "1", "manifest_digest": "digest"},
+            adapter_name="local",
+            event={**event, "payload": {"key\x00": 1, "key\\u0000": 2}},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ValueError("conflicting envelope"),
+        TypeError("invalid JSON"),
+        SimpleNamespace(sqlstate="22P05"),
+        SimpleNamespace(sqlstate="23505"),
+        SimpleNamespace(sqlstate="42501"),
+    ],
+)
+async def test_deterministic_sink_failure_is_not_retried_or_classified_unknown(tmp_path, failure):
+    """确定性拒绝保留文件，但不把失败误报成未知执行或重复提交。"""
+    manifest, digest, actual = _manifest(tmp_path)
+    adapter = FakeAdapter(actual, [{"event_id": "tool-1", "sequence": 0, "type": "tool_result", "payload": {}}])
+    submitted = []
+
+    async def sink(envelope):
+        """模拟 repository 或驱动确定性拒绝。"""
+        submitted.append(envelope)
+        if isinstance(failure, Exception):
+            raise failure
+        error = RuntimeError("database rejected value")
+        error.orig = failure
+        raise error
+
+    with pytest.raises(PiResultPersistenceFailed):
+        await execute_pi_attempt(
+            attempt={"run_id": "run-1", "attempt_id": "1", "manifest": manifest, "manifest_digest": digest},
+            adapter=adapter,
+            result_sink=sink,
+        )
+    assert len(submitted) == 1
+    assert adapter.stop_preserve_outputs == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["error", "aborted"])
+async def test_confirmed_model_failure_preserves_usage_and_is_not_unknown(tmp_path, stop_reason):
+    """已收到失败事件和非零退出时，按模型失败交回 worker。"""
+    import json
+
+    manifest, digest, actual = _manifest(tmp_path)
+    usage = {"model_call_count": 1, "total": {"total_tokens": 30}}
+
+    async def stream(_command, consume, **_kwargs):
+        """模拟 Runner 协议与进程退出。"""
+        await consume(
+            json.dumps(
+                {
+                    "type": "error",
+                    "payload": {
+                        "code": "model_failed",
+                        "stop_reason": stop_reason,
+                        "message": "provider\x00failed",
+                        "token_usage": usage,
+                    },
+                }
+            )
+            + "\n"
+        )
+        return SimpleNamespace(exit_code=1, output="provider failed", truncated=False)
+
+    local = LocalPiAdapter.__new__(LocalPiAdapter)
+    local._backend = SimpleNamespace(id="sandbox", aexecute_stream=stream)
+    local._stopped = False
+    local._output_subdir = "pi-runs/0123456789abcdef01234567"
+    local._attempt_id = "1"
+    adapter = FakeAdapter(actual)
+
+    async def execute(_instance_id, _attempt):
+        """保留真实 adapter 的 Runner 失败分类。"""
+        return await local.execute("sandbox", {"manifest": {"policy": {"timeout_seconds": 1}}})
+
+    adapter.execute = execute
+    with pytest.raises(PiModelFailed, match=stop_reason) as failure:
+        await execute_pi_attempt(
+            attempt={"run_id": "run-1", "attempt_id": "1", "manifest": manifest, "manifest_digest": digest},
+            adapter=adapter,
+            result_sink=lambda _event: None,
+        )
+    assert failure.value.token_usage == usage
+    assert "provider\\u0000failed" in str(failure.value)
+    assert adapter.stop_preserve_outputs == [True]
 
 
 @pytest.mark.asyncio

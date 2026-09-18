@@ -2173,7 +2173,8 @@ def test_workdir_paths_are_workspace_relative_and_reject_symlinks(monkeypatch, t
 
 
 @pytest.mark.asyncio
-async def test_stream_missing_exit_status_times_out_and_stops_process(monkeypatch):
+@pytest.mark.parametrize("status", ["completed", "no_change_timeout", "running"])
+async def test_stream_missing_exit_status_times_out_and_stops_process(monkeypatch, status):
     """伪完成状态不能让缺失退出码的进程无限等待或提前清理。"""
     from agent_sandbox.core.api_error import ApiError
 
@@ -2183,9 +2184,9 @@ async def test_stream_missing_exit_status_times_out_and_stops_process(monkeypatc
     monkeypatch.setattr(sandbox_backend_module.httpx, "AsyncClient", lambda **_kwargs: _OwnedAsyncHttpClient())
     shell = SimpleNamespace(
         exec_command=AsyncMock(
-            return_value=SimpleNamespace(data=SimpleNamespace(session_id="session-1", status="completed", exit_code=0))
+            return_value=SimpleNamespace(data=SimpleNamespace(session_id="session-1", status=status, exit_code=None))
         ),
-        view=AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(status="completed", exit_code=0))),
+        view=AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(status=status, exit_code=None))),
         kill_process=AsyncMock(return_value=SimpleNamespace(success=True, data=SimpleNamespace(status="terminated"))),
     )
     file = SimpleNamespace(
@@ -2200,3 +2201,37 @@ async def test_stream_missing_exit_status_times_out_and_stops_process(monkeypatc
     assert "退出码未在执行期限内生成" in result.output
     shell.kill_process.assert_awaited_once_with(id="session-1")
     assert shell.exec_command.call_args.kwargs["command"].startswith("rm -f -- ")
+
+
+@pytest.mark.asyncio
+async def test_stream_no_change_timeout_keeps_reading_until_actual_exit(monkeypatch):
+    """PTY 无输出超时后进程仍在写入，必须读到真实退出码才交付。"""
+    from agent_sandbox.core.api_error import ApiError
+
+    monkeypatch.setattr(sandbox_backend_module, "get_sandbox_provider", lambda: object())
+    backend = ProvisionerSandboxBackend(thread_id="thread-1", uid="user-1")
+    backend._provider = SimpleNamespace(get=lambda *_args, **_kwargs: SimpleNamespace(sandbox_url="http://sandbox"))
+    monkeypatch.setattr(sandbox_backend_module.httpx, "AsyncClient", lambda **_kwargs: _OwnedAsyncHttpClient())
+    shell = SimpleNamespace(
+        exec_command=AsyncMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(session_id="session-1", status="no_change_timeout", exit_code=None)
+            )
+        ),
+        view=AsyncMock(return_value=SimpleNamespace(data=SimpleNamespace(status="no_change_timeout", exit_code=None))),
+        kill_process=AsyncMock(),
+    )
+    snapshots = iter([b"first\n", b"first\nfinal\n"])
+    file = SimpleNamespace(
+        read_file=AsyncMock(
+            side_effect=[ApiError(status_code=404), SimpleNamespace(data=SimpleNamespace(content="0"))]
+        ),
+        with_raw_response=SimpleNamespace(
+            download_file=lambda **kwargs: _stream_range_response(next(snapshots), kwargs["request_options"])
+        ),
+    )
+    monkeypatch.setattr(backend, "_build_async_client", lambda *_args: SimpleNamespace(shell=shell, file=file))
+    result = await backend.aexecute_stream("long-command", AsyncMock(), timeout=5)
+    assert result.exit_code == 0
+    assert result.output == "first\nfinal\n"
+    shell.kill_process.assert_not_awaited()

@@ -772,7 +772,8 @@ async def test_explicit_pi_history_keeps_edit_source_after_independent_check(fac
         await _cleanup_runs(sessions, [child_thread, parent_thread])
 
 
-async def test_pi_envelope_replay_is_idempotent_and_final_ack_is_durable(fact_database):
+@pytest.mark.parametrize("stage_status", [None, "completed", "needs_input", "failed"])
+async def test_pi_envelope_replay_is_idempotent_and_final_ack_is_durable(fact_database, stage_status):
     """final 重放只生成一个 Message，ACK 后 PostgreSQL 结果仍可回读。"""
     _, session_factory = fact_database
     now = utc_now_naive()
@@ -796,6 +797,9 @@ async def test_pi_envelope_replay_is_idempotent_and_final_ack_is_durable(fact_da
         "runtime_manifest_digest": manifest_digest,
         "payload": {
             "text": "YUXI_PI_GOLDEN_V1",
+            "stage_status": stage_status,
+            "checks": ["行数与来源一致"],
+            "unresolved_items": [] if stage_status == "completed" else ["等待业务口径"],
             "output_subdir": "pending",
             "artifact": {"path": "pi-golden.txt", "sha256": "b" * 64},
             "session": {"id": "session-1"},
@@ -873,6 +877,9 @@ async def test_pi_envelope_replay_is_idempotent_and_final_ack_is_durable(fact_da
         assert persisted_run.output_message_id == messages[0].id
         assert [message.content for message in messages] == ["YUXI_PI_GOLDEN_V1"]
         assert messages[0].extra_metadata["pi"]["artifact"]["path"] == "pi-golden.txt"
+        assert messages[0].extra_metadata["pi"]["stage_status"] == stage_status
+        assert messages[0].extra_metadata["pi"]["checks"] == ["行数与来源一致"]
+        assert messages[0].extra_metadata["pi"]["unresolved_items"] == final["payload"]["unresolved_items"]
         assert persisted_attempt.result_events == [log, final]
         assert persisted_attempt.final_acked_at == now + timedelta(seconds=1)
 
@@ -1019,3 +1026,64 @@ async def test_pi_transient_events_validate_lease_without_rewriting_history(fact
         assert ((await _persisted_attempts(session_factory, run_id))[0].result_events or []) == []
     finally:
         await _cleanup_runs(session_factory, [thread_id])
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"stage_status": "unknown"},
+        {"stage_status": []},
+        {"checks": "checked"},
+        {"unresolved_items": [1]},
+        {"stage_status": "needs_input", "artifact": {"files": [{"path": "report.xlsx"}]}},
+        {"stage_status": "failed", "artifact": {"files": [{"path": "report.xlsx"}]}},
+    ],
+)
+async def test_pi_invalid_stage_result_does_not_commit_success(fact_database, invalid):
+    """拒绝非法阶段契约，并回读数据库确认没有成功输出或 final ACK。"""
+    _, sessions = fact_database
+    run_id, thread_id = await _create_run(sessions)
+    owner = "stage-owner"
+    try:
+        async with sessions() as db:
+            repo = AgentRunRepository(db)
+            await repo.mark_running(
+                run_id,
+                worker_id=owner,
+                lease_seconds=60,
+                attempt_metadata={
+                    "adapter": "local",
+                    "runtime_manifest": {"manifest_version": 1},
+                    "runtime_manifest_digest": "a" * 64,
+                    "route_reason": "test",
+                    "route_snapshot": {"rule_version": "test"},
+                },
+            )
+            await db.commit()
+            attempt = (await repo.list_run_attempts(run_id))[0]
+            payload = {
+                "text": "阶段结果",
+                "output_subdir": f"pi-runs/{hashlib.sha256(f'{run_id}:{attempt.id}'.encode()).hexdigest()[:24]}",
+                **invalid,
+            }
+            envelope = {
+                "job_id": run_id,
+                "attempt_id": str(attempt.id),
+                "adapter": "local",
+                "event_id": "invalid-final",
+                "sequence": 0,
+                "type": "final",
+                "runtime_manifest_digest": "a" * 64,
+                "payload": payload,
+                "payload_digest": compute_manifest_fingerprint(payload),
+            }
+            with pytest.raises(ValueError, match="stage_status|字符串列表|正式交付物"):
+                await repo.record_pi_envelope(run_id, attempt_id=attempt.id, envelope=envelope, worker_id=owner)
+            await db.rollback()
+        async with sessions() as db:
+            run = await db.get(AgentRun, run_id)
+            attempt = (await AgentRunRepository(db).list_run_attempts(run_id))[0]
+            assert run.status == "running" and run.output_message_id is None
+            assert attempt.final_acked_at is None and attempt.result_events == []
+    finally:
+        await _cleanup_runs(sessions, [thread_id])

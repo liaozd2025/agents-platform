@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import json
 import os
+from pathlib import Path
 import uuid
 
 import asyncpg
@@ -197,6 +198,11 @@ async def start_case(client, headers, context, scenario):
             "query": (
                 f"YUXI_PI_HTTP:{context['nonce']}:{scenario} 完成沙箱任务并按指定目录交付。"
                 + (f" YUXI_PI_EXPECT_HISTORY:{context['expected_history']}" if context.get("expected_history") else "")
+                + (
+                    f" YUXI_PI_REPORT_EXPECT:{context['report_expectation']}"
+                    if context.get("report_expectation")
+                    else ""
+                )
             ),
         },
     )
@@ -246,6 +252,109 @@ def dictionaries(value):
     elif isinstance(value, (list, tuple)):
         for child in value:
             yield from dictionaries(child)
+
+
+async def test_pi_provider_error_is_failed_and_parent_reports_it(e2e_client, e2e_headers, pi_environment):
+    """先收到正文再发生 provider 错误，不生成成功 final 或正式交付。"""
+    context = pi_environment
+    await start_case(e2e_client, e2e_headers, context, "error")
+    run = await wait_cleanup(e2e_client, e2e_headers, context["run"])
+    await asyncio.wait_for(context["stream"], timeout=20)
+    assert run["status"] == "completed", run
+    result = await e2e_client.get(f"/api/agent/runs/{context['run']}/result", headers=e2e_headers)
+    assert result.json()["output"] == "PI_HTTP_FAILURE_REPORTED", result.text
+    child = await child_facts(context)
+    assert child["status"] == "failed" and child["output_message_id"] is None, child
+    assert child["attempt"]["final_acked_at"] is None
+    assert not any(item["type"] == "final" for item in decoded(child["attempt"]["result_events"]))
+    async with database() as db:
+        error = await db.fetchrow("SELECT error_type,error_message FROM agent_runs WHERE id=$1", child["id"])
+    assert error["error_type"] == "model_failed", error
+    assert "content_filter" in error["error_message"]
+
+
+@pytest.mark.parametrize(
+    "row_count,displayed,preview_truncated,oversized",
+    [(3, 3, False, False), (51, 50, True, False), (3, 0, True, True)],
+    ids=["three_rows", "fifty_one_rows", "oversized_first_row"],
+)
+async def test_pi_report_checks_full_source_and_persists_nul_output(
+    e2e_client, e2e_headers, pi_environment, tmp_path, row_count, displayed, preview_truncated, oversized
+):
+    """PI 执行生产预览与导出函数；仅 MySQL 连接和结果由固定 CSV 替代。"""
+    context = pi_environment
+    workdir = Workdir.open_existing(context["uid"], context["workdir"])
+    rows = [("1000", "100", "x" * 11001 if oversized else "first"), ("1600", "400", "second")]
+    rows += [("0", "0", "padding")] * (row_count - 3)
+    rows += [("400", "100", "last")]
+    source = ("sales,returns,detail\n" + "".join(",".join(row) + "\n" for row in rows)).encode()
+    source_path = tmp_path / "sales.csv"
+    source_path.write_bytes(source)
+    query_path = (
+        Path(__file__).resolve().parents[2] / "package/yuxi/agents/skills/buildin/mysql-reporter/scripts/query.py"
+    )
+    query_script = query_path.read_bytes()
+    workdir.create_directory("/", "uploads")
+    workdir.copy_file_from_path("/uploads/sales.csv", str(source_path), overwrite=False)
+    workdir.copy_file_from_path("/uploads/mysql_reporter_query.py", str(query_path), overwrite=False)
+    context["report_expectation"] = f"{row_count}:{displayed}:{str(preview_truncated).lower()}:2400"
+    await start_case(e2e_client, e2e_headers, context, "report")
+    run = await wait_cleanup(e2e_client, e2e_headers, context["run"])
+    await asyncio.wait_for(context["stream"], timeout=20)
+    assert run["status"] == "completed", run
+    result = await e2e_client.get(f"/api/agent/runs/{context['run']}/result", headers=e2e_headers)
+    assert result.json()["output"] == f"PI_REPORT_VERIFIED: {row_count} records, net sales 2400", result.text
+    child = await child_facts(context)
+    assert child["status"] == "completed" and child["attempt"]["final_acked_at"]
+    assert any(
+        "PI_REPORT_RAW\\u0000OUTPUT" in value
+        for node in dictionaries(decoded(child["attempt"]["result_events"]))
+        for value in node.values()
+        if isinstance(value, str)
+    ), "NUL 工具输出未以可持久化文本回读"
+    metadata = decoded(child["extra_metadata"])["pi"]
+    assert metadata["stage_status"] == "completed"
+    assert metadata["checks"] and metadata["unresolved_items"] == []
+    assert {item["path"] for item in metadata["artifact"]["files"]} == {
+        "report.json",
+        "report.csv",
+        "full-results.json",
+    }
+    data = workdir.read_file(f"/outputs/{metadata['output_subdir']}/report.json", 4096)
+    assert json.loads(data) == {
+        "row_count": row_count,
+        "displayed_row_count": displayed,
+        "preview_truncated": preview_truncated,
+        "truncated": False,
+        "gross_sales": "3000",
+        "returns": "600",
+        "net_sales": "2400",
+    }
+    preview = workdir.read_file(f"/outputs/{metadata['output_subdir']}/query-preview.txt", 20000).decode()
+    assert json.loads(preview.splitlines()[0]) == {
+        "row_count": row_count,
+        "displayed_row_count": displayed,
+        "truncated": preview_truncated,
+    }
+    exported = await e2e_client.get(
+        "/api/workspace/download",
+        headers=e2e_headers,
+        params={"path": f"{context['workdir']}/outputs/{metadata['output_subdir']}/full-results.json"},
+    )
+    assert exported.status_code == 200, exported.text
+    assert exported.json() == {
+        "row_count": row_count,
+        "truncated": False,
+        "rows": [dict(zip(("sales", "returns", "detail"), row, strict=True)) for row in rows],
+    }
+    csv = await e2e_client.get(
+        "/api/workspace/download",
+        headers=e2e_headers,
+        params={"path": f"{context['workdir']}/outputs/{metadata['output_subdir']}/report.csv"},
+    )
+    assert csv.status_code == 200 and b"2400" in csv.content
+    assert workdir.read_file("/uploads/sales.csv", 20000) == source
+    assert workdir.read_file("/uploads/mysql_reporter_query.py", 20000) == query_script
 
 
 async def test_pi_http_delivers_large_file_with_persisted_lineage(e2e_client, e2e_headers, pi_environment):

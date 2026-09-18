@@ -12,7 +12,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-CASE = re.compile(r"YUXI_PI_HTTP:([0-9a-f]{32}):(artifact|cancel|steer)")
+CASE = re.compile(r"YUXI_PI_HTTP:([0-9a-f]{32}):(artifact|cancel|steer|error|report)")
 OBSERVATIONS: dict[str, list[dict]] = {}
 LOCK = threading.Lock()
 
@@ -47,6 +47,25 @@ def plan_response(request: dict) -> tuple[str, str, dict | str]:
             if "YUXI_PI_EXPECT_HISTORY:" in user_texts[-1]:
                 arguments["continue_session"] = True
             return nonce, "parent_delegate", {"name": "pi_sandbox", "args": arguments}
+        if scenario == "error":
+            assert "执行状态: failed" in str(tool_messages[-1]), "provider failure was not returned to parent"
+            assert "content_filter" in str(tool_messages[-1]), "provider failure reason was lost"
+            return nonce, "parent_failure", "PI_HTTP_FAILURE_REPORTED"
+        if scenario == "report":
+            content = str(tool_messages[-1].get("content", ""))
+            if "PI Run:" in content:
+                assert "阶段状态: completed" in content, "structured stage status missing"
+                path = re.search(r"/home/gem/user-data/[^\s]+/report\.json", content)
+                assert path, "report evidence was not delivered"
+                return nonce, "parent_verify", {"name": "read_file", "args": {"file_path": path[0]}}
+            expected = re.search(r"YUXI_PI_REPORT_EXPECT:(\d+):(\d+):(true|false):(\d+)", user_texts[-1])
+            assert expected, "independent report expectation missing"
+            report = json.loads(content[content.index("{") : content.rindex("}") + 1])
+            assert report["row_count"] == int(expected[1]) and report["displayed_row_count"] == int(expected[2]), report
+            assert report["preview_truncated"] is (expected[3] == "true") and report["truncated"] is False, report
+            assert report["net_sales"] == expected[4], report
+            assert "More lines remain" not in content, "report evidence was truncated"
+            return nonce, "parent_complete", f"PI_REPORT_VERIFIED: {expected[1]} records, net sales {expected[4]}"
         if scenario != "artifact" or "PI_HTTP_CHILD_OK" not in json.dumps(tool_messages, ensure_ascii=False):
             raise ValueError("child_result_missing")
         if "large.bin" not in json.dumps(tool_messages):
@@ -66,6 +85,60 @@ def plan_response(request: dict) -> tuple[str, str, dict | str]:
     project, output = project_match[1], output_match[1]
     if not re.fullmatch(re.escape(project) + r"/outputs/pi-runs/[0-9a-f]{24}", output):
         raise ValueError("assigned_directory_not_attempt_local")
+
+    if scenario == "error":
+        return nonce, "pi_error", "不可交付的部分答案"
+    if scenario == "report":
+        if not tool_messages:
+            script = (
+                "from __future__ import annotations\n"
+                "import ast,csv,json,re\nfrom decimal import Decimal\n"
+                "from pathlib import Path\nfrom types import SimpleNamespace\n"
+                f"rows=list(csv.DictReader(Path({project + '/uploads/sales.csv'!r}).open()))\n"
+                f"source=Path({project + '/uploads/mysql_reporter_query.py'!r})\n"
+                "names={'MySQLSecurityChecker','limit_result_size','format_query_result','run_query'}\n"
+                "tree=ast.parse(source.read_text())\n"
+                "tree.body=[node for node in tree.body "
+                "if isinstance(node,(ast.ClassDef,ast.FunctionDef)) and node.name in names]\n"
+                "scope={'re':re,'json':json,'Path':Path,'Any':object,"
+                "'load_mysql_config':lambda:{},"
+                "'create_connection':lambda config:SimpleNamespace(open=True,close=lambda:None),"
+                "'execute_query_with_timeout':lambda *args,**kwargs:rows}\n"
+                "exec(compile(tree,str(source),'exec'),scope)\n"
+                f"out=Path({output!r})\n"
+                "preview=scope['run_query']('SELECT sales, returns, detail FROM fixture_sales',"
+                "60,str(out/'full-results.json'))\n"
+                "(out/'query-preview.txt').write_text(preview)\n"
+                "preview_facts=json.loads(preview.splitlines()[0])\n"
+                "full=json.loads((out/'full-results.json').read_text())\n"
+                "gross=sum(Decimal(row['sales']) for row in full['rows'])\n"
+                "returns=sum(Decimal(row['returns']) for row in full['rows'])\n"
+                "result={'row_count':full['row_count'],'displayed_row_count':preview_facts['displayed_row_count'],"
+                "'preview_truncated':preview_facts['truncated'],'truncated':full['truncated'],'gross_sales':str(gross),"
+                "'returns':str(returns),'net_sales':str(gross-returns)}\n"
+                "(out/'report.json').write_text(json.dumps(result))\n"
+                "with (out/'report.csv').open('w') as stream:\n"
+                " writer=csv.DictWriter(stream,fieldnames=result.keys());writer.writeheader();writer.writerow(result)\n"
+                "print(preview)\nprint('PI_REPORT_RAW\\x00OUTPUT')\n"
+            )
+            return nonce, "pi_report_execute", {"name": "bash", "args": {"command": f"python -c {shlex.quote(script)}"}}
+        assert "PI_REPORT_RAW" in str(tool_messages), "real data calculation missing"
+        for filename in ("report.json", "report.csv", "full-results.json"):
+            if f"已登记 {filename}" not in str(tool_messages):
+                return (
+                    nonce,
+                    f"pi_report_submit_{filename}",
+                    {
+                        "name": "submit_artifact",
+                        "args": {
+                            "path": filename,
+                            "stage_status": "completed",
+                            "checks": ["生产查询函数完整导出固定 SQL 结果，核对预览截断及全量销售退货合计"],
+                            "unresolved_items": [],
+                        },
+                    },
+                )
+        return nonce, "pi_report_complete", "报告已生成，完整性与合计见 report.json。"
 
     if not tool_messages:
         if scenario == "artifact":
@@ -192,6 +265,11 @@ def plan_delegation_response(body):
     supplied = re.search(r"SUPPLIED_VALUE=([\w-]+)", user)
     if stage == "S":
         if supplied is None:
+            if last["role"] == "user":
+                return {
+                    "name": "submit_artifact",
+                    "args": {"stage_status": "needs_input", "checks": [], "unresolved_items": ["缺少申请科室"]},
+                }
             return "阶段未完成：缺少申请科室，请主智能体向用户补充。"
         assert "缺少申请科室" in prior, "supplement lost the incomplete stage history"
     output_root = re.search(r"Put every generated deliverable under ([^\n]+?)\. ", user).group(1)
@@ -201,7 +279,15 @@ def plan_delegation_response(body):
             value = f"申请科室：{supplied[1]}"
         return {"name": "write", "args": {"path": f"{output_root}/verification.txt", "content": f"{value}\n{nonce}\n"}}
     if '"name": "submit_artifact"' not in json.dumps(messages[latest_user:]):
-        return {"name": "submit_artifact", "args": {"path": "verification.txt"}}
+        return {
+            "name": "submit_artifact",
+            "args": {
+                "path": "verification.txt",
+                "stage_status": "completed",
+                "checks": ["已写入阶段核验文件"],
+                "unresolved_items": [],
+            },
+        }
     return f"阶段 {stage} 完成；验收依据 verification.txt；未解决项：无。"
 
 
@@ -251,7 +337,7 @@ class ReplayHandler(BaseHTTPRequestHandler):
             "created": int(time.time()),
         }
         if isinstance(response, str):
-            delta, finish = {"content": response}, "stop"
+            delta, finish = {"content": response}, "content_filter" if phase == "pi_error" else "stop"
         else:
             delta, finish = (
                 {

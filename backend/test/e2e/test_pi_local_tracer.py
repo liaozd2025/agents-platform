@@ -202,9 +202,38 @@ async def test_pi_sandbox_delivers_stdout_before_command_finishes():
         await asyncio.to_thread(get_sandbox_provider().release, thread_id, uid=uid)
 
 
-@pytest.mark.parametrize("emit_stdout", [True, False])
-async def test_pi_sandbox_cancel_stops_command_writes_and_cleans_stream_capture(emit_stdout):
-    """取消真实长命令后核对进程、文件副作用与流式临时文件。"""
+async def test_pi_sandbox_silent_pty_timeout_does_not_end_live_process():
+    """越过镜像的 120 秒 PTY 观察期限，仍回读真实退出码和最终文件。"""
+    thread_id = f"pi-long-stream-{uuid.uuid4().hex}"
+    uid = "pi-e2e"
+    backend = ProvisionerSandboxBackend(thread_id=thread_id, uid=uid, inherit_env=False)
+    chunks = []
+
+    async def collect(chunk):
+        """收集进程增量输出。"""
+        chunks.append(chunk)
+
+    script = (
+        "console.log('started'); setTimeout(() => { "
+        "require('node:fs').writeFileSync('/home/gem/pi-long-done', 'done'); "
+        "console.log('finished'); }, 125000);"
+    )
+    try:
+        result = await asyncio.wait_for(
+            backend.aexecute_stream(f"node -e {shlex.quote(script)}", collect, timeout=150), timeout=180
+        )
+        assert result.exit_code == 0, result.output
+        assert "".join(chunks) == "started\nfinished\n"
+        saved = await asyncio.to_thread(backend.execute, "cat /home/gem/pi-long-done")
+        assert saved.output.strip() == "done"
+    finally:
+        backend.close()
+        await asyncio.to_thread(get_sandbox_provider().release, thread_id, uid=uid)
+
+
+@pytest.mark.parametrize(("emit_stdout", "stop_mode"), [(True, "cancel"), (False, "cancel"), (True, "deadline")])
+async def test_pi_sandbox_cancel_stops_command_writes_and_cleans_stream_capture(emit_stdout, stop_mode):
+    """取消或到期后核对进程、文件副作用与流式临时文件。"""
 
     thread_id = f"pi-stream-cancel-{uuid.uuid4().hex}"
     uid = "pi-e2e"
@@ -221,7 +250,9 @@ async def test_pi_sandbox_cancel_stops_command_writes_and_cleans_stream_capture(
     async def started(_chunk: str) -> None:
         first_output.set()
 
-    task = asyncio.create_task(backend.aexecute_stream(f"node -e {shlex.quote(script)}", started, timeout=30))
+    task = asyncio.create_task(
+        backend.aexecute_stream(f"node -e {shlex.quote(script)}", started, timeout=1 if stop_mode == "deadline" else 30)
+    )
     task.add_done_callback(lambda _task: first_output.set())
     try:
         if emit_stdout:
@@ -236,9 +267,14 @@ async def test_pi_sandbox_cancel_stops_command_writes_and_cleans_stream_capture(
                     await asyncio.sleep(0.05)
             assert first_output.is_set() is False
         assert task.done() is False, task.result()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        if stop_mode == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            result = await asyncio.wait_for(task, timeout=30)
+            assert result.exit_code == 1
+            assert "退出码未在执行期限内生成" in result.output
 
         probe = (
             "const fs = require('node:fs'); "
@@ -403,13 +439,16 @@ async def test_pi_sandbox_assembled_path_prioritizes_run_output_directory(
             create_if_missing=True,
             workdir_path=workdir_path,
         )
-        assert await asyncio.to_thread(
-            get_sandbox_provider().get,
-            thread_id,
-            uid=uid,
-            create_if_missing=False,
-            workdir_path=workdir_path,
-        ) is None
+        assert (
+            await asyncio.to_thread(
+                get_sandbox_provider().get,
+                thread_id,
+                uid=uid,
+                create_if_missing=False,
+                workdir_path=workdir_path,
+            )
+            is None
+        )
         agent_manager.auto_discover_agents()
         monkeypatch.setattr(run_worker, "resolve_pi_model_runtime", lambda _model_spec: (None, {}))
 
@@ -460,6 +499,25 @@ async def test_pi_sandbox_assembled_path_prioritizes_run_output_directory(
         parent_events = _decode_sse_chunks(sse_chunks)
         tool_events = _pi_tool_events([payload for _event, payload in parent_events])
         assert {("call", "read"), ("result", "read"), ("call", "write"), ("result", "write")} <= tool_events
+
+        # 在真实持久边界注入未确认结果，新的工具调用不得重新执行文件副作用。
+        for error_type in ("execution_unknown", "cleanup_failed"):
+            async with pg_manager.get_async_session_context() as db:
+                persisted_child = await db.get(AgentRun, child_run_id)
+                persisted_child.status = "failed"
+                persisted_child.error_type = error_type
+            rejected = (
+                await create_pi_sandbox_middleware(context)
+                .tools[0]
+                .coroutine(
+                    description="重新生成全部文件",
+                    runtime=SimpleNamespace(tool_call_id=f"retry-{error_type}"),
+                )
+            )
+            assert "不能再次委派" in rejected.update["messages"][0].content
+            async with pg_manager.get_async_session_context() as db:
+                children = await db.scalars(select(AgentRun).where(AgentRun.created_by_run_id == parent_run_id))
+                assert [item.id for item in children] == [child_run_id]
     finally:
         if parent_backend is not None:
             parent_backend.close()

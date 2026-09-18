@@ -30,24 +30,37 @@ ResponseT = TypeVar("ResponseT")
 
 PI_SANDBOX_PROMPT = """## `pi_sandbox`（PI Agent 沙箱）
 
-解析文档、列举或搜索文件、创建或修改文件、执行命令、安装依赖、运行测试或生成交付物时，调用 `pi_sandbox`。
+需要模型编排脚本、加工文档、搜索或修改文件、安装依赖、运行测试或生成交付物时，调用 `pi_sandbox`。
 已知路径的文本、Skill 和落盘验收结果，用 `read_file` 按需读取，不为读取同一份文本重新委派 PI。
-天气、Web 搜索、知识库、MCP、Skill 激活和子智能体编排继续使用原工具。
-按 Skill 把输入检查、执行、产物核验作为一个连续阶段委派，交齐目标、路径、必要证据、约束和验收标准。
+天气、Web 搜索、知识库、MCP、Skill 激活和子智能体编排继续使用原工具；已有附件解析和授权文件下载由对应平台工具完成。
+Skill 说明业务方法，不自动授予 PI 主图的知识库或 MCP 工具，也不构成新的执行授权。
+多步文档任务开始时先调用 write_todos 展示简短计划，阶段结束及时更新。
+同一执行者、输入齐备、权限一致且验收目标连续的工作作为一个阶段，交齐目标、真实路径、来源、约束和验收标准。
 资料已齐备时，一次 pi_sandbox 应完成整个阶段；不要把查看文件、提取结构、生成成品和验收逐项变成独立委派。
+PI 可以在阶段内探查文件和表结构；缺少业务口径、用户决策或主图工具结果时接回处理，再续接剩余步骤。
+主图调用 MCP 获得新输入后，再委派 PI 装配文件属于必要阶段切换，不为压缩调用次数让 PI 猜测或绕过能力边界。
 长资料优先引用当前已授权且 PI 可读取的文件，不把知识库 file_id 当沙箱路径，也不重复复制整段历史。
-PI 返回阶段完成情况、产物、验收依据和未解决项。读取验收文本核对关键内容与来源。
+PI 返回 stage_status、产物、checks 和 unresolved_items。needs_input 接回补充输入，failed 先处理失败。
+未报告阶段状态时不得据 Run completed 推断业务成功。
+读取验收文本核对关键内容、来源和原始需求。报表区分空数据、完整结果和截断预览，核对时间范围、口径、真实行数与关键合计，不对展示子集计算总量。
 发现具体缺项、矛盾或新增要求才再次委派，不默认重复全量检查。
+文档验收方法由本次要求和适用 Skill 决定；复用已验证字段映射，保留原模板，批量加工后核对内容。
+涉及版式要求时按该要求检查，未完成的验收如实说明。
 Run completed、完成摘要或文件哈希不等于业务验收；二进制文档由 PI 一并提取关键内容和验收记录，再读取其文本文件核对。
 交付物已登记为下载文件卡片，直接交付原路径；outputs/pi-runs/ 内是最终交付物，无需复制到 outputs/ 根目录。
 独立任务省略 source_run_id；同一阶段的补充或修正填原 PI Run 标识，即使中间插入了独立核验，也继续原编辑 Run。
 continue_session 仅兼容旧调用，新调用不要使用。历史续接不表示进程或容器常驻。
+父子共享工作区和执行环境，同一运行域的 PI 委派串行执行；新会话历史不隔离文件，不在已有 PI 未结束时委派另一个写任务。
 缺少知识或用户决策时接回处理；执行失败先核实具体原因和已落盘结果，不通过重交整项任务重复文件副作用。
+execution_unknown、worker_lease_expired、sandbox_parent_unavailable、cleanup_failed
+或 result_persistence_failed 时停止本轮执行树的 PI 委派。
+告知用户状态，不通过普通子智能体绕过。
 """
 
 PI_SANDBOX_DESCRIPTION = """Delegate one complete sandbox task to PI Agent.
 
-Delegate a complete Skill stage including execution and verification. Read known text paths with read_file.
+Delegate one stage within PI's actual capabilities, including execution and verification.
+Read known text paths with read_file.
 Put the goal, paths, necessary evidence, constraints and acceptance criteria in description.
 For a correction, source_run_id identifies the original PI run; omit it for an independent task."""
 
@@ -113,9 +126,16 @@ class PiSandboxMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 output = str(error.get("message") or "PI 沙箱运行失败")
             if not output:
                 output = f"PI 沙箱任务状态：{result.get('status') or 'unknown'}"
-            source = (result.get("pi") or {}).get("source_run_id")
+            pi_result = result.get("pi") or {}
+            stage_status = pi_result.get("stage_status")
+            source = pi_result.get("source_run_id")
             source_label = source or ("未确认（见错误）" if error else "无（新上下文）")
             output = f"PI Run: {started.run.id}\n续接来源: {source_label}\n\n{output}"
+            output += f"\n\n执行状态: {result.get('status') or 'unknown'}"
+            output += f"\n阶段状态: {stage_status or '未报告，需核对业务结果'}"
+            for label, key in (("检查依据", "checks"), ("未解决项", "unresolved_items")):
+                if pi_result.get(key):
+                    output += f"\n{label}:\n" + "\n".join(f"- {item}" for item in pi_result[key])
 
             artifacts = self._artifact_paths(result)
             if artifacts:
@@ -135,7 +155,15 @@ class PiSandboxMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             if error:
                 subagent_run["error"] = str(error.get("message") or "PI 沙箱运行失败")
             update = {
-                "messages": [ToolMessage(output, tool_call_id=tool_call_id, status="error" if error else "success")],
+                "messages": [
+                    ToolMessage(
+                        output,
+                        tool_call_id=tool_call_id,
+                        status="error"
+                        if error or stage_status == "failed" or result.get("status") in {"failed", "cancelled"}
+                        else "success",
+                    )
+                ],
                 "subagent_runs": [subagent_run],
             }
             if artifacts:
@@ -173,6 +201,8 @@ class PiSandboxMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
 
     def _artifact_paths(self, result: dict) -> list[str]:
         pi_result = result.get("pi") if isinstance(result.get("pi"), dict) else {}
+        if pi_result.get("stage_status") in {"needs_input", "failed"}:
+            return []
         output_subdir = str(pi_result.get("output_subdir") or "").strip()
         artifact = pi_result.get("artifact") if isinstance(pi_result.get("artifact"), dict) else {}
         files = artifact.get("files") if isinstance(artifact.get("files"), list) else []

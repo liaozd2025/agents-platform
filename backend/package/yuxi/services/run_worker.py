@@ -43,6 +43,8 @@ from yuxi.services.pi_execution_service import (
     PiCleanupFailed,
     PiExecutionCancelled,
     PiExecutionUnknown,
+    PiModelFailed,
+    PiResultPersistenceFailed,
     PiRuntimeMismatch,
     PI_RUNNER_PATH,
     build_default_pi_runtime_manifest,
@@ -156,6 +158,9 @@ async def _validate_run_workdir_binding(run: AgentRun) -> AuthorizedWorkdir:
             ):
                 raise NonRetryableRunError("SubAgent Run 的 runtime scope 不属于创建者执行树")
         elif run.run_type == "sandbox":
+            from yuxi.agents.tool_approval import DEFAULT_TOOL_APPROVAL_MODE, require_pi_delegation_approval
+            from yuxi.repositories.project_repository import ProjectRepository
+
             creator_id = str(run.created_by_run_id or "").strip()
             if not creator_id:
                 raise NonRetryableRunError("Sandbox Run 缺少创建者")
@@ -165,6 +170,11 @@ async def _validate_run_workdir_binding(run: AgentRun) -> AuthorizedWorkdir:
                 raise NonRetryableRunError("Sandbox Run 的创建者非法")
             if creator_run.status != "running":
                 raise NonRetryableRunError("Sandbox Run 的创建者已不再执行")
+            parent_payload = creator_run.input_payload if isinstance(creator_run.input_payload, dict) else {}
+            require_pi_delegation_approval(
+                creator_run_type=creator_run.run_type,
+                tool_approval_mode=parent_payload.get("tool_approval_mode", DEFAULT_TOOL_APPROVAL_MODE),
+            )
             creator_binding = await resolve_authorized_workdir(
                 thread_id=str(creator_run.conversation_thread_id),
                 uid=str(run.uid),
@@ -178,6 +188,9 @@ async def _validate_run_workdir_binding(run: AgentRun) -> AuthorizedWorkdir:
                 or str(runtime.get("workdir_path") or "") != binding.workdir_path
             ):
                 raise NonRetryableRunError("Sandbox Run 的 runtime scope 不属于创建者执行树")
+            if await ProjectRepository(db).lock_active_for_user(binding.project_id, str(run.uid)) is None:
+                raise NonRetryableRunError("Sandbox Run 的 Project 不可执行")
+            await repo.require_pi_scope_available(creator_run, exclude_run_id=str(run.id))
     return binding
 
 
@@ -1401,6 +1414,12 @@ async def process_agent_run(ctx, run_id: str):
                     )
                 return ack
 
+            pi_error_types = {
+                PiRuntimeMismatch: "runtime_mismatch",
+                PiExecutionUnknown: "execution_unknown",
+                PiModelFailed: "model_failed",
+                PiResultPersistenceFailed: "result_persistence_failed",
+            }
             try:
                 pi_attempt = {
                     "run_id": run_id,
@@ -1426,12 +1445,16 @@ async def process_agent_run(ctx, run_id: str):
                 )
             except PiExecutionCancelled as exc:
                 raise asyncio.CancelledError(f"run {run_id} PI execution cancelled") from exc
-            except PiRuntimeMismatch as exc:
+            except tuple(pi_error_types) as exc:
+                error_type = pi_error_types[type(exc)]
                 transition = await mark_run_terminal(
                     run_id,
                     "failed",
-                    "runtime_mismatch",
+                    error_type,
                     str(exc),
+                    token_usage=AgentRunRepository.pi_token_usage(exc.token_usage, manifest)
+                    if isinstance(exc, PiModelFailed)
+                    else None,
                     worker_id=worker_id,
                 )
                 if transition.changed:
@@ -1439,23 +1462,7 @@ async def process_agent_run(ctx, run_id: str):
                         run_id,
                         transition.status or "failed",
                         thread_id=thread_id,
-                        payload={"error_type": "runtime_mismatch"},
-                    )
-                return
-            except PiExecutionUnknown as exc:
-                transition = await mark_run_terminal(
-                    run_id,
-                    "failed",
-                    "execution_unknown",
-                    str(exc),
-                    worker_id=worker_id,
-                )
-                if transition.changed:
-                    await _append_end_event(
-                        run_id,
-                        transition.status or "failed",
-                        thread_id=thread_id,
-                        payload={"error_type": "execution_unknown"},
+                        payload={"error_type": error_type},
                     )
                 return
             except PiCleanupFailed as exc:
@@ -1473,18 +1480,15 @@ async def process_agent_run(ctx, run_id: str):
                     await record_pi_cleanup_failure(run_id, attempt.id, worker_id, str(exc))
                     logger.info(f"Run PI cancellation settled with cleanup orphan: run={run_id}")
                     return
-                error_type = (
-                    "execution_unknown"
-                    if isinstance(primary, PiExecutionUnknown)
-                    else "runtime_mismatch"
-                    if isinstance(primary, PiRuntimeMismatch)
-                    else "cleanup_failed"
-                )
+                error_type = pi_error_types.get(type(primary), "cleanup_failed")
                 transition = await mark_run_terminal(
                     run_id,
                     "failed",
                     error_type,
                     str(primary or exc),
+                    token_usage=AgentRunRepository.pi_token_usage(primary.token_usage, manifest)
+                    if isinstance(primary, PiModelFailed)
+                    else None,
                     worker_id=worker_id,
                 )
                 await record_pi_cleanup_failure(run_id, attempt.id, worker_id, str(exc))

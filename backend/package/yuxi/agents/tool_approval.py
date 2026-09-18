@@ -22,6 +22,13 @@ def normalize_tool_approval_mode(value: object) -> ToolApprovalMode:
     return mode
 
 
+def require_pi_delegation_approval(*, creator_run_type: str, tool_approval_mode: object) -> None:
+    """普通子图没有审批恢复入口，需将受审批的 PI 委派交回主图。"""
+    mode = normalize_tool_approval_mode(tool_approval_mode)
+    if creator_run_type == "subagent" and mode == "default":
+        raise ValueError("当前子智能体不能批准 PI 执行，请将任务交回主智能体，由主图批准 pi_sandbox 后执行")
+
+
 def create_tool_approval_middleware(
     mode: ToolApprovalMode,
     *,

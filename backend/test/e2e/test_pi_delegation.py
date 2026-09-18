@@ -220,9 +220,12 @@ async def test_user_supplement_resumes_incomplete_pi_stage(e2e_client, e2e_heade
         assert len(rows) == 1
         metadata = json.loads(rows[0]["extra_metadata"])["pi"]
         assert metadata["source_run_id"] == source
+        assert metadata["stage_status"] == ("completed" if resume else "needs_input")
         if resume:
             workdir = Workdir.open_existing(ctx["uid"], ctx["workdir_path"])
             content = workdir.read_file(f"/outputs/{metadata['output_subdir']}/verification.txt", 1024)
             assert content.decode() == f"申请科室：{supplied}\n{ctx['nonce']}\n"
         else:
+            assert metadata["artifact"]["files"] == []
+            assert metadata["unresolved_items"] == ["缺少申请科室"]
             source, interrupted_run = rows[0]["id"], run_id

@@ -218,5 +218,5 @@ def test_pi_final_usage_rejects_untrusted_counts_and_model_attribution(mutation)
         usage["total"] = {key: 0 for key in total}
         usage["models"]["p:m"]["usage"] = dict(usage["total"])
     with pytest.raises(ValueError, match="PI token_usage"):
-        AgentRunRepository._pi_token_usage(usage, {"model": {"spec": "p:m"}})
-    assert AgentRunRepository._pi_token_usage(valid, {"model": {"spec": "p:m"}}) == valid
+        AgentRunRepository.pi_token_usage(usage, {"model": {"spec": "p:m"}})
+    assert AgentRunRepository.pi_token_usage(valid, {"model": {"spec": "p:m"}}) == valid

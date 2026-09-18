@@ -685,6 +685,7 @@ class ProvisionerSandboxBackend(BaseSandbox):
         client = None
         session_id = ""
         status = "running"
+        process_exited = False
         output_callback_failed = False
         capture_path = f"/home/gem/.yuxi-stream-{uuid.uuid4().hex}.log"
         status_path = f"{capture_path}.status"
@@ -751,7 +752,7 @@ class ProvisionerSandboxBackend(BaseSandbox):
                     while True:
                         polls += 1
                         previous_offset = capture_offset
-                        if status == "completed":
+                        if status in {"completed", "no_change_timeout"}:
                             try:
                                 poll_requests += 1
                                 captured_status = await client.file.read_file(
@@ -761,15 +762,17 @@ class ProvisionerSandboxBackend(BaseSandbox):
                             except ApiError as exc:
                                 if exc.status_code != 404:
                                     raise
-                                # 固定沙盒可能在进程仍执行时报告 completed，退出码文件才是包装命令的终态。
+                                # PTY 观察超时不会停止进程；退出码文件才是包装命令的终态。
                                 status = "running"
-                                if asyncio.get_running_loop().time() >= deadline:
-                                    raise TimeoutError("sandbox 命令退出码未在执行期限内生成") from exc
                             else:
                                 try:
                                     exit_code = int(captured_status.data.content.strip())
                                 except (AttributeError, TypeError, ValueError) as exc:
                                     raise RuntimeError("sandbox 命令退出码无效") from exc
+                                process_exited = True
+                                status = "completed"
+                        if not process_exited and asyncio.get_running_loop().time() >= deadline:
+                            raise TimeoutError("sandbox 命令退出码未在执行期限内生成")
                         terminal = status != "running"
                         try:
                             # file.read 会去掉末尾换行；按原始字节读取才能辨别完整 JSONL 行。
@@ -848,7 +851,7 @@ class ProvisionerSandboxBackend(BaseSandbox):
                     primary_error = exc
                     raise
                 finally:
-                    if session_id and status == "running":
+                    if session_id and not process_exited:
                         try:
                             killed = await client.shell.kill_process(id=session_id)
                             if (

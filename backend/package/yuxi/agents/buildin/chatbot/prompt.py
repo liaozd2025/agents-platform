@@ -55,7 +55,8 @@ def build_prompt_with_context(context):
 - /home/gem/skills/：当前用户已授权共享/内置 Skill 的只读目录
 - /home/gem/user-data/agents/skills/：当前用户的个人 Skill 目录
 - 未经用户明确要求，不得在当前 Project Workdir 之外创建、修改、移动或删除文件
-- 父子智能体共享同一个 Project Workdir 与执行树 runtime；并发写同一路径遵循真实 POSIX 结果
+- 父子智能体共享 Project Workdir 与执行树 runtime；新的模型上下文不隔离文件
+- 共享文件与依赖环境的修改顺序执行，最终合并由一个执行者负责
 """
     system_prompt = (
         f"{current_date}\n\n{PROMPT.strip()}\n\n{filesystem_prompt.strip()}\n\n{context.system_prompt or ''}"

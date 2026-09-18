@@ -162,6 +162,12 @@ jobs:
         run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_agent_request_queue_concurrency.py -q
       - name: Verify AgentRun lease ownership
         run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_agent_run_lease.py -q
+      - name: Verify PI persistence and execution boundaries
+        run: |
+          docker compose exec -T api uv run --no-sync --no-dev pytest \
+            test/integration/services/test_pi_scope_boundary.py \
+            test/integration/services/test_pi_execution_persistence.py \
+            test/integration/services/test_agent_run_manifest_and_attempts.py -q
       - name: Verify Run result causality
         run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/api/test_agent_run_result_causality.py -q
       - name: Verify deterministic Agent assembled path

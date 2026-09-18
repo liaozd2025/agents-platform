@@ -90,8 +90,14 @@ async def test_start_inherits_parent_runtime_project_model_and_locked_skills(
     project = SimpleNamespace(id="project-1", workdir_path="projects/project-1")
     child = SimpleNamespace(id="child-run")
     captured = {}
+    children = []
 
     class RunRepo:
+        async def require_pi_scope_available(self, creator_run):
+            assert creator_run is parent
+            if children:
+                raise ValueError("不能再次委派")
+
         async def lock_run_for_user(self, run_id, uid):
             assert (run_id, uid) == ("parent-run", "user-1")
             return parent
@@ -174,6 +180,20 @@ async def test_start_inherits_parent_runtime_project_model_and_locked_skills(
     }
     assert db.commits == 1
 
+    children.append(SimpleNamespace(id="uncertain-run", run_type="sandbox", error_type="execution_unknown"))
+    monkeypatch.setattr(svc.agent_run_service, "prepare_agent_run_creation_scope", prepare_scope)
+    with pytest.raises(ValueError, match="不能再次委派"):
+        await service.start(
+            uid="user-1",
+            created_by_run_id="parent-run",
+            description="重新生成整份报告",
+            tool_call_id="new-call",
+            skill_slugs=[],
+            skill_sources={},
+            skill_runtime_paths={},
+        )
+    assert db.commits == 1
+
     child.input_payload = captured["persist"]["input_payload"]
     original_runtime = dict(child.input_payload["runtime"])
 
@@ -213,6 +233,7 @@ async def test_start_rejects_deleted_parent_scope(parent_status, active_project,
         conversation_thread_id="thread-parent",
         conversation_id=10,
         status="running",
+        input_payload={},
     )
     parent_conversation = SimpleNamespace(
         id=10,
@@ -270,3 +291,26 @@ async def test_start_rejects_sandbox_parent_recursion_before_persisting(monkeypa
             skill_sources={},
             skill_runtime_paths={},
         )
+
+
+@pytest.mark.asyncio
+async def test_default_subagent_cannot_create_pi_even_when_tool_is_called_directly():
+    """绕过工具可见性直接调用服务时，仍必须交回主图审批。"""
+    db = Db()
+    service = svc.PiSandboxRunService(db)
+
+    async def lock(*_args):
+        return SimpleNamespace(status="running", run_type="subagent", input_payload={"tool_approval_mode": "default"})
+
+    service.run_repo.lock_run_for_user = lock
+    with pytest.raises(ValueError, match="交回主智能体"):
+        await service.start(
+            uid="user",
+            created_by_run_id="subagent",
+            description="生成文件",
+            tool_call_id="call",
+            skill_slugs=[],
+            skill_sources={},
+            skill_runtime_paths={},
+        )
+    assert db.commits == 0
