@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
 import sys
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import jwt
 import pytest
-from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from yuxi.storage.postgres.models_business import ROOT_DEPARTMENT_ID, OperationLog, User
+from yuxi.utils.auth_utils import AuthUtils
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -60,6 +68,122 @@ def _stop_apps(processes: list[subprocess.Popen]) -> None:
             process.wait(timeout=5)
 
 
+@pytest.mark.parametrize("mode", ["local-success", "local-failure", "oa-token", "oa-account"])
+async def test_oa_profile_survives_real_http_and_is_committed(mode):
+    """真实认证进程访问受控 OA HTTP 服务，响应字段与数据库提交必须一致。"""
+    account = f"2024{int(uuid.uuid4().hex[:8], 16) % 10**8:08d}"
+    local = mode.startswith("local-")
+    uid = f"pytest-local-{account}" if local else f"oa:TEST:{account}"
+    password = f"Pw!{uuid.uuid4().hex}"
+    token = jwt.encode({"data": {"account": account}}, "test-oa-profile-token-secret-32-bytes", algorithm="HS256")
+    calls = []
+    profile = {
+        "account": account,
+        "companyCode": "TEST",
+        "userStateCode": "service",
+        "fullName": "资料测试姓名",
+        "userJobInformationDtos": [
+            {
+                "pagingSort": 1,
+                "appointmentStationName": "资料测试岗位",
+                "jobLevelName": "11",
+                "jobGradeName": "基层",
+            }
+        ],
+    }
+
+    class Provider(BaseHTTPRequestHandler):
+        """提供当前用例的 OA 返回值与可观察故障。"""
+
+        def respond(self, status_code, data):
+            """返回 JSON，供独立 API 进程通过网络读取。"""
+            body = json.dumps(data).encode()
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            """记录反查账号并返回资料或上游错误。"""
+            calls.append(parse_qs(urlsplit(self.path).query).get("Account"))
+            self.respond(503 if mode == "local-failure" else 200, {"status": 1, "data": profile})
+
+        def do_POST(self):
+            """模拟账号换取 OA 凭证。"""
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.respond(200, {"data": {"account": account, "oaToken": token, "saToken": token}})
+
+        def log_message(self, *args):
+            """测试不输出请求信息。"""
+
+    provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    thread = threading.Thread(target=provider.serve_forever, daemon=True)
+    thread.start()
+    provider_url = f"http://127.0.0.1:{provider.server_port}"
+    port = _unused_port()
+    api_url = f"http://127.0.0.1:{port}"
+    env = {
+        **os.environ,
+        "YUXI_ENV": "development",
+        "YUXI_INSTANCE_ID": "pytest-oidc-replicas",
+        "JWT_SECRET_KEY": "pytest-oidc-replica-shared-jwt-secret",
+        "OA_SSO_ENABLED": "true",
+        "OA_SSO_USERINFO_URL": f"{provider_url}/userinfo",
+        "OA_SSO_COMPANY_CODE": "TEST",
+        "OA_ACCOUNT_LOGIN_ENABLED": "true",
+        "OA_ACCOUNT_LOGIN_URL": f"{provider_url}/login",
+        "OA_ACCOUNT_LOGIN_COMPANY_CODE": "TEST",
+    }
+    engine = create_async_engine(os.environ["POSTGRES_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    processes = []
+    try:
+        if local:
+            async with sessions() as db:
+                db.add(
+                    User(
+                        username=account,
+                        uid=uid,
+                        password_hash=AuthUtils.hash_password(password),
+                        department_id=ROOT_DEPARTMENT_ID,
+                    )
+                )
+                await db.commit()
+        processes.append(_start_app("test.integration.fixtures.oa_auth_replica:app", port, env))
+        await _wait_until_ready(f"{api_url}/api/auth/oidc/config", processes[0])
+        async with httpx.AsyncClient(base_url=api_url, timeout=10) as client:
+            if local:
+                response = await client.post("/api/auth/token", data={"username": account, "password": password})
+            elif mode == "oa-token":
+                response = await client.post("/api/auth/oa/exchange-token", json={"token": f"{token}|{token}"})
+            else:
+                response = await client.post("/api/auth/oa/exchange-account", json={"account": account})
+        assert response.status_code == 200, response.text
+        assert response.json()["access_token"]
+        assert calls == [[account]]
+        async with sessions() as db:
+            stored = (await db.scalars(select(User).where(User.uid == uid))).one()
+            expected = (None, None, None) if mode == "local-failure" else ("资料测试姓名", "资料测试岗位", "11（基层）")
+            assert (stored.display_name, stored.oa_station_name, stored.oa_job_level_name) == expected
+            if local:
+                assert stored.username == account
+            else:
+                assert response.json()["oa_profile"]["station_name"] == "资料测试岗位"
+                assert response.json()["oa_profile"]["job_level_name"] == "11"
+    finally:
+        _stop_apps(processes)
+        provider.shutdown()
+        provider.server_close()
+        thread.join(timeout=5)
+        async with sessions() as db:
+            user_ids = select(User.id).where(User.uid == uid)
+            await db.execute(delete(OperationLog).where(OperationLog.user_id.in_(user_ids)))
+            await db.execute(delete(User).where(User.uid == uid))
+            await db.commit()
+        await engine.dispose()
+
+
 async def test_oidc_callback_and_exchange_work_across_api_replicas():
     provider_port, api_a_port, api_b_port = (_unused_port() for _ in range(3))
     issuer = f"http://127.0.0.1:{provider_port}"
@@ -68,6 +192,8 @@ async def test_oidc_callback_and_exchange_work_across_api_replicas():
     env = {
         **os.environ,
         "YUXI_ENV": "development",
+        "YUXI_INSTANCE_ID": "pytest-oidc-replicas",
+        "JWT_SECRET_KEY": "pytest-oidc-replica-shared-jwt-secret",
         "OIDC_ENABLED": "true",
         "OIDC_ISSUER_URL": issuer,
         "OIDC_CLIENT_ID": "oa-s0-local-client",
@@ -128,7 +254,7 @@ async def test_oidc_callback_and_exchange_work_across_api_replicas():
             )
 
         assert oa_login["uid"] == "oa:TEST:oa-s0-user"
-        assert oa_me_response.status_code == 200
+        assert oa_me_response.status_code == 200, oa_me_response.text
         assert oa_me_response.json()["uid"] == "oa:TEST:oa-s0-user"
         assert exchange_response.status_code == 200
         assert exchange_response.json()["department_id"] == ROOT_DEPARTMENT_ID

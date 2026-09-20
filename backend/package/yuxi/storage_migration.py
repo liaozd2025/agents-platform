@@ -11,7 +11,6 @@ from sqlalchemy import text
 
 from yuxi.config import get_legacy_storage_dir
 from yuxi.config.options import ensure_options_in_db
-from yuxi.config.runtime import lite_mode_enabled
 from yuxi.repositories.agent_run_repository import AgentRunRepository
 from yuxi.storage.postgres.manager import (
     BUSINESS_SCHEMA_VERSION,
@@ -40,6 +39,7 @@ from yuxi.storage_migrations.v072_runtime_identity import (
     migrate_runtime_storage_identity,
     runtime_storage_requires_quiescence,
 )
+from yuxi.storage_migrations.v073_pi_retirement import apply_pi_retirement, inspect_pi_retirement
 
 _QUIESCENCE_TOKEN_ENV = "YUXI_STORAGE_MIGRATION_QUIESCENCE_TOKEN"
 _QUIESCENCE_FILE_ENV = "YUXI_STORAGE_MIGRATION_QUIESCENCE_FILE"
@@ -126,10 +126,21 @@ async def main() -> None:
                 "business",
                 business_version,
                 BUSINESS_SCHEMA_VERSION,
-                upgrade_from=(1, 2, 3),
+                upgrade_from=(1, 2, 3, 4, 5, 7, 8),
             )
-            if not lite_mode_enabled():
-                _require_supported_version("knowledge", versions.get("knowledge"), KNOWLEDGE_SCHEMA_VERSION)
+            knowledge_version = versions.get("knowledge")
+            _require_supported_version(
+                "knowledge",
+                knowledge_version,
+                KNOWLEDGE_SCHEMA_VERSION,
+                upgrade_from=(1, 2),
+            )
+
+            pi_run_ids, pi_request_ids = set(), set()
+            if business_version != BUSINESS_SCHEMA_VERSION:
+                pi_run_ids, pi_request_ids, retires_pi = await inspect_pi_retirement(pg_manager)
+                if retires_pi:
+                    _require_quiescence_proof()
 
             if business_version is None:
                 await pg_manager.create_business_tables()
@@ -141,14 +152,20 @@ async def main() -> None:
                     await rewrite_v071_workdir_paths(session)
                     await verify_workdir_bindings(session)
                     await session.commit()
-            if business_version is None or business_version < BUSINESS_SCHEMA_VERSION:
+            if business_version != BUSINESS_SCHEMA_VERSION:
                 await pg_manager.ensure_business_schema()
                 if business_version is None:
                     await pg_manager.setup_langgraph_checkpointer()
+                async with pg_manager.get_async_session_context() as session:
+                    await apply_pi_retirement(session, pi_run_ids, pi_request_ids)
+                    await session.commit()
                 await pg_manager.record_schema_version("business", BUSINESS_SCHEMA_VERSION)
 
-            if not lite_mode_enabled() and versions.get("knowledge") is None:
+            if knowledge_version is None:
                 await pg_manager.create_knowledge_tables()
+            elif knowledge_version == 1:
+                await pg_manager.upgrade_knowledge_schema_v1_to_v2()
+            if knowledge_version != KNOWLEDGE_SCHEMA_VERSION:
                 await pg_manager.ensure_knowledge_schema()
                 await pg_manager.record_schema_version("knowledge", KNOWLEDGE_SCHEMA_VERSION)
 

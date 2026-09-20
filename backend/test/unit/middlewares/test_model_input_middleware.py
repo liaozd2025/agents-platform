@@ -194,7 +194,7 @@ def test_removes_orphan_tool_result_for_truncated_tool_call_before_provider_repl
     assert all(getattr(message, "tool_call_id", None) != "chatcmpl-tool-truncated" for message in replay)
 
 
-def test_final_model_boundary_hides_direct_sandbox_execution_tools() -> None:
+def test_final_model_boundary_preserves_direct_sandbox_execution_tools() -> None:
     middleware = ImageInputCompatibilityMiddleware()
     seen = {}
 
@@ -215,13 +215,21 @@ def test_final_model_boundary_hides_direct_sandbox_execution_tools() -> None:
                 SimpleNamespace(name="edit_file"),
                 SimpleNamespace(name="execute"),
                 SimpleNamespace(name="ocr_parse_file"),
-                SimpleNamespace(name="pi_sandbox"),
             ],
         ),
         handler,
     )
 
-    assert [tool.name for tool in seen["tools"]] == ["read_file", "pi_sandbox"]
+    assert [tool.name for tool in seen["tools"]] == [
+        "read_file",
+        "ls",
+        "glob",
+        "grep",
+        "write_file",
+        "edit_file",
+        "execute",
+        "ocr_parse_file",
+    ]
 
 
 @pytest.mark.asyncio
@@ -237,7 +245,7 @@ def test_final_model_boundary_hides_direct_sandbox_execution_tools() -> None:
         ),
     ],
 )
-async def test_translates_provider_image_rejection_to_pi_fallback(error_message: str, status_code: int) -> None:
+async def test_translates_provider_image_rejection_to_backend_ocr(error_message: str, status_code: int) -> None:
     middleware = ImageInputCompatibilityMiddleware()
     request = _request(
         SimpleNamespace(),
@@ -255,10 +263,10 @@ async def test_translates_provider_image_rejection_to_pi_fallback(error_message:
     response = await middleware.awrap_model_call(request, handler)
 
     assert calls == 1
-    assert middleware.tools == []
-    assert response.result[0].content == "当前模型不支持图片输入，正在交给 PI Agent 在沙箱中解析。"
-    assert response.result[0].tool_calls[0]["name"] == "pi_sandbox"
-    assert "/home/gem/user-data/uploads/image.png" in response.result[0].tool_calls[0]["args"]["description"]
+    assert [tool.name for tool in middleware.tools] == ["ocr_parse_file"]
+    assert response.result[0].content == "当前模型不支持图片输入，正在改用 OCR 工具提取图片文字。"
+    assert response.result[0].tool_calls[0]["name"] == "ocr_parse_file"
+    assert response.result[0].tool_calls[0]["args"] == {"file_path": "/home/gem/user-data/uploads/image.png"}
 
 
 @pytest.mark.asyncio
@@ -333,7 +341,13 @@ async def test_does_not_repeat_valid_tool_call_marked_with_output_limit() -> Non
             result=[
                 AIMessage(
                     content="",
-                    tool_calls=[{"name": "pi_sandbox", "args": {"description": "生成报告"}, "id": "call-pi"}],
+                    tool_calls=[
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": "report.md", "content": "报告"},
+                            "id": "call-write",
+                        }
+                    ],
                     response_metadata={"stop_reason": "max_tokens"},
                 )
             ]
@@ -345,7 +359,7 @@ async def test_does_not_repeat_valid_tool_call_marked_with_output_limit() -> Non
     )
 
     assert calls == 1
-    assert response.result[0].tool_calls[0]["id"] == "call-pi"
+    assert response.result[0].tool_calls[0]["id"] == "call-write"
 
 
 @pytest.mark.asyncio
@@ -358,8 +372,8 @@ async def test_continues_truncated_response_after_removing_invalid_tool_call() -
         if len(requests) == 1:
             invalid_call = {
                 "id": "call-truncated",
-                "name": "pi_sandbox",
-                "args": '{"description":"unterminated',
+                "name": "write_file",
+                "args": '{"file_path":"unterminated',
                 "error": "invalid JSON",
                 "type": "invalid_tool_call",
             }
@@ -406,7 +420,7 @@ async def test_translates_openrouter_missing_vision_endpoint() -> None:
 
     response = await middleware.awrap_model_call(request, handler)
 
-    assert response.result[0].tool_calls[0]["name"] == "pi_sandbox"
+    assert response.result[0].tool_calls[0]["name"] == "ocr_parse_file"
 
 
 def test_omits_historical_tool_image_after_ocr_fallback() -> None:

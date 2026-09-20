@@ -295,17 +295,19 @@ class OcrParseFileInput(BaseModel):
 
 
 OCR_PARSE_FILE_DESCRIPTION = """
-将沙盒中的 PDF、Office 文档或图片文件解析为 Markdown 文本，并把结果保存为文件。
+在后端将沙盒中的 PDF、DOCX、PPTX、XLS、XLSX 或图片解析为 Markdown，并把结果保存为文件。
+Office 内容提取使用后端 Docling Slim。
 
 使用场景：
 1. 用户上传了 PDF、Office 文档或图片附件，需要提取其中的文字内容
 2. Project Workdir、User Data 或 Skills 下已有文件，需要转成可读取的 Markdown
-3. 解析结果较长，后续应使用 read_file 读取保存后的 Markdown 文件
+3. 解析结果较长，后续应使用 read_file 读取 parsed_path 对应的完整 Markdown
 
 注意事项：
 1. file_path 必须位于当前用户可见范围
 2. 解析结果会写入当前 Project Workdir 的 outputs/ocr/ 下
-4. 工具只返回结果文件路径和短预览，不直接返回完整 OCR 文本
+3. 工具只返回结果文件路径和短预览，不直接返回完整 OCR 文本
+4. 旧 DOC/PPT 需先转换格式；此工具不保留可编辑的 Office 版式
 5. 如需在前端展示结果文件，请再调用 present_artifacts
 """
 

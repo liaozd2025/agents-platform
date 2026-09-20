@@ -4,6 +4,8 @@
 类型：process
 Owner：ARCHITECTURE.md
 
+PI 执行相关部分由 [PI 退役决策](../implemented/2026-09-18-retire-pi-executor.md) 取代；本记录中的对应验证仅代表退役前版本。
+
 ## 问题
 
 产品主线与官方 `upstream/main` 同时修改了 Agent 运行、Project/Workspace、Skills、知识库、Dashboard、认证权限和前端交互。机械选择任一分支会丢失另一侧已经存在的用户能力，尤其可能破坏集团组织、数据权限、Run 因果绑定、文件边界或官方新运行时。

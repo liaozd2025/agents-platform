@@ -1,13 +1,9 @@
 """测试 chat_service 中的 interrupt 相关函数"""
 
 import json
-import sys
-import os
 from types import SimpleNamespace
 
 import pytest
-
-sys.path.insert(0, os.getcwd())
 
 from yuxi.services.chat_service import (
     _build_ask_user_question_payload,
@@ -193,7 +189,6 @@ class TestBuildAskUserQuestionPayload:
         info = {"questions": [{"question": "测试？"}]}
         result = _build_ask_user_question_payload(info, "thread-id")
 
-        assert result["questions"][0]["question_id"] != ""
         assert len(result["questions"][0]["question_id"]) > 0
 
 
@@ -249,6 +244,7 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
 
     monkeypatch.setattr(ProvisionerSandboxBackend, "ensure_available", reject_sandbox_creation)
     db = _FakeSession()
+    lifecycle: list[str] = []
 
     class FakeContext:
         def __init__(self):
@@ -266,7 +262,10 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
         context_schema = FakeContext
 
         async def stream_resume_with_state(self, resume_command, input_context=None, **kwargs):
+            await kwargs.pop("on_prepared")()
             assert db.commit_count == 1
+            assert lifecycle[-1] == "prepared"
+            lifecycle.append("streaming")
             yield (
                 "messages",
                 (
@@ -274,6 +273,7 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
                     {"namespace": ["task:1"], "thread_id": "child-thread"},
                 ),
             )
+            yield "checkpoint", SimpleNamespace(values={})
 
         async def get_graph(self, context=None):
             class FakeGraph:
@@ -312,7 +312,7 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
     monkeypatch.setattr(
         svc,
         "_build_langfuse_run_context",
-        lambda **_kwargs: SimpleNamespace(callbacks=[], metadata={}, tags=[]),
+        lambda **_kwargs: SimpleNamespace(callbacks=[], metadata={}, tags=[], trace_id=None),
     )
     monkeypatch.setattr(svc, "check_and_handle_interrupts", fake_check_and_handle_interrupts)
     monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fake_save_messages_from_langgraph_state)
@@ -335,7 +335,25 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
 
     monkeypatch.setattr(svc, "ConversationRepository", FakeConversationRepository)
 
+    class UnexpectedSandboxBackend:
+        def __init__(self, **_kwargs):
+            raise AssertionError("Resume 流不应在执行前构造 Sandbox Backend")
+
+        def ensure_available(self):
+            raise AssertionError("Resume 流不应预创建 Sandbox")
+
+    monkeypatch.setattr(svc, "ProvisionerSandboxBackend", UnexpectedSandboxBackend, raising=False)
+    monkeypatch.setattr(
+        svc,
+        "get_user_skills_root_dir",
+        lambda _uid: (_ for _ in ()).throw(AssertionError("Resume 流不应物化 Skill 投影根")),
+        raising=False,
+    )
     monkeypatch.setattr(svc, "flush_langfuse", lambda: None)
+
+    async def on_prepared() -> None:
+        assert db.commit_count == 1
+        lifecycle.append("prepared")
 
     stream = stream_agent_resume(
         thread_id="parent-thread",
@@ -343,6 +361,7 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
         meta={"request_id": "req-1"},
         current_user=SimpleNamespace(uid="user-1"),
         db=db,
+        on_prepared=on_prepared,
     )
 
     chunks = []
@@ -364,6 +383,7 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
     assert finished["status"] == "finished"
     assert finished["meta"]["agent_slug"] == "main-agent"
     assert "agent_id" not in finished["meta"]
+    assert lifecycle == ["prepared", "streaming"]
 
     async def fail_output_persistence(**_kwargs):
         raise ValueError("output binding rejected")
@@ -381,6 +401,7 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
         },
         current_user=SimpleNamespace(uid="user-1"),
         db=db,
+        on_prepared=on_prepared,
     ):
         failing_chunks.append(json.loads(raw.decode("utf-8")))
 

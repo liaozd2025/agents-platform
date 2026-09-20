@@ -1,10 +1,11 @@
 """PostgreSQL 业务数据模型 - 用户、部门、对话等相关表"""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -18,12 +19,12 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import declarative_base, relationship
 from yuxi.storage.minio.client import normalize_public_minio_url
-from yuxi.utils.datetime_utils import format_utc_datetime, utc_now_naive
+from yuxi.utils.datetime_utils import duration_ms, format_utc_datetime, utc_now_naive
 
 Base = declarative_base()
 
@@ -32,6 +33,9 @@ JSON_VALUE = JSON().with_variant(JSONB, "postgresql")
 MAX_LOGIN_FAILED_ATTEMPTS = 5
 LOGIN_LOCK_DURATION_SECONDS = 300
 AGENT_RUN_TERMINAL_STATUSES = ("completed", "failed", "cancelled", "interrupted")
+MODEL_AUDIT_MESSAGE_TYPE = "model_audit"
+TOOL_AUDIT_MESSAGE_TYPE = "tool_audit"
+AUDIT_MESSAGE_TYPES = (MODEL_AUDIT_MESSAGE_TYPE, TOOL_AUDIT_MESSAGE_TYPE)
 AGENT_RUN_SHAPE_CONSTRAINT_NAME = "ck_agent_runs_nonterminal_shape"
 AGENT_RUN_SHAPE_CONSTRAINT_SQL = """
 status IN ('completed', 'failed', 'cancelled', 'interrupted')
@@ -48,10 +52,7 @@ OR (
      AND subagent_thread_relation_id IS NULL)
  OR (run_type = 'subagent'
      AND created_by_run_id IS NOT NULL
-     AND subagent_thread_relation_id IS NOT NULL)
- OR (run_type = 'sandbox'
-     AND created_by_run_id IS NOT NULL
-     AND subagent_thread_relation_id IS NULL))
+     AND subagent_thread_relation_id IS NOT NULL))
 )
 """
 PROJECT_STATUS_CONSTRAINT_NAME = "ck_projects_status"
@@ -66,6 +67,32 @@ UNVIEWED_RUN_MARKER = "__unviewed__"
 ROOT_DEPARTMENT_ID = 1
 GROUP_NODE_TYPE = "group"
 DEPARTMENT_NODE_TYPE = "department"
+
+
+def build_agent_run_timing(
+    *,
+    created_at: datetime | None,
+    started_at: datetime | None,
+    prepared_at: datetime | None,
+    first_output_at: datetime | None,
+    finished_at: datetime | None,
+    first_model_request_at: datetime | None = None,
+) -> dict[str, Any]:
+    """从 AgentRun 权威时间点生成统一的阶段时延投影。"""
+    return {
+        "created_at": format_utc_datetime(created_at),
+        "started_at": format_utc_datetime(started_at),
+        "prepared_at": format_utc_datetime(prepared_at),
+        "first_model_request_at": format_utc_datetime(first_model_request_at),
+        "first_output_at": format_utc_datetime(first_output_at),
+        "finished_at": format_utc_datetime(finished_at),
+        "dispatch_latency_ms": duration_ms(created_at, started_at),
+        "preparation_latency_ms": duration_ms(started_at, prepared_at),
+        "first_model_request_latency_ms": duration_ms(created_at, first_model_request_at),
+        "model_first_output_latency_ms": duration_ms(prepared_at, first_output_at),
+        "first_output_latency_ms": duration_ms(created_at, first_output_at),
+        "total_latency_ms": duration_ms(created_at, finished_at),
+    }
 
 
 class Project(Base):
@@ -165,6 +192,8 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String, nullable=False, unique=True, index=True)  # 登录账号
     display_name = Column(String(100), nullable=True)  # 界面展示姓名，不参与登录身份识别
+    oa_station_name = Column(String(100), nullable=True)  # OA 反查得到的岗位名，仅用于用户资料展示
+    oa_job_level_name = Column(String(100), nullable=True)  # OA 职级展示文本（如“11（基层）”），仅用于用户资料展示
     uid = Column(String, nullable=False, unique=True, index=True)  # 登录标识
     phone_number = Column(String, nullable=True, unique=True, index=True)  # 手机号
     avatar = Column(String, nullable=True)  # 头像URL
@@ -617,6 +646,29 @@ class Message(Base):
     """Message table - 消息表"""
 
     __tablename__ = "messages"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_status IS NULL OR execution_status IN "
+            "('running', 'completed', 'failed', 'interrupted', 'abandoned')",
+            name="ck_messages_execution_status",
+        ),
+        Index(
+            "uq_messages_run_role_operation_id",
+            "run_id",
+            "role",
+            "operation_id",
+            unique=True,
+            postgresql_where=text("operation_id IS NOT NULL"),
+            sqlite_where=text("operation_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_messages_run_sequence",
+            "run_id",
+            "sequence",
+            postgresql_where=text("sequence IS NOT NULL"),
+            sqlite_where=text("sequence IS NOT NULL"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True, comment="Primary key")
     conversation_id = Column(
@@ -632,6 +684,13 @@ class Message(Base):
     run_id = Column(String(64), ForeignKey("agent_runs.id"), nullable=True, index=True, comment="Agent run ID")
     request_id = Column(String(64), nullable=True, index=True, comment="Request ID for idempotency")
     delivery_status = Column(String(32), nullable=False, default="complete", comment="Message status")
+    operation_id = Column(String(128), nullable=True, comment="同一 Run 内的 Model/Tool 稳定来源键")
+    started_at = Column(DateTime, nullable=True, comment="Yuxi 观察到操作开始的 wall-clock 时间")
+    finished_at = Column(DateTime, nullable=True, comment="Yuxi 观察到操作结束的 wall-clock 时间")
+    duration_ms = Column(BigInteger, nullable=True, comment="本进程 monotonic clock 计算的操作耗时")
+    sequence = Column(BigInteger, nullable=True, comment="LangGraph 根 StreamMux 事件顺序")
+    execution_status = Column(String(32), nullable=True, comment="Model/Tool 执行状态")
+    usage = Column(JSON_VALUE, nullable=True, comment="Provider 返回的单次可靠 usage")
 
     # Relationships
     conversation = relationship("Conversation", back_populates="messages")
@@ -652,6 +711,13 @@ class Message(Base):
             "run_id": self.run_id,
             "request_id": self.request_id,
             "status": self.delivery_status,
+            "operation_id": self.operation_id,
+            "started_at": format_utc_datetime(self.started_at),
+            "finished_at": format_utc_datetime(self.finished_at),
+            "duration_ms": self.duration_ms,
+            "sequence": self.sequence,
+            "execution_status": self.execution_status,
+            "usage": self.usage,
             "tool_calls": [tc.to_dict() for tc in self.tool_calls] if self.tool_calls else [],
         }
 
@@ -972,6 +1038,10 @@ class ConfigOption(Base):
 
 class TaskRecord(Base):
     __tablename__ = "tasks"
+    __table_args__ = (
+        UniqueConstraint("type", "dedupe_key", name="uq_tasks_active_dedupe"),
+        Index("ix_tasks_status_lease_expires", "status", "lease_expires_at"),
+    )
 
     id = Column(String(32), primary_key=True)
     name = Column(String(255), nullable=False)
@@ -983,6 +1053,13 @@ class TaskRecord(Base):
     result = Column(JSON, nullable=True)
     error = Column(Text, nullable=True)
     cancel_requested = Column(Integer, nullable=False, default=0)
+    handler_version = Column(Integer, nullable=False, default=1)
+    dedupe_key = Column(String(64), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    worker_id = Column(String(128), nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+    lease_expires_at = Column(DateTime, nullable=True)
+    timeout_seconds = Column(Float, nullable=False, default=21600.0)
     created_at = Column(DateTime, default=utc_now_naive, index=True)
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
     started_at = Column(DateTime, nullable=True)
@@ -1004,6 +1081,13 @@ class TaskRecord(Base):
             "result": self.result,
             "error": self.error,
             "cancel_requested": bool(self.cancel_requested),
+            "handler_version": int(self.handler_version if self.handler_version is not None else 1),
+            "dedupe_key": self.dedupe_key,
+            "attempt_count": int(self.attempt_count or 0),
+            "worker_id": self.worker_id,
+            "heartbeat_at": format_utc_datetime(self.heartbeat_at),
+            "lease_expires_at": format_utc_datetime(self.lease_expires_at),
+            "timeout_seconds": float(self.timeout_seconds or 0),
         }
 
     def to_summary_dict(self) -> dict[str, Any]:
@@ -1011,6 +1095,115 @@ class TaskRecord(Base):
         data.pop("payload", None)
         data.pop("result", None)
         return data
+
+
+class ScheduledAgentJob(Base):
+    """用户自建 Agent 定时任务。"""
+
+    __tablename__ = "scheduled_agent_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "uid",
+            "creation_request_id",
+            name="uq_scheduled_agent_jobs_uid_creation_request",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "uid"],
+            ["projects.id", "projects.uid"],
+            name="fk_scheduled_agent_jobs_project_uid",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "tool_approval_mode IN ('default', 'always_trust')",
+            name="ck_scheduled_agent_jobs_tool_approval_mode",
+        ),
+    )
+
+    id = Column(String(64), primary_key=True)
+    uid = Column(String(64), ForeignKey("users.uid", ondelete="CASCADE"), nullable=False, index=True)
+    creation_request_id = Column(String(64), nullable=False)
+    creation_intent_hash = Column(String(64), nullable=False)
+    project_id = Column(String(64), nullable=False, index=True)
+    agent_slug = Column(String(64), nullable=False)
+    name = Column(String(255), nullable=False)
+    prompt = Column(Text, nullable=False)
+    tool_approval_mode = Column(String(32), nullable=False, default="default")
+    model_spec = Column(String(512), nullable=True)
+    cron_expression = Column(String(100), nullable=False)
+    timezone = Column(String(64), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    deleted_at = Column(DateTime, nullable=True, index=True)
+    next_run_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, nullable=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "uid": self.uid,
+            "project_id": self.project_id,
+            "agent_slug": self.agent_slug,
+            "name": self.name,
+            "prompt": self.prompt,
+            "tool_approval_mode": self.tool_approval_mode,
+            "model_spec": self.model_spec,
+            "cron_expression": self.cron_expression,
+            "timezone": self.timezone,
+            "enabled": bool(self.enabled),
+            "deleted_at": format_utc_datetime(self.deleted_at),
+            "next_run_at": format_utc_datetime(self.next_run_at),
+            "created_at": format_utc_datetime(self.created_at),
+            "updated_at": format_utc_datetime(self.updated_at),
+        }
+
+
+class ScheduledAgentRun(Base):
+    """一次定时或手动触发意图，保存配置快照并关联统一 Request。"""
+
+    __tablename__ = "scheduled_agent_runs"
+    __table_args__ = (
+        UniqueConstraint("job_id", "occurrence_key", name="uq_scheduled_agent_runs_job_occurrence"),
+        UniqueConstraint("request_id", name="uq_scheduled_agent_runs_request"),
+        UniqueConstraint("thread_id", name="uq_scheduled_agent_runs_thread"),
+        Index("ix_scheduled_agent_runs_job_created", "job_id", "created_at"),
+        Index("ix_scheduled_agent_runs_dispatching", "status", "created_at"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    job_id = Column(
+        String(64),
+        ForeignKey("scheduled_agent_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    request_id = Column(String(64), nullable=False)
+    thread_id = Column(String(64), nullable=False)
+    trigger = Column(String(16), nullable=False, default="scheduled")
+    occurrence_key = Column(String(128), nullable=False)
+    scheduled_for = Column(DateTime, nullable=False)
+    project_id = Column(String(64), nullable=False)
+    agent_slug = Column(String(64), nullable=False)
+    conversation_title = Column(String(255), nullable=False)
+    prompt = Column(Text, nullable=False)
+    tool_approval_mode = Column(String(32), nullable=False)
+    model_spec = Column(String(512), nullable=True)
+    status = Column(String(32), nullable=False, default="dispatching")
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now_naive, nullable=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "job_id": self.job_id,
+            "request_id": self.request_id,
+            "thread_id": self.thread_id,
+            "trigger": self.trigger,
+            "scheduled_for": format_utc_datetime(self.scheduled_for),
+            "status": self.status,
+            "run_id": None,
+            "error_message": self.error_message,
+            "created_at": format_utc_datetime(self.created_at),
+            "completed_at": None,
+        }
 
 
 class APIKey(Base):
@@ -1147,13 +1340,13 @@ class AgentRun(Base):
         String(32),
         nullable=False,
         default="chat",
-        comment="Run type: chat/resume/subagent/sandbox",
+        comment="Run type: chat/resume/subagent；sandbox 仅保留已终态历史",
     )
     input_message_id = Column(Integer, nullable=True, comment="Input message ID")
     output_message_id = Column(Integer, nullable=True, comment="Output message ID")
-    last_event_id = Column(String(64), nullable=True, comment="Last Redis stream event ID")
     input_payload = Column(JSON, nullable=False, default=dict, comment="Original input payload")
     token_usage = Column(JSON_VALUE, nullable=False, default=dict, comment="Run token usage grouped by model")
+    langfuse_trace_id = Column(String(64), nullable=True, comment="Langfuse trace ID")
     error_type = Column(String(64), nullable=True, comment="Error type")
     error_message = Column(Text, nullable=True, comment="Error message")
     worker_id = Column(String(128), nullable=True, comment="稳定 worker identity 与 attempt UUID 组成的 owner token")
@@ -1167,6 +1360,9 @@ class AgentRun(Base):
     manifest_fingerprint = Column(String(64), nullable=True, comment="运行清单规范化 JSON 的 SHA-256 指纹")
     manifest_recorded_at = Column(DateTime, nullable=True, comment="运行清单固化时间")
     started_at = Column(DateTime, nullable=True, comment="Start time")
+    prepared_at = Column(DateTime, nullable=True, comment="当前 Run 首次完成模型调用前准备的时间")
+    first_model_request_at = Column(DateTime, nullable=True, comment="当前 Run 首次进入模型供应商请求前的时间")
+    first_output_at = Column(DateTime, nullable=True, comment="当前 Run 首次产生非空模型语义输出的时间")
     finished_at = Column(DateTime, nullable=True, comment="Finish time")
     created_at = Column(DateTime, default=utc_now_naive, comment="Creation time")
     updated_at = Column(DateTime, default=utc_now_naive, onupdate=utc_now_naive, comment="Update time")
@@ -1198,17 +1394,28 @@ class AgentRun(Base):
             "run_type": self.run_type,
             "input_message_id": self.input_message_id,
             "output_message_id": self.output_message_id,
-            "last_event_id": self.last_event_id,
             "input_payload": self.input_payload or {},
             "token_usage": self.token_usage or {},
+            "langfuse_trace_id": self.langfuse_trace_id,
             "error_type": self.error_type,
             "error_message": self.error_message,
             "manifest": self.manifest,
             "manifest_fingerprint": self.manifest_fingerprint,
             "started_at": format_utc_datetime(self.started_at),
+            "prepared_at": format_utc_datetime(self.prepared_at),
+            "first_model_request_at": format_utc_datetime(self.first_model_request_at),
+            "first_output_at": format_utc_datetime(self.first_output_at),
             "finished_at": format_utc_datetime(self.finished_at),
             "created_at": format_utc_datetime(self.created_at),
             "updated_at": format_utc_datetime(self.updated_at),
+            "timing": build_agent_run_timing(
+                created_at=self.created_at,
+                started_at=self.started_at,
+                prepared_at=self.prepared_at,
+                first_output_at=self.first_output_at,
+                finished_at=self.finished_at,
+                first_model_request_at=self.first_model_request_at,
+            ),
         }
 
 
@@ -1243,7 +1450,8 @@ class AgentRunAttempt(Base):
     )
     attempt_no = Column(Integer, nullable=False, comment="Run 内递增的执行序号")
     worker_id = Column(String(128), nullable=False, comment="取得执行所有权的 owner token")
-    adapter = Column(String(32), nullable=True, comment="本 attempt 冻结的执行 adapter")
+    # PI 历史审计列保留，result_events 默认值也用于兼容旧库的 NOT NULL 列。
+    adapter = Column(String(32), nullable=True, comment="历史 PI attempt 执行 adapter")
     instance_id = Column(String(128), nullable=True, comment="adapter 创建的实例 ID")
     route_reason = Column(Text, nullable=True, comment="选择 adapter 的稳定理由")
     route_snapshot = Column(JSON_VALUE, nullable=True, comment="claim 时冻结的选路输入")

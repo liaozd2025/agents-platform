@@ -54,9 +54,10 @@
 import { computed, ref } from 'vue'
 import { Check, ChevronDown, Hand, ShieldAlert } from '@lucide/vue'
 import { useOutsidePointerdown } from '@/composables/useOutsidePointerdown'
+import { DEFAULT_TOOL_APPROVAL_MODE } from '@/utils/toolApproval'
 
 const props = defineProps({
-  modelValue: { type: String, default: 'default' }
+  modelValue: { type: String, default: DEFAULT_TOOL_APPROVAL_MODE }
 })
 
 const emit = defineEmits(['update:modelValue'])
@@ -77,7 +78,10 @@ const open = ref(false)
 const triggerRef = ref(null)
 const panelRef = ref(null)
 const currentOption = computed(
-  () => options.find((option) => option.value === props.modelValue) || options[0]
+  () =>
+    options.find((option) => option.value === props.modelValue) ||
+    options.find((option) => option.value === DEFAULT_TOOL_APPROVAL_MODE) ||
+    options[0]
 )
 
 const selectMode = (mode) => {

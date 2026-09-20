@@ -1,6 +1,5 @@
 from typing import Any
 
-from yuxi.agents.tool_approval import PI_DELEGATED_SANDBOX_TOOLS
 from yuxi.utils import logger
 
 # 工具元数据缓存
@@ -105,11 +104,7 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
     selected_tool_sources = {name: "local" for name in _CORE_INTERACTION_TOOL_NAMES}
 
     for tool_name in getattr(context, "tools", None) or []:
-        if (
-            not isinstance(tool_name, str)
-            or tool_name in selected_tool_names
-            or tool_name in PI_DELEGATED_SANDBOX_TOOLS
-        ):
+        if not isinstance(tool_name, str) or tool_name in selected_tool_names:
             continue
         tool = buildin_tools.get(tool_name)
         if tool is None:
@@ -147,8 +142,6 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
     from yuxi.agents.skills.runtime import resolve_skill_gated_tools
 
     for tool in resolve_skill_gated_tools(context):
-        if tool.name in PI_DELEGATED_SANDBOX_TOOLS:
-            continue
         if tool.name in selected_tool_names:
             if selected_tool_sources[tool.name] != "local":
                 source = selected_tool_sources[tool.name]

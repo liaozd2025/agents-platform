@@ -168,6 +168,24 @@ def test_personal_skill_confirm_and_delete_routes(monkeypatch):
     assert delete_resp.status_code == 200, delete_resp.text
 
 
+def test_update_personal_skill_enabled_route(monkeypatch):
+    async def fake_update(uid, slug, *, enabled):
+        assert (uid, slug, enabled) == ("user", "demo", False)
+        return SimpleNamespace(
+            to_dict=lambda: {"slug": "demo", "source_scope": "personal", "enabled": False},
+            source_scope="personal",
+            source_type="personal",
+        )
+
+    monkeypatch.setattr("server.routers.skill_router.update_personal_skill_enabled", fake_update)
+
+    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
+    response = client.put("/api/skills/personal/demo/enabled", json={"enabled": False})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["enabled"] is False
+
+
 def test_prepare_skill_upload_route(monkeypatch):
     captured: dict[str, object] = {}
 

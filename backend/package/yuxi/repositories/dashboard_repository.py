@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.storage.minio.client import normalize_public_minio_url
 from yuxi.storage.postgres.models_business import (
+    AUDIT_MESSAGE_TYPES,
     Agent,
     AgentRun,
     Conversation,
@@ -397,6 +398,7 @@ class DashboardRepository:
                 .join(Message, MessageFeedback.message_id == Message.id)
                 .join(Conversation, Message.conversation_id == Conversation.id)
                 .where(*feedback_filters)
+                .where(or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)))
                 .group_by(Conversation.agent_id)
             )
         ).all()
@@ -483,6 +485,7 @@ class DashboardRepository:
             select(func.count(Message.id))
             .join(Conversation, Message.conversation_id == Conversation.id)
             .where(*conversation_filters)
+            .where(or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)))
         )
         if total_users is None:
             total_users_result = await self.db_session.execute(select(func.count(User.id)).where(User.is_deleted == 0))
@@ -492,6 +495,7 @@ class DashboardRepository:
             .join(Message, MessageFeedback.message_id == Message.id)
             .join(Conversation, Message.conversation_id == Conversation.id)
             .where(Conversation.status.notin_(("deleted", "subagent")), *feedback_filters)
+            .where(or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)))
         )
         like_count_result = await self.db_session.execute(
             select(func.count(MessageFeedback.id))
@@ -502,6 +506,7 @@ class DashboardRepository:
                 MessageFeedback.rating == "like",
                 *feedback_filters,
             )
+            .where(or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)))
         )
         total_feedbacks = total_feedbacks_result.scalar() or 0
         like_count = like_count_result.scalar() or 0
@@ -554,6 +559,7 @@ class DashboardRepository:
             .join(Conversation, Message.conversation_id == Conversation.id)
             .outerjoin(User, MessageFeedback.uid == User.uid)
             .where(Conversation.status.notin_(("deleted", "subagent")))
+            .where(or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)))
         )
         if scope_filter is not None:
             query = query.where(scope_filter)
@@ -611,6 +617,7 @@ class DashboardRepository:
             result = await self.db_session.execute(
                 query.where(
                     Message.role == "assistant",
+                    or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)),
                     Message.created_at >= query_start_time,
                     Message.extra_metadata.isnot(None),
                     *conversation_filters,
@@ -652,6 +659,7 @@ class DashboardRepository:
                 result = await self.db_session.execute(
                     query.where(
                         Message.created_at >= query_start_time,
+                        or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)),
                         Message.extra_metadata.isnot(None),
                         Message.extra_metadata["usage_metadata"].isnot(None),
                         *conversation_filters,
@@ -806,6 +814,7 @@ class DashboardRepository:
             .select_from(Message)
             .join(Conversation, Message.conversation_id == Conversation.id)
             .where(*conversation_filters)
+            .where(or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)))
         )
         message_summary_row = message_summary_result.one()
 
@@ -846,6 +855,7 @@ class DashboardRepository:
             .select_from(Message)
             .join(Conversation, Message.conversation_id == Conversation.id)
             .where(Message.created_at >= query_start_time, Message.created_at <= query_now, *conversation_filters)
+            .where(or_(Message.message_type.is_(None), Message.message_type.notin_(AUDIT_MESSAGE_TYPES)))
             .group_by(message_date)
         )
         activity_rows = (await self.db_session.execute(activity_query)).all()

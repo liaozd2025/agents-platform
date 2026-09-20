@@ -7,7 +7,7 @@ import uuid
 import pytest
 from sqlalchemy import delete, select, text
 
-from yuxi.storage.postgres.manager import pg_manager
+from test.integration.services.test_schema_migration_version import _create_isolated_manager, _drop_isolated_schema
 from yuxi.storage.postgres.models_business import Role, User, UserRoleAssignment
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
@@ -15,8 +15,9 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 async def test_role_migration_backfills_legacy_roles_and_drops_column_idempotently():
     """三类旧角色回填后删除单角色列，重复执行不产生重复分配。"""
-    pg_manager.initialize()
-    await pg_manager.create_tables()
+    schema, admin_engine, engine, pg_manager = await _create_isolated_manager("pytest_roles")
+    await pg_manager.create_business_tables()
+    await pg_manager.create_knowledge_tables()
     await pg_manager.ensure_business_schema()
 
     suffix = uuid.uuid4().hex[:10]
@@ -69,3 +70,4 @@ async def test_role_migration_backfills_legacy_roles_and_drops_column_idempotent
             await session.execute(text("ALTER TABLE users DROP COLUMN IF EXISTS role"))
             if user_ids:
                 await session.execute(delete(User).where(User.id.in_(user_ids)))
+        await _drop_isolated_schema(schema, admin_engine, engine)

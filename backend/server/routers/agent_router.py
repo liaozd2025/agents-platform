@@ -25,6 +25,7 @@ from yuxi.services.agent_request_queue_service import (
     steer_queued_request,
     stream_request_events,
 )
+from yuxi.services.agent_config_service import prepare_agent_config_write
 from yuxi.services.agent_run_service import (
     cancel_agent_run_view,
     create_agent_run_view,
@@ -87,7 +88,7 @@ class AgentRunCreate(BaseModel):
     image_content: str | None = Field(None, description="可选，base64 图片内容")
     model_spec: str | None = Field(None, description="可选，对话级模型覆盖，优先级高于智能体配置")
     tool_approval_mode: str | None = Field(None, description="可选，本次运行的工具审批模式覆盖")
-    executor: Literal["langgraph", "pi"] = Field("langgraph", description="执行引擎；PI 首期仅支持 Local golden Task")
+    executor: Literal["langgraph"] = Field("langgraph", description="兼容旧客户端，仅支持 LangGraph")
     resume: Any | None = Field(None, description="可选，恢复时传给 LangGraph 的输入载荷，非布尔值")
     created_by_run_id: str | None = Field(None, description="可选，创建本 run 的父 run ID；resume 时为被恢复的 run ID")
     queue_policy: str = Field(
@@ -195,13 +196,20 @@ async def create_agent(
     db: AsyncSession = Depends(get_db),
 ):
     current_user = authorization.user
-    if not agent_manager.get_agent(payload.backend_id):
+    backend = agent_manager.get_agent(payload.backend_id)
+    if not backend:
         raise HTTPException(status_code=404, detail=f"智能体后端 {payload.backend_id} 不存在")
     if payload.set_default:
         raise HTTPException(status_code=422, detail="默认智能体已固定为内置智能助手")
 
     repo = AgentRepository(db)
     try:
+        config_json, config_resource_access = await prepare_agent_config_write(
+            payload.config_json or {},
+            context_schema=backend.context_schema,
+            db=db,
+            user=current_user,
+        )
         item = await repo.create(
             name=payload.name,
             slug=payload.slug,
@@ -209,7 +217,8 @@ async def create_agent(
             description=payload.description,
             icon=payload.icon,
             pics=payload.pics,
-            config_json=_filter_agent_config_json(payload.backend_id, payload.config_json, True),
+            config_json=config_json,
+            config_resource_access=config_resource_access,
             share_config=payload.share_config,
             is_default=payload.set_default,
             is_subagent=payload.is_subagent,
@@ -258,15 +267,25 @@ async def update_agent(
         if "icon" in fields_set and payload.icon is None:
             item.icon = None
 
+        config_json = None
+        config_resource_access = None
+        if payload.config_json is not None:
+            backend = agent_manager.get_agent(item.backend_id)
+            config_json, config_resource_access = await prepare_agent_config_write(
+                payload.config_json,
+                context_schema=backend.context_schema if backend else None,
+                db=db,
+                user=current_user,
+            )
+
         updated = await repo.update(
             item,
             name=payload.name,
             description=payload.description,
             icon=payload.icon,
             pics=payload.pics,
-            config_json=_filter_agent_config_json(item.backend_id, payload.config_json, True)
-            if payload.config_json is not None
-            else None,
+            config_json=config_json,
+            config_resource_access=config_resource_access,
             share_config=payload.share_config,
             is_subagent=payload.is_subagent,
             updated_by=str(current_user.uid),
@@ -323,8 +342,6 @@ async def create_agent_run(
 ):
     # resume 路径：恢复已有 LangGraph 状态，跳过 request 入队与派发，直接新建 run。
     if payload.resume is not None:
-        if payload.executor != "langgraph":
-            raise HTTPException(status_code=422, detail="resume 暂不支持 PI executor")
         if payload.queue_policy != "enqueue":
             raise HTTPException(status_code=422, detail="queue_policy 仅支持普通 Chat 请求")
         input_message = None
@@ -360,7 +377,6 @@ async def create_agent_run(
             request_metadata={**meta, "tool_approval_mode": payload.tool_approval_mode},
             model_spec=payload.model_spec,
             tool_approval_mode=payload.tool_approval_mode,
-            executor=payload.executor,
             queue_policy=payload.queue_policy,
         ),
         current_user=current_user,

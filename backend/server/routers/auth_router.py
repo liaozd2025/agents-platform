@@ -49,6 +49,7 @@ from yuxi.services.login_rate_limit_service import (
 from yuxi.services.oa_sso_service import (
     MAX_OA_ACCOUNT_LENGTH,
     MAX_OA_TOKEN_LENGTH,
+    backfill_local_user_oa_profile,
     exchange_oa_account_handler,
     exchange_oa_token_handler,
 )
@@ -65,7 +66,6 @@ from yuxi.services.user_identity_service import generate_unique_uid, is_valid_ph
 from yuxi.services.user_management_service import (
     department_is_accessible,
     get_authorized_user,
-    list_authorized_users,
     list_authorized_users_page,
 )
 from yuxi.services.user_role_service import (
@@ -98,6 +98,7 @@ class Token(BaseModel):
     department_name: str | None = None
     roles: list["UserRoleResponse"] = Field(default_factory=list)
     effective_permissions: list[str] = Field(default_factory=list)
+    oa_profile: dict[str, str | None] | None = None
 
 
 class UserRoleAssignmentRequest(BaseModel):
@@ -135,6 +136,19 @@ class UserUpdate(BaseModel):
 class UserProfileUpdate(BaseModel):
     username: str | None = None
     phone_number: str | None = None
+
+
+class UserPasswordChange(BaseModel):
+    """普通用户自助修改密码的请求体。
+
+    原密码仅校验非空：历史密码可能由管理员设置且长度不受当前规则约束，
+    这里不做长度限制，只要求必须填写以便服务端做真实校验。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    old_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=8)
 
 
 class UserRoleResponse(BaseModel):
@@ -439,6 +453,10 @@ async def login_for_access_token(
     await user_repository.save(user)
     await clear_login_failures(client_ip, login_identifier)
 
+    # 本地账号按工号反查 OA，补齐展示姓名、岗位与职级（供 USER.md 用户画像使用）；
+    # 反查失败只记日志并跳过，登录流程不受影响，改动随下方 db.commit() 一并提交
+    await backfill_local_user_oa_profile(db, user)
+
     # 生成访问令牌
     token_data = {"sub": str(user.id)}
     access_token = AuthUtils.create_access_token(token_data)
@@ -640,6 +658,50 @@ async def update_profile(
     await db.commit()
 
     return serialize_user(current_user)
+
+
+# 路由：当前用户自助修改密码
+# 只操作自己这条记录，因此不挂 user:update 权限点（普通用户也应能用）。
+@auth.put("/password", response_model=dict)
+async def change_own_password(
+    password_data: UserPasswordChange,
+    request: Request,
+    current_user: User = Depends(get_required_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """校验原密码后更新当前用户的登录密码。
+
+    原密码校验是安全底线：令牌泄露时，攻击者不能直接改密接管账号。
+    改密成功后清零登录失败计数与锁定状态，避免旧锁定继续挡住新密码登录；
+    并写入「密码已更新」操作日志——该文案同时是批量运维判断「密码是否被改过」的判据。
+    """
+
+    user_repository = UserRepository(db)
+
+    # 原密码必须匹配；失败原因统一提示，不暴露账号细节
+    if not AuthUtils.verify_password(current_user.password_hash, password_data.old_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="原密码不正确",
+        )
+
+    # 新旧密码相同直接拒绝，避免用户误以为已修改
+    if AuthUtils.verify_password(current_user.password_hash, password_data.new_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="新密码不能与原密码相同",
+        )
+
+    current_user.password_hash = AuthUtils.hash_password(password_data.new_password)
+    # 改密成功视为账号恢复正常：失败次数、最后失败时间与锁定时间一并清零
+    current_user.reset_failed_login()
+    await user_repository.save(current_user)
+
+    await log_operation(db, current_user.id, "修改密码", "密码已更新", request)
+    await db.commit()
+
+    logger.info(f"用户自助修改密码成功：user_id={current_user.id}")
+    return {"message": "密码修改成功"}
 
 
 # 路由：创建新用户（管理员权限）

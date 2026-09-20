@@ -6,13 +6,22 @@ from datetime import UTC
 from datetime import datetime as dt
 from typing import Annotated, Any
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from yuxi.permissions.authorization import parse_department_ancestor_ids
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import APIKey, Department, Role, User, UserConfig, UserRoleAssignment
+from yuxi.storage.postgres.models_business import (
+    APIKey,
+    Department,
+    Role,
+    ScheduledAgentJob,
+    User,
+    UserConfig,
+    UserRoleAssignment,
+)
+from yuxi.utils.logging_config import logger
 
 
 def _utc_now() -> dt:
@@ -98,6 +107,12 @@ class UserRepository:
             if api_key.revoked_at is None:
                 api_key.revoked_at = revoked_at
 
+    @staticmethod
+    async def _delete_scheduled_jobs(session: AsyncSession, uid: str) -> None:
+        """账号删除时移除任务定义，数据库级联清理调度历史。"""
+
+        await session.execute(delete(ScheduledAgentJob).where(ScheduledAgentJob.uid == str(uid)))
+
     async def get_by_id_with_db(self, db: AsyncSession, id: int) -> User | None:
         """使用指定的 db 根据 ID 获取用户"""
         return await _get_user_with_department_ancestors(db, User.id == id)
@@ -112,21 +127,76 @@ class UserRepository:
         return await _get_user_with_department_ancestors(db, User.uid == uid)
 
     async def get_memory_profile(self, uid: str):
-        """只投影资料字段与启用角色，不刷新调用方的 ORM 权限关系。"""
+        """只投影 USER.md 需要的资料字段，不刷新调用方的 ORM 权限关系。
+
+        第 1 项返回展示名：优先 ``display_name``（真实姓名），未维护时回退登录账号 ``username``，
+        避免 USER.md 里只出现数字账号。第 2 项返回组织链路（如「集团 > 信息中心 > 开发室」）。
+        第 4、5 项分别是 OA 反查到的岗位与职级，未反查到为 ``None``。角色与 UID 不进入用户资料，
+        因此这里不联表角色分配，避免同一用户按角色数放大结果行。
+        """
         async with self._session() as session:
             result = await session.execute(
-                select(User.username, Department.name, UserConfig.enable_memory, Role.name)
+                select(
+                    User.username,
+                    User.display_name,
+                    Department.name,
+                    UserConfig.enable_memory,
+                    User.oa_station_name,
+                    User.oa_job_level_name,
+                    Department.path,
+                )
                 .select_from(User)
                 .outerjoin(Department, User.department_id == Department.id)
                 .outerjoin(UserConfig, UserConfig.uid == User.uid)
-                .outerjoin(UserRoleAssignment, UserRoleAssignment.user_id == User.id)
-                .outerjoin(Role, (Role.id == UserRoleAssignment.role_id) & Role.is_active)
                 .where(User.uid == uid, User.is_deleted == 0)
             )
             rows = result.all()
             if not rows:
                 return None
-            return (*rows[0][:3], sorted({row[3] for row in rows if row[3]}))
+            # 列序：0=username、1=display_name、2=部门名、3=Memory 开关、4=OA 岗位、5=OA 职级、6=部门物化路径
+            (
+                username,
+                display_name,
+                department_name,
+                enable_memory,
+                station_name,
+                job_level_name,
+                department_path,
+            ) = rows[0]
+            department_label = await self._department_chain(session, department_name, department_path)
+            return (
+                display_name or username,
+                department_label,
+                enable_memory,
+                station_name,
+                job_level_name,
+            )
+
+    @staticmethod
+    async def _department_chain(
+        session: AsyncSession, department_name: str | None, department_path: str | None
+    ) -> str | None:
+        """把部门物化路径还原成「集团 > 信息中心 > 开发室」。
+
+        路径缺失、层级不足、格式异常或链路节点在库中缺失时退回部门名，
+        避免把不完整的链路写进用户画像，资料同步不因组织数据问题中断。
+        """
+        if not department_name:
+            return None
+        try:
+            ancestor_ids = parse_department_ancestor_ids(department_path)
+        except (TypeError, ValueError):
+            logger.warning(f"部门物化路径无法解析，组织链路退回部门名：department={department_name}")
+            return department_name
+        if len(ancestor_ids) < 2:
+            return department_name
+        result = await session.execute(select(Department.id, Department.name).where(Department.id.in_(ancestor_ids)))
+        names = {row[0]: row[1] for row in result.all()}
+        if any(node_id not in names for node_id in ancestor_ids):
+            # 链路中任一节点缺失就说明路径与组织表不一致，宁可用直属部门名也不写残缺链路
+            logger.warning(f"组织链路节点缺失，退回部门名：department={department_name}")
+            return department_name
+        return " > ".join(names[node_id] for node_id in ancestor_ids)
 
     async def list_by_uids(self, uids: list[str]) -> list[User]:
         """批量获取指定 uid 的用户。"""
@@ -374,6 +444,7 @@ class UserRepository:
             if phone_number:
                 user.phone_number = None
             await self._revoke_api_keys(session, user.id, user.deleted_at)
+            await self._delete_scheduled_jobs(session, user.uid)
             await session.flush()
         return True
 
@@ -387,6 +458,7 @@ class UserRepository:
             user.password_hash = "DELETED"
             user.avatar = None
             await self._revoke_api_keys(session, user.id, user.deleted_at)
+            await self._delete_scheduled_jobs(session, user.uid)
             await session.flush()
 
     async def exists_by_uid(self, uid: str) -> bool:

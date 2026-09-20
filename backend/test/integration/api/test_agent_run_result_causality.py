@@ -45,6 +45,7 @@ async def test_run_observability_api_never_reads_another_runs_assistant_message(
     wrong_run_id = f"wrong-{unique}"
     legacy_run_id = f"legacy-{unique}"
     run_ids = [exact_run_id, wrong_run_id, legacy_run_id]
+    knowledge_sources = [{"kb_id": "kb-current", "file_id": "file-current", "content": "本次检索证据"}]
 
     engine = create_async_engine(os.environ["POSTGRES_URL"], pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -137,6 +138,7 @@ async def test_run_observability_api_never_reads_another_runs_assistant_message(
                 agent_id="pytest-output-causality",
                 status="active",
             )
+            created_at = datetime(2026, 8, 15, 12, 0, 0)
             runs = [
                 AgentRun(
                     id=run_id,
@@ -149,6 +151,11 @@ async def test_run_observability_api_never_reads_another_runs_assistant_message(
                     conversation_id=None,
                     run_type="chat",
                     input_payload={},
+                    created_at=created_at,
+                    started_at=created_at + timedelta(milliseconds=200),
+                    prepared_at=created_at + timedelta(seconds=1),
+                    first_output_at=created_at + timedelta(milliseconds=7500),
+                    finished_at=created_at + timedelta(milliseconds=43670),
                 )
                 for run_id in run_ids
             ]
@@ -160,13 +167,14 @@ async def test_run_observability_api_never_reads_another_runs_assistant_message(
             db.add_all(runs)
             await db.flush()
 
-            created_at = datetime(2026, 8, 15, 12, 0, 0)
             exact_message = Message(
                 conversation_id=conversation.id,
                 run_id=exact_run_id,
                 role="assistant",
                 content="exact run output",
-                extra_metadata={"langfuse_trace_id": "trace-exact"},
+                operation_id="model-current",
+                execution_status="completed",
+                extra_metadata={"langfuse_trace_id": "trace-exact", "knowledge_sources": knowledge_sources},
                 created_at=created_at + timedelta(seconds=3),
             )
             wrong_runs_own_message = Message(
@@ -195,6 +203,7 @@ async def test_run_observability_api_never_reads_another_runs_assistant_message(
             await db.flush()
 
             runs[0].output_message_id = exact_message.id
+            runs[0].langfuse_trace_id = "trace-run-exact"
             # 故意把 wrong Run 指向另一个 Run 的消息；即使自己有兼容候选，也不能 fallback。
             runs[1].output_message_id = exact_message.id
             runs[2].output_message_id = None
@@ -207,8 +216,17 @@ async def test_run_observability_api_never_reads_another_runs_assistant_message(
         assert profile_response.status_code == 200, profile_response.text
         assert profile_response.json()["uid"] == uid
 
+        history_response = await test_client.get(f"/api/chat/thread/{thread_id}/history", headers=headers)
+        assert history_response.status_code == 200, history_response.text
+        history_message = next(item for item in history_response.json()["history"] if item["run_id"] == exact_run_id)
+        assert history_message["extra_metadata"]["knowledge_sources"] == knowledge_sources
+
         exact_response = await test_client.get(
             f"/api/agent/runs/{exact_run_id}/result",
+            headers=headers,
+        )
+        exact_run_response = await test_client.get(
+            f"/api/agent/runs/{exact_run_id}",
             headers=headers,
         )
         wrong_response = await test_client.get(
@@ -231,6 +249,13 @@ async def test_run_observability_api_never_reads_another_runs_assistant_message(
         assert exact_response.status_code == 200, exact_response.text
         assert exact_response.json()["output"] == "exact run output"
         assert exact_response.json()["final_message_id"] == exact_message_id
+        assert exact_response.json()["langfuse_trace_id"] == "trace-run-exact"
+        assert exact_response.json()["timing"]["first_output_latency_ms"] == 7500
+        assert exact_response.json()["timing"]["model_first_output_latency_ms"] == 6500
+
+        assert exact_run_response.status_code == 200, exact_run_response.text
+        assert exact_run_response.json()["run"]["timing"]["preparation_latency_ms"] == 800
+        assert exact_run_response.json()["run"]["first_output_at"] == "2026-08-15T12:00:07.500000Z"
 
         assert wrong_response.status_code == 200, wrong_response.text
         assert wrong_response.json()["output"] == ""

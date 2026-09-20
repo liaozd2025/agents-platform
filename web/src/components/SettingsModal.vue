@@ -85,29 +85,29 @@
           class="settings-content"
           :class="{ 'wide-settings-content': ['user', 'role'].includes(activeTab) }"
         >
-          <div v-show="activeTab === 'account'" v-if="userStore.isLoggedIn">
+          <div v-show="activeTab === 'account'" v-if="userStore.isLoggedIn && loadedTabs.has('account')">
             <AccountSettingsComponent />
           </div>
 
           <!-- 菜单隐藏之外，内容区也仅为管理员挂载，防止直接访问路径加载页面。 -->
-          <div v-if="activeTab === 'apiKeys' && userStore.hasPermission('system_config:manage')">
+          <div v-show="activeTab === 'apiKeys'" v-if="loadedTabs.has('apiKeys') && userStore.hasPermission('system_config:manage')">
             <ApiKeyManagementComponent />
           </div>
 
           <!-- 与菜单保持一致，普通用户不能加载环境变量设置。 -->
-          <div v-if="activeTab === 'agentEnv' && userStore.hasPermission('system_config:manage')">
+          <div v-show="activeTab === 'agentEnv'" v-if="loadedTabs.has('agentEnv') && userStore.hasPermission('system_config:manage')">
             <AgentEnvSettingsCard />
           </div>
 
-          <div v-show="activeTab === 'base'" v-if="userStore.hasPermission('system_config:manage')">
+          <div v-show="activeTab === 'base'" v-if="userStore.hasPermission('system_config:manage') && loadedTabs.has('base')">
             <div class="settings-page-header">
               <div class="settings-page-title">基本设置</div>
-              <p class="settings-page-description">配置系统默认模型、内容审查与服务链接。</p>
+              <p class="settings-page-description">配置系统默认模型与服务链接。</p>
             </div>
             <BasicSettingsSection />
           </div>
 
-          <div v-show="activeTab === 'ocr'" v-if="userStore.hasPermission('ocr:manage')">
+          <div v-show="activeTab === 'ocr'" v-if="userStore.hasPermission('ocr:manage') && loadedTabs.has('ocr')">
             <div class="settings-page-header">
               <div class="settings-page-title">OCR 配置</div>
               <p class="settings-page-description">配置系统默认 OCR 方法及相关服务参数。</p>
@@ -115,21 +115,21 @@
             <OCRSettingsSection />
           </div>
 
-          <div v-if="activeTab === 'user' && userStore.hasPermission('user:read')">
+          <div v-show="activeTab === 'user'" v-if="loadedTabs.has('user') && userStore.hasPermission('user:read')">
             <UserManagementComponent />
           </div>
 
           <div
             v-show="activeTab === 'department'"
             v-if="
-              userStore.hasPermission('department:read') ||
-              userStore.hasPermission('department:read_all')
+              loadedTabs.has('department') && (userStore.hasPermission('department:read') ||
+              userStore.hasPermission('department:read_all'))
             "
           >
             <DepartmentManagementComponent />
           </div>
 
-          <div v-if="activeTab === 'role' && userStore.hasPermission('role:read')">
+          <div v-show="activeTab === 'role'" v-if="loadedTabs.has('role') && userStore.hasPermission('role:read')">
             <RoleManagementComponent />
           </div>
         </div>
@@ -139,7 +139,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useConfigStore } from '@/stores/config'
 import { useUserStore } from '@/stores/user'
@@ -155,14 +155,24 @@ import {
   User,
   Users
 } from '@lucide/vue'
-import AccountSettingsComponent from '@/components/AccountSettingsComponent.vue'
-import AgentEnvSettingsCard from '@/components/AgentEnvSettingsCard.vue'
-import BasicSettingsSection from '@/components/BasicSettingsSection.vue'
-import OCRSettingsSection from '@/components/OCRSettingsSection.vue'
-import ApiKeyManagementComponent from '@/components/ApiKeyManagementComponent.vue'
-import UserManagementComponent from '@/components/UserManagementComponent.vue'
-import DepartmentManagementComponent from '@/components/DepartmentManagementComponent.vue'
-import RoleManagementComponent from '@/components/RoleManagementComponent.vue'
+import { createAsyncPanel } from '@/utils/asyncPanel'
+
+const AccountSettingsComponent = createAsyncPanel(
+  () => import('@/components/AccountSettingsComponent.vue')
+)
+const AgentEnvSettingsCard = createAsyncPanel(() => import('@/components/AgentEnvSettingsCard.vue'))
+const BasicSettingsSection = createAsyncPanel(() => import('@/components/BasicSettingsSection.vue'))
+const OCRSettingsSection = createAsyncPanel(() => import('@/components/OCRSettingsSection.vue'))
+const ApiKeyManagementComponent = createAsyncPanel(
+  () => import('@/components/ApiKeyManagementComponent.vue')
+)
+const UserManagementComponent = createAsyncPanel(
+  () => import('@/components/UserManagementComponent.vue')
+)
+const DepartmentManagementComponent = createAsyncPanel(
+  () => import('@/components/DepartmentManagementComponent.vue')
+)
+const RoleManagementComponent = createAsyncPanel(() => import('@/components/RoleManagementComponent.vue'))
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { getSettingsNavigationGroups } from '@/utils/settingsNavigation'
 import { sanitizeRedirect } from '@/utils/oidcAutoStart'
@@ -177,6 +187,7 @@ const settingsTabIcons = {
   apiKeys: Key,
   ocr: ScanText
 }
+const loadedTabs = ref(new Set())
 const configStore = useConfigStore()
 const userStore = useUserStore()
 const route = useRoute()
@@ -214,6 +225,7 @@ onMounted(async () => {
     console.warn('加载系统配置失败:', error)
   }
 })
+watch(activeTab, (tab) => { if (tab) loadedTabs.value.add(tab) }, { immediate: true })
 </script>
 
 <style lang="less">

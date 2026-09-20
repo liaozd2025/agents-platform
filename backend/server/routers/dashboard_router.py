@@ -252,7 +252,7 @@ async def get_current_organization_stats(
 async def get_all_conversations(
     uid: str | None = None,
     agent_id: str | None = None,
-    status: Literal["active", "archived", "deleted", "subagent", "all"] = "active",
+    status: Literal["active", "archived", "deleted", "subagent", "all"] = "all",
     search: Annotated[str | None, Query(max_length=255)] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,

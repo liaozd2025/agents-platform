@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -51,6 +53,24 @@ async def test_user_config_routes_scope_to_current_user(session):
 
     assert own_config["enable_memory"] is True
     assert other_config["enable_memory"] is False
+
+
+async def test_enabling_memory_syncs_user_profile_immediately(session, monkeypatch):
+    db, user_a, _ = session
+    calls = []
+
+    async def fake_sync(*, db, uid):
+        calls.append((db, uid))
+
+    monkeypatch.setattr(importlib.import_module("server.routers.user_router"), "sync_user_profile_to_memory", fake_sync)
+
+    await update_user_config(
+        UserConfigSchema(enable_memory=True),
+        current_user=user_a,
+        db=db,
+    )
+
+    assert calls == [(db, user_a.uid)]
 
 
 async def test_user_config_allows_logged_in_user_without_department():

@@ -469,6 +469,7 @@ export const useDatabaseStore = defineStore('database', () => {
   }
 
   async function addFiles({ items, contentType, params, parentId }) {
+    const registerTask = taskerStore.createTaskRegistration()
     if (items.length === 0) {
       message.error(contentType === 'file' ? '请先上传文件' : '请输入有效的网页链接')
       return
@@ -486,7 +487,7 @@ export const useDatabaseStore = defineStore('database', () => {
         enableAutoRefresh('auto')
         message.success(data.message || `${itemType}已提交处理，请在任务中心查看进度`)
         if (data.task_id) {
-          taskerStore.registerQueuedTask({
+          registerTask({
             task_id: data.task_id,
             name: `知识库导入 (${kbId.value || ''})`,
             task_type: 'knowledge_ingest',
@@ -514,6 +515,7 @@ export const useDatabaseStore = defineStore('database', () => {
   }
 
   async function parseFiles(fileIds, params = {}) {
+    const registerTask = taskerStore.createTaskRegistration()
     if (fileIds.length === 0) return
     state.chunkLoading = true
     try {
@@ -522,7 +524,7 @@ export const useDatabaseStore = defineStore('database', () => {
         enableAutoRefresh('auto')
         message.success(data.message || '解析任务已提交')
         if (data.task_id) {
-          taskerStore.registerQueuedTask({
+          registerTask({
             task_id: data.task_id,
             name: `文档解析 (${kbId.value})`,
             task_type: 'knowledge_parse',
@@ -546,6 +548,7 @@ export const useDatabaseStore = defineStore('database', () => {
   }
 
   async function parsePendingFiles(paramsOrCount = {}, count = 0) {
+    const registerTask = taskerStore.createTaskRegistration()
     const params = typeof paramsOrCount === 'number' ? {} : paramsOrCount || {}
     const totalCount = typeof paramsOrCount === 'number' ? paramsOrCount : count
     state.chunkLoading = true
@@ -555,7 +558,7 @@ export const useDatabaseStore = defineStore('database', () => {
         enableAutoRefresh('auto')
         message.success(data.message || '解析任务已提交')
         if (data.task_id) {
-          taskerStore.registerQueuedTask({
+          registerTask({
             task_id: data.task_id,
             name: `文档解析 (${kbId.value})`,
             task_type: 'knowledge_parse',
@@ -584,6 +587,7 @@ export const useDatabaseStore = defineStore('database', () => {
   }
 
   async function indexFiles(fileIds, params = {}) {
+    const registerTask = taskerStore.createTaskRegistration()
     if (fileIds.length === 0) return
     state.chunkLoading = true
     try {
@@ -592,7 +596,7 @@ export const useDatabaseStore = defineStore('database', () => {
         enableAutoRefresh('auto')
         message.success(data.message || '入库任务已提交')
         if (data.task_id) {
-          taskerStore.registerQueuedTask({
+          registerTask({
             task_id: data.task_id,
             name: `文档入库 (${kbId.value})`,
             task_type: 'knowledge_index',
@@ -616,6 +620,7 @@ export const useDatabaseStore = defineStore('database', () => {
   }
 
   async function indexPendingFiles(params = {}, count = 0) {
+    const registerTask = taskerStore.createTaskRegistration()
     state.chunkLoading = true
     try {
       const data = await documentApi.indexPendingDocuments(kbId.value, params)
@@ -623,7 +628,7 @@ export const useDatabaseStore = defineStore('database', () => {
         enableAutoRefresh('auto')
         message.success(data.message || '入库任务已提交')
         if (data.task_id) {
-          taskerStore.registerQueuedTask({
+          registerTask({
             task_id: data.task_id,
             name: `文档入库 (${kbId.value})`,
             task_type: 'knowledge_index',

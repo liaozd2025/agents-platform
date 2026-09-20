@@ -1,14 +1,8 @@
 
-.PHONY: up up-lite down logs lint format seed reset test verify-trust audit-dependencies audit-licenses build-pi-sandbox
-.DEFAULT_GOAL := up
+.PHONY: up down logs lint format seed reset test verify-trust audit-dependencies audit-licenses
 
 PYTEST_ARGS ?=
 BACKEND_PYTHON ?= $(shell cat backend/.python-version)
-COMPOSE ?= docker compose
-
-build-pi-sandbox:
-	$(COMPOSE) build pi-sandbox-image
-	$(COMPOSE) run --rm --no-deps pi-sandbox-image
 
 up:
 	@if [ ! -f .env ]; then \
@@ -35,13 +29,6 @@ reset:
 	@echo "Waiting for api to be ready..."
 	@until docker compose exec -T api true >/dev/null 2>&1; do sleep 2; done
 	$(MAKE) seed
-
-up-lite:
-	@if [ ! -f .env ]; then \
-		echo "Error: .env file not found. Please create it from .env.template"; \
-		exit 1; \
-	fi
-	LITE_MODE=true docker compose up -d postgres redis minio api worker web
 
 logs:
 	@docker compose logs --tail=50 api
@@ -80,15 +67,12 @@ verify-trust:
 audit-dependencies:
 	cd backend && uv audit --locked --no-dev
 	cd packages/yuxi-cli && uv audit --locked --no-dev
-	cd backend/package/yuxi/pi_runner && npm audit --audit-level=high --omit=dev
 	cd web && pnpm audit --audit-level=high --prod
 	cd docs && pnpm audit --audit-level=high --prod
 	@if uv audit --script scripts/dependency-audit-fixtures/vulnerable.py > /tmp/yuxi-python-audit-negative.log 2>&1; then echo "Expected the vulnerable Python fixture to fail"; exit 1; fi
 	grep -q "aiohttp 3.14.1 has" /tmp/yuxi-python-audit-negative.log
 	grep -q "GHSA-cq5v-8q36-5273" /tmp/yuxi-python-audit-negative.log
-	@if cd scripts/dependency-audit-fixtures/node && pnpm audit --audit-level=high --prod > /tmp/yuxi-node-audit-negative.log 2>&1; then echo "Expected the vulnerable Node.js fixture to fail"; exit 1; fi
-	grep -q "js-yaml" /tmp/yuxi-node-audit-negative.log
-	grep -q "GHSA-5p4m-2wfm-xmqj" /tmp/yuxi-node-audit-negative.log
+	bash scripts/dependency-audit-fixtures/run-node-negative-control.sh
 
 audit-licenses:
 	cd backend && UV_PYTHON=$(BACKEND_PYTHON) uv run --isolated --no-dev --with pip-licenses pip-licenses --from mixed --format markdown

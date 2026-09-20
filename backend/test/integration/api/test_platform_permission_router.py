@@ -10,6 +10,7 @@ from sqlalchemy import delete, select
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import (
     ROOT_DEPARTMENT_ID,
+    APIKey,
     Department,
     OperationLog,
     Role,
@@ -28,8 +29,7 @@ async def platform_permission_users(test_client):
 
     pg_manager.initialize()
     await pg_manager.async_engine.dispose()
-    await pg_manager.create_tables()
-    await pg_manager.ensure_business_schema()
+    await pg_manager.require_current_schema()
 
     suffix = uuid.uuid4().hex[:10]
     password = f"Pw!{uuid.uuid4().hex}"
@@ -81,6 +81,7 @@ async def platform_permission_users(test_client):
         async with pg_manager.get_async_session_context() as session:
             await session.execute(delete(SecurityAudit).where(SecurityAudit.actor_user_id.in_(user_ids)))
             await session.execute(delete(OperationLog).where(OperationLog.user_id.in_(user_ids)))
+            await session.execute(delete(APIKey).where(APIKey.user_id.in_(user_ids)))
             await session.execute(delete(User).where(User.id.in_(user_ids)))
         await pg_manager.async_engine.dispose()
 
@@ -120,7 +121,7 @@ async def test_platform_capabilities_follow_effective_permissions(
     try:
         own_key = await test_client.post(
             "/api/user/apikey/",
-            json={"name": "pytest-own-platform-key"},
+            json={"name": "pytest-own-platform-key", "request_id": str(uuid.uuid4())},
             headers=headers,
         )
         assert own_key.status_code == 200, own_key.text
@@ -131,7 +132,7 @@ async def test_platform_capabilities_follow_effective_permissions(
 
         cross_key = await test_client.post(
             "/api/user/apikey/",
-            json={"name": "pytest-cross-platform-key"},
+            json={"name": "pytest-cross-platform-key", "request_id": str(uuid.uuid4())},
             headers=admin_headers,
         )
         assert cross_key.status_code == 200, cross_key.text

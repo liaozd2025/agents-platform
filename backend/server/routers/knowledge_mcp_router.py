@@ -31,13 +31,17 @@ def build_knowledge_mcp(resource_url: str):
         raise ValueError("YUXI_KNOWLEDGE_MCP_URL 必须是入口地址加 /api/mcp")
     development = os.getenv("YUXI_ENV", "development") == "development"
     try:
-        private_ip = any(ip_address(parts.hostname) in ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+        private_ip = any(
+            ip_address(parts.hostname) in ip_network(network)
+            for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        )
     except ValueError:
         private_ip = False
     explicit_lan = private_ip and os.getenv("YUXI_KNOWLEDGE_MCP_URL", "").strip().rstrip("/") == resource_url
     private_http_exception = os.getenv("YUXI_KNOWLEDGE_MCP_ALLOW_PRIVATE_HTTP", "").lower() == "true"
     if parts.scheme != "https" and not (
-        parts.scheme == "http" and (
+        parts.scheme == "http"
+        and (
             (development and parts.hostname in {"localhost", "127.0.0.1", "::1"})
             or (explicit_lan and (development or private_http_exception))
         )
@@ -161,6 +165,7 @@ def build_knowledge_mcp(resource_url: str):
         route.path = "/api/mcp/oauth" + route.path
         route.path_regex, route.path_format, route.param_convertors = compile_path(route.path)
     oauth_routes.append(Route("/.well-known/oauth-authorization-server/api/mcp", authorization_metadata))
+
     async def protected_resource_metadata(request):
         """提供按资源路径发现的标准元数据入口。"""
         return JSONResponse(await resource_metadata())

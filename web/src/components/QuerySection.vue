@@ -441,7 +441,9 @@ defineExpose({
   &:hover {
     background-color: var(--main-bright);
     border-color: var(--main-bright);
-    box-shadow: 0 4px 8px rgba(1, 136, 166, 0.25);
+    /* 阴影色跟随 --main-bright 派生，避免像原来那样写死旧主色的 rgba(1,136,166,.25)，
+       换主色后留下一层青色阴影 */
+    box-shadow: 0 4px 8px color-mix(in srgb, var(--main-bright) 25%, transparent);
     transform: translateY(-1px);
   }
 

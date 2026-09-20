@@ -7,7 +7,6 @@ import { renderToString } from 'vue/server-renderer'
 import { createServer } from 'vite'
 import { MessageProcessor } from '../../src/utils/messageProcessor.js'
 import { getSubagentRunTokenUsage } from '../../src/utils/subagentRuns.js'
-import { getToolApprovalSummary } from '../../src/utils/toolApproval.js'
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 let server
@@ -99,7 +98,7 @@ test('PI 工具累计快照替换正文并保持 running，最终结果覆盖快
     output('tool-progress', 'first', 'running')
     output('tool-progress', 'first\nsecond', 'running')
     let tool = displayedMessages(state).find((message) => message.run_id === runId).tool_calls[0]
-    assert.equal(tool.function.arguments, '{"command":"printf example"}')
+    assert.equal(tool.args, '{"command":"printf example"}')
     assert.equal(tool.tool_call_result.content, 'first\nsecond')
     assert.equal(getToolCallStatus(tool), 'running')
     output('tool-finished', `${runId}: final`, runId === 'child-1' ? 'success' : 'error')
@@ -201,10 +200,6 @@ test('PI 的已让位、取消和中断不显示成功，交付工具具有中�
   )
   assert.equal(getToolName('submit_artifact'), '交付文件')
   assert.equal(getToolCallStatus({ name: 'pi_sandbox', result: '历史结果' }), 'completed')
-  assert.equal(
-    getToolApprovalSummary({ name: 'pi_sandbox', args: { description: '整理项目报告' } }),
-    '整理项目报告'
-  )
 })
 
 const reportedUsage = {

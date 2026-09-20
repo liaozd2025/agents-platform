@@ -35,7 +35,7 @@ from yuxi.permissions import (
 from yuxi.repositories.department_repository import DepartmentRepository
 from yuxi.storage.postgres.models_business import Skill, User
 from yuxi.utils.logging_config import logger
-from yuxi.utils.paths import ensure_within_root, open_regular_file_fd
+from yuxi.utils.paths import ensure_within_root, open_directory_fd, open_regular_file_fd
 
 SKILL_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 SKILL_NAME_PATTERN = SKILL_SLUG_PATTERN
@@ -75,6 +75,7 @@ DEFAULT_SKILL_SHARE_CONFIG = {"access_level": "user", "department_ids": [], "use
 BUILTIN_SKILL_SHARE_CONFIG = {"access_level": "global", "department_ids": [], "user_uids": []}
 SKILL_DRAFT_TTL_SECONDS = 60 * 60
 PERSONAL_SKILL_SOURCE_TYPE = "personal"
+PERSONAL_SKILL_STATE_FILE = ".yuxi-skill-state.json"
 _USER_SKILLS_LOCK = threading.Lock()
 _USER_SKILLS_LOCKS: dict[str, threading.Lock] = {}
 _USER_SKILL_PROJECTION_LOCK_SCOPE = "yuxi:skills:user-projection:v1:"
@@ -462,9 +463,9 @@ def sync_user_accessible_skills(
             target_dir = user_skills_root / slug
             temp_target = user_skills_root / f".{slug}.tmp-{uuid.uuid4().hex[:8]}"
             try:
-                copy_skill_tree_no_symlinks(source_dir, temp_target)
-                if target_dir.is_dir() and not target_dir.is_symlink() and skill_dirs_equal(target_dir, temp_target):
+                if skill_dirs_equal(source_dir, target_dir):
                     continue
+                copy_skill_tree_no_symlinks(source_dir, temp_target)
                 _remove_skill_projection_entry(target_dir)
                 temp_target.rename(target_dir)
             except FileNotFoundError:
@@ -541,10 +542,47 @@ def _copy_skill_snapshot(
 
 
 def skill_dirs_equal(dir1: Path, dir2: Path) -> bool:
-    """检查两个目录的文件路径与内容是否完全一致。"""
-    if not dir1.exists() or not dir2.exists():
+    """按 no-follow 字节与执行位比较来源和投影，非法来源显式失败。"""
+    source_hash = _compute_projection_hash(dir1)
+    try:
+        return source_hash == _compute_projection_hash(dir2)
+    except OSError:
+        # 缺失或被替换为链接的投影必须重建，不能沿用相同字节的链接。
         return False
-    return compute_skill_dir_hash(dir1) == compute_skill_dir_hash(dir2)
+
+
+def _compute_projection_hash(path: Path) -> bytes:
+    """通过目录 fd 读取投影比较摘要，拒绝链接和特殊文件。"""
+    hasher = hashlib.sha256()
+
+    def visit(directory_fd: int) -> None:
+        """在已打开的目录内递归比较所需的类型、执行位和字节。"""
+        for name in sorted(os.listdir(directory_fd)):
+            hasher.update(os.fsencode(name) + b"\0")
+            mode = os.stat(name, dir_fd=directory_fd, follow_symlinks=False).st_mode
+            if stat.S_ISDIR(mode):
+                child_fd = open_directory_fd(directory_fd, (name,))
+                try:
+                    hasher.update(b"directory\0")
+                    visit(child_fd)
+                    hasher.update(b"end-directory\0")
+                finally:
+                    os.close(child_fd)
+            else:
+                with open_regular_file_fd(directory_fd, (name,)) as (file_fd, file_stat):
+                    hasher.update(b"file\0" + bytes([stat.S_IMODE(file_stat.st_mode) & 0o111]))
+                    content_hash = hashlib.sha256()
+                    while chunk := os.read(file_fd, 1024 * 1024):
+                        content_hash.update(chunk)
+                    hasher.update(content_hash.digest())
+
+    absolute = Path(os.path.abspath(path))
+    directory_fd = open_directory_fd(Path(absolute.anchor), absolute.parts[1:])
+    try:
+        visit(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return hasher.digest()
 
 
 def compute_skill_dir_hash(source_dir: Path) -> str:
@@ -611,6 +649,7 @@ async def list_accessible_skills(
         _list_accessible_shared_skills(db, user, require_enabled=require_enabled),
         list_personal_skills(str(user.uid)),
     )
+    personal_items = [item for item in personal_items if item.enabled]
     personal_by_slug = {item.slug: item for item in personal_items}
 
     effective: dict[str, ResolvedSkill] = {}
@@ -1000,6 +1039,11 @@ async def delete_personal_skill(uid: str, slug: str) -> None:
     await asyncio.to_thread(shutil.rmtree, skill_dir)
 
 
+async def update_personal_skill_enabled(uid: str, slug: str, *, enabled: bool) -> ResolvedSkill:
+    """更新个人 Skill 的启用状态，并返回当前持久化结果。"""
+    return await asyncio.to_thread(_update_personal_skill_enabled_sync, uid, slug, enabled)
+
+
 async def enable_personal_skills_for_agent_config(
     db: AsyncSession,
     *,
@@ -1019,8 +1063,7 @@ async def enable_personal_skills_for_agent_config(
     if not agent or agent.created_by != str(uid):
         return False
 
-    config = dict(agent.config_json or {})
-    context = dict(config.get("context") or {})
+    context = (agent.config_json or {}).get("context") or {}
     configured_skills = context.get("skills")
     if configured_skills is None:
         return True
@@ -1030,9 +1073,12 @@ async def enable_personal_skills_for_agent_config(
     if updated_skills == selected_skills:
         return True
 
-    context["skills"] = updated_skills
-    config["context"] = context
-    await agent_repo.update(agent, config_json=config, updated_by=str(uid))
+    await agent_repo.update(
+        agent,
+        config_json={"context": {"skills": updated_skills}},
+        config_resource_access={"skills": set(skill_slugs)},
+        updated_by=str(uid),
+    )
     return True
 
 
@@ -1073,7 +1119,7 @@ def _resolved_personal_skill(uid: str, root: Path, metadata: dict[str, Any]) -> 
         source_type=PERSONAL_SKILL_SOURCE_TYPE,
         source_scope=PERSONAL_SKILL_SOURCE_TYPE,
         source_dir=source_dir,
-        enabled=True,
+        enabled=bool(metadata.get("enabled", True)),
         created_by=uid,
         share_config=None,
         tool_dependencies=[],
@@ -1097,10 +1143,49 @@ def _scan_personal_skills(uid: str) -> list[ResolvedSkill]:
             metadata = parse_skill_dir_metadata(entry)
             if metadata["slug"] != entry.name:
                 raise ValueError("目录名必须与 SKILL.md slug 一致")
+            metadata["enabled"] = _read_personal_skill_enabled(entry)
             items.append(_resolved_personal_skill(uid, root, metadata))
         except Exception as exc:
             logger.warning(f"跳过无法解析的个人 Skill: uid={uid}, slug={entry.name}, error={exc}")
     return items
+
+
+def _read_personal_skill_enabled(skill_dir: Path) -> bool:
+    """读取个人 Skill 的本地启用状态；旧 Skill 默认启用。"""
+    state_path = skill_dir / PERSONAL_SKILL_STATE_FILE
+    if not state_path.exists():
+        return True
+    if state_path.is_symlink() or not state_path.is_file():
+        raise ValueError("个人 Skill 状态文件非法")
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("个人 Skill 状态文件无效") from exc
+    return bool(state.get("enabled", True))
+
+
+def _update_personal_skill_enabled_sync(uid: str, slug: str, enabled: bool) -> ResolvedSkill:
+    """原子写入个人 Skill 状态，避免半写入被运行时读取。"""
+    root = _personal_skills_root(uid)
+    skill_dir = _resolve_personal_skill_dir(root, slug)
+    if not skill_dir.is_dir():
+        raise ValueError("个人 Skill 不存在")
+    metadata = parse_skill_dir_metadata(skill_dir)
+    if metadata["slug"] != slug:
+        raise ValueError("个人 Skill 目录与元数据不一致")
+
+    state_path = skill_dir / PERSONAL_SKILL_STATE_FILE
+    if state_path.is_symlink():
+        raise ValueError("个人 Skill 状态文件非法")
+    temp_path = skill_dir / f".{PERSONAL_SKILL_STATE_FILE}.{uuid.uuid4().hex}.tmp"
+    try:
+        temp_path.write_text(json.dumps({"enabled": bool(enabled)}), encoding="utf-8")
+        os.replace(temp_path, state_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    metadata["enabled"] = bool(enabled)
+    return _resolved_personal_skill(uid, root, metadata)
 
 
 def _install_personal_skill_dir_sync(

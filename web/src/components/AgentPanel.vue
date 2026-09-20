@@ -168,9 +168,16 @@
               @select="onWorkspaceFileSelect"
             >
               <template #title="{ node }">
-                <div class="tree-node-name" :title="node.title">
-                  <span class="name-start">{{ node.nameStart || node.title }}</span>
-                  <span class="name-end" v-if="node.nameEnd">{{ node.nameEnd }}</span>
+                <div class="tree-node-name" :title="node.pathHint || node.title">
+                  <!-- 命中名称来源的目录：主标题后紧跟括号内的原始目录名（uuid），保持单行 -->
+                  <span v-if="node.subtitle" class="tree-node-label">
+                    <span class="tree-node-title">{{ node.title }}</span>
+                    <span class="tree-node-subtitle">（{{ node.subtitle }}）</span>
+                  </span>
+                  <template v-else>
+                    <span class="name-start">{{ node.nameStart || node.title }}</span>
+                    <span class="name-end" v-if="node.nameEnd">{{ node.nameEnd }}</span>
+                  </template>
                 </div>
               </template>
               <template #actions="{ node }">
@@ -223,7 +230,14 @@
         v-show="activeSectionKey === 'message-debug'"
         class="message-debug-section"
       >
-        <MessageDebugPanel :messages="messages" />
+        <MessageDebugPanel
+          :messages="messages"
+          :runs="runs"
+          :thread-id="threadId"
+          :active="visible && activeSectionKey === 'message-debug'"
+          :active-run-id="activeRunId"
+          :run-active="runActive"
+        />
       </div>
     </div>
 
@@ -294,9 +308,14 @@ import {
   searchWorkspaceFiles
 } from '@/apis/workspace_api'
 import { normalizePreviewResponse } from '@/utils/file_preview'
+import { parseDownloadFilename } from '@/utils/file_utils'
 import { threadApi } from '@/apis/agent_api'
+import { useProjectsStore } from '@/stores/projects'
+
+const projectsStore = useProjectsStore()
 
 const props = defineProps({
+  runs: { type: Array, default: () => [] },
   agentState: {
     type: Object,
     default: () => ({})
@@ -304,6 +323,18 @@ const props = defineProps({
   threadId: {
     type: String,
     default: null
+  },
+  activeRunId: {
+    type: String,
+    default: null
+  },
+  runActive: {
+    type: Boolean,
+    default: false
+  },
+  visible: {
+    type: Boolean,
+    default: false
   },
   panelRatio: {
     type: Number,
@@ -493,8 +524,14 @@ const createTreeNode = (entry, extraFileData = {}) => {
 }
 
 // 用户目录树节点：预览与下载走 workspace 身份，而非当前对话。
-const createWorkspaceTreeNode = (entry) =>
-  createTreeNode(entry, { workdir: false, workspace: true })
+const createWorkspaceTreeNode = (entry) => {
+  const node = createTreeNode(entry, { workdir: false, workspace: true })
+  if (node.isLeaf) return node
+  // 命中名称来源时主标题改用可读名称，副标题保留原始目录名，tooltip 给出完整路径。
+  const label = projectsStore.resolveDirectoryLabel(node.key)
+  if (!label) return node
+  return { ...node, title: label.label, subtitle: node.title, pathHint: label.hint }
+}
 
 const updateTreeChildren = (nodes, targetKey, children) => {
   return nodes.map((node) => {
@@ -538,26 +575,6 @@ const isSameOrChildPath = (path, targetPath) => {
   return (
     normalizedPath === normalizedTargetPath || normalizedPath.startsWith(`${normalizedTargetPath}/`)
   )
-}
-
-const parseDownloadFilename = (contentDisposition) => {
-  if (!contentDisposition) return ''
-
-  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
-  if (utf8Match && utf8Match[1]) {
-    try {
-      return decodeURIComponent(utf8Match[1])
-    } catch (error) {
-      console.warn('解析 UTF-8 文件名失败:', error)
-    }
-  }
-
-  const asciiMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
-  if (asciiMatch && asciiMatch[1]) {
-    return asciiMatch[1]
-  }
-
-  return ''
 }
 
 const getFileName = (fileItem) => {
@@ -679,7 +696,8 @@ const loadData = async (treeNode) => {
 }
 
 const loadWorkspaceChildren = async (directoryPath) => {
-  const res = await getWorkspaceTree(directoryPath)
+  // 带上未绑定的会话目录：个人空间要能看到每个 projects/<uuid>，才能按名称辨认来源。
+  const res = await getWorkspaceTree(directoryPath, false, false, true)
   return sortEntries(res?.entries || []).map((entry) => createWorkspaceTreeNode(entry))
 }
 
@@ -699,6 +717,8 @@ const refreshWorkspaceTree = async ({ force = false, refreshPreview = false } = 
   workspaceLoading.value = true
   workspaceError.value = ''
   workspacePreviewRefreshPending ||= refreshPreview
+  // 名称映射先就绪再建树，避免目录先以 uuid 渲染、随后被改写造成闪烁。
+  await projectsStore.ensureDirectoryLabels()
 
   try {
     do {
@@ -1793,6 +1813,27 @@ watch(
 .name-end {
   flex-shrink: 0;
   white-space: nowrap;
+}
+
+/* 命中名称来源的目录节点：主标题 + 括号内的原始目录名（uuid），单行呈现 */
+.tree-node-label {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.tree-node-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-node-subtitle {
+  flex-shrink: 0;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
 }
 
 .node-actions-container {

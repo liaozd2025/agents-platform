@@ -6,7 +6,6 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from yuxi.config.runtime import knowledge_capability_enabled
 from yuxi.permissions import (
     ResourcePermission,
     resolve_agent_permission,
@@ -82,16 +81,9 @@ class DashboardService:
                 "contains_inferred_data": contains_inferred_data,
             }
 
-        if knowledge_capability_enabled():
-            from yuxi.storage.postgres.models_knowledge import KnowledgeBase
+        from yuxi.storage.postgres.models_knowledge import KnowledgeBase
 
-            knowledge_bases = await summarize(KnowledgeBase, resolve_knowledge_base_permission)
-        else:
-            knowledge_bases = {
-                "creation_count": 0,
-                "shared_visible_count": 0,
-                "contains_inferred_data": False,
-            }
+        knowledge_bases = await summarize(KnowledgeBase, resolve_knowledge_base_permission)
         agents = await summarize(Agent, resolve_agent_permission)
         skills = await summarize(Skill, resolve_skill_permission)
         return {

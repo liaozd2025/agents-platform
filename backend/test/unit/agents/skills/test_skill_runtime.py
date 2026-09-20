@@ -146,23 +146,3 @@ async def test_preload_rejects_symlinked_source_ancestor(tmp_path, monkeypatch):
             db=object(),
             user=_authorized_user(),
         )
-
-
-@pytest.mark.asyncio
-async def test_lite_mode_excludes_knowledge_base_from_preload(tmp_path, monkeypatch):
-    item = _skill(tmp_path, "knowledge-base")
-
-    async def fake_list_accessible_skills(_db, _user):
-        return [item]
-
-    monkeypatch.setattr(skill_runtime, "list_accessible_skills", fake_list_accessible_skills)
-    monkeypatch.setattr(skill_runtime, "lite_mode_enabled", lambda: True)
-    scope = await resolve_runtime_skills_for_context(
-        SimpleNamespace(skills=["knowledge-base"], preload_skills=["knowledge-base"]),
-        db=object(),
-        user=_authorized_user(),
-    )
-
-    assert scope["context_skills"] == []
-    assert scope["preloaded_skills"] == []
-    assert scope["preloaded_skill_contents"] == {}

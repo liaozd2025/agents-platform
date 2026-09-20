@@ -6,16 +6,11 @@ from deepagents.backends import CompositeBackend
 from deepagents.middleware.filesystem import (
     TOOLS_EXCLUDED_FROM_EVICTION,
     FilesystemMiddleware,
+    FsToolName,
 )
-from langchain_core.messages import ToolMessage
 
-from yuxi.agents.backends.paths import (
-    VIRTUAL_PERSONAL_SKILLS_PATH,
-    VIRTUAL_SKILLS_PATH,
-    runtime_workdir_path,
-)
+from yuxi.agents.backends.paths import runtime_workdir_path
 from yuxi.agents.skills.service import refresh_user_skill_projection_async
-from yuxi.agents.tool_approval import PI_DELEGATED_SANDBOX_TOOLS
 
 from .sandbox import ProvisionerSandboxBackend
 
@@ -25,34 +20,21 @@ _TOOL_RESULT_EVICTION_EXEMPT_TOOLS = frozenset(TOOLS_EXCLUDED_FROM_EVICTION) | {
 
 # 文件工具 allowlist：显式排除 destructive delete。Yuxi backend 未实现 delete，
 # 且删除语义需要审批与审计设计，开放前不应让模型看到该工具。
-_PI_REDIRECTED_TOOLS = PI_DELEGATED_SANDBOX_TOOLS | {"read_file"}
+_AGENT_FS_TOOLS: tuple[FsToolName, ...] = (
+    "ls",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "execute",
+)
 
 
 class YuxiFilesystemMiddleware(FilesystemMiddleware):
-    """只允许模型通过 read_file 读取只读 Skill 投影。"""
-
-    @staticmethod
-    def _is_skill_read(request) -> bool:
-        tool_call = request.tool_call if isinstance(request.tool_call, dict) else {}
-        if tool_call.get("name") != "read_file":
-            return False
-        args = tool_call.get("args") if isinstance(tool_call.get("args"), dict) else {}
-        file_path = str(args.get("file_path") or "").strip()
-        return any(
-            file_path.startswith(f"{root.rstrip('/')}/") for root in (VIRTUAL_SKILLS_PATH, VIRTUAL_PERSONAL_SKILLS_PATH)
-        )
-
-    @staticmethod
-    def _sandbox_redirect(request) -> ToolMessage:
-        tool_call = request.tool_call if isinstance(request.tool_call, dict) else {}
-        return ToolMessage(
-            "用户沙箱文件必须通过 pi_sandbox 交给 PI Agent 处理。",
-            tool_call_id=str(tool_call.get("id") or ""),
-        )
+    """Filesystem middleware that budgets large tool outputs before they hit model context."""
 
     def wrap_tool_call(self, request, handler):
-        if request.tool_call["name"] in _PI_REDIRECTED_TOOLS and not self._is_skill_read(request):
-            return self._sandbox_redirect(request)
         tool_result = handler(request)
 
         if request.tool_call["name"] in _TOOL_RESULT_EVICTION_EXEMPT_TOOLS:
@@ -63,8 +45,6 @@ class YuxiFilesystemMiddleware(FilesystemMiddleware):
         return self._intercept_large_tool_result(tool_result)
 
     async def awrap_tool_call(self, request, handler):
-        if request.tool_call["name"] in _PI_REDIRECTED_TOOLS and not self._is_skill_read(request):
-            return self._sandbox_redirect(request)
         tool_result = await handler(request)
 
         if request.tool_call["name"] in _TOOL_RESULT_EVICTION_EXEMPT_TOOLS:
@@ -120,6 +100,7 @@ class _BackendScope:
                 thread_id=self.runtime_scope_id,
                 uid=self.uid,
                 workdir_path=self.workdir_relative_path,
+                create_if_missing=True,
             ),
             routes={},
             artifacts_root=f"{self.workdir_path.rstrip('/')}/outputs",
@@ -146,9 +127,11 @@ def create_agent_filesystem_middleware(
     tool_token_limit_before_evict: int | None = None,
     *,
     backend: CompositeBackend,
+    disabled_tools: frozenset[str] = frozenset(),
 ) -> FilesystemMiddleware:
+    """构造文件系统中间件，在 ToolNode 注册前排除禁用工具。"""
     return YuxiFilesystemMiddleware(
         backend=backend,
         tool_token_limit_before_evict=tool_token_limit_before_evict,
-        tools=["read_file"],
+        tools=[name for name in _AGENT_FS_TOOLS if name not in disabled_tools],
     )

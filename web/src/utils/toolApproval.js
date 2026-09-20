@@ -1,11 +1,13 @@
 export const TOOL_APPROVAL_MODES = ['default', 'always_trust']
+// 会话、Agent 配置与本地偏好都未指定时，使用默认审批。
+export const DEFAULT_TOOL_APPROVAL_MODE = 'default'
 export const TOOL_APPROVAL_MODE_STORAGE_KEY = 'yuxi_tool_approval_mode'
 
 export const isToolApprovalMode = (value) => TOOL_APPROVAL_MODES.includes(value)
 
 export const resolveToolApprovalMode = ({ hasThread, threadMode, agentMode, savedMode }) => {
   const candidates = hasThread ? [threadMode] : [savedMode, agentMode]
-  return candidates.find(isToolApprovalMode) || TOOL_APPROVAL_MODES[0]
+  return candidates.find(isToolApprovalMode) || DEFAULT_TOOL_APPROVAL_MODE
 }
 
 const resolveStorage = (storage) =>
@@ -63,7 +65,6 @@ export const getToolApprovalSummary = (request) => {
   if (typeof args === 'string') return args
   if (args === null || typeof args !== 'object') return String(args ?? '')
   if (name === 'execute') return String(args.command || args.cmd || formatToolApprovalArgs(args))
-  if (name === 'pi_sandbox') return String(args.description || formatToolApprovalArgs(args))
   if (name === 'write_file' || name === 'edit_file') {
     return String(args.file_path || args.path || formatToolApprovalArgs(args))
   }

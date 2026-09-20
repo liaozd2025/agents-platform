@@ -132,13 +132,17 @@ const handleClick = (e) => {
 
 .context-usage-ring-btn.is-warning {
   .context-ring-fill {
-    stroke: var(--warning-color, #faad14);
+    /* 原来写的是 var(--warning-color, ...)，但项目里并没有 --warning-color 这个变量，
+       实际一直靠兜底值生效；这里直接改成语义色的真实变量名 */
+    stroke: var(--color-warning-500);
   }
 }
 
 .context-usage-ring-btn.is-danger {
   .context-ring-fill {
-    stroke: var(--error-color, #ff4d4f);
+    /* 与上方 is-warning 同因：--error-color 全仓未定义，一直靠兜底值生效，
+       这里改成语义色的真实变量名，避免兜底值被误当作已配置 */
+    stroke: var(--color-error-500);
   }
 }
 </style>

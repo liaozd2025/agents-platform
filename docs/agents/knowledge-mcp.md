@@ -23,7 +23,7 @@ codex mcp login yuxi-knowledge --scopes knowledge:read
 
 ## 部署边界
 
-生产默认不注册 MCP。通过服务端环境变量 `YUXI_KNOWLEDGE_MCP_URL=https://knowledge.example.com/api/mcp` 配置固定入口后，在正常部署流程中重启 API。Compose 已通过 env_file 读取该变量。LITE 始终不注册知识库 MCP。正式部署使用可信 HTTPS，不关闭证书验证。
+生产默认不注册 MCP。通过服务端环境变量 `YUXI_KNOWLEDGE_MCP_URL=https://knowledge.example.com/api/mcp` 配置固定入口后，在正常部署流程中重启 API。Compose 已通过 env_file 读取该变量。正式部署使用可信 HTTPS，不关闭证书验证。
 
 内网开发时，设置 `YUXI_ENV=development` 并显式配置 `YUXI_KNOWLEDGE_MCP_URL=http://<内网IP>:5173/api/mcp`，客户端连接同一地址。仅 RFC1918 私有 IP 和本机地址允许开发 HTTP；HTTP 不加密，只用于可信内网测试，生产仍拒绝 HTTP。OAuth 客户端的本机回调由客户端生成，不改为服务端 IP。
 

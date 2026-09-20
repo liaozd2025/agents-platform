@@ -16,7 +16,6 @@ from mcp.server.auth.provider import (
     construct_redirect_uri,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
-
 from yuxi.permissions.authorization import build_authorization_context
 from yuxi.repositories.user_repository import UserRepository
 from yuxi.storage.postgres.manager import pg_manager
@@ -29,8 +28,8 @@ ACCESS_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 def register_knowledge_tools(server):
     """将只读知识库用例注册到 MCP，身份来自已认证上下文。"""
     from mcp.server.auth.middleware.auth_context import get_access_token
-    from pydantic import Field
     from mcp.types import ToolAnnotations
+    from pydantic import Field
 
     read_only = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
 

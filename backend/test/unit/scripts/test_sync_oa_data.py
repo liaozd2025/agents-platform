@@ -8,6 +8,14 @@ from scripts.migrate_oa_users import MigrationAction, OaUser
 from scripts.sync_oa_data import build_department_url, run
 
 
+@pytest.fixture(autouse=True)
+def isolate_schema_check(monkeypatch):
+    """编排单测不连接外部数据库，Schema 由迁移集成测试验证。"""
+    monkeypatch.setattr("yuxi.storage.postgres.manager.pg_manager.initialize", Mock())
+    monkeypatch.setattr("yuxi.storage.postgres.manager.pg_manager.require_current_schema", AsyncMock())
+    monkeypatch.setattr("yuxi.storage.postgres.manager.pg_manager.close", AsyncMock())
+
+
 def test_build_department_url_requires_user_endpoint():
     assert build_department_url("https://example.test/DrugDevp/QueryUserPage") == (
         "https://example.test/DrugDevp/QueryDepartmentTree"

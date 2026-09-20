@@ -164,7 +164,35 @@ async def dashboard_db():
         msg1 = Message(conversation=conv1, role="user", content="Hello", created_at=yesterday)
         msg2 = Message(conversation=conv1, role="assistant", content="Hi there!", created_at=yesterday)
         msg3 = Message(conversation=conv2, role="user", content="Write code", created_at=now)
-        msg4 = Message(conversation=conv2, role="assistant", content="Here is code", created_at=now)
+        msg4 = Message(
+            conversation=conv2,
+            role="assistant",
+            content="Here is code",
+            created_at=now,
+            extra_metadata={"usage_metadata": {"input_tokens": 5, "output_tokens": 3}},
+        )
+        hidden_model_audit = Message(
+            conversation=conv2,
+            role="assistant",
+            content="Intermediate model output",
+            message_type="model_audit",
+            operation_id="model-audit-1",
+            execution_status="completed",
+            created_at=now,
+            extra_metadata={"usage_metadata": {"input_tokens": 100, "output_tokens": 100}},
+        )
+        hidden_tool_audit = Message(
+            conversation=conv2,
+            role="tool",
+            content="Intermediate tool output",
+            message_type="tool_audit",
+            operation_id="tool-audit-1",
+            started_at=now,
+            sequence=2,
+            execution_status="completed",
+            created_at=now,
+            extra_metadata={"usage_metadata": {"input_tokens": 100, "output_tokens": 100}},
+        )
         removed_agent_message = Message(
             conversation=missing_agent_conversation,
             role="assistant",
@@ -181,6 +209,18 @@ async def dashboard_db():
         )
 
         feedback1 = MessageFeedback(message=msg2, uid="uid-alice", rating="like", created_at=yesterday)
+        hidden_model_feedback = MessageFeedback(
+            message=hidden_model_audit,
+            uid="uid-bob",
+            rating="dislike",
+            created_at=now,
+        )
+        hidden_tool_feedback = MessageFeedback(
+            message=hidden_tool_audit,
+            uid="uid-bob",
+            rating="like",
+            created_at=now,
+        )
         removed_agent_feedback = MessageFeedback(
             message=removed_agent_message,
             uid="uid-alice",
@@ -239,10 +279,14 @@ async def dashboard_db():
                 msg2,
                 msg3,
                 msg4,
+                hidden_model_audit,
+                hidden_tool_audit,
                 removed_agent_message,
                 tool1,
                 removed_agent_tool,
                 feedback1,
+                hidden_model_feedback,
+                hidden_tool_feedback,
                 removed_agent_feedback,
                 older_run,
                 completed_run,
@@ -317,11 +361,10 @@ async def test_resource_scope_aggregation_lives_in_dashboard_service(dashboard_d
 
     monkeypatch.setattr(service.repo, "list_resources", list_resources)
     monkeypatch.setattr(dashboard_service, "dashboard_resource_subjects", subjects)
-    monkeypatch.setattr(dashboard_service, "knowledge_capability_enabled", lambda: False)
 
     result = await service.get_resource_scope_stats(authorization=authorization, department_id=2)
 
-    assert result["knowledge_bases"]["creation_count"] == 0
+    assert result["knowledge_bases"]["creation_count"] == 1
     assert (
         result["agents"]
         == result["skills"]
@@ -356,6 +399,14 @@ async def test_agent_analytics_keeps_top_performers_wire_contract(dashboard_db):
         "agent-helper",
         "agent-coder",
         "removed-agent",
+    }
+    coder_satisfaction = next(
+        item for item in analytics["agent_satisfaction_rates"] if item["agent_id"] == "agent-coder"
+    )
+    assert coder_satisfaction == {
+        "agent_id": "agent-coder",
+        "satisfaction_rate": 100,
+        "total_feedbacks": 0,
     }
 
 

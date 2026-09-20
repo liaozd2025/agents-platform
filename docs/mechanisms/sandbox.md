@@ -26,32 +26,27 @@ flowchart LR
     Workspace --> UserData
 ```
 
-Graph 创建时，Agent backend 取得 `uid`、根运行 scope 和 `workdir_path`，并同步获授权的 Skill 投影。普通聊天与恢复直接进入模型；只有 PI 工具执行或 backend 实际访问文件时才创建沙盒。PI 首次使用保留容量不足时的有界等待与取消；直接文件操作在容量不足时报告 `sandbox_capacity_exhausted`，由调用方处理失败。API/worker 只持有 provisioner 代理地址，不直接访问动态容器或 NodePort。
+Graph 创建时，Agent backend 取得 `uid`、根运行 scope 和 `workdir_path`，并同步获授权的 Skill 投影。普通聊天与恢复直接进入模型；只有 backend 实际访问文件或执行命令时才创建沙盒。容量不足时工具报告 `sandbox_capacity_exhausted`，不会创建超出资源预算的实例。API/worker 只持有 provisioner 代理地址，不直接访问动态容器或 NodePort。
 
 ## Identity、Workdir 和生命周期
 
 `runtime_scope_id` 是一次顶层执行树的沙盒分组键，当前使用根 Conversation 的 thread ID。根 Agent 和子 Agent 共享这个 scope，因此可以共享同一个运行时、`/tmp`、环境和文件挂载；子 Agent 的 child thread 只隔离 LangGraph checkpoint。
 
-Conversation 通过 `project_id` 绑定 Project；Project 拥有这项绑定和 `workdir_path`，UserWorkspace 拥有该路径下的实际文件字节。`workdir_path` 是当前用户 UserWorkspace 下的合法相对 POSIX 路径，例如 `projects/<uuid>`，不能包含 `..`、反斜杠或符号链接。`linked` Project 只能引用已经存在的目录，目标不存在时请求失败；`managed` Project 使用服务分配并物化的 `projects/<uuid>` 目录，目录创建失败时请求失败。Workdir 决定当前工作目录和 Viewer 文件范围，但不决定 sandbox identity，也不把同一用户的其他 Project 变成安全隔离边界。两个顶层 Conversation 即使绑定同一 Workdir，也会创建不同 runtime。
+Conversation 通过 `project_id` 绑定 Project；Project 拥有这项绑定和 `workdir_path`，UserWorkspace 拥有该路径下的实际文件字节。`workdir_path` 是当前用户 UserWorkspace 下的合法相对 POSIX 路径，不能包含 `..`、反斜杠或符号链接。`linked` Project 只能引用已经存在的目录，目标不存在时请求失败。新 `managed` Project 使用上海时间和 Project ID 前 8 位分配 `projects/YYYY-MM-DD_HH-MM-SS_<project-id-prefix>`；同名条目已经存在时依次追加 `-1`、`-2`，既有 `projects/<uuid>` 保持有效，目录创建失败时请求失败。Workdir 决定当前工作目录和 Viewer 文件范围，但不决定 sandbox identity，也不把同一用户的其他 Project 变成安全隔离边界。两个顶层 Conversation 即使绑定同一 Workdir，也会创建不同 runtime。
 
 | 运行类型 | checkpoint | runtime scope | Workdir |
 | --- | --- | --- | --- |
 | 普通 Agent | 当前 thread | 根 thread | 当前 Project 的 Workdir |
 | 子 Agent | child thread | 根 thread | 继承根 Conversation |
-| PI 沙箱任务 | attempt 内的 PI session | 根 thread | 继承根 Conversation |
 | 远程 Skill 安装 | 临时 thread | 临时 thread | 无持久用户目录，`inherit_env=False` |
 
 `uid + runtime_scope_id` 派生稳定 `sandbox_id`。同一 runtime 存活期间不能改绑到另一个 Workdir。根执行树终态后，worker 清理 runtime，但保留 UserWorkspace 文件。
 
-## PI 任务的交付与持续协作
+## 工具审批与历史 PI 结果
 
-`pi_sandbox` 在现有 Request、child Run 和 Attempt 中执行 PI Runner。命令的 cwd 是当前 Project；依赖和中间文件保留在工作目录，最终交付通过 `submit_artifact` 显式登记在当前 attempt 的 `outputs/pi-runs/<目录>/`。登记和 final ACK 都验证文件类型、路径、大小和摘要；单文件上限 64MiB，总量 256MiB，最多 200 个文件。只读任务可以没有交付物。artifact、session、patch 和最终消息始终绑定同一 attempt；patch 描述该次已登记交付，不是任意项目源码改动的回滚包。
+普通 Agent 使用文件工具和 `execute`，需要批准的调用通过工具审批恢复。普通 SubAgent 继承父运行的审批模式：`default` 下不能调用写文件、编辑和命令工具；`always_trust` 下可以使用这些工具。SubAgent 的独立 Run、checkpoint 和结果继续由既有子智能体服务持久化。
 
-后续任务从相同用户、Project 和 PI child 会话的最近已 ACK 结果续接。repository 选定来源后，Workdir 有界读取并验证 session 摘要，Runner 从字节快照 fork 新 session，旧文件保持不变。Project 根 `AGENTS.md` 与获授权 Skill 路径显式投影；Runner 不自动加载工作目录中的其他 Skill、扩展或系统提示文件。模型上下文、输出上限、输入模态及 reasoning 能力来自现有逐模型配置；child Run 用量只统计本次执行，未上报时显示未知。
-
-正文增量和工具累计输出经 Redis SSE 展示，约每 250ms 合并；工具完成事件覆盖中间快照。这些高频事件校验当前 attempt 与 lease，但不追加 PostgreSQL 历史。数据库保留工具首尾和 final ACK，PI 详情从真实 child Run 回读状态及用量，不依赖 LangGraph checkpoint。
-
-运行中引导沿用根会话的 Request 队列。服务端确认当前执行树存在待处理的 steer 后，仅发送固定让位控制行；PI 完成当前整个工具批次并确认控制后，以 `stop_reason=steer` 交付，下一 Request 再执行新要求。当前 PI 不直接接收并执行那段新要求。取消会等待已启动执行停止再清理；启动响应或停止确认失败会保留可观察的清理失败事实，不能因重建 adapter 缺少旧进程句柄而宣称已回收。任务审批沿用既有授权范围，包含沙箱命令及当前用户工作区访问，不提供逐命令审批。
+历史 PI child Run、对话、用量和已交付文件保留原有读取权限，并通过 Run 结果、子任务详情和 Viewer/artifact 下载入口查看。PI child 对话只读，新增请求和恢复均被后端拒绝。升级迁移收敛未结束的 PI Run；部署前必须停止旧 worker 和仍执行 PI 的沙箱，具体取舍见[PI 退役决策](../develop-guides/decisions/implemented/2026-09-18-retire-pi-executor.md)。
 
 ## 挂载和文件 Owner
 
