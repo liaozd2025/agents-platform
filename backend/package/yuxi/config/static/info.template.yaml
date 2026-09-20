@@ -3,14 +3,16 @@
 
 # 组织信息
 organization:
-  name: "九典制药"                       # 完整组织名称
+  name: "九典制药智能体平台"                        # 完整组织名称（登录页左上角展示）
+  short_name: "九典制药"                             # 组织简称：登录页页脚版权等窄幅场景使用
   logo: "/jiudian-pharma-logo.png"       # Logo文件路径（放在 web/public 目录下）
   avatar: "/jiudian-pharma-logo.png"     # 头像文件路径（放在 web/public 目录下）
   login_bg: "/login-bg.jpg"  # 登录背景图片路径（放在 web/public 目录下）
 
 # 项目信息
 branding:
-  name: "九典制药"
+  name: "九典制药智能体平台"
+  sidebar_name: "智能体平台"              # 侧边栏品牌位短名（侧边栏宽 230px 固定，全称会被省略号截断）
   title: "让智能体可构建、可编排、可落地"     # 系统标题
   subtitle: "开源智能体平台套件，融合 RAG 与知识图谱"          # 副标题（subtitles 为空时使用）
   subtitles:

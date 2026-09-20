@@ -24,6 +24,7 @@ export const useInfoStore = defineStore('info', () => {
     () =>
       infoConfig.value.organization || {
         name: '',
+        short_name: '',
         logo: '',
         avatar: ''
       }
@@ -34,6 +35,7 @@ export const useInfoStore = defineStore('info', () => {
     () =>
       infoConfig.value.branding || {
         name: '',
+        sidebar_name: '',
         title: '',
         subtitle: '',
         subtitles: []
