@@ -1,6 +1,7 @@
 <template>
   <div
     ref="previewRef"
+    v-bind="$attrs"
     :class="[
       'yk-markdown-preview',
       'flat-md-preview',
@@ -8,16 +9,28 @@
     ]"
     @click="handleMarkdownAction"
   ></div>
+  <AnswerCitationModal
+    v-if="selectedCitation"
+    v-model:open="citationOpen"
+    :citation="selectedCitation"
+  />
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useThemeStore } from '@/stores/theme'
 import { useUserStore } from '@/stores/user'
+import { resolveAnswerCitation } from '@/utils/answerCitations.js'
 import { renderMarkdown } from '@/utils/markdown_preview'
 import { HTML_PREVIEW_MAX_HEIGHT, HTML_PREVIEW_MIN_HEIGHT } from '@/utils/htmlPreviewRenderer'
 import 'katex/dist/katex.min.css'
+defineOptions({ inheritAttrs: false })
+
+const AnswerCitationModal = defineAsyncComponent(() =>
+  import('@/components/sources/AnswerCitationModal.vue')
+)
 const props = defineProps({
+  citationSources: { type: Array, default: () => [] },
   content: {
     type: String,
     default: ''
@@ -36,6 +49,13 @@ const themeStore = useThemeStore()
 const userStore = useUserStore()
 const shikiTheme = computed(() => (themeStore.isDark ? 'github-dark' : 'github-light'))
 const previewRef = ref(null)
+const selectedCitationSource = ref('')
+const citationOpen = ref(false)
+const selectedCitation = computed(() =>
+  selectedCitationSource.value
+    ? resolveAnswerCitation(selectedCitationSource.value, props.citationSources)
+    : null
+)
 const copiedTimers = new WeakMap()
 const htmlPreviewFrames = new Map()
 const kbImageBlobUrls = new Set()
@@ -405,6 +425,14 @@ const handleMarkdownAction = async (e) => {
   const target = e.target instanceof Element ? e.target : e.target?.parentElement
   if (!target) return
 
+  const citationButton = target.closest('.citation-ref[data-citation-source]')
+  if (citationButton && previewRef.value?.contains(citationButton)) {
+    e.preventDefault()
+    selectedCitationSource.value = citationButton.dataset.citationSource
+    citationOpen.value = true
+    return
+  }
+
   const codeCopyBtn = target.closest('.markdown-code-copy-btn')
   if (codeCopyBtn) {
     await copyCodeBlock(codeCopyBtn)
@@ -638,51 +666,23 @@ const showCopiedFeedback = (btn) => {
     color: var(--gray-700);
   }
 
-  cite {
-    position: relative;
+  .citation-ref {
+    display: inline;
     margin: 0 4px;
-    padding: 0 0.25rem;
+    padding: 1px 5px;
+    border: 0;
     border-radius: 4px;
-    outline: 2px solid var(--gray-100);
     background-color: var(--gray-100);
     color: var(--gray-800);
+    font: inherit;
     font-size: 12px;
-    font-style: normal;
+    line-height: 1.5;
     cursor: pointer;
-    user-select: none;
 
-    &:hover::after {
-      content: attr(source);
-      position: absolute;
-      bottom: calc(100% + 6px);
-      left: 50%;
-      z-index: 1000;
-      width: max-content;
-      min-width: 100px;
-      max-width: 400px;
-      padding: 8px 12px;
-      border-radius: 6px;
-      transform: translateX(-50%);
-      background-color: #222;
-      color: #fff;
-      font-size: 13px;
-      line-height: 1.5;
-      text-align: center;
-      white-space: normal;
-      word-break: break-word;
-      pointer-events: none;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-    }
-
-    &:hover::before {
-      content: '';
-      position: absolute;
-      bottom: 100%;
-      left: 50%;
-      z-index: 1000;
-      transform: translateX(-50%);
-      border: 5px solid transparent;
-      border-top-color: var(--gray-900);
+    &:hover { background: var(--gray-200); }
+    &:focus-visible {
+      outline: 2px solid var(--main-500);
+      outline-offset: 2px;
     }
   }
 
