@@ -217,8 +217,15 @@ const isConversationRoute = computed(() => conversationRouteNames.has(route.name
 const activeConversationThreadId = computed(() =>
   isConversationRoute.value ? currentThreadId.value : null
 )
-const organizationName = computed(() => {
-  return infoStore.organization.name || infoStore.branding.name || 'Yuxi'
+// 侧边栏品牌位的可用宽度只有约 100px（230px 侧边栏要减去头像与右侧两个操作按钮），
+// 因此优先取配置里的短名 branding.sidebar_name，避免「九典制药智能体平台」这类全称被省略号截断。
+const sidebarBrandName = computed(() => {
+  return (
+    infoStore.branding.sidebar_name ||
+    infoStore.organization.name ||
+    infoStore.branding.name ||
+    'Yuxi'
+  )
 })
 
 // 下面是导航菜单部分，添加智能体项
@@ -489,7 +496,7 @@ provide('settingsModal', {
       <div class="sidebar-brand" @click.stop>
         <div v-if="!layoutSidebarCollapsed" class="brand-identity">
           <img :src="infoStore.organization.avatar" class="brand-avatar" />
-          <span class="brand-name">{{ organizationName }}</span>
+          <span class="brand-name">{{ sidebarBrandName }}</span>
         </div>
         <button
           v-else
@@ -899,12 +906,19 @@ div.header,
     object-fit: cover;
   }
 
+  /*
+   * 侧边栏品牌位可用宽度被固定尺寸挤出来：
+   * @sidebar-width 230px - 2px 边框 - 16px 侧边栏内边距 - 8px 本行内边距
+   * - 28px 头像 - 本行 margin-left - 8px 行内 gap - 62px 右侧两个 30px 操作按钮 ≈ 98px。
+   * 当前文案「智能体平台」（配置 branding.sidebar_name，5 个汉字）14px 下实测约占 79px，
+   * 可完整显示；文案一旦加长会先撑满再被 text-overflow 截成省略号，改文案前先核对这条宽度预算。
+   */
   .brand-name {
     min-width: 0;
     margin-left: 10px;
     overflow: hidden;
     color: var(--gray-1000);
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 650;
     line-height: 20px;
     text-overflow: ellipsis;
