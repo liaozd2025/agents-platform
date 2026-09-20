@@ -23,6 +23,7 @@ from yuxi.agents.middlewares import (
     TokenUsageMiddleware,
     create_summary_middleware_from_context,
 )
+from yuxi.agents.middlewares.citations import CitationMiddleware
 from yuxi.agents.middlewares.skills import SkillsMiddleware
 from yuxi.agents.tool_approval import (
     DEFAULT_TOOL_APPROVAL_MODE,
@@ -107,6 +108,7 @@ async def _build_middlewares(context, backend, tool_approval_mode: str):
         ModelRetryMiddleware(),
         ImageInputCompatibilityMiddleware(),
         TokenUsageMiddleware(),
+        CitationMiddleware(),
     ]
 
 

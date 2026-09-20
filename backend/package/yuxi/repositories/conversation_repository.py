@@ -414,6 +414,22 @@ class ConversationRepository:
         result = await self.db.execute(query)
         return list(result.scalars().unique().all())
 
+    async def get_tool_artifacts(self, conversation_id: int) -> dict[tuple[str, str], dict]:
+        """按 Run 与工具调用身份读取历史引用，避免加载完整工具正文。"""
+        result = await self.db.execute(
+            select(
+                Message.run_id, Message.operation_id, Message.extra_metadata["output"]["artifact"]["citation_sources"]
+            ).where(
+                Message.conversation_id == conversation_id,
+                Message.message_type == TOOL_AUDIT_MESSAGE_TYPE,
+            )
+        )
+        return {
+            (run_id, operation_id): {"citation_sources": sources}
+            for run_id, operation_id, sources in result.all()
+            if isinstance(sources, list)
+        }
+
     async def get_message_source_ids_by_thread_id(self, thread_id: str) -> set[str]:
         """读取全部持久 Message 来源 ID，包括普通历史隐藏的审计行。"""
         conversation = await self.get_conversation_by_thread_id(thread_id)

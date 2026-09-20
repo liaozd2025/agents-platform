@@ -305,6 +305,7 @@ async def test_save_messages_from_langgraph_state_handles_dict_tool_call_blocks(
         async def aget_state(self, _config):
             return SimpleNamespace(
                 values={
+                    "citation_sources": [{"source": "kb://kb-1/file-1", "excerpts": [{"text": "真实原文"}]}],
                     "messages": [
                         {
                             "id": "ai-tool-call",
@@ -318,7 +319,7 @@ async def test_save_messages_from_langgraph_state_handles_dict_tool_call_blocks(
                                 }
                             ],
                         }
-                    ]
+                    ],
                 }
             )
 
@@ -335,6 +336,7 @@ async def test_save_messages_from_langgraph_state_handles_dict_tool_call_blocks(
     assert conv_repo.saved_messages[0]["extra_metadata"]["knowledge_sources"] == [
         {"kb_id": "kb-1", "content": "检索证据"}
     ]
+    assert conv_repo.saved_messages[0]["extra_metadata"]["citation_sources"][0]["excerpts"] == [{"text": "真实原文"}]
     assert conv_repo.saved_messages[0]["content"] == ""
     assert conv_repo.saved_messages[0]["extra_metadata"]["content"][0]["id"] == "call-task-1"
     assert conv_repo.saved_messages[0]["commit"] is True
