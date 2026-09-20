@@ -38,6 +38,12 @@ def _validate_request(authorization: str | None, request: dict) -> str | None:
     if not isinstance(messages, list) or not messages:
         return "messages_required"
     serialized_messages = json.dumps(messages, ensure_ascii=False)
+    if "CITATION_REPLAY:" in serialized_messages:
+        try:
+            _citation_response(request)
+        except (ValueError, KeyError, TypeError, StopIteration) as exc:
+            return f"citation_contract: {exc}"
+        return None
     if EXPECTED_OUTPUT not in serialized_messages:
         return "expected_input_missing"
     if EXPECTED_PRELOADED_SKILL_MARKER not in serialized_messages:
@@ -104,6 +110,16 @@ def _stream_payloads(model: str, messages: list[dict]) -> list[dict]:
         "created": int(time.time()),
         "model": model,
     }
+    if "CITATION_REPLAY:" in serialized_messages:
+        delta, finish = _citation_response({"messages": messages})
+        return [
+            {**common, "choices": [{"index": 0, "delta": {"role": "assistant", **delta}, "finish_reason": None}]},
+            {
+                **common,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+            },
+        ]
     if any(message.get("role") == "tool" for message in messages if isinstance(message, dict)):
         return [
             {
@@ -176,6 +192,104 @@ def _stream_payloads(model: str, messages: list[dict]) -> list[dict]:
             "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10},
         },
     ]
+
+
+def _citation_response(request: dict) -> tuple[dict, str]:
+    """引用回放只在真实工具返回匹配原文和子回复之后继续模型步骤。"""
+    messages = request["messages"]
+    payload = next(
+        json.loads(message["content"].split("CITATION_REPLAY:", 1)[1])
+        for message in reversed(messages)
+        if message.get("role") == "user" and "CITATION_REPLAY:" in str(message.get("content"))
+    )
+    token = payload["token"]
+    results = {
+        message["tool_call_id"]: message["content"]
+        for message in messages
+        if message.get("role") == "tool" and str(message.get("tool_call_id", "")).startswith(f"call-citation-{token}-")
+    }
+
+    def call(suffix: str, name: str, arguments: dict) -> tuple[dict, str]:
+        """返回单个模型工具调用，并检查 shipping 装配实际提供该工具。"""
+        if "tools" in request and name not in {tool.get("function", {}).get("name") for tool in request["tools"]}:
+            raise ValueError(f"missing tool {name}")
+        return {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": f"call-citation-{token}-{suffix}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(arguments)},
+                }
+            ]
+        }, "tool_calls"
+
+    if payload.get("child"):
+        file_id = payload["file_ids"][0]
+        tool_id = f"call-citation-{token}-open"
+        if tool_id not in results:
+            return call("open", "open_kb_document", {"kb_id": payload["kb_id"], "file_id": file_id})
+        document = json.loads(results[tool_id])
+        if document.get("kb_id") != payload["kb_id"] or document.get("file_id") != file_id:
+            raise ValueError("knowledge identity missing from real tool result")
+        raw_value = re.search(r"CITATION_RAW_VALUE:([a-f0-9]+)", document.get("content", ""))
+        if not raw_value:
+            raise ValueError("knowledge original missing from real tool result")
+        source = f"kb://{payload['kb_id']}/{file_id}"
+        return {"content": f'核查摘要 {raw_value.group(1)} <cite source="{source}" type="file">1</cite>'}, "stop"
+
+    summaries = []
+    for index, file_id in enumerate(payload["file_ids"]):
+        suffix = f"task-{index}"
+        if payload["mode"] == "async":
+            start_id = f"call-citation-{token}-start-{index}"
+            if start_id not in results:
+                suffix = f"start-{index}"
+            else:
+                result_id = f"call-citation-{token}-{suffix}"
+                if result_id not in results:
+                    started = json.loads(results[start_id])
+                    return call(suffix, "subagent_await", {"run_id": started["run_id"]})
+        result_id = f"call-citation-{token}-{suffix}"
+        if result_id not in results:
+            child_payload = {**payload, "child": True, "file_ids": [file_id]}
+            return call(
+                suffix,
+                "subagent_start" if payload["mode"] == "async" else "task",
+                {"subagent_slug": payload["child_slug"], "description": "CITATION_REPLAY:" + json.dumps(child_payload)},
+            )
+        content = results[f"call-citation-{token}-task-{index}"]
+        if payload["mode"] == "async":
+            content = json.loads(content)["result"]["output"]
+        source = f"kb://{payload['kb_id']}/{file_id}"
+        summary = re.search(
+            r'核查摘要 ([a-f0-9]+) <cite source="' + re.escape(source) + r'" type="file">1</cite>', content
+        )
+        if not summary:
+            raise ValueError("child evidence missing from real task result")
+        if file_id in payload.get("adopted_file_ids", payload["file_ids"]):
+            summaries.append(f'主助手汇总 {summary.group(1)} <cite source="{source}" type="file">1</cite>')
+
+    if payload["mode"] == "resume":
+        question_id = f"call-citation-{token}-question"
+        if question_id not in results:
+            return call(
+                "question",
+                "ask_user_question",
+                {
+                    "questions": [
+                        {
+                            "question_id": "citation-confirm",
+                            "question": "选择输出形式",
+                            "options": [{"label": "简短"}, {"label": "完整"}],
+                        }
+                    ]
+                },
+            )
+        if "简短" not in results[question_id]:
+            raise ValueError("resume answer missing from real tool result")
+    summaries.append(f'仅链接来源 <cite source="{payload["url"]}" type="url">1</cite>')
+    return {"content": "\n\n".join(summaries)}, "stop"
 
 
 class ReplayHandler(BaseHTTPRequestHandler):
