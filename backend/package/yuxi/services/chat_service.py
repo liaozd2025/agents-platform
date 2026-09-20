@@ -21,12 +21,12 @@ from typing import Any, Literal
 
 from langchain.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.types import Command
-from yuxi.agents.middlewares.citations import knowledge_citation_sources
 from yuxi.agents.backends.paths import runtime_workdir_path
 from yuxi.agents.base import _json_safe
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.callbacks.model_request_timing import FirstModelRequestRecorder
 from yuxi.agents.context import build_agent_input_context, normalize_agent_context_config
+from yuxi.agents.middlewares.citations import knowledge_citation_sources
 from yuxi.agents.state import AgentStatePayload
 from yuxi.models.utils import parse_assistant_message_body
 from yuxi.repositories.agent_repository import AgentRepository
