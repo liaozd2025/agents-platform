@@ -853,6 +853,7 @@ async def get_agent_run_result(*, run_id: str, current_uid: str, db: AsyncSessio
     payload: dict[str, Any] = {
         "status": run.status,
         "output": output_message.content if output_message else "",
+        "citation_sources": output_metadata.get("citation_sources") or [],
         "agent_slug": run.agent_slug,
         "thread_id": run.conversation_thread_id,
         "conversation_id": run.conversation_id,

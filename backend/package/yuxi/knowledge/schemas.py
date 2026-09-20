@@ -40,6 +40,7 @@ class FindWindowSchema(BaseModel):
 
 
 class FindOutputSchema(BaseModel):
+    title: str = Field(default="", description="原文件名，用于引用标题")
     kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
     file_id: str = Field(description="文件 ID")
     semantic: bool = Field(default=False, description="是否为语义查找")
@@ -57,6 +58,7 @@ class OpenInputSchema(BaseModel):
 
 
 class OpenOutputSchema(BaseModel):
+    title: str = Field(default="", description="原文件名，用于引用标题")
     kb_id: str = Field(description="知识库资源 ID，也就是 kb_id")
     file_id: str = Field(description="文件 ID")
     start_line: int = Field(description="窗口起始行号，1-based；空结果为 0")

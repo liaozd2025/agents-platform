@@ -30,7 +30,16 @@ from yuxi.workspace.workdir import Workdir
 MESSAGE_AUDIT_LIMIT = 500
 AGENT_RUN_TRACE_LIMIT = 500
 MODEL_HISTORY_METADATA_KEYS = frozenset(
-    {"attachments", "source", "knowledge_sources", "error_type", "error_message", "langfuse_trace_id", "model"}
+    {
+        "attachments",
+        "source",
+        "knowledge_sources",
+        "citation_sources",
+        "error_type",
+        "error_message",
+        "langfuse_trace_id",
+        "model",
+    }
 )
 
 
@@ -429,6 +438,9 @@ async def get_thread_history_view(
                 serialize_attachment(attachment, thread_id=thread_id)
             )
 
+    tool_artifacts = (
+        await conv_repo.get_tool_artifacts(conversation.id) if any(msg.tool_calls for msg in messages) else {}
+    )
     history: list[dict] = []
     role_type_map = {"user": "human", "assistant": "ai", "tool": "tool", "system": "system"}
 
@@ -470,7 +482,13 @@ async def get_thread_history_view(
             msg_dict.update(parse_assistant_message_body(msg.content, msg.extra_metadata or {}))
 
         if msg.tool_calls:
-            msg_dict["tool_calls"] = [_serialize_tool_call(tool_call) for tool_call in msg.tool_calls]
+            msg_dict["tool_calls"] = [
+                _serialize_tool_call(
+                    tool_call,
+                    artifact=tool_artifacts.get((msg.run_id, tool_call.langgraph_tool_call_id)),
+                )
+                for tool_call in msg.tool_calls
+            ]
 
         history.append(msg_dict)
 
@@ -561,14 +579,17 @@ def _serialize_history_metadata(message: Any) -> dict[str, Any]:
     return {key: metadata[key] for key in MODEL_HISTORY_METADATA_KEYS if key in metadata}
 
 
-def _serialize_tool_call(tool_call: Any) -> dict[str, Any]:
-    """序列化普通历史和审计共用的 ToolCall 结构。"""
+def _serialize_tool_call(tool_call: Any, *, artifact: dict | None = None) -> dict[str, Any]:
+    """序列化 ToolCall，引用 artifact 仅从同 Run 同工具的审计事实取得。"""
+    result = {"content": tool_call.tool_output or ""}
+    if artifact:
+        result["artifact"] = artifact
     return {
         "id": tool_call.langgraph_tool_call_id or str(tool_call.id),
         "name": tool_call.tool_name,
         "function": {"name": tool_call.tool_name},
         "args": tool_call.tool_input or {},
-        "tool_call_result": {"content": tool_call.tool_output or ""} if tool_call.status == "success" else None,
+        "tool_call_result": result if tool_call.status == "success" else None,
         "status": tool_call.status,
         "error_message": tool_call.error_message,
     }
