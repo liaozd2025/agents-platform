@@ -5,7 +5,11 @@ import { useAgentStore } from './agent'
 
 export const useUserStore = defineStore('user', () => {
   // 状态
-  const token = ref(localStorage.getItem('user_token') || '')
+  // 优先恢复跨会话令牌；未勾选“保持登录”时只从当前会话恢复。
+  const sessionTokenStorage = typeof sessionStorage === 'undefined' ? null : sessionStorage
+  const token = ref(
+    localStorage.getItem('user_token') || sessionTokenStorage?.getItem('user_token') || ''
+  )
   const userId = ref(null)
   const username = ref('')
   // displayName 是界面展示姓名，username 仍仅作为登录账号使用。
@@ -24,7 +28,7 @@ export const useUserStore = defineStore('user', () => {
   const hasPermission = (permissionKey) => effectivePermissions.value.includes(permissionKey)
 
   // 动作
-  function applySession(data) {
+  function applySession(data, rememberLogin = true) {
     token.value = data.access_token
     userId.value = data.user_id
     username.value = data.username
@@ -36,13 +40,17 @@ export const useUserStore = defineStore('user', () => {
     effectivePermissions.value = data.effective_permissions || []
     departmentId.value = data.department_id || null
     departmentName.value = data.department_name || ''
-    localStorage.setItem('user_token', data.access_token)
+    localStorage.removeItem('user_token')
+    sessionTokenStorage?.removeItem('user_token')
+    // 测试或服务端渲染环境没有 sessionStorage 时回退到 localStorage，避免初始化失败。
+    const tokenStorage = rememberLogin || !sessionTokenStorage ? localStorage : sessionTokenStorage
+    tokenStorage.setItem('user_token', data.access_token)
   }
 
   async function login(credentials) {
     try {
       const data = await authApi.login(credentials)
-      applySession(data)
+      applySession(data, credentials.rememberLogin)
       await getCurrentUser()
       return true
     } catch (error) {
@@ -75,6 +83,7 @@ export const useUserStore = defineStore('user', () => {
 
     // 只清除 token
     localStorage.removeItem('user_token')
+    sessionTokenStorage?.removeItem('user_token')
   }
 
   async function initialize(admin) {

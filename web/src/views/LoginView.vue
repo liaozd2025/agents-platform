@@ -31,9 +31,13 @@
     <!-- 主要内容区：居中卡片 -->
     <main class="login-main">
       <div class="login-card">
-        <!-- 左侧图片 -->
+        <!-- 左侧插画：角色眼睛跟随鼠标，密码框有输入或显示明文时眼珠看向别处 -->
         <div class="card-side is-image">
-          <img :src="loginBgImage" alt="登录背景" class="login-bg-image" />
+          <MouseEyesCharacter
+            :password-filled="passwordFilled"
+            :password-visible="passwordVisible"
+            :password-focused="passwordFocused"
+          />
         </div>
 
         <!-- 右侧表单 -->
@@ -128,30 +132,6 @@
                     />
                   </a-form-item>
 
-                  <a-form-item v-if="showAgreementConsent" class="agreement-form-item">
-                    <div class="agreement-row">
-                      <a-checkbox v-model:checked="agreementAccepted">
-                        登录即代表同意
-                        <a
-                          class="agreement-link"
-                          :href="userAgreementUrl"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          @click.stop
-                          >《用户协议》</a
-                        >
-                        <a
-                          class="agreement-link"
-                          :href="privacyPolicyUrl"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          @click.stop
-                          >《隐私协议》</a
-                        >
-                      </a-checkbox>
-                    </div>
-                  </a-form-item>
-
                   <a-form-item>
                     <a-button type="primary" html-type="submit" :loading="loading" block
                       >创建管理员账户</a-button
@@ -180,34 +160,21 @@
                     name="password"
                     :rules="[{ required: true, message: '请输入密码' }]"
                   >
-                    <a-input-password v-model:value="loginForm.password">
+                    <a-input-password
+                      v-model:value="loginForm.password"
+                      v-model:visible="passwordVisible"
+                      @focus="passwordFocused = true"
+                      @blur="passwordFocused = false"
+                    >
                       <template #prefix>
                         <lock-icon size="18" />
                       </template>
                     </a-input-password>
                   </a-form-item>
 
-                  <a-form-item v-if="showAgreementConsent" class="agreement-form-item">
+                  <a-form-item class="agreement-form-item">
                     <div class="agreement-row">
-                      <a-checkbox v-model:checked="agreementAccepted">
-                        登录即代表同意
-                        <a
-                          class="agreement-link"
-                          :href="userAgreementUrl"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          @click.stop
-                          >《用户协议》</a
-                        >
-                        <a
-                          class="agreement-link"
-                          :href="privacyPolicyUrl"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          @click.stop
-                          >《隐私协议》</a
-                        >
-                      </a-checkbox>
+                      <a-checkbox v-model:checked="rememberLogin">保持登录 30 天</a-checkbox>
                     </div>
                   </a-form-item>
 
@@ -290,6 +257,7 @@ import {
 } from '@lucide/vue'
 import { tryAutoStartOIDC, sanitizeRedirect } from '@/utils/oidcAutoStart'
 import { MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
+import MouseEyesCharacter from '@/components/MouseEyesCharacter.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -298,9 +266,6 @@ const infoStore = useInfoStore()
 const agentStore = useAgentStore()
 
 // 品牌展示数据
-const loginBgImage = computed(() => {
-  return infoStore.organization?.login_bg || '/login-bg.jpg'
-})
 const brandLogo = computed(() => {
   return infoStore.organization?.logo || ''
 })
@@ -317,21 +282,12 @@ const brandName = computed(() => {
 
   return orgName || brandNameRaw
 })
-const userAgreementUrl = computed(() => {
-  return infoStore.footer?.user_agreement_url?.trim() || ''
-})
-const privacyPolicyUrl = computed(() => {
-  return infoStore.footer?.privacy_policy_url?.trim() || ''
-})
-const showAgreementConsent = computed(() => {
-  return Boolean(userAgreementUrl.value && privacyPolicyUrl.value)
-})
-
 // 状态
 const isFirstRun = ref(false)
 const loading = ref(false)
 const errorMessage = ref('')
-const agreementAccepted = ref(false)
+// 勾选后跨浏览器会话保留令牌；后端令牌有效期固定为 30 天。
+const rememberLogin = ref(false)
 const serverStatus = ref('loading')
 const serverError = ref('')
 const healthChecking = ref(false)
@@ -352,6 +308,14 @@ const loginForm = reactive({
   loginId: '', // 支持uid或phone_number登录
   password: ''
 })
+
+// 密码框的展示状态，透传给左侧插画：
+// 密码框有内容（输入中或已切明文）时眼珠看向别处，失焦或清空后恢复跟随鼠标
+const passwordFilled = computed(() => loginForm.password.length > 0)
+// 由 antd InputPassword 的 visible 双向绑定驱动，用户点击输入框右侧小眼睛时切换
+const passwordVisible = ref(false)
+// 聚焦状态只用于插画的表现（输入中才「看别处」），不参与任何校验逻辑
+const passwordFocused = ref(false)
 
 // 管理员初始化表单
 const adminForm = reactive({
@@ -418,25 +382,11 @@ const validateConfirmPassword = async (rule, value) => {
   }
 }
 
-const ensureAgreementAccepted = () => {
-  if (!showAgreementConsent.value || agreementAccepted.value) {
-    return true
-  }
-
-  const warningMessage = '请先阅读并同意《用户协议》《隐私协议》'
-  message.warning(warningMessage)
-  return false
-}
-
 // 处理登录
 const handleLogin = async () => {
   // 如果当前被锁定，不允许登录
   if (isLocked.value) {
     message.warning(`账户被锁定，请等待 ${formatTime(lockRemainingTime.value)}`)
-    return
-  }
-
-  if (!ensureAgreementAccepted()) {
     return
   }
 
@@ -447,7 +397,8 @@ const handleLogin = async () => {
 
     await userStore.login({
       loginId: loginForm.loginId,
-      password: loginForm.password
+      password: loginForm.password,
+      rememberLogin: rememberLogin.value
     })
 
     message.success('登录成功')
@@ -508,10 +459,6 @@ const handleLogin = async () => {
 
 // 处理 OIDC 登录
 const handleOIDCLogin = async () => {
-  if (!ensureAgreementAccepted()) {
-    return
-  }
-
   try {
     oidcLoading.value = true
     errorMessage.value = ''
@@ -523,6 +470,7 @@ const handleOIDCLogin = async () => {
       const redirectPath =
         sessionStorage.getItem('redirect') || router.currentRoute.value.query.redirect || '/'
       sessionStorage.setItem('oidc_redirect', redirectPath)
+      sessionStorage.setItem('oidc_remember_login', String(rememberLogin.value))
 
       // 跳转到 OIDC Provider
       window.location.href = response.login_url
@@ -558,10 +506,6 @@ const checkOIDCConfig = async () => {
 
 // 处理初始化管理员
 const handleInitialize = async () => {
-  if (!ensureAgreementAccepted()) {
-    return
-  }
-
   try {
     loading.value = true
     errorMessage.value = ''
@@ -670,7 +614,8 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   /* 使用无纹理的浅蓝灰纯色，和白色登录卡片形成清晰层次。 */
-  background-color: #FBFCFC;
+  /* 登录页使用品牌园区图铺满视口，cover 保持比例并适配不同屏幕。 */
+  background: #dceeff url('/login-page-background.png') center center / cover no-repeat;
 
   &.has-alert {
     padding-top: 60px;
@@ -764,7 +709,8 @@ onUnmounted(() => {
   width: 900px;
   max-width: 95vw;
   height: 560px;
-  background: var(--gray-0);
+  /* 子区域负责各自的底色，卡片本身透明才能让表单层透出页面背景。 */
+  background: transparent;
   border-radius: 16px;
   box-shadow: 0 0px 40px var(--shadow-1);
   display: flex;
@@ -775,18 +721,10 @@ onUnmounted(() => {
   position: relative;
 }
 
-/* Image Side */
+/* Image Side：背景与插画全部由 MouseEyesCharacter 铺满，这里只负责占位与裁切 */
 .card-side.is-image {
   flex: 1.4;
-  background-color: var(--main-10);
   overflow: hidden;
-
-  .login-bg-image {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-    object-position: center;
-  }
 }
 
 /* Form Side */
@@ -796,6 +734,10 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   padding: 40px;
+  /* 半透明表单层保留文字可读性，同时透出整屏背景图。 */
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 .form-wrapper {
