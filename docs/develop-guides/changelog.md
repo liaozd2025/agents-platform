@@ -29,6 +29,7 @@
 - 修复子智能体禁用工具后仍可调用后端执行的问题；禁用状态在执行端拒绝工具访问（[#1001](https://github.com/xerrors/Yuxi/pull/1001)）。
 - 修复书籍分块偶发遗漏短文档标题、将不同节错误合并的问题；标题识别使用无放回抽样，短文档保留全部段落。
 
+- 登录页改为整屏品牌背景与半透明表单层，左侧插画升级为眼睛跟随鼠标的交互角色（输入密码时移开视线）；登录令牌有效期调整为 30 天，与「保持登录 30 天」勾选一致，并按勾选状态选择令牌存储范围；移除《用户协议》《隐私协议》勾选入口（已获合规确认）。见[登录页视觉决策](./decisions/implemented/2026-09-20-login-page-visual-refresh.md)与[保持登录决策](./decisions/implemented/2026-09-12-remember-login-30-days.md)。
 ### 运行与维护
 
 - 通用后台 Task 使用 PostgreSQL 持久执行意图与 ARQ worker，按 owner、heartbeat 和 lease 执行与收敛失联任务；知识库执行器和 Milvus 同步调用移出共享事件循环。
