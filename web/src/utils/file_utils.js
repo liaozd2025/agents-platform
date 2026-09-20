@@ -85,11 +85,17 @@ export const normalizeAttachmentPreview = (attachment) => {
   const fileType = String(attachment?.file_type || '')
   const sizeLabel = formatFileSize(attachment?.file_size)
   const typeLabel = getFileExtensionLabel(name) || getMimeSubtypeLabel(fileType) || '文件'
+  // 右侧面板预览用的 Sandbox runtime 绝对虚拟路径：
+  // 优先取 original_path（用户上传的原文件，doc/docx/ppt/pptx 由后端转 PDF 预览），
+  // 缺失时回退到 path（附件被解析时指向解析出的 .md）。两者都可直接交给线程 artifact 预览接口。
+  // 旧数据若不带路径则留空，调用方据此判定卡片不可点击。
+  const path = attachment?.original_path || attachment?.path || ''
 
   return {
     raw: attachment,
     fileId,
     name,
+    path,
     previewUrl: attachment?.original_artifact_url || attachment?.artifact_url || '',
     meta: [typeLabel, sizeLabel === '-' ? '' : sizeLabel].filter(Boolean).join(' · ')
   }

@@ -9,6 +9,7 @@ from yuxi.utils.filepreview import (
     MAX_TEXT_PREVIEW_CHARS,
     detect_preview_type,
     is_office_pdf_preview_file,
+    office_container_signature_mismatch,
     render_preview,
 )
 
@@ -77,3 +78,34 @@ def test_office_pdf_preview_includes_legacy_word_and_powerpoint():
     assert is_office_pdf_preview_file("demo.xlsx") is False
     assert is_office_pdf_preview_file("demo.doc") is True
     assert is_office_pdf_preview_file("demo.ppt") is True
+
+
+# 本机实测的企业加密（DLP）密文头：既不是 zip 也不是 OLE2，后缀仍保留 Office 扩展名。
+_ENCRYPTED_HEAD = b"\x63\xc0\xb6\x4d\x0d\x50\xc1\x2f"
+
+
+@pytest.mark.parametrize("path", ["黑豆+黑养膏.pptx", "demo.docx", "demo.xlsx", "demo.doc", "demo.ppt", "demo.xls"])
+def test_office_signature_mismatch_flags_encrypted_containers(path):
+    assert office_container_signature_mismatch(path, _ENCRYPTED_HEAD + b"\x00" * 16) is True
+
+
+@pytest.mark.parametrize(
+    ("path", "content"),
+    [
+        ("demo.pptx", b"PK\x03\x04rest"),
+        ("demo.xlsx", b"PK\x03\x04rest"),
+        # 旧格式内容配 OOXML 后缀（改名文件）与带密码的 OOXML 都是 OLE2，放行交给 LibreOffice 判断
+        ("demo.docx", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest"),
+        ("demo.doc", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest"),
+    ],
+)
+def test_office_signature_mismatch_accepts_known_office_containers(path, content):
+    assert office_container_signature_mismatch(path, content) is False
+
+
+@pytest.mark.parametrize(
+    ("path", "content"),
+    [("note.md", _ENCRYPTED_HEAD), ("report.pdf", b"%PDF-1.4"), ("a.txt", b"\x00\x01")],
+)
+def test_office_signature_mismatch_ignores_non_office_suffix(path, content):
+    assert office_container_signature_mismatch(path, content) is False

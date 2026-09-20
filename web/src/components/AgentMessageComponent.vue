@@ -95,10 +95,15 @@
     v-if="message.type === 'human' && messageAttachments.length"
     class="human-message-attachments"
   >
-    <div
+    <button
       v-for="attachment in messageAttachments"
       :key="attachment.fileId"
+      type="button"
       class="message-attachment-file"
+      :class="{ 'is-previewable': attachment.path }"
+      :disabled="!attachment.path"
+      :title="attachment.path ? `在右侧面板预览 ${attachment.name}` : attachment.name"
+      @click="openAttachmentPreview(attachment)"
     >
       <div class="message-attachment-icon">
         <FileTypeIcon :name="attachment.name" :size="18" />
@@ -109,7 +114,7 @@
         </div>
         <div class="message-attachment-meta">{{ attachment.meta }}</div>
       </div>
-    </div>
+    </button>
   </div>
 
   <Teleport to="body">
@@ -177,7 +182,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['retry', 'retryStoppedMessage', 'openRefs'])
+const emit = defineEmits(['retry', 'retryStoppedMessage', 'openRefs', 'open-attachment'])
 
 // 图片全屏预览
 const imagePreview = ref({ visible: false, src: '', alt: '' })
@@ -288,6 +293,13 @@ const { availableKnowledgeBases } = storeToRefs(agentStore)
 const messageAttachments = computed(() =>
   normalizeAttachmentPreviews(props.message.extra_metadata?.attachments)
 )
+
+// 用户消息里的附件（非图片，图片走 message.image_content 内联大图）点击后
+// 交给父组件在右侧面板打开预览；无 runtime 路径（旧数据）时卡片保持不可点击。
+const openAttachmentPreview = (attachment) => {
+  if (!attachment?.path) return
+  emit('open-attachment', { path: attachment.path, name: attachment.name })
+}
 const messageImageMimeType = computed(
   () => inferImageMimeTypeFromBase64(props.message.image_content) || 'image/jpeg'
 )
@@ -477,6 +489,27 @@ const parsedData = computed(() => {
   border-radius: 0.625rem;
   background: var(--gray-0);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  // 卡片现在渲染为 button，清掉浏览器默认字体与对齐，保持原视觉
+  font: inherit;
+  text-align: left;
+}
+
+// 仅带 runtime 路径的附件可点击预览；无路径时保持原静态外观
+.message-attachment-file.is-previewable {
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+
+  &:hover {
+    border-color: var(--main-color);
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--main-color);
+    outline-offset: 2px;
+  }
 }
 
 .message-attachment-icon {

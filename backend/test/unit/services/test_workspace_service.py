@@ -133,11 +133,12 @@ async def test_read_workspace_file_content_returns_pdf_preview_for_office_file(
     user = _user()
     root = _workspace_root(user)
     target = root / "demo.docx"
-    target.write_bytes(b"office")
+    # 合法 OOXML 容器签名（zip 头）：非 zip 的字节会被"疑似加密/损坏"守卫提前拦截
+    target.write_bytes(b"PK\x03\x04office")
 
     async def fake_convert(filename: str, content: bytes) -> bytes:
         assert filename == "demo.docx"
-        assert content == b"office"
+        assert content == b"PK\x03\x04office"
         return b"%PDF-1.4\npreview"
 
     monkeypatch.setenv("YUXI_RUNTIME_DIR", str(tmp_path / "runtime"))
@@ -174,8 +175,9 @@ async def test_read_workspace_file_content_rejects_xlsx_preview(
 @pytest.mark.parametrize(
     ("filename", "content"),
     [
-        ("demo.docx", b"office"),
-        ("slides.pptx", b"presentation"),
+        # 合法 OOXML 容器签名（zip 头），否则会被"疑似加密/损坏"守卫提前拦截
+        ("demo.docx", b"PK\x03\x04office"),
+        ("slides.pptx", b"PK\x03\x04presentation"),
     ],
 )
 @pytest.mark.asyncio

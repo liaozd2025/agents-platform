@@ -119,6 +119,32 @@ def is_office_pdf_preview_file(path: str) -> bool:
     return PurePosixPath(path).suffix.lower() in _OFFICE_PDF_PREVIEW_EXTENSIONS
 
 
+# Office 文件真实容器签名：OOXML（docx/pptx/xlsx）是 zip，旧格式（doc/ppt/xls）是 OLE2 复合文档。
+# 企业透明加密（DLP）会整文件替换为密文但保留原扩展名，这类字节 LibreOffice 解析不了，
+# 只会降级成 Writer/Impress 硬转并长时间占用（实测 656 KB 加密 pptx 需 74 秒），
+# 因此必须在转换前按签名快速识别，并给出能指向"加密"的提示。
+_OFFICE_CONTAINER_EXTENSIONS = frozenset({".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"})
+_ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+_OLE2_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+ENCRYPTED_OFFICE_PREVIEW_MESSAGE = (
+    "无法预览：文件内容不是有效的 Office 文档，很可能已被加密（如企业加密软件）或已损坏。"
+    "请在本地用 Office 打开确认后，上传未加密的副本。"
+)
+
+
+def office_container_signature_mismatch(path: str, raw_content: bytes) -> bool:
+    """判断 Office 文件是否连容器签名都不成立（即已被加密或损坏）。
+
+    两种合法容器任一成立即放行：zip（OOXML）与 OLE2（旧格式，或带密码的 OOXML）。
+    这样改名文件（如 .docx 后缀装旧格式内容）仍交给 LibreOffice 按内容处理，不误伤；
+    而非 Office 后缀一律返回 False。
+    """
+    if PurePosixPath(path).suffix.lower() not in _OFFICE_CONTAINER_EXTENSIONS:
+        return False
+    head = raw_content[:8]
+    return not (head.startswith(_ZIP_SIGNATURES) or head.startswith(_OLE2_SIGNATURE))
+
+
 def preview_too_large() -> PreviewResult:
     return PreviewResult(
         content=None,
