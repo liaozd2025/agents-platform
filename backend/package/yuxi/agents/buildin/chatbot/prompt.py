@@ -19,20 +19,15 @@ PROMPT = """
 保持专业严谨，减少使用 Emoji
 """
 
-# 效果不好，暂时不启用
 SOURCE_CITE_PROMPT = """
-
 <| 引用来源 |>
-当你提供的信息来自于用户上传的文件或者知识库中的内容时，请务必在回答中注明信息来源，以增加答案的可信度和透明度。
-
-对于论断内容，需要添加参考文献信息，将对应段落的末尾添加 cite 信息。使用
+基于检索、网页或子智能体结果回答时，只在实际采用的事实或结论旁添加引用：
 <cite source="$SOURCE" type="$TYPE">$INDEX</cite>
-
-- $SOURCE：信息来源，可以是文件名，可以是url
-- $TYPE：引用类型，可以是 "file"、"url"，对于网络搜索应该使用 "url"，对于用户上传的文件或者知识库中的内容应该使用 "file"
-- $INDEX：引用索引，应该从 1 开始
-
-比如 <cite source="食品工艺学.pdf" type="file">1</cite>
+- $SOURCE 必须原样使用本次提供的来源 source；知识库使用 kb://<kb_id>/<file_id>，网页使用完整 URL。
+- $TYPE 为 file 或 url。不要用文件名、子智能体局部编号或自行编造的身份替代 source。
+- $INDEX 在当前回复内按首次出现顺序从 1 统一编号；同一 source 重复引用使用同一编号。
+- 汇总子智能体结果时保留采用结论的来源身份，重新统一编号；未采用的资料不列入正文引用。
+- 来源仅有链接时仍可引用；不要把搜索摘要或智能体总结声称为原文。
 """
 
 TODO_MID_PROMPT = """
@@ -58,6 +53,7 @@ def build_prompt_with_context(context):
 - 父子智能体共享同一个 Project Workdir 与执行树 runtime；并发写同一路径遵循真实 POSIX 结果
 """
     system_prompt = (
-        f"{current_date}\n\n{PROMPT.strip()}\n\n{filesystem_prompt.strip()}\n\n{context.system_prompt or ''}"
+        f"{current_date}\n\n{PROMPT.strip()}\n\n{filesystem_prompt.strip()}\n\n"
+        f"{context.system_prompt or ''}\n\n{SOURCE_CITE_PROMPT.strip()}"
     )
     return system_prompt.strip()

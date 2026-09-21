@@ -26,6 +26,7 @@ from yuxi.agents.base import _json_safe
 from yuxi.agents.buildin import agent_manager
 from yuxi.agents.callbacks.model_request_timing import FirstModelRequestRecorder
 from yuxi.agents.context import build_agent_input_context, normalize_agent_context_config
+from yuxi.agents.middlewares.citations import knowledge_citation_sources
 from yuxi.agents.state import AgentStatePayload
 from yuxi.models.utils import parse_assistant_message_body
 from yuxi.repositories.agent_repository import AgentRepository
@@ -763,6 +764,10 @@ async def save_messages_from_langgraph_state(
             if locked_run is None:
                 raise ValueError(f"AgentRun 不存在: {run_id}")
 
+        assistant_additional_metadata = {
+            **(assistant_additional_metadata or {}),
+            "citation_sources": state.values.get("citation_sources") or [],
+        }
         messages = state.values.get("messages", [])
         existing_ids = await conv_repo.get_message_source_ids_by_thread_id(thread_id)
         current_model_audits = await ModelMessageAuditRepository(conv_repo.db).list_for_run(run_id) if run_id else []
@@ -1249,6 +1254,14 @@ async def stream_agent_chat(
                 "mentioned": retrieval_decision.mentioned,
                 "result_count": len(retrieval_chunks),
             }
+        human_message = human_message.model_copy(
+            update={
+                "additional_kwargs": {
+                    **human_message.additional_kwargs,
+                    "citation_sources": knowledge_citation_sources(retrieval_chunks),
+                }
+            }
+        )
         messages = [_with_attachment_context(human_message, thread_attachments)]
 
         init_msg = {

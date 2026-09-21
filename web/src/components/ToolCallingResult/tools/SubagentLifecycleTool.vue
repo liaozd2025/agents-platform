@@ -55,6 +55,7 @@
           v-if="resultText"
           compact
           :content="resultText"
+          :citation-sources="citationSources"
           class="md-preview-wrapper"
         />
 
@@ -65,6 +66,7 @@
 </template>
 
 <script setup>
+import { getToolCitationSources } from '@/utils/answerCitations.js'
 import { computed } from 'vue'
 import BaseToolCall from '../BaseToolCall.vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
@@ -130,6 +132,7 @@ const parsedResult = computed(() => parseToolCallResult(props.toolCall))
 const hasParsedResult = computed(
   () => parsedResult.value !== null && parsedResult.value !== undefined
 )
+const citationSources = computed(() => getToolCitationSources(props.toolCall))
 const subagentRun = computed(() => props.toolCall.subagent_run || null)
 
 const headerTitle = computed(() => {

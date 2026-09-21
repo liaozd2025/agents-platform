@@ -504,8 +504,12 @@ def _task_result_response(result: dict[str, Any], tool_call_id: str, subagent_ru
         output = "子智能体已完成任务，但没有返回文本结果。"
 
     tool_result = _tool_result_with_thread_id(subagent_run["child_thread_id"], output)
+    sources = result.get("citation_sources") or []
     return Command(
-        update={"messages": [ToolMessage(tool_result, tool_call_id=tool_call_id)], "subagent_runs": [subagent_run]}
+        update={
+            "messages": [ToolMessage(tool_result, tool_call_id=tool_call_id, artifact={"citation_sources": sources})],
+            "subagent_runs": [{**subagent_run, "citation_sources": sources}],
+        }
     )
 
 
@@ -531,10 +535,14 @@ def _json_tool_command(
     subagent_run: dict[str, Any] | None = None,
 ) -> Command:
     """把后台子智能体工具的结构化结果包装成 ToolMessage。"""
+    sources = (payload.get("result") or {}).get("citation_sources") or []
+    payload = {**payload, "citation_sources": sources}
     content = json.dumps(payload, ensure_ascii=False, indent=2)
-    update: dict[str, Any] = {"messages": [ToolMessage(content, tool_call_id=tool_call_id)]}
+    update: dict[str, Any] = {
+        "messages": [ToolMessage(content, tool_call_id=tool_call_id, artifact={"citation_sources": sources})]
+    }
     if subagent_run is not None:
-        update["subagent_runs"] = [subagent_run]
+        update["subagent_runs"] = [{**subagent_run, **({"citation_sources": sources} if sources else {})}]
     return Command(update=update)
 
 
