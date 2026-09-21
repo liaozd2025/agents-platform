@@ -22,7 +22,7 @@ Owner：backend/package/yuxi/knowledge/parser/unified.py
 
 ## 后果
 
-后端执行进程需要 LibreOffice Writer，现有 API/worker 镜像已声明安装。无需升级依赖、增加配置或更改数据结构。Markdown 是内容提取结果，不承诺复杂排版、图片文字识别、模板保真或加密文件可读。
+后端执行进程需要 LibreOffice Writer，现有 API/worker 镜像已声明安装。无需升级 Python 依赖、增加配置或更改数据结构。后端 unit workflow 显式安装 LibreOffice Writer 和 Calc，使固定 DOC 回归及检测到 LibreOffice 后启用的既有 XLS 回归在 CI 中执行真实转换。Markdown 是内容提取结果，不承诺复杂排版、图片文字识别、模板保真或加密文件可读。
 
 ## 验证
 
