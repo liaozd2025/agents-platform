@@ -66,27 +66,40 @@
                     <small>{{ skill.description || skill.slug }}</small>
                   </span>
                 </label>
-                <!-- 已安装：整行可点，切换启用/停用 -->
-                <button
+                <!-- 已安装：左侧图标按钮切换启用/停用，点击技能信息打开详情 -->
+                <div
                   v-else
-                  type="button"
-                  class="selection-item installed installed-toggle"
-                  :disabled="isSkillToggling(skill)"
-                  :aria-pressed="!isSkillDisabled(skill)"
-                  :title="skillToggleHint(skill)"
-                  @click="toggleSkillEnabled(skill)"
+                  class="selection-item installed"
+                  :class="{ disabled: isSkillDisabled(skill) }"
                 >
-                  <Plus v-if="isSkillDisabled(skill)" :size="15" class="installed-state-icon" />
-                  <Check v-else :size="15" class="installed-state-icon enabled" />
-                  <span class="flow-item-content">
-                    <strong>{{ skill.name }}</strong>
-                    <small>{{ skill.description || skill.slug }}</small>
-                  </span>
-                  <span class="skill-enabled-text">
-                    {{ isSkillDisabled(skill) ? '已停用' : '已启用' }}
-                  </span>
-                  <LoaderCircle v-if="isSkillToggling(skill)" :size="14" class="spin" />
-                </button>
+                  <button
+                    type="button"
+                    class="installed-state-toggle"
+                    :disabled="isSkillToggling(skill)"
+                    :aria-pressed="!isSkillDisabled(skill)"
+                    :aria-label="skillToggleHint(skill)"
+                    :title="skillToggleHint(skill)"
+                    @click="toggleSkillEnabled(skill)"
+                  >
+                    <Plus v-if="isSkillDisabled(skill)" :size="15" class="installed-state-icon" />
+                    <Check v-else :size="15" class="installed-state-icon enabled" />
+                    <LoaderCircle v-if="isSkillToggling(skill)" :size="14" class="spin" />
+                  </button>
+                  <button
+                    type="button"
+                    class="installed-detail-trigger"
+                    :title="`查看 ${skill.name || skill.slug} 详情`"
+                    @click="openInstalledSkillDetail(skill)"
+                  >
+                    <span class="flow-item-content">
+                      <strong>{{ skill.name }}</strong>
+                      <small>{{ skill.description || skill.slug }}</small>
+                    </span>
+                    <span class="skill-enabled-text">
+                      {{ isSkillDisabled(skill) ? '已停用' : '已启用' }}
+                    </span>
+                  </button>
+                </div>
               </template>
             </div>
           </template>
@@ -262,7 +275,7 @@ const props = defineProps({
   flow: { type: Object, default: null }
 })
 
-const emit = defineEmits(['close', 'completed', 'skills-changed'])
+const emit = defineEmits(['close', 'completed', 'skills-changed', 'preview-skill'])
 const userStore = useUserStore()
 const canInstallPersonal = computed(() => userStore.hasPermission('skill:use'))
 const canInstallShared = computed(() => userStore.hasPermission('skill:manage'))
@@ -475,6 +488,17 @@ const toggleSkillEnabled = async (skill) => {
   } finally {
     togglingSkillSlugs.value = togglingSkillSlugs.value.filter((item) => item !== stateKey)
   }
+}
+/** 点击已安装技能的技能信息：交给外层打开技能详情预览。 */
+const openInstalledSkillDetail = (skill) => {
+  const installed = resolveInstalledSkill(skill)
+  if (!installed?.slug) {
+    message.warning('未找到该 Skill 的安装记录，请刷新列表后重试')
+    return
+  }
+  // installed 是弹窗打开时的快照，必须叠加本地覆盖值，否则刚停用的技能
+  // 在详情里仍然是「已启用」，用户还能点「立即使用」跳走。
+  emit('preview-skill', { ...installed, enabled: !isSkillDisabled(skill) })
 }
 const selectAllAvailable = () => {
   selectedSlugs.value = suiteSkills.value
@@ -907,29 +931,85 @@ watch(
 .selection-item {
   cursor: pointer;
 
+  // 已安装项：左侧图标按钮切换启用/停用，点击技能信息查看详情
   &.installed {
-    color: var(--gray-400);
-    cursor: not-allowed;
-    background: var(--gray-50);
+    padding: 6px 8px;
+    gap: 2px;
+    color: var(--gray-700);
+    cursor: default;
+    background: var(--gray-0);
+
+    // 已安装但已停用：整行降灰，和「已启用」行一眼区分开。
+    &.disabled {
+      background: var(--gray-50);
+
+      .flow-item-content strong,
+      .flow-item-content small,
+      .skill-enabled-text {
+        color: var(--gray-400);
+      }
+    }
+  }
+}
+
+// 启用/停用开关：只有点击左侧图标区域才会切换状态。
+.installed-state-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 160ms ease;
+
+  &:hover:not(:disabled) {
+    background: var(--gray-100);
   }
 
-  // 已安装项整行可点用于切换启用状态，因此恢复为可点击外观。
-  &.installed-toggle {
-    width: 100%;
-    font-family: inherit;
-    font-size: inherit;
-    color: var(--gray-700);
-    text-align: left;
-    cursor: pointer;
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
 
-    &:hover:not(:disabled) {
-      background: var(--gray-100);
-    }
+  &:focus-visible {
+    outline: 2px solid var(--main-400);
+    outline-offset: 1px;
+  }
+}
 
-    &:disabled {
-      cursor: not-allowed;
-      opacity: 0.6;
+// 技能信息区：点击查看该 Skill 的详情。
+.installed-detail-trigger {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  gap: 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 160ms ease;
+
+  &:hover {
+    background: var(--gray-100);
+
+    .flow-item-content strong {
+      color: var(--main-600);
     }
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--main-400);
+    outline-offset: 1px;
   }
 }
 

@@ -2162,6 +2162,46 @@ async def test_personal_skill_enabled_state_is_persisted_and_excluded_from_runti
 
 
 @pytest.mark.asyncio
+async def test_personal_skill_origin_is_persisted_and_survives_enabled_toggle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """个人 Skill 来源需落盘，供前端区分「技能广场技能」与「个人上传技能」。"""
+    root = _personal_skill_root(tmp_path, monkeypatch)
+    source = _write_personal_skill(tmp_path / "source", "demo", "uploaded")
+
+    installed = await svc.install_personal_skill_dir("user-1", source, origin="upload")
+
+    assert installed.origin == "upload"
+    assert installed.to_dict()["origin"] == "upload"
+
+    disabled = await svc.update_personal_skill_enabled("user-1", "demo", enabled=False)
+
+    # 切换启用状态不得冲掉来源标记。
+    assert disabled.origin == "upload"
+    state = svc.json.loads((root / "demo" / svc.PERSONAL_SKILL_STATE_FILE).read_text(encoding="utf-8"))
+    assert state == {"enabled": False, "origin": "upload"}
+    assert (await svc.list_personal_skills("user-1"))[0].origin == "upload"
+
+
+@pytest.mark.asyncio
+async def test_personal_skill_without_state_file_keeps_personal_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """历史个人 Skill 没有来源记录时保留「个人上传」归类，不能凭空消失。"""
+    root = _personal_skill_root(tmp_path, monkeypatch)
+    legacy = _write_personal_skill(root, "legacy", "legacy")
+
+    assert svc.DEFAULT_PERSONAL_SKILL_ORIGIN == "upload"
+    assert svc._read_personal_skill_state(legacy) == {"enabled": True, "origin": "upload"}
+
+    items = await svc.list_personal_skills("user-1")
+
+    assert [item.origin for item in items] == ["upload"]
+
+
+@pytest.mark.asyncio
 async def test_personal_skill_overrides_shared_skill_and_drops_dependencies(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

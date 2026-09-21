@@ -2816,6 +2816,11 @@ onMounted(() => {
     }
 
     startChatMainResizeObserver()
+
+    // 首次进入对话页时草稿已在初始化阶段读入，光标同样需要落到末尾（如技能广场写入的 @技能）
+    if (!currentChatId.value && userInput.value) {
+      agentInputAreaRef.value?.focusEnd()
+    }
   })
 })
 
@@ -2825,6 +2830,17 @@ onActivated(() => {
   })
   if (isReplyLoading.value) {
     startReplyElapsedTimer()
+  }
+  // 技能广场等页面会改写新建对话草稿（「立即使用」写入技能提及），缓存页重新激活时同步回来
+  if (!currentChatId.value) {
+    const latestDraft = threadDraftStore.read(DRAFT_THREAD_ID)
+    if (latestDraft && latestDraft !== userInput.value) {
+      userInput.value = latestDraft
+      // 草稿重绘会把光标重置到开头，定位到末尾，用户接着打字才会落在 @技能 之后
+      nextTick(() => {
+        agentInputAreaRef.value?.focusEnd()
+      })
+    }
   }
 })
 

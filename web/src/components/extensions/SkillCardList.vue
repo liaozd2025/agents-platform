@@ -162,6 +162,7 @@
                 :description="skill.description || '暂无描述'"
                 :tags="skillCardTags(skill)"
                 :default-icon="getSkillIcon(skill.slug)"
+                :disabled="skill.enabled === false"
                 @click="handleCardClick(skill)"
                 :class="{ 'card-clickable-select': isBatchDeleteMode }"
               >
@@ -209,12 +210,7 @@
                 {{ formatExtensionCardTitle(previewSkill.name) }}
               </div>
               <div class="skill-preview-meta">
-                <span
-                  >{{
-                    sourceTypeLabel(previewSkill.sourceType || previewSkill.source_type)
-                  }}
-                  Skill</span
-                >
+                <span>{{ skillOriginLabel(previewSkill) }}</span>
                 <span v-if="previewSkill.enabled === false" class="skill-preview-disabled-tag">
                   已禁用
                 </span>
@@ -222,6 +218,17 @@
             </div>
           </div>
           <div class="skill-preview-actions">
+            <a-tooltip :title="useSkillDisabledHint">
+              <a-button
+                type="primary"
+                size="small"
+                class="skill-preview-use-btn"
+                :disabled="!canUsePreviewSkill"
+                @click="usePreviewSkillInChat"
+              >
+                立即使用
+              </a-button>
+            </a-tooltip>
             <a-switch
               v-if="canManageSkill(previewSkill)"
               :checked="previewSkill.enabled !== false"
@@ -277,6 +284,7 @@
       @close="closeInstallFlow"
       @completed="handleInstallFlowCompleted"
       @skills-changed="handleSkillsChanged"
+      @preview-skill="handleSuiteSkillPreview"
     >
       <template #selection>
         <div class="remote-install-panel">
@@ -570,6 +578,9 @@ import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import { formatExtensionCardTitle } from '@/utils/extensionDisplayName'
 import { getShareConfigLabel } from '@/utils/shareConfig'
 import { getSkillIcon } from '@/utils/skill_icon_utils'
+import { prependSkillMentionToNewChatDraft } from '@/utils/skill_mention_draft'
+import { refreshSelectedAgentSkillOptions } from '@/utils/agent_skill_options'
+import { resolveAppNavigationPath, useEmbedContext } from '@/composables/useEmbedMode'
 import { useAgentStore } from '@/stores/agent'
 import { useUserStore } from '@/stores/user'
 
@@ -578,7 +589,7 @@ const RECOMMENDED_SUITES = [
     id: 'minimax-office-skills',
     name: 'MiniMax 办公文档套件',
     provider: 'MiniMax-AI',
-    category: 'creation',
+    category: 'office',
     description:
       'MiniMax 开源的办公文档 Skills 合集，覆盖 DOCX、PDF、XLSX 与 PPTX 演示文稿的创建与格式化。',
     source: 'https://modelscope.cn/collections/MiniMax/MiniMax-Office-skills',
@@ -612,7 +623,7 @@ const RECOMMENDED_SUITES = [
     id: 'skill-builder-suite',
     name: 'Skill 能力与进化套件',
     provider: 'Community',
-    category: 'productivity',
+    category: 'devtools',
     description: '用于 Agent 技能发现、创建、评测调优与自主进化的核心工具合集。',
     skills: [
       {
@@ -639,7 +650,7 @@ const RECOMMENDED_SUITES = [
     id: 'anthropic-office-skills',
     name: 'Anthropic 官方文档套件',
     provider: 'Anthropic',
-    category: 'creation',
+    category: 'office',
     description:
       'Anthropic 官方开源的文档 Skills，覆盖 PPTX 演示文稿、DOCX 文档、XLSX 表格与 PDF 的创建、编辑与分析。',
     source: 'https://github.com/anthropics/skills',
@@ -737,7 +748,7 @@ const RECOMMENDED_SUITES = [
     id: 'de-ai-writing-suite',
     name: '中文去 AI 味套件',
     provider: 'Community',
-    category: 'creation',
+    category: 'devtools',
     description: '把中文文本从「像模型拼出来的稿子」改成「像母语者真的写出来的文章」：消除翻译腔、空泛结论与机械排版腔。',
     skills: [
       {
@@ -753,7 +764,7 @@ const RECOMMENDED_SUITES = [
     id: 'research-analysis-suite',
     name: '研究与竞品分析套件',
     provider: 'Community',
-    category: 'research',
+    category: 'learning',
     description: '调研与汇报场景：客户与公司背景研究、用户研究结论提炼、人物画像整理与状态报告撰写。',
     skills: [
       {
@@ -786,7 +797,7 @@ const RECOMMENDED_SUITES = [
     id: 'office-automation-suite',
     name: '办公自动化套件',
     provider: 'Community',
-    category: 'productivity',
+    category: 'office',
     description: '把重复的文档与表格工作自动化：Excel 表格智能处理、Word/PDF 程序化生成与多格式互转。',
     skills: [
       {
@@ -818,6 +829,7 @@ const RECOMMENDED_SUITES = [
 ]
 
 const router = useRouter()
+const { isEmbedded } = useEmbedContext()
 const userStore = useUserStore()
 const agentStore = useAgentStore()
 const canUseSkills = computed(() => userStore.hasPermission('skill:use'))
@@ -917,11 +929,16 @@ const recommendedSuiteCards = computed(() =>
   RECOMMENDED_SUITES.map((suite) => ({ ...suite, isSuite: true }))
 )
 
+// 一级分类来自产品侧《技能广场分类及分类规则》。规则里「无/预留」且当前无任何
+// 技能的分类（效率工具、商业运营）不生成页签，等有内容时再补回。
 const SKILL_CATEGORIES = [
   { key: 'all', label: '全部' },
+  { key: 'office', label: '办公协同' },
+  { key: 'learning', label: '知识与学习' },
   { key: 'creation', label: '内容创作' },
-  { key: 'productivity', label: '效率工具' },
-  { key: 'research', label: '研究分析' }
+  { key: 'analytics', label: '数据分析' },
+  { key: 'devtools', label: '开发工具' },
+  { key: 'news', label: '信息资讯' }
 ]
 
 const skillAreaTabs = [
@@ -933,18 +950,44 @@ const activeSkillArea = ref('plaza')
 const activePlazaCategory = ref('all')
 const activeMineScope = ref('all')
 
+/**
+ * 分类规则文档点名的单技能 → 分类 key。
+ *
+ * 键为 slug 或展示名的小写形式，两者任一命中即可。规则里点名但项目不存在的
+ * Skill（如 Huashu Excel）不建占位条目，直接忽略。
+ */
+const SKILL_CATEGORY_BY_NAME = {
+  'image-gen': 'creation',
+  'mysql-reporter': 'analytics',
+  'html-preview': 'devtools',
+  'knowledge-base': 'devtools',
+  'deep-research': 'news'
+}
+
+/** 未点名 Skill 的兜底：按规则文档给出的各类判定标准做关键词匹配。 */
 const categorizeSkill = (skill) => {
+  for (const key of [skill?.slug, skill?.name]) {
+    const hit = SKILL_CATEGORY_BY_NAME[String(key || '').trim().toLowerCase()]
+    if (hit) return hit
+  }
   const text = [skill?.name, skill?.slug, skill?.description].filter(Boolean).join(' ').toLowerCase()
-  if (/ppt|docx|pdf|xlsx|文档|写作|内容|设计|绘图|presentation|document/.test(text)) return 'creation'
-  if (/research|search|find|效率|自动化|工具|办公|文件|表格|代码/.test(text)) return 'productivity'
-  return 'research'
+  if (/docx|xlsx|pptx|pdf|公文|报表|办公/.test(text)) return 'office'
+  if (/excel|表格|数据库|指标|图表|看板|数据分析|reporter/.test(text)) return 'analytics'
+  if (/skill|prompt|代码|调试|评测|预览|preview|知识库|上下文/.test(text)) return 'devtools'
+  if (/deep research|联网|检索|抓取|资讯|简报|快讯/.test(text)) return 'news'
+  if (/研究|调研|学习|竞品|访谈/.test(text)) return 'learning'
+  if (/写作|翻译|文案|译稿|设计|绘图|演示|图像|图片|image|gen/.test(text)) return 'creation'
+  // 「效率工具 / 商业运营」两个分类当前无技能、不生成页签，未命中者归入最通用的办公协同，
+  // 保证每个技能都落在已存在的分类里，不会出现无归属的悬空项。
+  return 'office'
 }
 
 const skillCategory = (skill) => skill?.category || categorizeSkill(skill)
-const isSystemSkill = (skill) => {
-  if (skill?.sourceType === 'builtin' || skill?.sourceScope === 'builtin') return true
-  return skill?.share_config?.read_scope?.access_level === 'global'
-}
+// 「技能广场技能」包含内置、共享，以及从技能广场下载到本地的技能。
+const isPlazaSkill = (skill) => skill?.sourceScope !== 'personal' || skill?.origin === 'remote'
+// 「个人上传技能」只统计用户自己上传的 Skill；没有来源标记的历史技能按自行上传处理。
+const isPersonalUploadSkill = (skill) =>
+  skill?.sourceScope === 'personal' && skill?.origin !== 'remote'
 
 const filteredInstalledSkills = computed(() => installedSkillCards.value.filter(matchesSearch))
 const plazaGroups = computed(() =>
@@ -953,7 +996,8 @@ const plazaGroups = computed(() =>
     title: category.label,
     skills: [
       ...recommendedSuiteCards.value,
-      ...installedSkillCards.value.filter((skill) => isSystemSkill(skill))
+      // 广场浏览区只列套件与内置/共享 Skill；个人 Skill 一律只出现在「我的技能」。
+      ...installedSkillCards.value.filter((skill) => skill?.sourceScope !== 'personal')
     ].filter(
       (skill) => matchesSearch(skill) && (category.key === 'all' || skillCategory(skill) === category.key)
     )
@@ -962,8 +1006,8 @@ const plazaGroups = computed(() =>
 
 const mineSkills = computed(() => {
   const installed = filteredInstalledSkills.value.filter((skill) => {
-    if (activeMineScope.value === 'personal') return skill.sourceScope === 'personal'
-    if (activeMineScope.value === 'system') return isSystemSkill(skill)
+    if (activeMineScope.value === 'personal') return isPersonalUploadSkill(skill)
+    if (activeMineScope.value === 'system') return isPlazaSkill(skill)
     return true
   })
   return installed
@@ -986,8 +1030,8 @@ const currentVisibleGroups = computed(() => {
 
 const mineScopeTabs = [
   { key: 'all', label: '全部技能' },
-  { key: 'system', label: '系统技能' },
-  { key: 'personal', label: '个人技能' }
+  { key: 'system', label: '技能广场技能' },
+  { key: 'personal', label: '个人上传技能' }
 ]
 
 const mineScopeTabsWithCount = computed(() =>
@@ -997,7 +1041,7 @@ const mineScopeTabsWithCount = computed(() =>
       tab.key === 'all'
         ? filteredInstalledSkills.value.length
         : filteredInstalledSkills.value.filter((skill) =>
-            tab.key === 'personal' ? skill.sourceScope === 'personal' : isSystemSkill(skill)
+            tab.key === 'personal' ? isPersonalUploadSkill(skill) : isPlazaSkill(skill)
           ).length
   }))
 )
@@ -1013,6 +1057,16 @@ const canDeletePreviewSkill = computed(
     !!previewSkill.value &&
     canManageSkill(previewSkill.value) &&
     previewSkill.value.sourceType !== 'builtin'
+)
+
+// 技能广场的单技能、我的技能、套件弹窗都复用同一个预览面板：
+// 只有启用状态的技能才能跳到对话里 @ 使用（停用的技能 @ 了也不会生效）。
+// 按钮始终展示，未启用时置灰不可点，避免「按了没反应」的歧义。
+const canUsePreviewSkill = computed(
+  () => !!previewSkill.value && previewSkill.value.enabled !== false
+)
+const useSkillDisabledHint = computed(() =>
+  previewSkill.value && !canUsePreviewSkill.value ? 'Skill 已禁用，启用后才能使用' : ''
 )
 
 // 仓库拉取的技能列表过滤
@@ -1102,10 +1156,18 @@ const toggleSearchSkillFromRow = (item) => {
 }
 
 const sourceTypeLabel = (sourceType) => {
-  if (sourceType === 'personal') return '个人技能'
+  if (sourceType === 'personal') return '个人上传技能'
   if (sourceType === 'builtin') return '内置'
   if (sourceType === 'remote') return '远程'
   return '上传'
+}
+
+/** 预览弹窗的来源文案：个人 Skill 需按自行上传 / 广场下载区分。 */
+const skillOriginLabel = (skill) => {
+  if (skill?.sourceScope === 'personal') {
+    return isPersonalUploadSkill(skill) ? '个人上传技能' : '从技能广场安装'
+  }
+  return `${sourceTypeLabel(skill?.sourceType || skill?.source_type)} Skill`
 }
 
 /** 返回 Skill 共享范围的简短展示文案。 */
@@ -1114,7 +1176,7 @@ const getSkillShareLabel = (skill) => getShareConfigLabel(skill?.share_config)
 const skillCardTags = (skill) => {
   if (skill.sourceScope === 'personal') {
     return [
-      { name: '个人技能', color: 'gray' },
+      { name: isPersonalUploadSkill(skill) ? '个人上传技能' : '技能广场', color: 'gray' },
       ...(skill.overrides_shared ? [{ name: '覆盖共享版本', color: 'orange' }] : [])
     ]
   }
@@ -1167,6 +1229,17 @@ const goToPreviewSkillManagement = () => {
   closeSkillPreview()
 }
 
+/** 立即使用：把技能提及写入新建对话草稿后跳到对话页。 */
+const usePreviewSkillInChat = () => {
+  // 兜底拦截：按钮已置灰，这里再挡一层，避免其它入口绕过 disabled 直接跳转
+  if (!canUsePreviewSkill.value) return
+  const skill = previewSkill.value
+  if (!skill?.slug) return
+  prependSkillMentionToNewChatDraft(skill.slug)
+  closeSkillPreview()
+  router.push(resolveAppNavigationPath(isEmbedded.value, '/agent'))
+}
+
 const handleCardClick = (skill) => {
   if (isBatchDeleteMode.value) {
     handleToggleCardSelect(skill.slug)
@@ -1216,6 +1289,8 @@ const handleToggleSkillEnabled = async (skill) => {
         : { ...previewSkill.value, enabled }
     }
     message.success(`Skill 已${enabled ? '启用' : '禁用'}`)
+    // 启停后必须刷新当前 Agent 的技能候选，否则对话页仍能 @ 到刚禁用的技能
+    await refreshSelectedAgentSkillOptions(agentStore)
   } catch (error) {
     message.error(error?.response?.data?.detail || error.message || '更新 Skill 启用状态失败')
   } finally {
@@ -1253,6 +1328,8 @@ const confirmDeletePreviewSkill = () => {
         closeSkillPreview()
         previewSkill.value = null
         await fetchSkills()
+        // 卸载后同样要让对话页的 @技能 候选失效
+        await refreshSelectedAgentSkillOptions(agentStore)
       } catch (error) {
         message.error(error?.response?.data?.detail || error.message || '卸载 Skill 失败')
       } finally {
@@ -1403,6 +1480,14 @@ const openRecommendedSuite = (suite) => {
 /** 套件内切换启用状态后，同步技能广场与我的技能列表。 */
 const handleSkillsChanged = () => {
   void fetchSkills()
+  // 套件内启停同样影响对话页的 @技能 候选
+  void refreshSelectedAgentSkillOptions(agentStore)
+}
+
+/** 套件安装弹窗里点击已安装技能：打开技能详情预览。 */
+const handleSuiteSkillPreview = (skill) => {
+  if (!skill?.slug) return
+  void openSkillPreview(skill)
 }
 
 const handleInstallFlowCompleted = async ({ success, failed }) => {
@@ -1411,21 +1496,8 @@ const handleInstallFlowCompleted = async ({ success, failed }) => {
   await fetchSkills({ refreshPersonal: true })
 
   // 安装完成后，强制刷新当前 Agent 详情，更新对话页 Skill 提及选项。
-  const selectedAgentId = agentStore.selectedAgentId
-  if (success > 0 && selectedAgentId) {
-    try {
-      await agentStore.fetchAgentDetail(selectedAgentId, true)
-      console.debug('[Skill] 安装完成，已刷新当前 Agent 的 Skill 选项', {
-        agentId: selectedAgentId,
-        success
-      })
-    } catch (error) {
-      // Skill 已安装成功；详情刷新失败只影响即时展示，避免覆盖安装结果。
-      console.warn('[Skill] 安装完成后刷新 Agent Skill 选项失败', {
-        agentId: selectedAgentId,
-        error
-      })
-    }
+  if (success > 0) {
+    await refreshSelectedAgentSkillOptions(agentStore)
   }
 }
 
@@ -1958,6 +2030,14 @@ defineExpose({
   flex-shrink: 0;
   gap: 8px;
   padding-top: 2px;
+}
+
+.skill-preview-use-btn {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .skill-preview-body {

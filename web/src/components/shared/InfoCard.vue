@@ -196,8 +196,32 @@ const normalizedTags = computed(() => {
   }
 
   &-disabled {
-    opacity: 0.65;
     cursor: default;
+    border-color: var(--gray-150);
+    background: var(--gray-50);
+
+    // 停用态整体降灰，让「已停用」和「已启用」一眼可辨；
+    // info-card-status 保持常态，其中的启用按钮仍可点击重新启用。
+    .info-card-icon {
+      background: var(--gray-100);
+      color: var(--gray-400);
+    }
+
+    .info-card-name,
+    .info-card-subtitle,
+    .info-card-desc {
+      color: var(--gray-400);
+    }
+
+    .card-tag {
+      filter: grayscale(1);
+      opacity: 0.7;
+    }
+
+    &:hover {
+      border-color: var(--gray-150);
+      background: var(--gray-50);
+    }
   }
 
   &-header {
