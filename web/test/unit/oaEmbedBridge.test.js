@@ -5,6 +5,8 @@ import {
   DEFAULT_OA_EMBED_MODE,
   createOAEmbedBridge,
   getOAEmbedRenewalDelay,
+  getOAEmbedRenewalTimerDelay,
+  MAX_OA_EMBED_RENEWAL_TIMER_MS,
   parseOAEmbedAllowedOrigins
 } from '../../src/utils/oaEmbedBridge.js'
 import {
@@ -157,10 +159,50 @@ test('OA bridge rejects missing accounts and asks the authenticated parent to re
   })
 })
 
-test('OA embed renews one hour before a valid JWT expires', () => {
+test('OA embed renews one minute before a valid JWT expires', () => {
   const accessToken = `header.${btoa(JSON.stringify({ exp: 7200 }))}.signature`
-  assert.equal(getOAEmbedRenewalDelay(accessToken, 0), 3600000)
+  assert.equal(getOAEmbedRenewalDelay(accessToken, 0), 7140000)
+  const shortLivedToken = `header.${btoa(JSON.stringify({ exp: 300 }))}.signature`
+  assert.equal(getOAEmbedRenewalDelay(shortLivedToken, 0), 240000)
   assert.equal(getOAEmbedRenewalDelay('invalid-token', 0), null)
+})
+
+test('OA renewal timer delay is bounded to prevent browser timeout overflow', () => {
+  assert.equal(getOAEmbedRenewalTimerDelay(1000), 1000)
+  assert.equal(
+    getOAEmbedRenewalTimerDelay(MAX_OA_EMBED_RENEWAL_TIMER_MS),
+    MAX_OA_EMBED_RENEWAL_TIMER_MS
+  )
+  assert.equal(
+    getOAEmbedRenewalTimerDelay(MAX_OA_EMBED_RENEWAL_TIMER_MS + 1),
+    MAX_OA_EMBED_RENEWAL_TIMER_MS
+  )
+  assert.equal(getOAEmbedRenewalTimerDelay(Number.POSITIVE_INFINITY), null)
+  assert.equal(getOAEmbedRenewalTimerDelay(Number.NaN), null)
+  assert.equal(getOAEmbedRenewalTimerDelay(-1), null)
+})
+
+test('OA bridge ignores duplicate login params after the same account is accepted', async () => {
+  const harness = createBrowserHarness()
+  const acceptedAccounts = []
+  const bridge = harness.createBridge({
+    allowedOrigins: ['https://oa.example.test'],
+    onAccount: async (account) => acceptedAccounts.push(account)
+  })
+
+  bridge.start()
+  await harness.dispatchMessage({
+    source: harness.browserWindow.parent,
+    origin: 'https://oa.example.test',
+    data: { type: 'login-params', data: { userInfo: { account: 'oa-user-1' } } }
+  })
+  await harness.dispatchMessage({
+    source: harness.browserWindow.parent,
+    origin: 'https://oa.example.test',
+    data: { type: 'login-params', data: { userInfo: { account: 'oa-user-1' } } }
+  })
+
+  assert.deepEqual(acceptedAccounts, ['oa-user-1'])
 })
 
 test('OA bridge requests login parameters after the formal handshake delay and clears its timer', () => {
