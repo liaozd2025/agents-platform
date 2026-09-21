@@ -234,7 +234,7 @@
     <!-- 页面底部：版权信息等 -->
     <footer class="page-footer">
       <div class="copyright">
-        &copy; {{ new Date().getFullYear() }} {{ brandName }}. All Rights Reserved.
+        &copy; {{ new Date().getFullYear() }} {{ brandShortName }}. All Rights Reserved.
       </div>
     </footer>
   </div>
@@ -281,6 +281,10 @@ const brandName = computed(() => {
   }
 
   return orgName || brandNameRaw
+})
+// 页脚版权用组织简称（配置 organization.short_name），窄幅页脚放全称会过长，未配置简称时退回品牌名
+const brandShortName = computed(() => {
+  return infoStore.organization?.short_name?.trim() || brandName.value
 })
 // 状态
 const isFirstRun = ref(false)
