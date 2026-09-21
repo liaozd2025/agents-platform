@@ -21,13 +21,13 @@ pytestmark = pytest.mark.unit
 def test_capability_metadata_covers_upload_and_ocr_formats() -> None:
     assert ".webp" in IMAGE_FILE_EXTENSIONS
     assert ".webp" in SUPPORTED_FILE_EXTENSIONS
-    assert ".doc" not in SUPPORTED_FILE_EXTENSIONS
+    assert ".doc" in SUPPORTED_FILE_EXTENSIONS
     assert ".ppt" not in SUPPORTED_FILE_EXTENSIONS
     assert get_ocr_engines_for_extension("webp") == ("deepseek_ocr",)
     assert get_ocr_engines_for_extension("docx") == ("mineru_official",)
     assert get_ocr_engines_for_extension("ppt") == ()
     assert is_supported_file_extension("report.PPTX")
-    assert not is_supported_file_extension("legacy.doc")
+    assert is_supported_file_extension("legacy.DOC")
 
 
 def test_capability_lookup_does_not_load_concrete_parser_modules() -> None:

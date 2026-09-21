@@ -69,8 +69,9 @@ def _runtime(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("subagent", [False, True])
-async def test_office_tool_passes_execution_filters_and_parses_docx(monkeypatch, subagent):
-    """主、子 Agent 经真实执行过滤后在后端解析 DOCX，并保存完整 Markdown。"""
+@pytest.mark.parametrize("extension", ["doc", "docx"])
+async def test_office_tool_passes_execution_filters_and_parses_word(monkeypatch, subagent, extension):
+    """主、子 Agent 经真实执行过滤后解析 Word，并保存完整 Markdown。"""
     _mock_system_options(monkeypatch)
     source = BytesIO()
     document = Document()
@@ -81,18 +82,24 @@ async def test_office_tool_passes_execution_filters_and_parses_docx(monkeypatch,
     table.cell(1, 0).text = "Sample"
     table.cell(1, 1).text = "37"
     document.save(source)
-    path = f"{_runtime().context.workdir_path}/uploads/report.docx"
-    files = _patch_sandbox_backend(monkeypatch, {path: source.getvalue()})
+    source_bytes = source.getvalue()
+    expected = ("Office backend content", "37")
+    if extension == "doc":
+        source_bytes = (Path(__file__).parents[2] / "data/legacy_word.doc").read_bytes()
+        expected = ("中文正文 DOC-ROUNDTRIP-2026", "42")
+    path = f"{_runtime().context.workdir_path}/uploads/report.{extension}"
+    files = _patch_sandbox_backend(monkeypatch, {path: source_bytes})
     tools = {tool.name: tool for tool in ImageInputCompatibilityMiddleware().tools}
     assert "ocr_parse_file" in tools
+    assert "旧 DOC 由后端自动转换后解析，可直接传入原件" in tools["ocr_parse_file"].description
     filesystem = create_agent_filesystem_middleware(backend=SimpleNamespace())
     request = SimpleNamespace(tool_call={"name": "ocr_parse_file", "id": "parse-office", "args": {"file_path": path}})
 
     async def parse(request):
         result = await tools[request.tool_call["name"]].coroutine(file_path=path, runtime=_runtime())
-        assert "Office backend content" in result["preview"]
-        assert "37" in files[result["parsed_path"]].decode()
-        assert files[path] == source.getvalue()
+        assert expected[0] in result["preview"]
+        assert expected[1] in files[result["parsed_path"]].decode()
+        assert files[path] == source_bytes
         return ToolMessage(content=result["parsed_path"], tool_call_id="parse-office")
 
     async def execute(request):
