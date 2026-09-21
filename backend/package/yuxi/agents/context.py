@@ -14,6 +14,23 @@ from yuxi.workspace.filesystem import Workspace
 
 WORKSPACE_AGENTS_PROMPT_MAX_BYTES = 64 * 1024
 WORKSPACE_BASE_CONTEXT_FILES = ("AGENTS.md", "USER.md")
+# BaseContext.system_prompt 的默认占位值：它不代表用户配置，只表示「未配置」。
+# 判定 Agent 是否显式配置过系统提示词必须以此为准，且只能比较 Agent 自身的配置值；
+# 若拿已被追加工作区 AGENTS.md/USER.md 的 system_prompt 去比较，所有智能体都会被
+# 误判为「已自定义」，导致产品默认身份丢失、模型无身份可依。
+DEFAULT_SYSTEM_PROMPT_PLACEHOLDER = "You are a helpful assistant."
+
+
+def is_custom_system_prompt(system_prompt: str | None) -> bool:
+    """判断 Agent 是否显式配置了系统提示词。
+
+    空值、纯空白与默认占位值都算「未配置」。
+    入参必须是 Agent 自身的配置值，不能是已被追加工作区内容后的 system_prompt。
+    """
+    normalized = str(system_prompt or "").strip()
+    return bool(normalized) and normalized != DEFAULT_SYSTEM_PROMPT_PLACEHOLDER
+
+
 DEFAULT_SUMMARY_THRESHOLD_K = 100  # 100K tokens
 DEFAULT_SUMMARY_KEEP_MESSAGES = 10
 DEFAULT_SUMMARY_TOOL_RESULT_TOKEN_LIMIT = 300
@@ -91,6 +108,12 @@ async def build_agent_input_context(
 ) -> dict:
     """构建上下文，读取工作区前同步当前用户资料。"""
     input_context = dict(agent_config or {})
+    # 身份归属判定必须在追加工作区内容之前完成：只能用 Agent 自身配置的
+    # system_prompt 判断是否「已自定义」，否则工作区 AGENTS.md/USER.md 的追加
+    # 会把未配置的智能体也变成「已自定义」，导致产品默认身份丢失。
+    configured_system_prompt = str(input_context.get("system_prompt") or "")
+    system_prompt_is_custom = is_custom_system_prompt(configured_system_prompt)
+
     if db is not None:
         from yuxi.services.user_memory_service import sync_user_profile_to_memory
 
@@ -103,7 +126,7 @@ async def build_agent_input_context(
     agent_context = await asyncio.to_thread(_load_workspace_agent_context, uid)
 
     if agent_context:
-        base_prompt = str(input_context.get("system_prompt") or "").rstrip()
+        base_prompt = configured_system_prompt.rstrip()
         input_context["system_prompt"] = f"{base_prompt}\n\n{agent_context}" if base_prompt else agent_context
 
     input_context.update(
@@ -113,6 +136,8 @@ async def build_agent_input_context(
             "run_id": run_id,
             "request_id": request_id,
             "worker_id": worker_id,
+            # 运行时标志（非用户配置）：供 prompt 构造判断是否注入产品默认身份。
+            "system_prompt_is_custom": system_prompt_is_custom,
         }
     )
     return input_context
@@ -199,8 +224,13 @@ class BaseContext:
     )
 
     system_prompt: str = field(
-        default="You are a helpful assistant.",
+        default=DEFAULT_SYSTEM_PROMPT_PLACEHOLDER,
         metadata={"name": "系统提示词", "description": "用来描述智能体的角色和行为", "kind": "prompt"},
+    )
+
+    system_prompt_is_custom: bool | None = field(
+        default=None,
+        metadata={"hide": True, "configurable": False},
     )
 
     model: str = field(
