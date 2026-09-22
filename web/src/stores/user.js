@@ -7,9 +7,23 @@ export const useUserStore = defineStore('user', () => {
   // 状态
   // 优先恢复跨会话令牌；未勾选“保持登录”时只从当前会话恢复。
   const sessionTokenStorage = typeof sessionStorage === 'undefined' ? null : sessionStorage
-  const token = ref(
-    localStorage.getItem('user_token') || sessionTokenStorage?.getItem('user_token') || ''
-  )
+
+  /**
+   * 首屏恢复令牌：localStorage（保持登录）优先，缺失时才退回 sessionStorage（仅本次会话）。
+   * 取用后清理另一侧残留，避免上一次登录遗留的旧令牌被继续当成有效登录态。
+   * @returns {string} 可用的 JWT；两处都没有时返回空串
+   */
+  function restorePersistedToken() {
+    const persistentToken = localStorage.getItem('user_token')
+    if (persistentToken) {
+      // 存在跨会话令牌即以它为准，同时清掉会话令牌，防止同一浏览器两个存储分叉
+      sessionTokenStorage?.removeItem('user_token')
+      return persistentToken
+    }
+    return sessionTokenStorage?.getItem('user_token') || ''
+  }
+
+  const token = ref(restorePersistedToken())
   const userId = ref(null)
   const username = ref('')
   // displayName 是界面展示姓名，username 仍仅作为登录账号使用。
@@ -28,6 +42,22 @@ export const useUserStore = defineStore('user', () => {
   const hasPermission = (permissionKey) => effectivePermissions.value.includes(permissionKey)
 
   // 动作
+  /**
+   * 按“保持登录 30 天”勾选状态持久化令牌，供所有登录入口复用。
+   * rememberLogin 为 true（默认值，与后端 30 天有效期一致）：写 localStorage，关闭浏览器后仍保持登录；
+   * rememberLogin 为 false：只写 sessionStorage，关闭标签页即失效。
+   * 写入前先清空两侧，保证两种存储互斥，避免取消勾选后仍被旧令牌自动登录。
+   * @param {string} accessToken 后端下发的访问令牌
+   * @param {boolean} rememberLogin 是否跨浏览器会话保留登录态
+   */
+  function persistToken(accessToken, rememberLogin = true) {
+    // 无 sessionStorage（SSR / 单测环境）时降级到 localStorage，保证初始化不失败
+    const tokenStorage = rememberLogin || !sessionTokenStorage ? localStorage : sessionTokenStorage
+    localStorage.removeItem('user_token')
+    sessionTokenStorage?.removeItem('user_token')
+    tokenStorage.setItem('user_token', accessToken)
+  }
+
   function applySession(data, rememberLogin = true) {
     token.value = data.access_token
     userId.value = data.user_id
@@ -40,11 +70,7 @@ export const useUserStore = defineStore('user', () => {
     effectivePermissions.value = data.effective_permissions || []
     departmentId.value = data.department_id || null
     departmentName.value = data.department_name || ''
-    localStorage.removeItem('user_token')
-    sessionTokenStorage?.removeItem('user_token')
-    // 测试或服务端渲染环境没有 sessionStorage 时回退到 localStorage，避免初始化失败。
-    const tokenStorage = rememberLogin || !sessionTokenStorage ? localStorage : sessionTokenStorage
-    tokenStorage.setItem('user_token', data.access_token)
+    persistToken(data.access_token, rememberLogin)
   }
 
   async function login(credentials) {
@@ -61,6 +87,13 @@ export const useUserStore = defineStore('user', () => {
   }
 
   function logout() {
+    // 认证会话控制器的 abort 会取消所有正在进行的业务请求；记录调用堆栈用于定位误登出来源。
+    console.warn('[认证诊断] userStore.logout，正在取消当前会话请求', {
+      path: typeof window !== 'undefined' ? window.location.pathname : '',
+      userId: userId.value,
+      hasToken: Boolean(token.value),
+      stack: new Error().stack
+    })
     authSessionController.abort()
     authSessionController = new AbortController()
 
@@ -217,8 +250,16 @@ export const useUserStore = defineStore('user', () => {
     token.value = accessToken
     localStorage.setItem('user_token', accessToken)
     try {
-      return await getCurrentUser()
+      const userData = await getCurrentUser()
+      console.info('[认证诊断] OA token 已通过 /api/auth/me 校验', {
+        userId: userData?.id ?? null
+      })
+      return userData
     } catch (error) {
+      console.error('[认证诊断] OA token 校验失败，将回滚登录态', {
+        errorType: error?.name || 'Error',
+        status: error?.status ?? null
+      })
       if (token.value === accessToken) logout()
       throw error
     }
@@ -269,6 +310,8 @@ export const useUserStore = defineStore('user', () => {
     checkFirstRun,
     getAuthHeaders,
     getAuthSignal,
+    // 供 OIDC 回调等非表单登录入口复用，统一按勾选状态选择令牌存储位置
+    persistToken,
     getUsers,
     createUser,
     updateUser,

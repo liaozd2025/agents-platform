@@ -68,11 +68,16 @@ const handleCallback = async () => {
 
     await router.replace({ path: route.path, query: {} })
 
+    // 登录页跳转 IdP 前记录的“保持登录 30 天”勾选状态；
+    // 键缺失（例如直接从 IdP 侧发起登录）时按“保持登录”处理，与历史行为保持一致。
+    const rememberLogin = sessionStorage.getItem('oidc_remember_login') !== 'false'
+    sessionStorage.removeItem('oidc_remember_login')
+
     // 更新用户状态
     userStore.token = tokenData.access_token
 
-    // 保存 token 到 localStorage
-    localStorage.setItem('user_token', tokenData.access_token)
+    // 按勾选状态决定写 localStorage（跨会话保持）还是 sessionStorage（仅本次会话），并清理另一侧残留
+    userStore.persistToken(tokenData.access_token, rememberLogin)
     await userStore.getCurrentUser()
 
     // 显示成功消息
