@@ -93,7 +93,10 @@
             <p>基于九典内部知识库检索，同时支持联网搜索，辅助文案编写等功能。</p>
           </div>
           <div class="chat-box">
-            <template v-for="row in conversationRows" :key="row.key">
+            <a-button v-if="messageWindow.hasEarlier" type="link" @click="visibleMessageCount += 20">
+              查看更早消息
+            </a-button>
+            <template v-for="row in messageWindow.rows" :key="row.key">
               <div v-if="row.type === 'conversation'" class="conv-box">
                 <div v-if="row.timeLabel" class="conversation-time">
                   {{ row.timeLabel }}
@@ -921,6 +924,7 @@ import {
 } from '@/utils/contextUsage'
 import { AgentValidator } from '@/utils/agentValidator'
 import { useAgentStore } from '@/stores/agent'
+import { sliceMessageRows } from '@/utils/messageWindow'
 import { useChatThreadsStore } from '@/stores/chatThreads'
 import { useChatUIStore } from '@/stores/chatUI'
 import { useConfigStore } from '@/stores/config'
@@ -1039,7 +1043,7 @@ const setCurrentThreadId = (threadId, options) => {
 const streamSmoother = useStreamSmoother({
   getThreadState: (threadId) => chatState.threadStates[threadId] || null
 })
-const { getThreadState, resetOnGoingConv, stopThreadStream } = useAgentThreadState({
+const { getThreadState, disposeThreadStates, resetOnGoingConv, stopThreadStream } = useAgentThreadState({
   chatState,
   getCurrentThreadId: () => currentThreadId.value,
   onStopThread: (threadId) => streamSmoother.flushThread(threadId),
@@ -2401,6 +2405,10 @@ const conversationRows = computed(() => {
   return rows
 })
 
+const visibleMessageCount = ref(20)
+watch(currentThreadId, () => { visibleMessageCount.value = 20 })
+const messageWindow = computed(() => sliceMessageRows(conversationRows.value, visibleMessageCount.value))
+
 const isLoadingMessages = computed(() => chatUIStore.isLoadingMessages)
 const isStreaming = computed(() => {
   const threadState = currentThreadState.value
@@ -2872,8 +2880,7 @@ onUnmounted(() => {
     clearTimeout(sendCooldownTimer)
     sendCooldownTimer = null
   }
-  // 清理所有线程状态
-  resetOnGoingConv()
+  disposeThreadStates()
   for (const entry of agentPanelPreviewCache.values()) {
     if (entry.file?.previewUrl) window.URL.revokeObjectURL(entry.file.previewUrl)
   }
