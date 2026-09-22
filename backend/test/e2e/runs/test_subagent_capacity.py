@@ -17,6 +17,7 @@ async def test_four_waiting_parents_and_children_complete():
     """四父全部占位后委派，父子最终消息各自绑定唯一 Run 与 Attempt。"""
     if os.getenv("SUBAGENT_CAPACITY_E2E") != "1":
         pytest.skip("通过 run_subagent_capacity.sh 使用一次性测试环境")
+    assert os.getuid() == 1000, "夹具必须使用 shipping runtime UID，不能依赖 root 或宿主映射"
     conn = await asyncpg.connect(os.environ["POSTGRES_URL"].replace("+asyncpg", ""))
     async with httpx.AsyncClient(base_url="http://api:5050", timeout=45) as api:
         try:
@@ -122,6 +123,11 @@ async def test_four_waiting_parents_and_children_complete():
                     path, content = artifacts[parent_id]
                     kind = "parent" if row["id"] in parents else "child"
                     expected = f"DONE:{kind}:{content}"
+                    assert path.is_file(), await conn.fetch(
+                        "SELECT t.tool_name,t.tool_output FROM tool_calls t JOIN messages m ON m.id=t.message_id "
+                        "WHERE m.run_id=$1 OR m.run_id IN (SELECT id FROM agent_runs WHERE created_by_run_id=$1)",
+                        row["id"],
+                    )
                     assert path.read_text() == content
                     assert row["message_run_id"] == row["id"] and row["content"] == expected
                     attempts = await conn.fetch("SELECT outcome FROM agent_run_attempts WHERE run_id=$1", row["id"])

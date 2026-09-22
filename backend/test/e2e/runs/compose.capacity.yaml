@@ -1,8 +1,10 @@
 services:
   api:
+    user: '1000:1000'
     environment:
       SUBAGENT_CAPACITY_E2E: '1'
   worker:
+    user: '1000:1000'
     environment:
       YUXI_WORKER_MAX_JOBS: '4'
   replay:
