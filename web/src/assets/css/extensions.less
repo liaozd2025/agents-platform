@@ -142,6 +142,15 @@
   }
 }
 
+/* color-mix 降级（Chrome 86 及更低内核不支持 color-mix，含变量的写法 lightningcss 也无法
+   在构建期求值 → 产物原样保留 → 老内核整条声明丢弃）。静态值是亮色主题的等价混合色；
+   暗色主题下会略偏色，但比整条丢失好。现代浏览器不进此块，行为不变。下同。 */
+@supports not (background: color-mix(in srgb, red, blue)) {
+  .sidebar-list .sidebar-tool.active {
+    background-color: #f1f3fd; /* color-mix(in srgb, var(--main-color) 8%, var(--gray-0)) */
+  }
+}
+
 .list-item {
   padding: 10px 12px;
   border-radius: @radius;

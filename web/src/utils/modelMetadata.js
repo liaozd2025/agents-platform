@@ -27,7 +27,9 @@ export const normalizeModelConfig = (model = {}) => ({
 })
 
 export const loadModelMetadataCatalog = () => {
-  catalogPromise ||= import('virtual:model-display-metadata').then(({ providers }) => ({ providers }))
+  // 原写法是 ||= 逻辑赋值（需 Chrome 85+），低版本会抛语法错误导致整个应用起不来。
+  // ||= 的语义本就是「左侧为 falsy 时才赋值」，用等价的 || 写法即可。
+  catalogPromise = catalogPromise || import('virtual:model-display-metadata').then(({ providers }) => ({ providers }))
   return catalogPromise
 }
 

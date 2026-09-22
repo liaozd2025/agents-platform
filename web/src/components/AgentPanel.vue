@@ -716,7 +716,10 @@ const refreshWorkspaceTree = async ({ force = false, refreshPreview = false } = 
   workspaceRefreshInFlight = true
   workspaceLoading.value = true
   workspaceError.value = ''
-  workspacePreviewRefreshPending ||= refreshPreview
+  // 原写法是 ||= 逻辑赋值，该语法需要 Chrome 85+：内网存在更低版本终端，
+  // 解析到它时会直接抛语法错误，整个 main.js 模块链都不执行（页面空白）。
+  // 用等价的「先取自身、空值再赋值」写法，语义完全一致且所有版本都能解析。
+  workspacePreviewRefreshPending = workspacePreviewRefreshPending || refreshPreview
   // 名称映射先就绪再建树，避免目录先以 uuid 渲染、随后被改写造成闪烁。
   await projectsStore.ensureDirectoryLabels()
 

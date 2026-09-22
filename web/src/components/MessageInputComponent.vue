@@ -1441,6 +1441,13 @@ defineExpose({
       font-weight: 600;
       pointer-events: none;
     }
+
+    /* color-mix 降级（Chrome 86 及更低内核不支持，整条声明会丢失）。静态值取亮色主题等价色。 */
+    @supports not (background: color-mix(in srgb, red, blue)) {
+      &::after {
+        background: rgba(255, 255, 255, 0.88); /* color-mix(in srgb, var(--gray-0) 88%, transparent) */
+      }
+    }
   }
 }
 

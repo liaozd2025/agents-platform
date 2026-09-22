@@ -204,6 +204,12 @@ const startThreadStatusSync = () => {
 }
 
 onUnmounted(() => {
+  // AppLayout 卸载会销毁 OA bridge；记录路由和登录态，区分正常切页与异常重建。
+  console.warn('[OA iframe][诊断] AppLayout 卸载', {
+    path: route.fullPath,
+    userId: userStore.userId,
+    isEmbedded: isEmbedded.value
+  })
   window.removeEventListener('keydown', handleGlobalKeydown)
   if (threadStatusSyncTimer) {
     clearInterval(threadStatusSyncTimer)
@@ -220,11 +226,14 @@ const activeConversationThreadId = computed(() =>
 // 侧边栏品牌位的可用宽度只有约 100px（230px 侧边栏要减去头像与右侧两个操作按钮），
 // 因此优先取配置里的短名 branding.sidebar_name，避免「九典制药智能体平台」这类全称被省略号截断。
 const sidebarBrandName = computed(() => {
+  // 品牌配置未就绪时返回空串（配合模板 v-if 整体不渲染），
+  // 避免先闪一帧兜底文字再跳成正式配置内容
+  if (!infoStore.isLoaded) return ''
   return (
     infoStore.branding.sidebar_name ||
     infoStore.organization.name ||
     infoStore.branding.name ||
-    'Yuxi'
+    '智能体平台'
   )
 })
 
@@ -495,8 +504,10 @@ provide('settingsModal', {
     <div v-if="showSidebar" class="header">
       <div class="sidebar-brand" @click.stop>
         <div v-if="!layoutSidebarCollapsed" class="brand-identity">
-          <img :src="infoStore.organization.avatar" class="brand-avatar" />
-          <span class="brand-name">{{ sidebarBrandName }}</span>
+          <!-- avatar 为空字符串时 <img src=""> 会指向页面自身并渲染成裂图（品牌配置接口未返回时的瞬间），
+               必须用 v-if 挡住；文字侧由 sidebarBrandName 的「智能体平台」兜底 -->
+          <img v-if="infoStore.organization.avatar" :src="infoStore.organization.avatar" class="brand-avatar" />
+          <span v-if="sidebarBrandName" class="brand-name">{{ sidebarBrandName }}</span>
         </div>
         <button
           v-else
@@ -505,7 +516,7 @@ provide('settingsModal', {
           aria-label="展开侧边栏"
           @click="setSidebarCollapsed(false)"
         >
-          <img :src="infoStore.organization.avatar" class="brand-avatar brand-avatar-image" />
+          <img v-if="infoStore.organization.avatar" :src="infoStore.organization.avatar" class="brand-avatar brand-avatar-image" />
           <PanelLeftOpen class="brand-expand-icon" size="20" />
         </button>
         <div
@@ -1038,7 +1049,9 @@ div.header,
 
     &.active {
       border-color: transparent;
-      background-color: color-mix(in srgb, var(--gray-100) 6%, var(--gray-100));
+      /* 原写法 color-mix(in srgb, var(--gray-100) 6%, var(--gray-100))：同色混合恒等于本身，
+         直接写 var(--gray-100)，顺带避开 color-mix 在 Chrome 86 上不可用的问题 */
+      background-color: var(--gray-100);
       font-weight: 600;
       color: var(--gray-1000);
     }

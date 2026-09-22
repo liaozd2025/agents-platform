@@ -58,13 +58,23 @@
   border: 1px solid var(--gray-100);
   border-radius: 8px;
   transition: all 0.2s ease;
+  /*
+   * 高度撑满父容器（.grid-item 是 flex 纵向容器）：主轴上用 flex:1，不要只依赖 height:100%。
+   * 原因：父容器高度由 grid 行 + min-height 推导，Chromium 86 及更低内核在这种情况下会把
+   * 百分比高度解析成 auto → 卡片塌成内容高度（实测 .ant-card 从 400px 掉到 77px）→
+   * 内部 ECharts 容器高度为 0 → 图表不渲染（dashboard「调用统计」白块的根因）。
+   * height:100% 保留，用于父容器不是 flex 的场景；两者并存时 flex-basis 优先，现代内核行为不变。
+   */
   height: 100%;
+  flex: 1;
   display: flex;
   flex-direction: column;
+}
 
-  &:hover {
-    border-color: var(--gray-100);
-  }
+/* 展开写作 .dashboard-card:hover（原 & 嵌套）：
+   CSS 原生嵌套需 Chrome 112+，而目标基线是 Chrome 86，嵌套会整块失效，故一律写成扁平选择器。 */
+.dashboard-card:hover {
+  border-color: var(--gray-100);
 }
 
 /* 使用更具体的选择器来覆盖 Ant Design 的默认样式 */
@@ -107,89 +117,90 @@
   }
 }
 
-/* 图表容器样式 */
-.chart-container {
-  h4,
-  h5 {
-    margin-bottom: 16px;
-    font-weight: 600;
-    color: var(--gray-1000);
-  }
+/* 图表容器样式
+   注意：这里全部写成扁平选择器，不要改回 CSS 原生嵌套。
+   Chromium 86 及更低内核不支持原生嵌套，嵌套会让整块规则失效 ——
+   实测后果是 .chart 拿不到 height:250px → 容器高度 0 → ECharts 报
+   "Can't get DOM width or height" 且图表不渲染（智能体分析 / 工具调用监控）。 */
+.chart-container h4,
+.chart-container h5 {
+  margin-bottom: 16px;
+  font-weight: 600;
+  color: var(--gray-1000);
+}
 
-  h4 {
-    font-size: 16px;
-  }
+.chart-container h4 {
+  font-size: 16px;
+}
 
-  h5 {
-    font-size: 14px;
-    color: var(--gray-600);
-  }
+.chart-container h5 {
+  font-size: 14px;
+  color: var(--gray-600);
+}
 
-  .chart {
-    height: 250px;
-    width: 100%;
-    background-color: var(--gray-0);
-    border-radius: 8px;
-    padding: 10px;
-    border: 1px solid var(--gray-100);
-  }
+.chart-container .chart {
+  height: 250px;
+  width: 100%;
+  background-color: var(--gray-0);
+  border-radius: 8px;
+  padding: 10px;
+  border: 1px solid var(--gray-100);
+}
 
-  .chart-medium {
-    height: 180px;
-    width: 100%;
-    background-color: var(--gray-0);
-    border-radius: 8px;
-    padding: 8px;
-    border: 1px solid var(--gray-100);
-  }
+.chart-container .chart-medium {
+  height: 180px;
+  width: 100%;
+  background-color: var(--gray-0);
+  border-radius: 8px;
+  padding: 8px;
+  border: 1px solid var(--gray-100);
+}
 
-  .chart-small {
-    height: 180px;
-    width: 100%;
-  }
+.chart-container .chart-small {
+  height: 180px;
+  width: 100%;
 }
 
 .dashboard-card .ant-table {
   background-color: var(--gray-0);
   border-radius: 8px;
   overflow: hidden;
-
-  .ant-table-thead > tr > th {
-    background-color: var(--gray-25);
-    border-bottom: 1px solid var(--gray-200);
-    font-weight: 600;
-    padding: 12px 16px;
-    font-size: 12px;
-    color: var(--gray-700);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .ant-table-tbody > tr {
-    transition: background-color 0.2s ease;
-
-    > td {
-      border-bottom: 1px solid var(--gray-100);
-      color: var(--gray-1000);
-      padding: 12px 16px;
-      font-weight: 400;
-    }
-
-    &:hover > td {
-      background-color: var(--gray-25);
-    }
-  }
 }
 
-.dashboard-card .ant-progress {
-  .ant-progress-bg {
-    background-color: var(--main-500) !important;
-    border-radius: 4px;
-  }
+/* 以下同样由原生嵌套展开而来（原因见文件内说明：Chrome 86 不支持嵌套） */
+.dashboard-card .ant-table .ant-table-thead > tr > th {
+  background-color: var(--gray-25);
+  border-bottom: 1px solid var(--gray-200);
+  font-weight: 600;
+  padding: 12px 16px;
+  font-size: 12px;
+  color: var(--gray-700);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
 
-  .ant-progress-text {
-    color: var(--gray-1000) !important;
-    font-weight: 500;
-    font-size: 12px;
-  }
+.dashboard-card .ant-table .ant-table-tbody > tr {
+  transition: background-color 0.2s ease;
+}
+
+.dashboard-card .ant-table .ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--gray-100);
+  color: var(--gray-1000);
+  padding: 12px 16px;
+  font-weight: 400;
+}
+
+.dashboard-card .ant-table .ant-table-tbody > tr:hover > td {
+  background-color: var(--gray-25);
+}
+
+.dashboard-card .ant-progress .ant-progress-bg {
+  background-color: var(--main-500) !important;
+  border-radius: 4px;
+}
+
+.dashboard-card .ant-progress .ant-progress-text {
+  color: var(--gray-1000) !important;
+  font-weight: 500;
+  font-size: 12px;
 }

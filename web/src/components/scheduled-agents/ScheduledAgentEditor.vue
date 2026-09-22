@@ -376,6 +376,13 @@ function changeFrequency(frequency) {
     border-color: var(--gray-300);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--main-color) 8%, transparent);
   }
+
+  /* color-mix 降级（Chrome 86 及更低内核不支持，整条声明会丢失）。静态值取亮色主题等价色。 */
+  @supports not (box-shadow: color-mix(in srgb, red, blue)) {
+    &:focus-within {
+      box-shadow: 0 0 0 2px rgba(82, 99, 231, 0.08); /* color-mix(in srgb, var(--main-color) 8%, transparent) */
+    }
+  }
 }
 
 .save-error {
@@ -453,6 +460,14 @@ function changeFrequency(frequency) {
       border-color: var(--gray-200);
       background: var(--gray-0);
       box-shadow: 0 0 0 2px color-mix(in srgb, var(--main-color) 10%, transparent);
+    }
+  }
+
+  /* color-mix 降级（Chrome 86 及更低内核不支持，整条声明会丢失）。静态值取亮色主题等价色。 */
+  @supports not (box-shadow: color-mix(in srgb, red, blue)) {
+    input:focus,
+    select:focus {
+      box-shadow: 0 0 0 2px rgba(82, 99, 231, 0.1); /* color-mix(in srgb, var(--main-color) 10%, transparent) */
     }
   }
 

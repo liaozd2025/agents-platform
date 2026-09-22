@@ -1655,6 +1655,19 @@ defineExpose({
   }
 }
 
+/* color-mix 降级（Chrome 86 及更低内核不支持 → 整条声明丢失）。静态值为亮色主题等价混合色。 */
+@supports not (background: color-mix(in srgb, red, blue)) {
+  .skill-scope-tab.active,
+  .skill-category-tab.active {
+    border-color: #eaecfc; /* color-mix(in srgb, var(--main-color) 12%, var(--gray-0)) */
+    background: #eeeffd; /* color-mix(in srgb, var(--main-color) 10%, var(--gray-0)) */
+  }
+
+  .active .skill-category-count {
+    color: #6773d0; /* color-mix(in srgb, var(--main-color) 70%, var(--gray-500)) */
+  }
+}
+
 .skill-scope-tabs {
   padding-top: 6px;
   padding-bottom: 0;
