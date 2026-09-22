@@ -268,6 +268,22 @@ const totalActiveUsers = computed(() =>
   background: color-mix(in srgb, var(--main-color) 65%, var(--gray-0));
 }
 
+/* color-mix 降级（Chrome 86 及更低内核不支持，构建期也无法求值 → 整条声明丢失）。
+   静态值为亮色主题的等价混合色；暗色主题下会略偏色。现代浏览器不进此块。 */
+@supports not (background: color-mix(in srgb, red, blue)) {
+  .level-1 {
+    background: #dce0fa; /* color-mix(in srgb, var(--main-color) 20%, var(--gray-0)) */
+  }
+
+  .level-2 {
+    background: #bac1f5; /* color-mix(in srgb, var(--main-color) 40%, var(--gray-0)) */
+  }
+
+  .level-3 {
+    background: #8f9aef; /* color-mix(in srgb, var(--main-color) 65%, var(--gray-0)) */
+  }
+}
+
 .level-4 {
   background: var(--main-color);
 }
