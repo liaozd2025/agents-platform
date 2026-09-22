@@ -4,6 +4,7 @@ import { after, before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { createServer } from 'vite'
+import { useAgentThreadState } from '../../src/composables/useAgentThreadState.js'
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 let server
@@ -1130,4 +1131,50 @@ test('接入未完成的发送项只展示，不订阅或取消尚未持久化�
     ;[agentApi.listThreadQueuedRequests, agentApi.streamRequestEvents, agentApi.cancelRequest] =
       originals
   }
+})
+
+test('卸载后请求流的 finally 和迟到 active-run 响应不能重建线程或订阅', async (t) => {
+  const chatState = { threadStates: {} }
+  const states = useAgentThreadState({ chatState, getCurrentThreadId: () => 'disposed-thread' })
+  let resolveActive
+  let subscriptions = 0
+  t.mock.method(
+    agentApi,
+    'getThreadActiveRun',
+    () =>
+      new Promise((resolve) => {
+        resolveActive = resolve
+      })
+  )
+  t.mock.method(agentApi, 'streamAgentRunEvents', async () => {
+    subscriptions++
+    return new Response('')
+  })
+  t.mock.method(
+    agentApi,
+    'streamRequestEvents',
+    (_id, { signal }) =>
+      new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new DOMException('卸载', 'AbortError')), {
+          once: true
+        })
+      })
+  )
+  const runs = useAgentRunStream({
+    ...states,
+    currentAgentId: 'agent-1',
+    handleStreamChunk: () => {},
+    fetchThreadMessages: async () => {},
+    fetchAgentState: () => {},
+    onScrollToBottom: () => {}
+  })
+  const requests = useAgentRequestQueue({ ...states, startRunStream: runs.startRunStream })
+  const pendingRequest = requests.startRequestStream('background-disposed', 'request-disposed')
+  const pendingResume = runs.resumeActiveRunForThread('disposed-thread')
+  states.disposeThreadStates()
+  resolveActive({ run: { id: 'late-run', status: 'running' } })
+  await Promise.all([pendingRequest, pendingResume])
+  assert.equal(subscriptions, 0)
+  assert.deepEqual(chatState.threadStates, {})
+  assert.equal(states.getThreadState('new-after-dispose'), null)
 })
