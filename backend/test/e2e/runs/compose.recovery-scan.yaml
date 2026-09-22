@@ -1,0 +1,8 @@
+services:
+  postgres:
+    command: [postgres, -c, max_connections=600]
+  api:
+    environment:
+      RECOVERY_SCAN_E2E: '1'
+      POSTGRES_POOL_SIZE: '120'
+      POSTGRES_MAX_OVERFLOW: '40'
