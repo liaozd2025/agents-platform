@@ -137,7 +137,8 @@ class FakeFileRepository:
             "chunk_count": sum(int(record.chunk_count or 0) for record in files),
             "token_count": sum(int(record.token_count or 0) for record in files),
             "pending_parse_count": sum(1 for record in files if record.status == "uploaded"),
-            "pending_index_count": sum(1 for record in files if record.status in {"parsed", "error_indexing"}),
+            "pending_index_count": sum(1 for record in files if record.status == "parsed"),
+            "retry_index_count": sum(1 for record in files if record.status in {"error_indexing", "failed"}),
             "processing_count": sum(
                 1 for record in files if record.status in {"processing", "waiting", "parsing", "indexing"}
             ),
