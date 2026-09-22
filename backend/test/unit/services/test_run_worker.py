@@ -400,7 +400,7 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch, run_obj: SimpleNamespace):
     monkeypatch.setattr(run_worker, "_load_user", fake_load_user)
     monkeypatch.setattr(run_worker, "_load_input_message", fake_load_input_message)
     monkeypatch.setattr(run_worker, "get_agent_state_view", fake_get_agent_state_view)
-    monkeypatch.setattr(run_worker, "mark_run_running", fake_mark_run_running)
+    monkeypatch.setattr(run_worker, "mark_run_running", AsyncMock(return_value=1))
     monkeypatch.setattr(run_worker, "release_run_lease_for_retry", fake_mark_run_running)
     monkeypatch.setattr(run_worker, "persist_run_manifest", fake_noop)
     monkeypatch.setattr(run_worker, "_record_run_timing_best_effort", fake_noop)
@@ -971,10 +971,14 @@ async def test_redis_event_failure_cannot_block_owned_completed_terminal(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_durable_cancel_without_redis_signal_never_enters_agent_stream(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("attempt_no", [1, 3])
+async def test_durable_cancel_without_redis_signal_never_enters_agent_stream(
+    monkeypatch: pytest.MonkeyPatch, attempt_no
+):
     run_obj = _build_run()
     run_obj.status = "cancel_requested"
     _patch_common(monkeypatch, run_obj)
+    monkeypatch.setattr(run_worker, "mark_run_running", AsyncMock(return_value=attempt_no))
     terminal_calls: list[dict] = []
     lifecycle: list[str] = []
 
@@ -1024,8 +1028,8 @@ async def test_infrastructure_cancel_releases_pending_and_propagates(monkeypatch
     monkeypatch.setattr(run_worker.RunContext, "close", fake_close)
     monkeypatch.setattr(
         run_worker,
-        "_consume_stream_with_cancel",
-        lambda stream, context: _RaisingAsyncIter(asyncio.CancelledError("worker shutdown")),
+        "_load_user",
+        AsyncMock(side_effect=asyncio.CancelledError("worker shutdown")),
     )
 
     with pytest.raises(asyncio.CancelledError, match="worker shutdown"):
@@ -1049,8 +1053,8 @@ async def test_release_failure_does_not_mask_infrastructure_cancel(monkeypatch: 
     monkeypatch.setattr(run_worker, "release_run_lease_for_retry", fail_release)
     monkeypatch.setattr(
         run_worker,
-        "_consume_stream_with_cancel",
-        lambda stream, context: _RaisingAsyncIter(asyncio.CancelledError("worker shutdown")),
+        "_load_user",
+        AsyncMock(side_effect=asyncio.CancelledError("worker shutdown")),
     )
 
     with pytest.raises(asyncio.CancelledError, match="worker shutdown"):
@@ -1103,16 +1107,20 @@ async def test_process_agent_run_retryable_error_retries_then_completes(monkeypa
         terminal_statuses.append(status)
         return run_worker.TerminalTransition(status=status, changed=True)
 
-    def fake_consume(stream, run_ctx):
-        del stream, run_ctx
+    async def load_user(uid):
+        """只在尚未进入执行流的用户加载阶段模拟可重试失败。"""
         attempts["count"] += 1
         if attempts["count"] == 1:
-            return _RaisingAsyncIter(run_worker.RetryableRunError("temporary failure"))
+            raise run_worker.RetryableRunError("temporary failure")
+        return SimpleNamespace(id=1, uid=uid)
+
+    def fake_consume(stream, run_ctx):
         return _BytesAsyncIter([b'{"status":"finished","request_id":"req-1"}\n'])
 
     monkeypatch.setattr(run_worker, "append_run_event", fake_append_event)
     monkeypatch.setattr(run_worker, "mark_run_terminal", fake_mark_terminal)
     monkeypatch.setattr(run_worker, "_consume_stream_with_cancel", fake_consume)
+    monkeypatch.setattr(run_worker, "_load_user", load_user)
 
     async def fake_release_lease(*_args, **_kwargs):
         lifecycle.append("lease-and-descendants")
@@ -1782,3 +1790,111 @@ async def test_retired_pi_job_never_enters_new_executor(monkeypatch, run_type, r
     await run_worker.process_agent_run({}, run.id)
     terminal.assert_awaited_once_with(run.id, "failed", "pi_executor_retired", "PI 执行器已停用，旧任务不可续跑")
     claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [asyncio.CancelledError("worker shutdown"), ConnectionError("connection lost")])
+@pytest.mark.parametrize("run_type", ["chat", "resume", "subagent"])
+async def test_started_execution_is_not_released_for_retry(monkeypatch, failure, run_type):
+    """执行流已开始后，中断不能把未知副作用任务重新放回队列。"""
+    run = _build_run()
+    run.run_type = run_type
+    _patch_common(monkeypatch, run)
+    if run_type == "resume":
+        monkeypatch.setattr(
+            run_worker,
+            "_load_input_message",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    content="",
+                    image_content=None,
+                    extra_metadata={"resume": {"answer": "continue"}},
+                )
+            ),
+        )
+    terminal = AsyncMock(return_value=run_worker.TerminalTransition(status="failed", changed=True))
+    events = AsyncMock()
+    release = AsyncMock(side_effect=AssertionError("未知执行不允许重试"))
+    monkeypatch.setattr(run_worker, "mark_run_terminal", terminal)
+    monkeypatch.setattr(run_worker, "append_run_event", events)
+    monkeypatch.setattr(run_worker, "release_run_lease_for_retry", release)
+    monkeypatch.setattr(run_worker, "stream_agent_resume", lambda **kwargs: object())
+    monkeypatch.setattr(run_worker, "_consume_stream_with_cancel", lambda *args: _RaisingAsyncIter(failure))
+
+    await run_worker.process_agent_run({"worker_id": "worker-stop", "job_try": 1}, "run-1")
+
+    release.assert_not_awaited()
+    assert terminal.await_args.args[:2] == ("run-1", "failed")
+    assert terminal.await_args.kwargs["error_type"] == "execution_outcome_unknown"
+    assert "不会自动重试" in terminal.await_args.kwargs["error_message"]
+    assert any(call.args[1] == "error" and call.args[2]["retryable"] is False for call in events.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current_status", ["cancel_requested", "completed"])
+@pytest.mark.parametrize("preparing", [False, True])
+async def test_execution_interruption_respects_concurrent_state(monkeypatch, current_status, preparing):
+    """结果未知收敛遇到已提交的取消或终态时，不覆盖其事实。"""
+    run = _build_run()
+    _patch_common(monkeypatch, run)
+    transitions = [run_worker.TerminalTransition(status=current_status, changed=False)]
+    if current_status == "cancel_requested":
+        transitions.append(run_worker.TerminalTransition(status="cancelled", changed=True))
+    terminal = AsyncMock(side_effect=transitions)
+    events = AsyncMock()
+    monkeypatch.setattr(run_worker, "mark_run_terminal", terminal)
+    monkeypatch.setattr(run_worker, "append_run_event", events)
+    monkeypatch.setattr(run_worker, "release_run_lease_for_retry", AsyncMock(side_effect=AssertionError("no replay")))
+    monkeypatch.setattr(
+        run_worker,
+        "_consume_stream_with_cancel",
+        lambda *args: _RaisingAsyncIter(asyncio.CancelledError("worker shutdown")),
+    )
+
+    if preparing:
+        monkeypatch.setattr(run_worker, "mark_run_running", AsyncMock(return_value=2))
+        monkeypatch.setattr(run_worker, "_load_user", AsyncMock(side_effect=asyncio.CancelledError("timeout")))
+
+    await run_worker.process_agent_run({"worker_id": "worker-stop"}, run.id)
+
+    statuses = [call.args[1] for call in terminal.await_args_list]
+    assert statuses == (["failed", "cancelled"] if current_status == "cancel_requested" else ["failed"])
+    assert not any(call.args[1] == "error" for call in events.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [asyncio.CancelledError("timeout"), ConnectionError("unavailable")])
+async def test_preparation_retry_budget_survives_fresh_job(monkeypatch, failure):
+    """第二次持久 attempt 即使 job_try 归一也失败，终态事件不再宣称可重试。"""
+    run = _build_run()
+    _patch_common(monkeypatch, run)
+    monkeypatch.setattr(run_worker, "mark_run_running", AsyncMock(return_value=2))
+    monkeypatch.setattr(run_worker, "_load_user", AsyncMock(side_effect=failure))
+    terminal = AsyncMock(return_value=run_worker.TerminalTransition(status="failed", changed=True))
+    release = AsyncMock()
+    events = AsyncMock()
+    monkeypatch.setattr(run_worker, "mark_run_terminal", terminal)
+    monkeypatch.setattr(run_worker, "release_run_lease_for_retry", release)
+    monkeypatch.setattr(run_worker, "append_run_event", events)
+    await run_worker.process_agent_run({"job_try": 1}, run.id)
+    release.assert_not_awaited()
+    assert terminal.await_args.args[1] == "failed"
+    assert terminal.await_args.kwargs["error_type"] == "run_retry_exhausted"
+    error = next(call.args[2] for call in events.await_args_list if call.args[1] == "error")
+    assert error["retryable"] is False and error["chunk"]["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_old_over_budget_pending_run_does_not_prepare(monkeypatch):
+    """旧 pending 超过预算时，仅取得收尾 owner，不再进入准备或执行。"""
+    run = _build_run()
+    _patch_common(monkeypatch, run)
+    monkeypatch.setattr(run_worker, "mark_run_running", AsyncMock(return_value=3))
+    load = AsyncMock(side_effect=AssertionError("must not prepare"))
+    monkeypatch.setattr(run_worker, "_load_input_message", load)
+    terminal = AsyncMock(return_value=run_worker.TerminalTransition(status="failed", changed=True))
+    monkeypatch.setattr(run_worker, "mark_run_terminal", terminal)
+    monkeypatch.setattr(run_worker, "append_run_event", AsyncMock())
+    await run_worker.process_agent_run({"job_try": 1}, run.id)
+    load.assert_not_awaited()
+    assert terminal.await_args.kwargs["error_type"] == "run_retry_exhausted"

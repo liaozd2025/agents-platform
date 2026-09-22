@@ -129,5 +129,8 @@ def format_retrieval_context(chunks: list[dict[str, Any]]) -> str:
     lines = ["以下内容来自本次允许检索的知识库，仅可据此回答相关事实："]
     for index, item in enumerate(chunks, 1):
         content = item.get("content") or item.get("text") or item.get("chunk") or ""
-        lines.append(f"[{index}] kb_id={item.get('kb_id')} file_id={item.get('file_id')}\n{content}")
+        metadata = item.get("metadata") or {}
+        file_id = item.get("file_id") or metadata.get("file_id")
+        source = f"kb://{item.get('kb_id')}/{file_id}" if file_id else "来源身份缺失，不可生成文件引用"
+        lines.append(f"[{index}] source={source}\n{content}")
     return "\n\n".join(lines)

@@ -13,12 +13,9 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-from yuxi.repositories.agent_run_request_repository import AgentRunRequestRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
-from yuxi.services import agent_request_queue_service
-from yuxi.services import context_compression_service
-from yuxi.services import run_worker
+from yuxi.repositories.agent_run_request_repository import AgentRunRequestRepository
+from yuxi.services import agent_request_queue_service, context_compression_service, run_worker
 from yuxi.services.input_message_service import build_chat_input_message
 from yuxi.storage.postgres.models_business import (
     AgentRun,
@@ -201,6 +198,7 @@ async def test_context_compression_holds_thread_lock_until_checkpoint_update(mon
     monkeypatch.setattr(context_compression_service, "resolve_agent_run_model_spec", model_spec)
     monkeypatch.setattr(context_compression_service, "ensure_conversation_workdir_available", workdir)
     monkeypatch.setattr(context_compression_service, "_ensure_runtime_available", runtime)
+    monkeypatch.setattr(context_compression_service, "_release_runtime", runtime)
     monkeypatch.setattr(context_compression_service, "build_agent_input_context", build_context)
     monkeypatch.setattr(context_compression_service, "_compress_agent_checkpoint", compress)
     monkeypatch.setattr(

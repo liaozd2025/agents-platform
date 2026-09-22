@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TEXT_FILE_EXTENSIONS = (".txt", ".md")
-OFFICE_FILE_EXTENSIONS = (".docx", ".pptx", ".xls", ".xlsx")
+OFFICE_FILE_EXTENSIONS = (".doc", ".docx", ".pptx", ".xls", ".xlsx")
 HTML_FILE_EXTENSIONS = (".html", ".htm")
 IMAGE_FILE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp")
 PDF_FILE_EXTENSIONS = (".pdf",)

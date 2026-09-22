@@ -23,13 +23,19 @@
 
     <template #result>
       <div class="task-result">
-        <MarkdownPreview compact :content="String(displayResult)" class="md-preview-wrapper" />
+        <MarkdownPreview
+          compact
+          :content="String(displayResult)"
+          :citation-sources="citationSources"
+          class="md-preview-wrapper"
+        />
       </div>
     </template>
   </BaseToolCall>
 </template>
 
 <script setup>
+import { getToolCitationSources } from '@/utils/answerCitations.js'
 import { computed, inject } from 'vue'
 import BaseToolCall from '../BaseToolCall.vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
@@ -49,6 +55,7 @@ const activeSubagentToolCallIds = inject('activeSubagentToolCallIds', null)
 
 const parsedArgs = computed(() => parseToolCallArgs(props.toolCall))
 
+const citationSources = computed(() => getToolCitationSources(props.toolCall))
 const subagentRun = computed(() => props.toolCall.subagent_run || null)
 const subagentDisplayName = computed(
   () =>

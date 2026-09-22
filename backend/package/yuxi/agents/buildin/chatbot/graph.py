@@ -20,6 +20,7 @@ from yuxi.agents.middlewares import (
     create_memory_middleware,
     create_summary_middleware_from_context,
 )
+from yuxi.agents.middlewares.citations import CitationMiddleware
 from yuxi.agents.middlewares.skills import SkillsMiddleware
 from yuxi.agents.middlewares.subagent_task import create_subagent_task_middleware
 from yuxi.agents.tool_approval import (
@@ -56,9 +57,10 @@ async def _build_middlewares(context, backend):
             create_summary_middleware_from_context(context, backend=backend),
             TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
             PatchToolCallsMiddleware(),
-            ModelRetryMiddleware(max_retries=getattr(context, "model_retry_times", 2)),
+            ModelRetryMiddleware(max_retries=getattr(context, "model_retry_times", 2), on_failure="error"),
             ImageInputCompatibilityMiddleware(),
             TokenUsageMiddleware(),
+            CitationMiddleware(),
         ]
     )
     approval_middleware = create_tool_approval_middleware(

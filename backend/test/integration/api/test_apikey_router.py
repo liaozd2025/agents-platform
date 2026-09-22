@@ -186,11 +186,12 @@ async def test_user_delete_oidc_restore_cannot_republish_or_enable_old_api_key(t
     suffix = uuid.uuid4().hex[:12]
     user_response = await test_client.post(
         "/api/auth/users",
-        json={"username": f"revive_{suffix}", "password": "routerTest123!", "role": "user"},
+        json={"username": f"revive_{suffix}", "password": "routerTest123!"},
         headers=admin_headers,
     )
     assert user_response.status_code == 200, user_response.text
     user_id = user_response.json()["id"]
+    department_id = user_response.json()["department_id"]
     payload = {**_create_payload("Deleted User Tombstone"), "user_id": user_id}
     create_response = await test_client.post(API_KEYS_PATH, json=payload, headers=admin_headers)
     assert create_response.status_code == 200, create_response.text
@@ -214,7 +215,10 @@ async def test_user_delete_oidc_restore_cannot_republish_or_enable_old_api_key(t
                 db,
                 deleted_user,
                 {"name": f"restored_{suffix}", "username": f"restored_{suffix}", "sub": f"test:{suffix}"},
+                department_id,
             )
+            assert deleted_user.is_deleted == 0
+            assert deleted_user.department_id == department_id
 
         list_response = await test_client.get(API_KEYS_PATH, headers=admin_headers)
         assert list_response.status_code == 200, list_response.text

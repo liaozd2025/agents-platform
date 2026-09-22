@@ -93,7 +93,10 @@
             <p>基于九典内部知识库检索，同时支持联网搜索，辅助文案编写等功能。</p>
           </div>
           <div class="chat-box">
-            <template v-for="row in conversationRows" :key="row.key">
+            <a-button v-if="messageWindow.hasEarlier" type="link" @click="visibleMessageCount += 20">
+              查看更早消息
+            </a-button>
+            <template v-for="row in messageWindow.rows" :key="row.key">
               <div v-if="row.type === 'conversation'" class="conv-box">
                 <div v-if="row.timeLabel" class="conversation-time">
                   {{ row.timeLabel }}
@@ -268,6 +271,22 @@
                   :inert="currentToolApprovalVisible"
                   :aria-hidden="currentToolApprovalVisible ? 'true' : undefined"
                 >
+                  <a-alert
+                    v-if="currentThreadState?.pendingSubmission?.uncertain"
+                    type="warning"
+                    message="发送结果尚未确认，恢复会继续原请求。"
+                    role="status"
+                  >
+                    <template #action>
+                      <a-button
+                        :loading="currentThreadState.pendingSubmission.sending"
+                        @click="
+                          handleSendMessage({ submission: currentThreadState.pendingSubmission })
+                        "
+                        >恢复发送</a-button
+                      >
+                    </template>
+                  </a-alert>
                   <AgentInputArea
                     ref="agentInputAreaRef"
                     v-model="userInput"
@@ -905,6 +924,7 @@ import {
 } from '@/utils/contextUsage'
 import { AgentValidator } from '@/utils/agentValidator'
 import { useAgentStore } from '@/stores/agent'
+import { sliceMessageRows } from '@/utils/messageWindow'
 import { useChatThreadsStore } from '@/stores/chatThreads'
 import { useChatUIStore } from '@/stores/chatUI'
 import { useConfigStore } from '@/stores/config'
@@ -936,7 +956,12 @@ import ProjectSelectionSection from '@/components/ProjectSelectionSection.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { enrichTaskToolCalls, parseToolCallArgs } from '@/components/ToolCallingResult/toolRegistry'
 import { getConversationDisplayItems } from '@/utils/messageGrouping'
-import { resolveConversationModel } from '@/utils/conversationModel'
+import {
+  clearChatModelPreference,
+  readChatModelPreference,
+  resolveConversationModel,
+  writeChatModelPreference
+} from '@/utils/conversationModel'
 import { makeChildThreadId } from '@/utils/subagentThread'
 import { isSubagentLaunchToolName, mergeSubagentRunsForDisplay } from '@/utils/subagentRuns'
 import {
@@ -1023,7 +1048,7 @@ const setCurrentThreadId = (threadId, options) => {
 const streamSmoother = useStreamSmoother({
   getThreadState: (threadId) => chatState.threadStates[threadId] || null
 })
-const { getThreadState, resetOnGoingConv, stopThreadStream } = useAgentThreadState({
+const { getThreadState, disposeThreadStates, resetOnGoingConv, stopThreadStream } = useAgentThreadState({
   chatState,
   getCurrentThreadId: () => currentThreadId.value,
   onStopThread: (threadId) => streamSmoother.flushThread(threadId),
@@ -1260,6 +1285,68 @@ const resetAgentPanelState = () => {
   agentPanelActiveSectionKey.value = FILE_TREE_SECTION.key
 }
 
+// ==================== 会话级右侧面板状态 ====================
+// 右侧面板状态（面板开关、预览标签、当前预览文件、分区 tabs）都是本组件级 ref，
+// 而切换会话时 store 里的 currentThreadId 可能被侧边栏/路由直接改写（见 AppLayout.handleSelectChat），
+// 因此这些状态若不按会话隔离，就会把 A 会话打开的文件残留到 B 会话。
+// 这里以 threadId 为键给每个会话各自存档面板状态：切走时保存当前会话，切回时恢复自己的状态。
+// 注意：本 Map 随组件实例存活（页面刷新或组件卸载即清空），不做持久化。
+const threadPanelStateMap = new Map() // threadId(字符串) -> 面板状态快照
+
+// 组件最近一次完成加载的会话 id：用于区分「真的切换了会话」与「重复选中当前会话」。
+// 侧边栏/路由会先改写 store 再触发 selectChat，导致 selectChat 内 previousThreadId 已等于目标会话，
+// 无法据此判断是否发生过切换（见 selectChat 内的 isSameThreadReselect）。
+// 注意：本值不持久化；组件被卸载重挂载后为空，此时首次「重复选中」会被判为切换（即不刷新一次）。
+let lastLoadedThreadId = null
+
+// 采集当前面板状态快照。sections/tabs 都走不可变更新（见 utils/agentPanelSections.js），
+// 这里仍做一次浅拷贝：不依赖"后续只做不可变更新"这一约定，避免将来就地改动污染已存档的快照。
+const snapshotAgentPanelState = () => ({
+  isFilePanelOpen: isFilePanelOpen.value,
+  statePanelOpen: statePanelOpen.value,
+  isAgentPanelMaximized: isAgentPanelMaximized.value,
+  previewTabs: [...agentPanelPreviewTabs.value],
+  activePreviewPath: agentPanelActivePreviewPath.value,
+  viewMode: agentPanelViewMode.value,
+  sections: [...agentPanelSections.value],
+  activeSectionKey: agentPanelActiveSectionKey.value
+})
+
+// 保存某个会话的面板状态。面板已关闭且没有任何预览标签时视为"无状态"并删除条目，
+// 避免访问过的会话都留一份快照导致 Map 无限增长。
+const saveAgentPanelStateForThread = (threadId) => {
+  if (!threadId) return
+  const snapshot = snapshotAgentPanelState()
+  const isEmpty =
+    !snapshot.isFilePanelOpen && !snapshot.statePanelOpen && snapshot.previewTabs.length === 0
+  if (isEmpty) {
+    threadPanelStateMap.delete(threadId)
+    return
+  }
+  threadPanelStateMap.set(threadId, snapshot)
+}
+
+// 恢复某个会话的面板状态；没有快照（首次进入该会话、或新建对话）时回到默认关闭态。
+const restoreAgentPanelStateForThread = (threadId) => {
+  const snapshot = threadId ? threadPanelStateMap.get(threadId) : null
+  if (!snapshot) {
+    resetAgentPanelState()
+    return
+  }
+
+  isFilePanelOpen.value = snapshot.isFilePanelOpen
+  statePanelOpen.value = snapshot.statePanelOpen
+  isAgentPanelMaximized.value = snapshot.isAgentPanelMaximized
+  agentPanelPreviewTabs.value = snapshot.previewTabs
+  agentPanelActivePreviewPath.value = snapshot.activePreviewPath
+  agentPanelViewMode.value = snapshot.viewMode
+  agentPanelSections.value = snapshot.sections
+  agentPanelActiveSectionKey.value = snapshot.activeSectionKey
+  // 清除上一个会话拖拽留下的临时宽度，否则恢复后的 panelRatio 不会生效（见 filePanelWidthStyle）。
+  filePanelDragWidth.value = null
+  setPanelRatioForViewMode()
+}
+
 const previewCacheKey = (path, threadId = currentChatId.value) => `${threadId}:${path}`
 
 // 用户目录文件使用独立 cache 前缀；释放时两个 scope 的 key 一并清理。
@@ -1436,24 +1523,39 @@ watch(
 )
 
 // ==================== 对话级模型覆盖 ====================
-// 用户手动选择和已有会话绑定优先；新会话由模型选择器选择已配置列表首项。
+// 优先级：本会话的显式选择 → 会话绑定的模型 → 用户本地偏好（新建会话继承上次手动选择）。
+// 偏好为空（从未手动选择过）时，仍由模型选择器从已配置模型列表中选择首项兜底。
 const DRAFT_MODEL_KEY = '__draft__'
 const selectedModelByThread = reactive({})
+// 用户最近一次手动选择的模型：新建会话时沿用，避免每次都回落到列表首项
+const savedChatModel = ref(readChatModelPreference())
 const savedToolApprovalMode = ref(readToolApprovalModePreference())
 const currentModelSpec = computed(
   () =>
     resolveConversationModel({
       selectedModel: selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY],
-      conversationModel: currentThread.value?.metadata?.model_spec
+      conversationModel: currentThread.value?.metadata?.model_spec,
+      savedModel: savedChatModel.value
     })
 )
-const handleModelSelect = (spec) => {
-  if (typeof spec === 'string') {
-    if (spec) {
-      selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY] = spec
-    } else {
-      delete selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY]
+// 手动选择（含清空）写入本地偏好供后续新建会话继承；
+// 选择器兜底选中的首项带 autoSelected 标记，不写偏好，保留「用户从未选择过」的状态。
+const handleModelSelect = (spec, options = {}) => {
+  if (typeof spec !== 'string') return
+
+  if (spec) {
+    selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY] = spec
+    if (!options.autoSelected) {
+      savedChatModel.value = spec
+      writeChatModelPreference(spec)
     }
+    return
+  }
+
+  delete selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY]
+  if (!options.autoSelected) {
+    savedChatModel.value = ''
+    clearChatModelPreference()
   }
 }
 
@@ -2385,6 +2487,10 @@ const conversationRows = computed(() => {
   return rows
 })
 
+const visibleMessageCount = ref(20)
+watch(currentThreadId, () => { visibleMessageCount.value = 20 })
+const messageWindow = computed(() => sliceMessageRows(conversationRows.value, visibleMessageCount.value))
+
 const isLoadingMessages = computed(() => chatUIStore.isLoadingMessages)
 const isStreaming = computed(() => {
   const threadState = currentThreadState.value
@@ -2518,6 +2624,7 @@ const isSendButtonDisabled = computed(() => {
   return (
     sendCooldownActive.value ||
     props.sendDisabled ||
+    (Boolean(currentThreadState.value?.pendingSubmission) && !isProcessing.value) ||
     isWaitingForUserAction.value ||
     (!userInput.value && !isProcessing.value) ||
     !currentAgent.value ||
@@ -2825,6 +2932,11 @@ onMounted(() => {
     }
 
     startChatMainResizeObserver()
+
+    // 首次进入对话页时草稿已在初始化阶段读入，光标同样需要落到末尾（如技能广场写入的 @技能）
+    if (!currentChatId.value && userInput.value) {
+      agentInputAreaRef.value?.focusEnd()
+    }
   })
 })
 
@@ -2834,6 +2946,17 @@ onActivated(() => {
   })
   if (isReplyLoading.value) {
     startReplyElapsedTimer()
+  }
+  // 技能广场等页面会改写新建对话草稿（「立即使用」写入技能提及），缓存页重新激活时同步回来
+  if (!currentChatId.value) {
+    const latestDraft = threadDraftStore.read(DRAFT_THREAD_ID)
+    if (latestDraft && latestDraft !== userInput.value) {
+      userInput.value = latestDraft
+      // 草稿重绘会把光标重置到开头，定位到末尾，用户接着打字才会落在 @技能 之后
+      nextTick(() => {
+        agentInputAreaRef.value?.focusEnd()
+      })
+    }
   }
 })
 
@@ -2855,8 +2978,7 @@ onUnmounted(() => {
     clearTimeout(sendCooldownTimer)
     sendCooldownTimer = null
   }
-  // 清理所有线程状态
-  resetOnGoingConv()
+  disposeThreadStates()
   for (const entry of agentPanelPreviewCache.values()) {
     if (entry.file?.previewUrl) window.URL.revokeObjectURL(entry.file.previewUrl)
   }
@@ -3249,10 +3371,14 @@ const selectChat = async (chatId) => {
     stopAllRequestStreams(previousThreadId)
   }
 
-  if (previousThreadId !== chatId) {
-    resetAgentPanelState()
-  }
+  // 是否只是「重复选中当前已加载的会话」（例如从其它页面点回同一会话）。
+  // 侧边栏/路由会先改写 store，因此 previousThreadId 在这里常常已经等于 chatId，
+  // 需要再对比 lastLoadedThreadId 才能区分：真的切换了会话 vs 重复选中。
+  // 只有前者才需要跳过文件系统刷新（见下方 handleAgentStateRefresh 的开关注释）。
+  const isSameThreadReselect = previousThreadId === chatId && lastLoadedThreadId === chatId
 
+  // 注意：这里不再显式 resetAgentPanelState()。面板状态由 watch(currentChatId) 按会话
+  // 存档/恢复统一负责；若在此提前重置，会把旧会话的面板状态清掉，导致切回时无法恢复。
   try {
     await withConfigNoticeSync(async () => {
       // 先更新当前线程，确保底部智能体名称与选中项即时同步。
@@ -3287,12 +3413,16 @@ const selectChat = async (chatId) => {
   await nextTick()
   await scrollController.scrollToBottomStaticForce()
   // await fetchAgentState(targetAgentId, chatId)
-  await handleAgentStateRefresh(chatId)
+  // 真的切换了会话时不做文件系统刷新：右侧面板恢复后已按新会话重新读取预览，重复刷新只会让内容闪一下。
+  // 重复选中当前会话时保留原有的刷新语义（此时面板状态未变、也不会闪）。
+  await handleAgentStateRefresh(chatId, { bumpFilesystemRefresh: isSameThreadReselect })
   syncThreadConfigSnapshot(chatId, { overwrite: false })
   await resumeActiveRunForThread(chatId)
   await resumeQueuedRequests(chatId, resolveAgentSlugForThread(chatId))
   restorePendingInterruptForThread(chatId)
   await scrollController.scrollToBottomStaticForce()
+  // 记录本次已加载的会话，供下一次调用的 isSameThreadReselect 判断
+  lastLoadedThreadId = chatId
   return true
 }
 
@@ -3309,7 +3439,7 @@ const selectThreadFromRoute = async (threadId) => {
       stopRunStreamSubscription(previousThreadId)
       stopAllRequestStreams(previousThreadId)
     }
-    resetAgentPanelState()
+    // 面板状态交给 watch(currentChatId) 处理：它会先把离开的会话存档，再对 null 会话做重置。
     setCurrentThreadId(null)
     return true
   }
@@ -3327,22 +3457,26 @@ const selectThreadFromRoute = async (threadId) => {
   return true
 }
 
-const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
-  const text = userInput.value.trim()
-  const imageContent = image?.imageContent || null
+const handleSendMessage = async ({ image, queuePolicy = 'enqueue', submission = null } = {}) => {
+  const text = submission?.body.query ?? userInput.value.trim()
+  const imageContent = submission?.body.image_content ?? image?.imageContent ?? null
+  if (submission?.sending || (!submission && currentThreadState.value?.pendingSubmission)) return
+  if (submission) queuePolicy = submission.body.queue_policy
   if (
-    (!text && !image) ||
+    (!text && !imageContent) ||
     !currentAgent.value ||
-    sendCooldownActive.value ||
+    (!submission && sendCooldownActive.value) ||
     props.sendDisabled ||
     isWaitingForUserAction.value
   )
     return
 
+  if (submission) submission.sending = true
+
   // 发送后进入短暂冷却，防止连续触发停止
   startSendCooldown()
 
-  let threadId = currentChatId.value
+  let threadId = submission?.body.thread_id || currentChatId.value
   if (!threadId) {
     try {
       threadId = await ensureActiveThread(text)
@@ -3355,11 +3489,13 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
     // 该线程由草稿发送创建，清理新建对话草稿，避免已发送文本再次还原
     threadDraftSession.clearDraftThread()
   }
-  // 每次请求都下发输入框展示的模型，后端在同一事务内绑定到 Conversation。
-  const modelSpec = currentModelSpec.value || null
-  const toolApprovalMode = currentToolApprovalMode.value
+  // 首次发送使用当前展示模型；恢复时沿用原请求模型。
+  const modelSpec = submission ? submission.body.model_spec : currentModelSpec.value || null
+  const toolApprovalMode = submission
+    ? submission.body.tool_approval_mode
+    : currentToolApprovalMode.value
 
-  userInput.value = ''
+  if (!submission) userInput.value = ''
 
   await nextTick()
   scrollController.scrollToBottom(true)
@@ -3372,12 +3508,12 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
     hideApprovalState()
   }
 
-  const pendingAttachments = [...currentPendingThreadAttachments.value]
+  const pendingAttachments = submission?.attachments || [...currentPendingThreadAttachments.value]
   const pendingAttachmentFileIds = pendingAttachments
     .map((attachment) => attachment.file_id)
     .filter(Boolean)
 
-  if ((threadMessages.value[threadId] || []).length === 0) {
+  if (!submission && (threadMessages.value[threadId] || []).length === 0) {
     const autoTitle = text.replace(/\s+/g, ' ').trim().slice(0, 2000)
     if (autoTitle) {
       void (async () => {
@@ -3400,9 +3536,11 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
     }
   }
 
-  const requestId = createClientRequestId()
-  const previousAttachments = markAttachmentsRequestId(threadId, pendingAttachments, requestId)
-  if (!hadActiveRun) {
+  const requestId = submission?.body.meta.request_id || createClientRequestId()
+  const previousAttachments =
+    submission?.previousAttachments ||
+    markAttachmentsRequestId(threadId, pendingAttachments, requestId)
+  if (!submission && !hadActiveRun) {
     resetOnGoingConv(threadId)
     insertOptimisticHumanMessage(threadState, {
       requestId,
@@ -3414,7 +3552,7 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
       }))
     })
     threadState.isStreaming = true
-  } else {
+  } else if (!submission) {
     threadState.queuedRequests.push({
       request_id: requestId,
       status: 'sending',
@@ -3423,8 +3561,10 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
     })
   }
 
-  try {
-    const runResp = await agentApi.createAgentRun({
+  const pending = submission || {
+    attachments: pendingAttachments,
+    previousAttachments,
+    body: {
       query: text,
       agent_slug: currentAgentId.value,
       thread_id: threadId,
@@ -3436,7 +3576,13 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
       model_spec: modelSpec,
       tool_approval_mode: toolApprovalMode,
       queue_policy: queuePolicy
-    })
+    }
+  }
+  pending.sending = true
+  threadState.pendingSubmission = pending
+  try {
+    const runResp = await agentApi.createAgentRun(pending.body)
+    threadState.pendingSubmission = null
     const status = runResp?.status
     const runId = runResp?.run_id
     const sendingRequest = threadState.queuedRequests.find(
@@ -3489,6 +3635,17 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
       throw new Error('创建 run 失败：缺少 run_id')
     }
   } catch (error) {
+    if (threadState.pendingSubmission && (error.submissionUncertain || submission)) {
+      threadState.pendingSubmission.sending = false
+      threadState.pendingSubmission.uncertain = true
+      if (!threadState.activeRunId) {
+        threadState.isStreaming = false
+        threadState.replyLoadingVisible = false
+      }
+      message.warning('发送结果尚未确认，请点击“恢复发送”继续原请求')
+      return
+    }
+    threadState.pendingSubmission = null
     threadState.queuedRequests = threadState.queuedRequests.filter(
       (request) => request.request_id !== requestId
     )
@@ -3672,7 +3829,10 @@ defineExpose({
   selectThreadFromRoute
 })
 
-const handleAgentStateRefresh = async (threadId = null) => {
+// bumpFilesystemRefresh=false 用于切换会话时的状态刷新：右侧面板刚按新的 threadId 重新拉取过预览，
+// 此时再递增文件系统版本号会让 AgentPanel 作废刚拿到的缓存并重复加载同一份内容，
+// 表现为切回会话时面板"先显示内容、再闪一下重新加载"。默认仍为 true（手动刷新/运行结束后的文件变化）。
+const handleAgentStateRefresh = async (threadId = null, { bumpFilesystemRefresh = true } = {}) => {
   if (!currentAgentId.value) return
   const chatId = threadId || currentChatId.value
   if (!chatId) return
@@ -3682,7 +3842,9 @@ const handleAgentStateRefresh = async (threadId = null) => {
       fetchAgentState(currentAgentId.value, chatId),
       fetchThreadAttachments(chatId)
     ])
-    if (chatId === currentChatId.value) agentPanelFilesystemRefreshVersion.value += 1
+    if (bumpFilesystemRefresh && chatId === currentChatId.value) {
+      agentPanelFilesystemRefreshVersion.value += 1
+    }
   } finally {
     isRefreshingState.value = false
   }
@@ -3837,7 +3999,6 @@ const loadChatsList = async () => {
   if (props.singleMode && !agentId) {
     console.warn('No agent selected, cannot load chats list')
     threads.value = []
-    resetAgentPanelState()
     setCurrentThreadId(null)
     threadAttachmentsMap.value = {}
     return
@@ -3912,12 +4073,11 @@ watch(
     }
 
     if (newAgentId !== oldAgentId) {
-      // 清理当前线程状态
+      // 清理当前线程状态（面板状态的关闭/恢复由 watch(currentChatId) 统一处理）
       setCurrentThreadId(null)
       threadMessages.value = {}
       threadRuns.value = {}
       threadAttachmentsMap.value = {}
-      resetAgentPanelState()
       // 清理所有线程状态
       resetOnGoingConv()
 
@@ -3976,6 +4136,11 @@ watch(
 
 watch(currentChatId, (threadId, oldThreadId) => {
   if (threadId === oldThreadId) return
+  // 会话级面板状态：先把离开的会话存档，再恢复目标会话（无存档则回到默认关闭态）。
+  // 放在这里而不是 selectChat 里，是因为侧边栏点击会先直接改写 store 的 currentThreadId
+  // （AppLayout.handleSelectChat），此时 selectChat 已看不到旧线程，无法判断"发生了切换"。
+  saveAgentPanelStateForThread(oldThreadId)
+  restoreAgentPanelStateForThread(threadId)
   // 旧线程已被删除时丢弃输入草稿，避免写入无法再次访问的孤儿缓存
   const keepInput = !oldThreadId || threads.value.some((thread) => thread.id === oldThreadId)
   // 切换线程：保存旧线程的输入草稿，并还原新线程（或新建对话）的草稿

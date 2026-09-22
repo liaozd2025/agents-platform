@@ -272,6 +272,42 @@ async def test_parse_document_docx_returns_markdown_text(tmp_path: Path, monkeyp
     assert "Parser DOCX content" in markdown
 
 
+@pytest.mark.asyncio
+async def test_parse_document_legacy_doc_preserves_text_table_and_source(tmp_path: Path) -> None:
+    """真实二进制 DOC 经业务解析入口保留正文、表格文字和原件。"""
+    original = (PARSER_FIXTURES / "legacy_word.doc").read_bytes()
+    assert original.startswith(bytes.fromhex("d0cf11e0a1b11ae1"))
+    source = tmp_path / "legacy.DOC"
+    source.write_bytes(original)
+
+    markdown = await parse_document(str(source), params={"image_bucket": "images"})
+
+    assert "旧版 Word 解析验收" in markdown
+    assert "中文正文 DOC-ROUNDTRIP-2026" in markdown
+    assert re.search(r"\|\s*产品\s*\|\s*数量\s*\|", markdown)
+    assert re.search(r"\|\s*测试产品\s*\|\s*42\s*\|", markdown)
+    assert source.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_parse_document_corrupt_doc_fails_without_docx_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """损坏的 DOC 显式失败，不把原始二进制交给 DOCX 回退。"""
+    source = tmp_path / "broken.doc"
+    corrupted = (PARSER_FIXTURES / "legacy_word.doc").read_bytes()[:512]
+    source.write_bytes(corrupted)
+
+    def unexpected_fallback(*args, **kwargs):
+        """拒绝使用只支持 DOCX 的回退。"""
+        pytest.fail("旧 DOC 不应使用 python-docx 回退")
+
+    monkeypatch.setattr(parser_unified, "_convert_docx_with_python_docx", unexpected_fallback)
+    with pytest.raises(RuntimeError, match="Docling 无法读取 Office 文件"):
+        await parse_document(str(source), params={"image_bucket": "images"})
+    assert source.read_bytes() == corrupted
+
+
 @pytest.mark.parametrize(
     ("filename", "expected_fragments"),
     [

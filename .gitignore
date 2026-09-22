@@ -68,6 +68,9 @@ cache
 *.local.yaml
 *.local/*
 
+# 本机 Windows 环境专用：把 PostgreSQL 数据目录从 9p bind mount 换成 Docker named volume
+docker-compose.override.yml
+
 *.pdf
 src/data
 */package-lock.json

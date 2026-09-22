@@ -391,10 +391,13 @@ import ExtensionDetailLayout from '@/components/shared/ExtensionDetailLayout.vue
 import FileTreeComponent from '@/components/FileTreeComponent.vue'
 import ShareConfigForm from '@/components/ShareConfigForm.vue'
 import { useUserStore } from '@/stores/user'
+import { useAgentStore } from '@/stores/agent'
+import { refreshSelectedAgentSkillOptions } from '@/utils/agent_skill_options'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const agentStore = useAgentStore()
 const slug = computed(() => decodeURIComponent(route.params.slug))
 
 const skillDetailTabs = [
@@ -734,6 +737,8 @@ const confirmDeleteSkill = () => {
       try {
         await skillApi.deleteSkill(target.slug)
         message.success(`已${actionText}`)
+        // 删除后刷新当前 Agent 的 @技能 候选，避免对话页仍能 @ 到已卸载技能
+        await refreshSelectedAgentSkillOptions(agentStore)
         router.push({ path: '/extensions', query: { tab: 'skills' } })
       } catch {
         message.error(`${actionText}失败`)
@@ -806,6 +811,8 @@ const saveShareConfig = async () => {
       syncShareConfigFromSkill(result.data)
     }
     message.success('设置已保存')
+    // 启用状态/生效范围变化后刷新当前 Agent 的 @技能 候选
+    await refreshSelectedAgentSkillOptions(agentStore)
   } catch (error) {
     message.error(error?.response?.data?.detail || error.message || '保存设置失败')
   } finally {

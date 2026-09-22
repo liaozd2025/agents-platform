@@ -64,7 +64,7 @@ Conversation 通过 `project_id` 绑定 Project；Project 拥有这项绑定和 
 
 ## Docker 和 Kubernetes
 
-Docker backend 为每个 runtime 创建独立 bridge 网络，不发布沙盒端口，也不加入应用 `app-network`。网络只连接 provisioner 和对应沙盒，因此沙盒不能互访，也不能直接访问 PostgreSQL、Redis、MinIO、Milvus 或 Neo4j。provisioner 复用实例前会检查 uid、Workdir、挂载和网络身份。
+Docker backend 为每个 runtime 创建独立 bridge 网络，不发布沙盒端口，也不加入应用 `app-network`。网络只连接 provisioner 和对应沙盒；跨网络实际可达性仍取决于宿主 Docker 平台，独立网络名称不构成认证边界。provisioner 复用实例前会检查 uid、Workdir、挂载、网络和执行认证策略。
 
 Kubernetes backend 创建 Pod 和 NodePort Service。Pod 从 User Data PVC 的 `shared/<uid>/workspace` 挂载 `/home/gem/user-data`，从 Skill PVC 的 `skill-projections/<uid>` 只读挂载 `/home/gem/skills`。Pod 默认不自动挂载 ServiceAccount token；具体安全性仍取决于 namespace、PVC、NetworkPolicy 和 ServiceAccount 配置。
 
@@ -73,6 +73,8 @@ Kubernetes backend 创建 Pod 和 NodePort Service。Pod 从 User Data PVC 的 `
 ## 环境变量和信任边界
 
 API/worker 使用 `SANDBOX_PROVISIONER_TOKEN` 调用 provisioner。动态沙盒会收到全局 `sandbox.env` 与当前用户 Agent 环境的合并值，用户值覆盖同名全局值；这些值都可能被沙盒内代码读取和外传。provisioner token、数据库凭据、对象存储管理凭据和云平台管理员密钥不能进入这两类环境。
+
+provisioner 使用管理主密钥和 sandbox_id 派生独立执行密钥，覆盖沙盒的 `SANDBOX_API_KEY` 并清空其他 JWT 认证配置。每个沙盒仅持有自己的执行密钥，不能据此推导另一沙盒的密钥。管理代理和健康检查使用目标沙盒的密钥，主密钥不传给沙盒。Docker 与 Kubernetes 的启动入口将 AIO 网关所有请求设为需要认证，包含静态后缀和带查询参数的下载；不匹配预期认证模板的镜像启动失败。
 
 远程 Skill 安装使用不继承环境变量的一次性 Sandbox，也不挂载持久用户根。Skill 文件是只读的，但其中脚本仍可能被执行；脚本如需写文件，应写入当前 Project Workdir 或 User Data。
 

@@ -220,7 +220,7 @@ const renameChat = () => {
   }
 
   &.active {
-    background-color: color-mix(in srgb, var(--gray-100) 6%, var(--gray-100));
+    background-color: var(--gray-100);
     color: var(--gray-1000);
 
     .conversation-title {
@@ -231,7 +231,7 @@ const renameChat = () => {
       background: linear-gradient(
         to right,
         transparent,
-        color-mix(in srgb, var(--gray-100) 6%, var(--gray-100)) 28px
+        var(--gray-100) 28px
       );
     }
   }

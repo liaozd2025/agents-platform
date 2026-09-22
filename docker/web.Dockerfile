@@ -12,7 +12,9 @@ COPY ./web/pnpm-lock.yaml* ./
 COPY ./web/pnpm-workspace.yaml ./
 
 # 安装依赖（--frozen-lockfile 保证 dev 与 build/CI 三处依赖与 pnpm-lock.yaml 一致，避免漂移）
-RUN pnpm install --frozen-lockfile --registry=https://registry.npmmirror.com
+# fetch_timeout/fetch_retries/network_concurrency：弱网环境下放宽 pnpm 下载超时（默认 60s 易误杀）、增加重试、降低并发，避免构建反复在 pnpm install 处超时失败
+RUN npm_config_fetch_timeout=600000 npm_config_fetch_retries=5 npm_config_network_concurrency=4 \
+    pnpm install --frozen-lockfile --registry=https://registry.npmmirror.com
 
 # 复制源代码
 COPY ./web .

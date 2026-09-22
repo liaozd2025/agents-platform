@@ -398,7 +398,8 @@ async def _flush_writer_best_effort(writer: ChunkedEventWriter) -> None:
         logger.warning(f"Failed to flush non-authoritative AgentRun events: run={writer.run_id}", exc_info=True)
 
 
-async def mark_run_running(run_id: str, worker_id: str) -> bool:
+async def mark_run_running(run_id: str, worker_id: str) -> int | None:
+    """取得执行权并在同一事务读取持久 attempt 序号。"""
     async with pg_manager.get_async_session_context() as db:
         repo = AgentRunRepository(db)
         _, acquired = await repo.mark_running(
@@ -406,7 +407,10 @@ async def mark_run_running(run_id: str, worker_id: str) -> bool:
             worker_id=worker_id,
             lease_seconds=RUN_LEASE_SECONDS,
         )
-        return acquired
+        if not acquired:
+            return None
+        attempts = await repo.list_run_attempts(run_id)
+        return attempts[-1].attempt_no
 
 
 async def renew_run_lease(run_id: str, worker_id: str) -> bool:
@@ -610,10 +614,6 @@ def _job_try(ctx) -> int:
     return 1
 
 
-def _is_last_try(ctx) -> bool:
-    return _job_try(ctx) >= max(1, int(getattr(WorkerSettings, "max_tries", 1)))
-
-
 def _is_retryable_exception(exc: Exception) -> bool:
     if isinstance(exc, NonRetryableRunError):
         return False
@@ -796,6 +796,69 @@ async def _finish_user_cancel(
     return transition
 
 
+async def _finish_uncertain_execution(*, run, worker_id: str, current_user, writer) -> None:
+    """执行开始后结果未知，保留终态事实而不重放可能已生效的操作。"""
+    await _finish_nonretryable_failure(
+        run=run,
+        worker_id=worker_id,
+        current_user=current_user,
+        writer=writer,
+        error_type="execution_outcome_unknown",
+        message="执行中断，部分操作可能已生效；本次运行不会自动重试。请先核对结果，再决定是否重新发起。",
+    )
+
+
+async def _finish_retry_exhausted(*, run, worker_id: str, current_user, writer) -> None:
+    """准备阶段耗尽持久预算，沿用 owner 校验和取消优先的终态路径。"""
+    await _finish_nonretryable_failure(
+        run=run,
+        worker_id=worker_id,
+        current_user=current_user,
+        writer=writer,
+        error_type="run_retry_exhausted",
+        message="执行准备多次中断，已达到本次运行的尝试上限；请检查服务状态后重新发起。",
+    )
+
+
+async def _finish_nonretryable_failure(
+    *, run, worker_id: str, current_user, writer, error_type: str, message: str
+) -> None:
+    """写入不可重试失败；并发取消仍按用户取消收尾。"""
+    chunk = {
+        "status": "error",
+        "error_type": error_type,
+        "error_message": message,
+        "request_id": run.request_id,
+        "retryable": False,
+    }
+    transition = await _finish_run(
+        run.id,
+        "failed",
+        thread_id=run.conversation_thread_id,
+        chunk=chunk,
+        error_type=chunk["error_type"],
+        error_message=message,
+        current_user=current_user,
+        worker_id=worker_id,
+        publish_end=False,
+    )
+    if transition.status == "cancel_requested":
+        await _finish_user_cancel(
+            run_id=run.id,
+            request_id=run.request_id,
+            thread_id=run.conversation_thread_id,
+            current_user=current_user,
+            worker_id=worker_id,
+            writer=writer,
+            run=run,
+        )
+    elif transition.changed:
+        await _append_run_event_best_effort(
+            run.id, "error", {"chunk": chunk, "retryable": False}, thread_id=run.conversation_thread_id
+        )
+        await _append_end_event(run.id, "failed", thread_id=run.conversation_thread_id, payload={"chunk": chunk})
+
+
 async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
     """每 Run 只建一个取消等待器，退出前回收执行任务和生成器。"""
     cancel_task = asyncio.create_task(run_ctx.wait_cancelled())
@@ -866,7 +929,8 @@ async def process_agent_run(ctx, run_id: str):
     if run.run_type == "sandbox" or (isinstance(runtime, dict) and runtime.get("executor") == "pi"):
         await mark_run_terminal(run_id, "failed", "pi_executor_retired", "PI 执行器已停用，旧任务不可续跑")
         return
-    if not await mark_run_running(run_id, worker_id):
+    attempt_no = await mark_run_running(run_id, worker_id)
+    if attempt_no is None:
         logger.info(f"Run lease is owned elsewhere or expired, skip: {run_id}")
         return
 
@@ -886,10 +950,15 @@ async def process_agent_run(ctx, run_id: str):
     # 取得 lease 后立即续租，覆盖 Skill 准备和运行清单固化。
     await run_ctx.start()
     model_request_recorder = FirstModelRequestRecorder()
+    execution_started = False
     try:
         if await _is_cancel_requested(run_id):
             run_ctx.cancel_event.set()
             raise asyncio.CancelledError(f"run {run_id} cancelled before execution")
+
+        if attempt_no > WorkerSettings.max_tries:
+            await _finish_retry_exhausted(run=run, worker_id=worker_id, current_user=user, writer=writer)
+            return
 
         if not isinstance(run.input_payload, dict):
             await mark_run_terminal(
@@ -1099,6 +1168,8 @@ async def process_agent_run(ctx, run_id: str):
             else:
                 raise RuntimeError(f"unsupported run_type after validation: {run_type}")
 
+            # 执行流可能产生外部副作用；此后不能把原输入自动重放。
+            execution_started = True
             async with aclosing(_consume_stream_with_cancel(stream, run_ctx)) as chunks:
                 async for chunk_bytes in chunks:
                     for chunk in _iter_json_chunks(chunk_bytes):
@@ -1300,6 +1371,14 @@ async def process_agent_run(ctx, run_id: str):
             logger.info(f"Run user cancellation settled: run={run_id}, changed={transition.changed}")
             return
 
+        if execution_started:
+            await _finish_uncertain_execution(run=run, worker_id=worker_id, current_user=user, writer=writer)
+            return
+
+        if attempt_no >= WorkerSettings.max_tries:
+            await _finish_retry_exhausted(run=run, worker_id=worker_id, current_user=user, writer=writer)
+            return
+
         try:
             released = await release_run_lease_for_retry(run_id, worker_id)
         except Exception:
@@ -1377,32 +1456,11 @@ async def process_agent_run(ctx, run_id: str):
                     run=run,
                 )
                 return
-            if _is_last_try(ctx):
-                transition = await _finish_run(
-                    run_id,
-                    "failed",
-                    thread_id=thread_id,
-                    chunk=retryable_error_chunk,
-                    error_type="retryable_worker_error",
-                    error_message=str(e),
-                    current_user=user,
-                    worker_id=worker_id,
-                    publish_end=False,
-                )
-                if transition.changed:
-                    await _append_run_event_best_effort(
-                        run_id,
-                        "error",
-                        {"chunk": retryable_error_chunk, "retryable": True},
-                        thread_id=thread_id,
-                    )
-                    await _append_end_event(
-                        run_id,
-                        transition.status or "failed",
-                        thread_id=thread_id,
-                        payload={"chunk": retryable_error_chunk},
-                    )
-                logger.error(f"Run failed after retries exhausted {run_id}: {e}")
+            if execution_started:
+                await _finish_uncertain_execution(run=run, worker_id=worker_id, current_user=user, writer=writer)
+                return
+            if attempt_no >= WorkerSettings.max_tries:
+                await _finish_retry_exhausted(run=run, worker_id=worker_id, current_user=user, writer=writer)
                 return
 
             if not await release_run_lease_for_retry(run_id, worker_id):

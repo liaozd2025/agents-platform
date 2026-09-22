@@ -19,6 +19,8 @@ export function useAgentThreadState({
   onBeforeResetThread = null,
   onBeforeCleanupThread = null
 }) {
+  let disposed = false
+
   const resetThreadUiState = (threadState) => {
     if (!threadState) return
     threadState.replyLoadingVisible = false
@@ -26,7 +28,7 @@ export function useAgentThreadState({
   }
 
   const getThreadState = (threadId) => {
-    if (!threadId) return null
+    if (!threadId || disposed) return null
     if (!chatState.threadStates[threadId]) {
       chatState.threadStates[threadId] = {
         isStreaming: false,
@@ -37,6 +39,7 @@ export function useAgentThreadState({
         lastRetryableJobTry: null,
         replyLoadingVisible: false,
         pendingRequestId: null,
+        pendingSubmission: null,
         pendingInterrupt: null,
         agentStateRequestVersion: 0,
         onGoingConv: createOnGoingConvState(),
@@ -81,6 +84,12 @@ export function useAgentThreadState({
     delete chatState.threadStates[threadId]
   }
 
+  /** 组件卸载后拒绝异步回调重建线程或恢复订阅。 */
+  const disposeThreadStates = () => {
+    disposed = true
+    Object.keys(chatState.threadStates).forEach(cleanupThreadState)
+  }
+
   const resetOnGoingConv = (threadId = null, { preserveRequestStreams = false } = {}) => {
     const targetThreadId =
       threadId || (typeof getCurrentThreadId === 'function' ? getCurrentThreadId() : null)
@@ -115,6 +124,7 @@ export function useAgentThreadState({
   return {
     getThreadState,
     cleanupThreadState,
+    disposeThreadStates,
     resetOnGoingConv,
     stopThreadStream
   }

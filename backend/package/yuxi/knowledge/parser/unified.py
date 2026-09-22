@@ -32,6 +32,7 @@ from yuxi.storage.minio import get_minio_client
 from yuxi.utils import logger
 
 _OFFICE_BACKENDS = {
+    ".doc": (InputFormat.DOC, MsWordDocumentBackend),
     ".docx": (InputFormat.DOCX, MsWordDocumentBackend),
     ".pptx": (InputFormat.PPTX, MsPowerpointDocumentBackend),
     ".xlsx": (InputFormat.XLSX, MsExcelDocumentBackend),
@@ -172,7 +173,7 @@ async def parse_resolved_document(source: str, params: dict | None = None) -> st
                 logger.warning(f"Docling 解析 DOCX 失败，回退到 python-docx: {file_path_obj.name}, {e}")
                 result = await asyncio.to_thread(_convert_docx_with_python_docx, file_path_obj)
 
-        elif file_ext == ".pptx":
+        elif file_ext in [".doc", ".pptx"]:
             result = await asyncio.to_thread(_convert_with_docling, file_path_obj, params=params)
 
         elif file_ext in IMAGE_FILE_EXTENSIONS:

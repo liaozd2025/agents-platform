@@ -92,8 +92,7 @@ export const agentApi = {
   /**
    * 提交线程级主动上下文压缩
    */
-  compressThreadContext: (threadId) =>
-    apiPost(`/api/chat/thread/${threadId}/compress`, {}),
+  compressThreadContext: (threadId) => apiPost(`/api/chat/thread/${threadId}/compress`, {}),
 
   /**
    * Submit feedback for a message
@@ -123,8 +122,8 @@ export const agentApi = {
    * @param {Object} data - run 请求体
    * @returns {Promise<Object>}
    */
-  createAgentRun: (data) =>
-    apiPost('/api/agent/runs', {
+  createAgentRun: async (data) => {
+    const body = {
       query: data.query,
       agent_slug: data.agent_slug,
       thread_id: data.thread_id,
@@ -135,7 +134,23 @@ export const agentApi = {
       resume: data.resume ?? null,
       created_by_run_id: data.created_by_run_id || null,
       queue_policy: data.queue_policy || 'enqueue'
-    }),
+    }
+    try {
+      return await apiPost('/api/agent/runs', body)
+    } catch (error) {
+      const status = error.status || error.response?.status
+      if (!body.meta.request_id || body.resume || (status && status !== 408 && status < 500)) {
+        throw error
+      }
+      // 首次提交可能已落库；只重放原身份，第二次失败仍不能当作未提交。
+      try {
+        return await apiPost('/api/agent/runs', body)
+      } catch (retryError) {
+        retryError.submissionUncertain = true
+        throw retryError
+      }
+    }
+  },
 
   /**
    * 获取请求详情

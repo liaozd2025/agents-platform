@@ -59,16 +59,22 @@ const PUPIL_CORE_DEFAULT = 0.805
 // 瞳孔与眼眶之间保留的空隙（px）。贴图边缘自带羽化，留 0.5px 就够；
 // 取 2px 时在「角色缩小 + 瞳孔贴图占眼球框 82%」的组合下会把可移动半径吃到只剩 2px，
 // 屏幕上完全看不出跟随（踩过）。
-// 额外留出安全边距，避免透明留白或浏览器小数像素渲染造成贴边溢出。
-const PUPIL_MARGIN = 1.5
+// 注意这是绝对像素量：原值 1.5 是按 49px 眼球框定的，角色缩到 42% 后框只有 27px，
+// 必须同比缩小，否则边距会吃光可动余量（纵向就是这么归零并把瞳孔顶出眼眶的）。
+const PUPIL_MARGIN = 1
 // 原图眼白是椭圆形，方形定位框在上下方向会比真实眼白更宽，因此额外收紧纵向活动范围。
-const PUPIL_VERTICAL_MARGIN = 4
+// 同样按框尺寸等比给（约为框宽的 8%：49px 框用 4px，27px 框用 2px）。
+// 这个值不能省——省掉后瞳孔移到上下极限会压到眼睑上（肉眼看得出）；
+// 也不能按老值给 4——纵向总余量只剩约 4.6px，给 4 会让可移动半径归零。
+const PUPIL_VERTICAL_MARGIN = 2
 // 截图中画面左侧的眼白横向更窄，右侧极限时单独收紧，避免眼珠越过眼白边缘。
 const LEFT_EYE_HORIZONTAL_SCALE = 0.65
-// 身体走动的幅度上限：鼠标从画面中心移到边缘时，身体最多平移 16px、倾斜 4°。
+// 身体走动的幅度上限：鼠标从画面中心移到边缘时，身体最多平移 10px、倾斜 2.5°。
 // 幅度刻意保持小：全身像整体倾斜超过 5° 就明显读作「人物歪了」而不是「走过去」。
-const WALK_SHIFT = 16
-const WALK_TILT = 4
+// 角色缩到容器高度 42% 后同步收了一档（原 16px / 4°）：绝对像素位移没变，
+// 但相对身高变大，沿用旧值会显得在「甩」而不是「迈一步」。
+const WALK_SHIFT = 10
+const WALK_TILT = 2.5
 
 const stageRef = ref(null)
 const isLookingAway = computed(
@@ -212,32 +218,45 @@ onBeforeUnmount(() => {
  */
 .mouse-eyes {
   position: absolute;
-  inset: 0;
+  /*
+   * 不用 inset 简写：它需要 Chrome 87+，而内网终端存在 Chrome 86（无 VPN、无法升级），
+   * 一旦失效这个绝对定位容器就是 0×0，整块插画直接空白。四向属性写法完全等价且全版本通用。
+   */
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   overflow: hidden;
   /* 装饰层不参与事件，避免遮挡左侧区域的鼠标交互 */
   pointer-events: none;
-  /* 浅色下是近白的淡蓝，深色下是深蓝黑，两侧都与右侧表单卡片形成层次 */
-  background: var(--main-50);
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
+  /*
+   * 园区插画（九典制药大楼）铺满左侧容器：素材 1706×1920（比例 0.889），
+   * 容器 478×560（比例 0.854）→ cover 后按高度铺满，左右各裁掉约 10px，主体不受影响。
+   * 底色变量留着做兜底：图未加载完或加载失败时不会闪白。
+   * 角色（.stage）是绝对定位贴左下角，换背景图只改这一行，不用动角色。
+   */
+  background: var(--main-50) url('/login-card-side.jpg') center center / cover no-repeat;
 }
 
 /*
  * 走动舞台：尺寸严格等于图片显示区域（眼睛的百分比定位才是相对图片的），
- * 高度取左区高度的 78%，宽度由素材比例（580×883，帽子到腰的半身）推出。
+ * 高度取容器高度的 42%，宽度由素材比例（580×883，帽子到腰的半身）推出。
  * 高度是整个组件的「标尺」：素材高度不变 ⇒ 角色显示大小与瞳孔可移动幅度都不变，
  * 因此加宽画布（容纳叉腰的双臂）只改这里的宽度比，不要动 height。
- * 不要再缩小：角色变小时眼睛同步变小，瞳孔可移动的像素量随之被压到看不见跟随
- * （全身版实测 88% 时只有约 2px 位移，屏幕上几乎察觉不到）。
+ * 绝对定位贴死容器左下角（left/bottom 归零），换背景图时角色落点不随背景尺寸漂移。
+ * 继续往下缩要留意代价：眼睛同步变小，瞳孔可移动的像素量随高度等比衰减
+ * （42% 时横向可动约 3.7px / 左眼 2.4px、纵向约 1.7px，已接近肉眼能分辨的下限；
+ * 全身版实测 88% 时只剩约 2px）。眼球框、两个安全边距与可动半径是绑定的，
+ * 调 height 后要回读 measureEyes 算出的 maxX/maxY，别让任一项落到 0。
  * transform 由 JS 写（平移 + 倾斜），origin 在底部中心，倾斜时像绕脚旋转。
  */
 .stage {
-  position: relative;
-  height: 78%;
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 42%;
   width: auto;
   aspect-ratio: 580 / 883;
-  flex: 0 0 auto;
   transition: transform 0.45s ease-out;
   transform-origin: bottom center;
 }
@@ -246,6 +265,19 @@ onBeforeUnmount(() => {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+/*
+ * < Chrome 88 没有 aspect-ratio：.stage 的 height:42% + width:auto 推不出宽度，
+ * 宽度会退化成「按 hero-img 的 width:100% 撑满容器」，角色被横向拉宽（实测 478px，正常 154px）。
+ * 降级办法：交给 img 用它自己的固有比例算宽度（素材 brand-kid-hero.png 是 580×883，
+ * 与上面 .stage 声明的 580/883 完全一致，所以两者结果等价）。
+ * 用 @supports 包住，现代浏览器一个字节都不受影响。
+ */
+@supports not (aspect-ratio: 580 / 883) {
+  .hero-img {
+    width: auto;
+  }
 }
 
 /*
@@ -269,6 +301,22 @@ onBeforeUnmount(() => {
   transform: translate(-50%, -50%);
 }
 
+/*
+ * < Chrome 88 没有 aspect-ratio：.eye 只声明了宽度，高度会塌成 0（眼睛直接看不见）。
+ * 降级办法用 padding-bottom 百分比撑高 —— padding 百分比永远按「包含块宽度」解析，
+ * 与 width:17.2% 同源，因此得到的正是正方形眼球框。
+ * 瞳孔用 inset:0 + margin:auto 相对 .eye 的 padding box 居中，padding 计入 padding box，
+ * 所以瞳孔尺寸与可移动半径都不变；JS 侧 measureEyes 读的是 offsetWidth / offsetHeight
+ * （getBoundingClientRect 同理），二者都把 padding 算在内，测量结果不受影响。
+ * 同样用 @supports 包住，现代浏览器保持原样。
+ */
+@supports not (aspect-ratio: 1) {
+  .eye {
+    height: 0;
+    padding-bottom: 17.2%;
+  }
+}
+
 .eye.is-right {
   left: 60.2%;
   top: 50.7%;
@@ -289,7 +337,11 @@ onBeforeUnmount(() => {
  */
 .pupil {
   position: absolute;
-  inset: 0;
+  /* 同 .mouse-eyes：避开需要 Chrome 87+ 的 inset，保证老内核上瞳孔定位与居中仍成立。 */
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   margin: auto;
   width: 82%;
   height: 82%;

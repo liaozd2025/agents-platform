@@ -1,10 +1,10 @@
 <template>
   <div class="thread-message-list">
-    <template v-for="(conv, convIndex) in conversations" :key="`conv-${convIndex}`">
-      <template
-        v-for="(displayItem, itemIndex) in displayItemsList[convIndex]"
-        :key="displayItem.key"
-      >
+    <a-button v-if="messageWindow.hasEarlier" type="link" @click="visibleMessageCount += 20">
+      查看更早消息
+    </a-button>
+    <template v-for="{ conv, displayItems, key } in messageWindow.rows" :key="key">
+      <template v-for="(displayItem, itemIndex) in displayItems" :key="displayItem.key">
         <AgentMessageComponent
           v-if="displayItem.type === 'message'"
           :message="displayItem.message"
@@ -17,7 +17,7 @@
           v-else
           :tool-calls="displayItem.toolCalls"
           :entries="displayItem.entries"
-          :is-active="isToolGroupActive(conv, itemIndex, displayItemsList[convIndex])"
+          :is-active="isToolGroupActive(conv, itemIndex, displayItems)"
         />
       </template>
       <div v-if="!conv.messages.length && conv.run" class="thread-message-list-empty">
@@ -30,7 +30,8 @@
 
 <script setup>
 import { formatEmptyRunStatus } from '@/utils/conversationProcessGrouping'
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { sliceMessageRows } from '@/utils/messageWindow'
 import AgentMessageComponent from '@/components/AgentMessageComponent.vue'
 import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
 import { MessageProcessor } from '@/utils/messageProcessor'
@@ -72,12 +73,24 @@ const conversations = computed(() => {
   return [...historyConversations.value, liveGroup]
 })
 
-const displayItemsList = computed(() =>
-  conversations.value.map((conv) =>
-    getConversationDisplayItems(
+const visibleMessageCount = ref(20)
+watch(
+  () => props.messages[0]?.id,
+  () => {
+    visibleMessageCount.value = 20
+  }
+)
+const messageWindow = computed(() =>
+  sliceMessageRows(
+    conversations.value.map((conv, index) => ({
+      key: `conv-${index}`,
       conv,
-      props.enrichToolCalls ? { enrichToolCalls: props.enrichToolCalls } : {}
-    )
+      displayItems: getConversationDisplayItems(
+        conv,
+        props.enrichToolCalls ? { enrichToolCalls: props.enrichToolCalls } : {}
+      )
+    })),
+    visibleMessageCount.value
   )
 )
 

@@ -8,6 +8,82 @@
   </head>
   <body>
     <div id="app"></div>
+    <!--
+      低版本浏览器「友好提示」（只提示，绝不拦截）。
+      提示阈值 = **Chrome 85**，依据有三条：
+      1. 源码用到的最新 JS 语法是逻辑赋值（||= / ??=，Chrome 85+），而 vite.config.js 的
+         build.target 设为 chrome86，不会把这类语法继续降级 —— 低于 85 的内核不保证能解析产物；
+      2. 登录页正常显示依赖 flex gap（Chrome 84+）与 replaceAll（Chrome 85+）；
+      3. Chromium 85 已实测通过（登录页 9 项尺寸与现代浏览器完全一致）。
+      已经做过兜底的能力（:where() / inset / aspect-ratio / at / findLast / Intl.Segmenter）
+      **不再参与判断**，否则会把本来正常的 85/86 用户误报一遍。
+      为什么用内联样式 + 原生 DOM：提示条必须在任何低版本内核上都能显示，不依赖外部 CSS/框架。
+      占用文档流顶部而非 fixed，避免遮挡页面导航；本脚本先于 main.js（type=module）执行。
+    -->
+    <script>
+      ;(function () {
+        var missing = []
+        try {
+          // 基础 JS 能力：Vue 3 运行时依赖 ES2015 的 Promise / Proxy / Symbol，缺任一即极老内核
+          if (
+            typeof Promise === 'undefined' ||
+            typeof Proxy === 'undefined' ||
+            typeof Symbol === 'undefined'
+          ) {
+            missing.push('es2015')
+          }
+          /*
+           * replaceAll = Chrome 85+，正好落在本项目保证的最低版本上：
+           * 源码用到的最新语法是逻辑赋值（||= / ??=，85+），build.target 设为 chrome86 后不会再降级，
+           * 所以低于 85 的内核既不保证能解析产物，也缺少这个项目实际在用的 API。
+           * 注意：不要用 `CSS.supports('gap: 1px')` 来判断 —— Chromium 83 实测返回 true
+           * （grid 的 gap 早已支持），测不出 flex gap，会把过低的内核漏判。
+           */
+          if (typeof String.prototype.replaceAll !== 'function') missing.push('replaceAll')
+        } catch (e) {
+          // 探测本身报错也按能力不足处理，但同样只提示不拦截
+          missing.push('probe')
+        }
+        if (!missing.length) return
+
+        // 标记供自动化验证断言使用（不再用于阻止应用挂载）
+        window.__YUXI_LEGACY_BROWSER__ = missing.join(',')
+
+        function mountNotice() {
+          var bar = document.createElement('div')
+          bar.id = 'legacy-browser-notice'
+          bar.setAttribute(
+            'style',
+            'display:flex;align-items:center;gap:10px;box-sizing:border-box;padding:8px 12px;' +
+              'background:#fffbf0;border-bottom:1px solid #ffe0a3;color:#7e5b13;' +
+              "font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;"
+          )
+          var text = document.createElement('span')
+          text.setAttribute('style', 'flex:1;min-width:0')
+          text.textContent =
+            '当前浏览器版本较低，页面部分样式可能显示异常（主要功能仍可正常使用）。' +
+            '如需完整体验，建议在可升级的机器上使用 Chrome 85 及以上版本。'
+          var close = document.createElement('button')
+          close.type = 'button'
+          close.setAttribute('aria-label', '关闭提示')
+          close.setAttribute(
+            'style',
+            'flex:none;width:24px;height:24px;padding:0;border:0;background:transparent;' +
+              'color:#a97c23;font-size:16px;line-height:1;cursor:pointer;'
+          )
+          close.textContent = '×'
+          close.onclick = function () {
+            if (bar.parentNode) bar.parentNode.removeChild(bar)
+          }
+          bar.appendChild(text)
+          bar.appendChild(close)
+          if (document.body) document.body.insertBefore(bar, document.body.firstChild)
+        }
+
+        if (document.body) mountNotice()
+        else document.addEventListener('DOMContentLoaded', mountNotice)
+      })()
+    </script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

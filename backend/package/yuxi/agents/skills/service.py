@@ -76,6 +76,13 @@ BUILTIN_SKILL_SHARE_CONFIG = {"access_level": "global", "department_ids": [], "u
 SKILL_DRAFT_TTL_SECONDS = 60 * 60
 PERSONAL_SKILL_SOURCE_TYPE = "personal"
 PERSONAL_SKILL_STATE_FILE = ".yuxi-skill-state.json"
+# 个人 Skill 来源：upload = 用户自行上传；remote = 从技能广场/远程仓库下载安装。
+PERSONAL_SKILL_ORIGIN_UPLOAD = "upload"
+PERSONAL_SKILL_ORIGIN_REMOTE = "remote"
+PERSONAL_SKILL_ORIGINS = frozenset({PERSONAL_SKILL_ORIGIN_UPLOAD, PERSONAL_SKILL_ORIGIN_REMOTE})
+# 历史个人 Skill 没有来源记录：无法反推真实来源时保留既有的「个人上传」归类，
+# 避免已装技能在分类改版后凭空从「个人上传技能」里消失。
+DEFAULT_PERSONAL_SKILL_ORIGIN = PERSONAL_SKILL_ORIGIN_UPLOAD
 _USER_SKILLS_LOCK = threading.Lock()
 _USER_SKILLS_LOCKS: dict[str, threading.Lock] = {}
 _USER_SKILL_PROJECTION_LOCK_SCOPE = "yuxi:skills:user-projection:v1:"
@@ -101,6 +108,8 @@ class ResolvedSkill:
     skill_dependencies: list[str]
     overrides_shared: bool = False
     shadowed_by_personal: bool = False
+    # 仅个人 Skill 有值：upload = 用户自行上传；remote = 从技能广场下载安装。
+    origin: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """返回可安全提供给前端的 Skill 元数据。"""
@@ -119,6 +128,8 @@ class ResolvedSkill:
             "overrides_shared": self.overrides_shared,
             "shadowed_by_personal": self.shadowed_by_personal,
         }
+        if self.origin is not None:
+            data["origin"] = self.origin
         if self.share_config is not None:
             data["share_config"] = self.share_config
         return data
@@ -996,6 +1007,7 @@ async def install_personal_skill_dir(
     source_dir: Path | str,
     *,
     expected_slug: str | None = None,
+    origin: str = DEFAULT_PERSONAL_SKILL_ORIGIN,
 ) -> ResolvedSkill:
     """将一个 Skill 原子安装到当前用户个人持久源。"""
     return await asyncio.to_thread(
@@ -1003,6 +1015,7 @@ async def install_personal_skill_dir(
         uid,
         Path(source_dir),
         expected_slug=expected_slug,
+        origin=origin,
     )
 
 
@@ -1125,7 +1138,18 @@ def _resolved_personal_skill(uid: str, root: Path, metadata: dict[str, Any]) -> 
         tool_dependencies=[],
         mcp_dependencies=[],
         skill_dependencies=[],
+        origin=_normalize_personal_skill_origin(metadata.get("origin")),
     )
+
+
+def _normalize_personal_skill_origin(origin: Any) -> str:
+    """把任意来源标记收敛到受支持的个人 Skill 来源集合。
+
+    只有技能广场/远程安装草稿会写入 remote；用户上传、Agent 安装以及没有
+    来源记录的历史技能统一落在 upload，保证「个人上传技能」不会凭空少项。
+    """
+    value = str(origin or "").strip().lower()
+    return value if value in PERSONAL_SKILL_ORIGINS else DEFAULT_PERSONAL_SKILL_ORIGIN
 
 
 def _scan_personal_skills(uid: str) -> list[ResolvedSkill]:
@@ -1143,29 +1167,50 @@ def _scan_personal_skills(uid: str) -> list[ResolvedSkill]:
             metadata = parse_skill_dir_metadata(entry)
             if metadata["slug"] != entry.name:
                 raise ValueError("目录名必须与 SKILL.md slug 一致")
-            metadata["enabled"] = _read_personal_skill_enabled(entry)
+            state = _read_personal_skill_state(entry)
+            metadata["enabled"] = state["enabled"]
+            metadata["origin"] = state["origin"]
             items.append(_resolved_personal_skill(uid, root, metadata))
         except Exception as exc:
             logger.warning(f"跳过无法解析的个人 Skill: uid={uid}, slug={entry.name}, error={exc}")
     return items
 
 
-def _read_personal_skill_enabled(skill_dir: Path) -> bool:
-    """读取个人 Skill 的本地启用状态；旧 Skill 默认启用。"""
+def _read_personal_skill_state(skill_dir: Path) -> dict[str, Any]:
+    """读取个人 Skill 的本地状态；旧 Skill 默认启用且按「个人上传」归类。"""
     state_path = skill_dir / PERSONAL_SKILL_STATE_FILE
     if not state_path.exists():
-        return True
+        return {"enabled": True, "origin": DEFAULT_PERSONAL_SKILL_ORIGIN}
     if state_path.is_symlink() or not state_path.is_file():
         raise ValueError("个人 Skill 状态文件非法")
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("个人 Skill 状态文件无效") from exc
-    return bool(state.get("enabled", True))
+    if not isinstance(state, dict):
+        raise ValueError("个人 Skill 状态文件无效")
+    return {
+        "enabled": bool(state.get("enabled", True)),
+        "origin": _normalize_personal_skill_origin(state.get("origin")),
+    }
+
+
+def _write_personal_skill_state(skill_dir: Path, *, enabled: bool, origin: str) -> None:
+    """原子写入个人 Skill 状态，避免半写入被运行时读取。"""
+    state_path = skill_dir / PERSONAL_SKILL_STATE_FILE
+    if state_path.is_symlink():
+        raise ValueError("个人 Skill 状态文件非法")
+    payload = {"enabled": bool(enabled), "origin": _normalize_personal_skill_origin(origin)}
+    temp_path = skill_dir / f".{PERSONAL_SKILL_STATE_FILE}.{uuid.uuid4().hex}.tmp"
+    try:
+        temp_path.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temp_path, state_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _update_personal_skill_enabled_sync(uid: str, slug: str, enabled: bool) -> ResolvedSkill:
-    """原子写入个人 Skill 状态，避免半写入被运行时读取。"""
+    """切换启用状态时保留既有来源标记。"""
     root = _personal_skills_root(uid)
     skill_dir = _resolve_personal_skill_dir(root, slug)
     if not skill_dir.is_dir():
@@ -1174,17 +1219,11 @@ def _update_personal_skill_enabled_sync(uid: str, slug: str, enabled: bool) -> R
     if metadata["slug"] != slug:
         raise ValueError("个人 Skill 目录与元数据不一致")
 
-    state_path = skill_dir / PERSONAL_SKILL_STATE_FILE
-    if state_path.is_symlink():
-        raise ValueError("个人 Skill 状态文件非法")
-    temp_path = skill_dir / f".{PERSONAL_SKILL_STATE_FILE}.{uuid.uuid4().hex}.tmp"
-    try:
-        temp_path.write_text(json.dumps({"enabled": bool(enabled)}), encoding="utf-8")
-        os.replace(temp_path, state_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
+    state = _read_personal_skill_state(skill_dir)
+    _write_personal_skill_state(skill_dir, enabled=enabled, origin=state["origin"])
 
     metadata["enabled"] = bool(enabled)
+    metadata["origin"] = state["origin"]
     return _resolved_personal_skill(uid, root, metadata)
 
 
@@ -1193,18 +1232,23 @@ def _install_personal_skill_dir_sync(
     source_dir: Path,
     *,
     expected_slug: str | None = None,
+    origin: str = DEFAULT_PERSONAL_SKILL_ORIGIN,
 ) -> ResolvedSkill:
-    """将一个 Skill 原子复制到个人目录。"""
+    """将一个 Skill 原子复制到个人目录，并记录其来源。"""
     source_dir = source_dir.resolve()
     root = _personal_skills_root(uid)
     temp_target = root / f".install.tmp-{uuid.uuid4().hex[:8]}"
     target_dir: Path | None = None
+    normalized_origin = _normalize_personal_skill_origin(origin)
     try:
         metadata = _copy_skill_snapshot(source_dir, temp_target, expected_slug=expected_slug)
         slug = metadata["slug"]
         target_dir = root / slug
         if target_dir.exists() or target_dir.is_symlink():
             raise ValueError(f"个人 Skill 源已存在同名 Skill: {slug}")
+        _write_personal_skill_state(temp_target, enabled=True, origin=normalized_origin)
+        metadata["enabled"] = True
+        metadata["origin"] = normalized_origin
         temp_target.rename(target_dir)
     except (FileExistsError, OSError) as exc:
         if target_dir is None or not target_dir.exists():
@@ -1524,7 +1568,9 @@ async def confirm_personal_skill_install_draft(
     operator: User,
 ) -> list[dict[str, Any]]:
     """确认草稿并将选中 Skill 安装到当前用户个人持久源。"""
-    draft_dir, _data, draft_items = _load_and_select_draft_items(draft_id, slugs, operator)
+    draft_dir, data, draft_items = _load_and_select_draft_items(draft_id, slugs, operator)
+    # 草稿来源决定个人 Skill 归属：remote = 从技能广场下载，upload = 用户自行上传。
+    install_origin = _normalize_personal_skill_origin(data.get("source_type"))
 
     results: list[dict[str, Any]] = []
     for draft_item in draft_items:
@@ -1558,6 +1604,7 @@ async def confirm_personal_skill_install_draft(
                 str(operator.uid),
                 source_dir,
                 expected_slug=personal_slug,
+                origin=install_origin,
             )
             results.append(
                 {

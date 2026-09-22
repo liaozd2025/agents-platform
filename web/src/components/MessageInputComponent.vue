@@ -1304,6 +1304,24 @@ const handleInputBoxClick = (event) => {
   focusInput()
 }
 
+/**
+ * 聚焦输入框并把光标落到内容末尾。
+ *
+ * 外部写入草稿（如技能广场「立即使用」写入 @技能）后编辑器会被整体重绘，
+ * 浏览器会把光标重置到开头，用户接着打字就会跑到 @技能 前面，因此需要显式定位。
+ */
+const focusInputEnd = () => {
+  if (!inputRef.value || props.disabled) return
+  inputRef.value.focus()
+  const selection = window.getSelection?.()
+  if (!selection) return
+  const range = document.createRange()
+  range.selectNodeContents(inputRef.value)
+  range.collapse(false)
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
 // 处理输入框点击事件，自适应检测光标是否落入 @提及 范围内以唤醒或更新弹窗
 const handleEditorClick = () => {
   if (mentionEnabled.value) {
@@ -1359,6 +1377,7 @@ onBeforeUnmount(() => {
 // 公开方法供父组件调用
 defineExpose({
   focus: () => inputRef.value?.focus(),
+  focusEnd: focusInputEnd,
   insertMention: commitMention,
   closeOptions: () => {
     optionsExpanded.value = false
@@ -1440,6 +1459,13 @@ defineExpose({
       font-size: 13px;
       font-weight: 600;
       pointer-events: none;
+    }
+
+    /* color-mix 降级（Chrome 86 及更低内核不支持，整条声明会丢失）。静态值取亮色主题等价色。 */
+    @supports not (background: color-mix(in srgb, red, blue)) {
+      &::after {
+        background: rgba(255, 255, 255, 0.88); /* color-mix(in srgb, var(--gray-0) 88%, transparent) */
+      }
     }
   }
 }

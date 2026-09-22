@@ -321,6 +321,7 @@
 
       let threadId = null;
       let running = false;
+      let pendingSubmission = null;
       let restingStatus = "就绪";
 
       function addMessage(role, content = "") {
@@ -348,7 +349,9 @@
       function setRunning(value) {
         running = value;
         send.disabled = value;
-        input.disabled = value;
+        input.disabled = value || Boolean(pendingSubmission);
+        send.textContent = pendingSubmission ? "恢复发送" : "发送";
+        document.querySelector("#new-chat").disabled = value || Boolean(pendingSubmission);
         status.textContent = value ? "生成中" : restingStatus;
       }
 
@@ -379,8 +382,12 @@
               output.textContent += `${separator}${event.message}`;
               restingStatus = "等待审批 · 输入 /approve";
             }
-            if (event.type === "error") throw new Error(event.message);
+            if (event.type === "error") {
+              if (event.terminal) pendingSubmission = null;
+              throw new Error(event.message);
+            }
             if (event.type === "done") {
+              pendingSubmission = null;
               completed = ["completed", "waiting_approval"].includes(event.status);
             }
           }
@@ -390,11 +397,17 @@
       }
 
       async function submitMessage() {
-        const message = input.value.trim();
-        if (!message || running) return;
+        if (running) return;
+        const recovering = Boolean(pendingSubmission);
+        if (!pendingSubmission) {
+          const message = input.value.trim();
+          if (!message) return;
+          // 恢复必须沿用首发 thread_id，包括尚未创建会话时的 null。
+          pendingSubmission = { message, thread_id: threadId, request_id: crypto.randomUUID() };
+          input.value = "";
+          addMessage("user", message);
+        }
         restingStatus = "就绪";
-        input.value = "";
-        addMessage("user", message);
         const output = addMessage("assistant");
         setRunning(true);
 
@@ -405,16 +418,21 @@
               "Content-Type": "application/json",
               "X-Yuxi-Chat-Token": sessionToken
             },
-            body: JSON.stringify({ message, thread_id: threadId })
+            body: JSON.stringify(pendingSubmission)
           });
           if (!response.ok) {
             const error = await response.json();
+            if (error.terminal || (!error.uncertain && response.status < 500 && !recovering)) {
+              input.value = pendingSubmission.message;
+              pendingSubmission = null;
+            }
             throw new Error(error.error || `请求失败：${response.status}`);
           }
           await readEvents(response, output);
         } catch (error) {
           output.closest(".message").remove();
           addMessage("error", error.message || String(error));
+          if (pendingSubmission) restingStatus = "结果尚未确认 · 点击恢复发送继续原请求";
         } finally {
           setRunning(false);
           input.focus();
@@ -434,7 +452,7 @@
       });
 
       document.querySelector("#new-chat").addEventListener("click", () => {
-        if (running) return;
+        if (running || pendingSubmission) return;
         threadId = null;
         restingStatus = "就绪";
         status.textContent = restingStatus;

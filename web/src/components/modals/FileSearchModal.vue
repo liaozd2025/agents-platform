@@ -196,6 +196,13 @@ watch(
   backdrop-filter: blur(2px);
 }
 
+/* color-mix 降级（Chrome 86 及更低内核不支持，整条声明会丢失）。静态值取亮色主题等价色。 */
+@supports not (background: color-mix(in srgb, red, blue)) {
+  .file-search-overlay {
+    background: rgba(255, 255, 255, 0.72); /* color-mix(in srgb, var(--gray-0) 72%, transparent) */
+  }
+}
+
 .search-modal-enter-active,
 .search-modal-leave-active {
   transition: opacity 180ms ease;

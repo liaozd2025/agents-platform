@@ -70,7 +70,7 @@ def test_postgres_pool_capacity_uses_environment(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_langgraph_setup_uses_cross_process_advisory_lock():
+async def test_langgraph_setup_uses_cross_process_advisory_lock(monkeypatch):
     """官方 checkpoint migration 必须被 PostgreSQL advisory lock 包围。"""
     manager = object.__new__(PostgresManager)
     manager._initialized = True
@@ -92,6 +92,7 @@ async def test_langgraph_setup_uses_cross_process_advisory_lock():
     saver = SimpleNamespace(setup=setup)
     manager.langgraph_pool = SimpleNamespace(connection=connection)
     manager.langgraph_checkpointer = saver
+    monkeypatch.setattr(manager_module, "AsyncPostgresSaver", lambda conn: saver)
 
     assert await manager.setup_langgraph_checkpointer() is saver
     assert statements == [
@@ -102,7 +103,7 @@ async def test_langgraph_setup_uses_cross_process_advisory_lock():
 
 
 @pytest.mark.asyncio
-async def test_langgraph_setup_discards_connection_when_unlock_fails():
+async def test_langgraph_setup_discards_connection_when_unlock_fails(monkeypatch):
     """无法确认 advisory lock 已释放时不能把持锁 session 放回池中。"""
     manager = object.__new__(PostgresManager)
     manager._initialized = True
@@ -125,6 +126,7 @@ async def test_langgraph_setup_discards_connection_when_unlock_fails():
 
     manager.langgraph_pool = SimpleNamespace(connection=connection)
     manager.langgraph_checkpointer = SimpleNamespace(setup=_noop)
+    monkeypatch.setattr(manager_module, "AsyncPostgresSaver", lambda conn: SimpleNamespace(setup=_noop))
 
     with pytest.raises(RuntimeError, match="unlock failed"):
         await manager.setup_langgraph_checkpointer()

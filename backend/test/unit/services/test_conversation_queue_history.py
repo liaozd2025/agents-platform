@@ -397,3 +397,80 @@ async def test_thread_history_hides_internal_metadata_from_published_model_audit
     assert message["tool_calls"][0]["tool_call_result"] == {"content": "safe result"}
     assert "private-model-run" not in str(history)
     assert "private-provider" not in str(history)
+
+
+async def test_history_citations_bind_tool_artifacts_to_the_owning_run(session):
+    """同工具调用 ID 在不同 Run 重用时，历史原文不得串源。"""
+    session.add(
+        Conversation(
+            id=1, thread_id="thread-1", project_id="project-thread-1", uid="user-1", agent_id="main", status="active"
+        )
+    )
+    for index in (1, 2):
+        run_id = f"run-{index}"
+        source = {
+            "source": f"kb://kb/{index}",
+            "source_type": "file",
+            "title": f"文件 {index}",
+            "excerpts": [{"text": f"原文 {index}"}],
+        }
+        session.add(
+            AgentRun(
+                id=run_id,
+                conversation_thread_id="thread-1",
+                runtime_scope_id="thread-1",
+                agent_slug="main",
+                uid="user-1",
+                request_id=run_id,
+                conversation_id=1,
+                input_payload={},
+                status="completed",
+            )
+        )
+        answer = Message(
+            conversation_id=1,
+            role="assistant",
+            content=f'结论 {index}<cite source="kb://kb/{index}" type="file">1</cite>',
+            message_type="text",
+            run_id=run_id,
+            operation_id="model",
+            extra_metadata={"citation_sources": [source]},
+            execution_status="completed",
+        )
+        session.add(answer)
+        await session.flush()
+        session.add(
+            ToolCall(
+                message_id=answer.id,
+                langgraph_tool_call_id="same-call",
+                tool_name="task",
+                tool_output="摘要",
+                status="success",
+            )
+        )
+        session.add(
+            Message(
+                conversation_id=1,
+                role="tool",
+                content="摘要",
+                message_type="tool_audit",
+                run_id=run_id,
+                operation_id="same-call",
+                extra_metadata={"output": {"artifact": {"citation_sources": [source], "internal": "private-artifact"}}},
+            )
+        )
+    legacy = Message(conversation_id=1, role="assistant", content="无标识的旧回复", message_type="text")
+    session.add(legacy)
+    await session.commit()
+    history = (await get_thread_history_view(thread_id="thread-1", current_uid="user-1", db=session))["history"]
+    assert "private-artifact" not in str(history)
+    for item in history:
+        if not item["run_id"]:
+            assert item["content"] == legacy.content == "无标识的旧回复"
+            continue
+        expected_text = f"原文 {item['run_id'][-1]}"
+        assert item["extra_metadata"]["citation_sources"][0]["excerpts"][0]["text"] == expected_text
+        assert (
+            item["tool_calls"][0]["tool_call_result"]["artifact"]["citation_sources"][0]["excerpts"][0]["text"]
+            == expected_text
+        )

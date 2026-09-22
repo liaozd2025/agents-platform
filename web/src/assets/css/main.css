@@ -37,10 +37,12 @@ body {
 
 .layout-container {
   width: 100%;
+}
 
-  h2 {
-    margin: 20px 0 10px 0;
-  }
+/* 原为 .layout-container 内的 h2 嵌套，这里展开为扁平选择器：
+   CSS 原生嵌套需 Chrome 112+，低于该版本时整块规则会被浏览器丢弃（目标基线是 Chrome 86）。 */
+.layout-container h2 {
+  margin: 20px 0 10px 0;
 }
 
 .lucide-icon-btn {
@@ -151,14 +153,15 @@ body {
   text-align: left;
   cursor: pointer;
   transition: background-color 0.15s ease;
+}
 
-  &:first-child {
-    margin-top: 0;
-  }
+/* 原为上面块内的 & 嵌套，展开为扁平选择器（CSS 原生嵌套需 Chrome 112+，目标基线 Chrome 86） */
+.config-dropdown-overlay .config-dropdown-item:first-child {
+  margin-top: 0;
+}
 
-  &:last-child {
-    margin-bottom: 0;
-  }
+.config-dropdown-overlay .config-dropdown-item:last-child {
+  margin-bottom: 0;
 }
 
 .config-dropdown-overlay .config-dropdown-item:hover,

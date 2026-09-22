@@ -211,6 +211,7 @@ const handleKeyDown = (e) => {
 
 defineExpose({
   focus: () => inputRef.value?.focus(),
+  focusEnd: () => inputRef.value?.focusEnd(),
   closeOptions: () => inputRef.value?.closeOptions(),
   restoreImage
 })

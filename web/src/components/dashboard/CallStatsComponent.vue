@@ -356,25 +356,35 @@ onUnmounted(() => {
 
 :deep(.ant-card-body) {
   flex: 1;
+  /* 纵向排布：让唯一子项 .call-stats-container 在主轴上撑满高度。
+     旧写法靠 align-items:stretch + 子项 height:100% 取高，而 Chromium 86 及更低内核会把
+     「父高度由 flex / min-height 推导」场景下的百分比高度解析成 auto → 图表容器高度 0 → ECharts 不渲染。 */
+  flex-direction: column;
   display: flex;
   padding: 16px; /* 减少padding从20px到16px */
   overflow-x: hidden; /* 防止横向滚动条 */
 }
 
 .call-stats-container {
-  height: 100%;
+  /* 高度改由 flex 主轴传递（父已是 flex 列容器），不再用 height:100%；
+     min-height:0 允许在容器变矮时收缩，避免内容把布局顶出去。 */
   display: flex;
+  flex-direction: column;
   flex: 1;
+  min-height: 0;
 }
 
 .call-stats .chart-container {
-  height: 100%;
+  display: flex;
+  flex-direction: column;
   flex: 1;
+  min-height: 0;
   padding: 0; /* 移除默认padding */
 }
 
 .call-stats .chart {
-  height: 100% !important;
+  /* 父是 flex 列容器，用 flex:1 撑满高度，替代原来的 height:100%（同因：老内核百分比高度不可靠） */
+  flex: 1;
   width: 100%;
   padding: 0; /* 移除chart的padding */
   border: none; /* 移除chart的border */

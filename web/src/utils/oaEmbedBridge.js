@@ -19,8 +19,18 @@ export function parseOAEmbedAllowedOrigins(value) {
 
 export const OA_EMBED_MODES = Object.freeze(['fixed', 'floating', 'fullscreen'])
 export const DEFAULT_OA_EMBED_MODE = 'fixed'
+// 提前一分钟续期；不能使用一小时，否则短有效期 token 会在换票成功后立即触发登出。
+const OA_EMBED_RENEWAL_LEAD_MS = 60 * 1000
+// 浏览器 setTimeout 的单次安全上限，供调度层和测试共同使用。
+export const MAX_OA_EMBED_RENEWAL_TIMER_MS = 2_147_000_000
 
-/** 计算嵌入登录态的静默续期等待时间，最迟在过期前一小时请求父页续期。 */
+/** 将续期等待时间裁剪为浏览器可安全接收的单次定时器延迟。 */
+export function getOAEmbedRenewalTimerDelay(delay) {
+  if (!Number.isFinite(delay) || delay < 0) return null
+  return Math.min(delay, MAX_OA_EMBED_RENEWAL_TIMER_MS)
+}
+
+/** 计算嵌入登录态的静默续期等待时间，最迟在过期前一分钟请求父页续期。 */
 export function getOAEmbedRenewalDelay(accessToken, now = Date.now()) {
   try {
     const payload = accessToken.split('.')[1]
@@ -28,7 +38,7 @@ export function getOAEmbedRenewalDelay(accessToken, now = Date.now()) {
     const claims = JSON.parse(atob(encoded))
     const expiresAt = Number(claims.exp) * 1000
     if (!Number.isFinite(expiresAt)) return null
-    return Math.max(0, expiresAt - now - 60 * 60 * 1000)
+    return Math.max(0, expiresAt - now - OA_EMBED_RENEWAL_LEAD_MS)
   } catch {
     return null
   }
@@ -49,6 +59,8 @@ export function createOAEmbedBridge({
   let parentOrigin = ''
   let loginRequestTimer = null
   let tokenAccepted = false
+  // 记录最近一次成功换票的账号，避免重复授权重建登录态并取消业务请求。
+  let acceptedAccount = ''
   let isAuthenticating = false
   let baseMode = DEFAULT_OA_EMBED_MODE
   let currentMode = DEFAULT_OA_EMBED_MODE
@@ -108,11 +120,19 @@ export function createOAEmbedBridge({
       return
     }
 
+    const normalizedAccount = account.trim()
+    // 首次登录或续期时 tokenAccepted 为 false，仍允许同账号重新换票。
+    if (tokenAccepted && acceptedAccount === normalizedAccount) {
+      console.info('[OA iframe] 已有有效登录态，忽略重复账号授权')
+      return
+    }
+
     parentOrigin = event.origin
     isAuthenticating = true
     console.info('[OA iframe] 收到父项目账号，开始建立 Yuxi 登录态')
     try {
-      await onAccount(account.trim())
+      await onAccount(normalizedAccount)
+      acceptedAccount = normalizedAccount
       tokenAccepted = true
     } catch {
       console.warn('[OA iframe] OA 账号登录失败，等待父项目重新授权')

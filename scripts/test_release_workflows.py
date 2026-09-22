@@ -1,6 +1,9 @@
 """发布事件与应用、CLI 发布边界的回归检查。"""
 
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -42,6 +45,77 @@ class ReleaseWorkflowTests(unittest.TestCase):
             ["workflow_dispatch"],
             "CLI 必须独立手动发布",
         )
+
+    def assert_minio_sources(self, files: dict[str, str]) -> None:
+        """所有真实拉取入口使用同一可获取制品。"""
+        expected = (
+            "quay.io/minio/minio:RELEASE.2023-03-20T20-16-18Z@sha256:"
+            "6d770d7f255cda1f18d841ffc4365cb7e0d237f6af6a15fcdb587480cd7c3b93"
+        )
+        for name, content in files.items():
+            references = re.findall(r"[\w./-]*minio/minio:[^\s\"',]+", content)
+            reference = expected.split("@", 1)[0] if name.startswith("scripts/init.") else expected
+            self.assertEqual(references, [reference], name)
+
+    def test_minio_pull_entries_and_unavailable_source_regression(self) -> None:
+        """正常配置一致；任一入口恢复不可获取的 Docker Hub 来源都会失败。"""
+        root = WORKFLOWS.parents[1]
+        files = {
+            name: (root / name).read_text()
+            for name in (
+                "docker-compose.yml", "docker-compose.prod.yml", "scripts/init.sh",
+                "scripts/init.ps1", "backend/test/e2e/knowledge/compose.yaml",
+            )
+        }
+        self.assert_minio_sources(files)
+        for name, content in files.items():
+            with self.subTest(path=name), self.assertRaises(AssertionError):
+                self.assert_minio_sources(files | {name: content.replace("quay.io/minio/", "minio/")})
+
+    def test_installer_minio_reference_can_be_retagged(self) -> None:
+        """用真实预拉脚本验证安装入口仍使用可重标记的 tag。"""
+        root = WORKFLOWS.parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            fake_docker = Path(directory) / "docker"
+            fake_docker.write_text(
+                '#!/bin/sh\n'
+                'printf "%s\\n" "$*" >> "$CI117_DOCKER_LOG"\n'
+                'if [ "$1" = tag ]; then case "$3" in *@*) exit 1;; esac; fi\n'
+            )
+            fake_docker.chmod(0o755)
+            log = Path(directory) / "calls"
+            env = os.environ | {"PATH": directory + os.pathsep + os.environ["PATH"], "CI117_DOCKER_LOG": str(log)}
+            for name in ("init.sh", "init.ps1"):
+                reference = re.search(r"quay.io/minio/minio:[^\s\"',]+", (root / "scripts" / name).read_text())[0]
+                result = subprocess.run(
+                    ["bash", str(root / "scripts/pull_image.sh"), reference],
+                    env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"tag m.daocloud.io/{reference} {reference}", log.read_text().splitlines())
+            result = subprocess.run(
+                ["bash", str(root / "scripts/pull_image.sh"), reference + "@sha256:" + "0" * 64],
+                env=env, capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+
+    def assert_docs_build_without_pages(self, workflow: str) -> None:
+        """PR 构建不依赖仓库已经开通 Pages。"""
+        build = workflow.split("  build:\n", 1)[1].split("  deploy:\n", 1)[0]
+        self.assertIn("run: pnpm run build", build)
+        self.assertNotIn("actions/configure-pages@", build)
+
+    def test_docs_build_without_pages(self) -> None:
+        """真实文档工作流可在没有 Pages 站点时完成构建。"""
+        self.assert_docs_build_without_pages((WORKFLOWS / "deploy.yml").read_text())
+
+    def test_docs_build_rejects_pages_prerequisite(self) -> None:
+        """恢复构建前的 Pages 配置时检查拒绝。"""
+        workflow = (WORKFLOWS / "deploy.yml").read_text().replace(
+            "  build:\n", "  build:\n    uses: actions/configure-pages@v6\n", 1
+        )
+        with self.assertRaises(AssertionError):
+            self.assert_docs_build_without_pages(workflow)
 
     def test_repository_release_events(self) -> None:
         """当前配置覆盖候选与正式 tag，CLI 仅手动触发。"""

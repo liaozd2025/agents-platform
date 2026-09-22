@@ -588,6 +588,14 @@ onUnmounted(() => {
   backdrop-filter: blur(2px);
 }
 
+/* color-mix 降级（Chrome 86 及更低内核不支持 color-mix，含变量的写法构建期也无法求值，
+   整条声明会被老内核丢弃）。静态值取亮色主题等价色，暗色主题下会略偏色。下同。 */
+@supports not (background: color-mix(in srgb, red, blue)) {
+  .global-search-overlay {
+    background: rgba(255, 255, 255, 0.72); /* color-mix(in srgb, var(--gray-0) 72%, transparent) */
+  }
+}
+
 .search-modal-enter-active,
 .search-modal-leave-active {
   transition: opacity 180ms ease;
@@ -662,6 +670,12 @@ onUnmounted(() => {
     background: color-mix(in srgb, var(--main-color) 10%, transparent);
     color: var(--main-700);
     font-weight: 600;
+  }
+
+  @supports not (background: color-mix(in srgb, red, blue)) {
+    &.active {
+      background: rgba(82, 99, 231, 0.1); /* color-mix(in srgb, var(--main-color) 10%, transparent) */
+    }
   }
 }
 
@@ -801,6 +815,12 @@ onUnmounted(() => {
     padding: 0;
     background: color-mix(in srgb, var(--main-color) 14%, transparent);
     color: var(--main-700);
+  }
+
+  @supports not (background: color-mix(in srgb, red, blue)) {
+    mark {
+      background: rgba(82, 99, 231, 0.14); /* color-mix(in srgb, var(--main-color) 14%, transparent) */
+    }
   }
 }
 

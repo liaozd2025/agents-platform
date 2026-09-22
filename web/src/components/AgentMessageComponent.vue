@@ -49,6 +49,8 @@
         v-if="parsedData.content"
         :key="message.id"
         :content="parsedData.content"
+        :streaming="isProcessing"
+        :citation-sources="citationSources"
         code-copy
         class="message-md"
       />
@@ -140,6 +142,7 @@ import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import MentionTextRenderer from '@/components/common/MentionTextRenderer.vue'
 import { useAgentStore } from '@/stores/agent'
 import { storeToRefs } from 'pinia'
+import { getMessageCitationSources } from '@/utils/answerCitations.js'
 import { MessageProcessor } from '@/utils/messageProcessor'
 import { inferImageMimeTypeFromBase64, normalizeAttachmentPreviews } from '@/utils/file_utils'
 import { buildMentionDisplayLabels } from '@/utils/mention_utils'
@@ -305,6 +308,8 @@ const messageImageMimeType = computed(
 )
 
 const mentionDisplayLabels = computed(() => buildMentionDisplayLabels(props.mention || {}))
+
+const citationSources = computed(() => getMessageCitationSources(props.message))
 
 const messageSources = computed(() => {
   if (props.message.type === 'ai') {

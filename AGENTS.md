@@ -73,6 +73,11 @@ docker compose exec api uv run --group test pytest test/unit -m "not slow"
 - 不输出或提交 `.env`、账号、Token、用户数据、运行目录和构建产物。
 - 文件以一个换行结尾；提交前运行 `git diff --check`。
 
+### 前端定时器与延迟任务
+
+- 浏览器 `setTimeout`/`setInterval` 的单次延迟不得直接超过 `2^31-1` 毫秒（约 24.8 天）；超长等待必须拆分为不超过该上限的分段定时器，并在每次回调中重新计算剩余时间，避免整数溢出后被立即执行。
+- 涉及登录态续期、授权刷新或请求取消的定时器，必须记录实际安排的延迟和触发原因；必须补充短于上限、等于上限附近、超过上限以及无效时间值的边界测试。
+
 ## 提交与 Review
 
 1. 参考 [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) 规范编写提交信息。

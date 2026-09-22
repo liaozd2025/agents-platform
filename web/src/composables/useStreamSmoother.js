@@ -3,7 +3,13 @@ const cloneChunk = (value) => {
   return JSON.parse(JSON.stringify(value))
 }
 const hasText = (value) => typeof value === 'string' && value.length > 0
-const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+// Intl.Segmenter 需要 Chrome 87+，而内网终端存在 Chrome 86（无 VPN、无法升级）：
+// 顶层直接 new 会抛 TypeError 并让整个模块加载失败，表现为聊天页白屏，所以必须先探测再使用。
+// 缺失时在 takeFromBuffer 里退化为「按码点推进」，至少不会把代理对切开产生乱码。
+const segmenter =
+  typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+    : null
 
 const START_BUFFER_MS = 180
 const RATE_SAMPLE_MS = 200
@@ -44,10 +50,19 @@ const takeFromBuffer = (value, count) => {
   if (!value || count <= 0) return { emitted: '', rest: value }
   if (count >= value.length) return { emitted: value, rest: '' }
   let end = 0
-  for (const { segment, index } of segmenter.segment(value)) {
-    if (index + segment.length > count && end > 0) break
-    end = index + segment.length
-    if (end >= count) break
+  if (segmenter) {
+    for (const { segment, index } of segmenter.segment(value)) {
+      if (index + segment.length > count && end > 0) break
+      end = index + segment.length
+      if (end >= count) break
+    }
+  } else {
+    // 老内核兜底：for...of 走字符串迭代器，天然按码点推进，
+    // 组合字符可能被分开（观感略差），但绝不会切出半个代理对造成乱码。
+    for (const char of value) {
+      end += char.length
+      if (end >= count) break
+    }
   }
   return { emitted: value.slice(0, end), rest: value.slice(end) }
 }
