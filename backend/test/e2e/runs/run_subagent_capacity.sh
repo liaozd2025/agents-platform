@@ -23,7 +23,9 @@ cleanup() {
 }
 trap cleanup EXIT
 "${compose[@]}" pull --policy missing postgres redis minio
+# 迁移器必须以 root 完成身份迁移；其日志也在随后移交的状态目录中。
+"${compose[@]}" run --rm migrator
 # 与 shipping API/worker 的 UID 一致，避免 Linux 上 root 创建的私有目录阻断 Sandbox。
 docker run --rm --network none --user 0:0 --entrypoint chown -v "$KB_E2E_STATE_DIR:/state" "$KB_E2E_API_IMAGE" -R 1000:1000 /state
-"${compose[@]}" up -d --wait --wait-timeout 120 api worker replay redis minio sandbox-provisioner
+"${compose[@]}" up -d --no-deps --wait --wait-timeout 120 api worker replay redis minio sandbox-provisioner
 "${compose[@]}" exec -T api uv run --no-sync pytest --confcutdir=test/e2e/runs test/e2e/runs/test_subagent_capacity.py -q -s
