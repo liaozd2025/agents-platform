@@ -1276,6 +1276,68 @@ const resetAgentPanelState = () => {
   agentPanelActiveSectionKey.value = FILE_TREE_SECTION.key
 }
 
+// ==================== 会话级右侧面板状态 ====================
+// 右侧面板状态（面板开关、预览标签、当前预览文件、分区 tabs）都是本组件级 ref，
+// 而切换会话时 store 里的 currentThreadId 可能被侧边栏/路由直接改写（见 AppLayout.handleSelectChat），
+// 因此这些状态若不按会话隔离，就会把 A 会话打开的文件残留到 B 会话。
+// 这里以 threadId 为键给每个会话各自存档面板状态：切走时保存当前会话，切回时恢复自己的状态。
+// 注意：本 Map 随组件实例存活（页面刷新或组件卸载即清空），不做持久化。
+const threadPanelStateMap = new Map() // threadId(字符串) -> 面板状态快照
+
+// 组件最近一次完成加载的会话 id：用于区分「真的切换了会话」与「重复选中当前会话」。
+// 侧边栏/路由会先改写 store 再触发 selectChat，导致 selectChat 内 previousThreadId 已等于目标会话，
+// 无法据此判断是否发生过切换（见 selectChat 内的 isSameThreadReselect）。
+// 注意：本值不持久化；组件被卸载重挂载后为空，此时首次「重复选中」会被判为切换（即不刷新一次）。
+let lastLoadedThreadId = null
+
+// 采集当前面板状态快照。sections/tabs 都走不可变更新（见 utils/agentPanelSections.js），
+// 这里仍做一次浅拷贝：不依赖"后续只做不可变更新"这一约定，避免将来就地改动污染已存档的快照。
+const snapshotAgentPanelState = () => ({
+  isFilePanelOpen: isFilePanelOpen.value,
+  statePanelOpen: statePanelOpen.value,
+  isAgentPanelMaximized: isAgentPanelMaximized.value,
+  previewTabs: [...agentPanelPreviewTabs.value],
+  activePreviewPath: agentPanelActivePreviewPath.value,
+  viewMode: agentPanelViewMode.value,
+  sections: [...agentPanelSections.value],
+  activeSectionKey: agentPanelActiveSectionKey.value
+})
+
+// 保存某个会话的面板状态。面板已关闭且没有任何预览标签时视为"无状态"并删除条目，
+// 避免访问过的会话都留一份快照导致 Map 无限增长。
+const saveAgentPanelStateForThread = (threadId) => {
+  if (!threadId) return
+  const snapshot = snapshotAgentPanelState()
+  const isEmpty =
+    !snapshot.isFilePanelOpen && !snapshot.statePanelOpen && snapshot.previewTabs.length === 0
+  if (isEmpty) {
+    threadPanelStateMap.delete(threadId)
+    return
+  }
+  threadPanelStateMap.set(threadId, snapshot)
+}
+
+// 恢复某个会话的面板状态；没有快照（首次进入该会话、或新建对话）时回到默认关闭态。
+const restoreAgentPanelStateForThread = (threadId) => {
+  const snapshot = threadId ? threadPanelStateMap.get(threadId) : null
+  if (!snapshot) {
+    resetAgentPanelState()
+    return
+  }
+
+  isFilePanelOpen.value = snapshot.isFilePanelOpen
+  statePanelOpen.value = snapshot.statePanelOpen
+  isAgentPanelMaximized.value = snapshot.isAgentPanelMaximized
+  agentPanelPreviewTabs.value = snapshot.previewTabs
+  agentPanelActivePreviewPath.value = snapshot.activePreviewPath
+  agentPanelViewMode.value = snapshot.viewMode
+  agentPanelSections.value = snapshot.sections
+  agentPanelActiveSectionKey.value = snapshot.activeSectionKey
+  // 清除上一个会话拖拽留下的临时宽度，否则恢复后的 panelRatio 不会生效（见 filePanelWidthStyle）。
+  filePanelDragWidth.value = null
+  setPanelRatioForViewMode()
+}
+
 const previewCacheKey = (path, threadId = currentChatId.value) => `${threadId}:${path}`
 
 // 用户目录文件使用独立 cache 前缀；释放时两个 scope 的 key 一并清理。
@@ -3266,10 +3328,14 @@ const selectChat = async (chatId) => {
     stopAllRequestStreams(previousThreadId)
   }
 
-  if (previousThreadId !== chatId) {
-    resetAgentPanelState()
-  }
+  // 是否只是「重复选中当前已加载的会话」（例如从其它页面点回同一会话）。
+  // 侧边栏/路由会先改写 store，因此 previousThreadId 在这里常常已经等于 chatId，
+  // 需要再对比 lastLoadedThreadId 才能区分：真的切换了会话 vs 重复选中。
+  // 只有前者才需要跳过文件系统刷新（见下方 handleAgentStateRefresh 的开关注释）。
+  const isSameThreadReselect = previousThreadId === chatId && lastLoadedThreadId === chatId
 
+  // 注意：这里不再显式 resetAgentPanelState()。面板状态由 watch(currentChatId) 按会话
+  // 存档/恢复统一负责；若在此提前重置，会把旧会话的面板状态清掉，导致切回时无法恢复。
   try {
     await withConfigNoticeSync(async () => {
       // 先更新当前线程，确保底部智能体名称与选中项即时同步。
@@ -3304,12 +3370,16 @@ const selectChat = async (chatId) => {
   await nextTick()
   await scrollController.scrollToBottomStaticForce()
   // await fetchAgentState(targetAgentId, chatId)
-  await handleAgentStateRefresh(chatId)
+  // 真的切换了会话时不做文件系统刷新：右侧面板恢复后已按新会话重新读取预览，重复刷新只会让内容闪一下。
+  // 重复选中当前会话时保留原有的刷新语义（此时面板状态未变、也不会闪）。
+  await handleAgentStateRefresh(chatId, { bumpFilesystemRefresh: isSameThreadReselect })
   syncThreadConfigSnapshot(chatId, { overwrite: false })
   await resumeActiveRunForThread(chatId)
   await resumeQueuedRequests(chatId, resolveAgentSlugForThread(chatId))
   restorePendingInterruptForThread(chatId)
   await scrollController.scrollToBottomStaticForce()
+  // 记录本次已加载的会话，供下一次调用的 isSameThreadReselect 判断
+  lastLoadedThreadId = chatId
   return true
 }
 
@@ -3326,7 +3396,7 @@ const selectThreadFromRoute = async (threadId) => {
       stopRunStreamSubscription(previousThreadId)
       stopAllRequestStreams(previousThreadId)
     }
-    resetAgentPanelState()
+    // 面板状态交给 watch(currentChatId) 处理：它会先把离开的会话存档，再对 null 会话做重置。
     setCurrentThreadId(null)
     return true
   }
@@ -3716,7 +3786,10 @@ defineExpose({
   selectThreadFromRoute
 })
 
-const handleAgentStateRefresh = async (threadId = null) => {
+// bumpFilesystemRefresh=false 用于切换会话时的状态刷新：右侧面板刚按新的 threadId 重新拉取过预览，
+// 此时再递增文件系统版本号会让 AgentPanel 作废刚拿到的缓存并重复加载同一份内容，
+// 表现为切回会话时面板"先显示内容、再闪一下重新加载"。默认仍为 true（手动刷新/运行结束后的文件变化）。
+const handleAgentStateRefresh = async (threadId = null, { bumpFilesystemRefresh = true } = {}) => {
   if (!currentAgentId.value) return
   const chatId = threadId || currentChatId.value
   if (!chatId) return
@@ -3726,7 +3799,9 @@ const handleAgentStateRefresh = async (threadId = null) => {
       fetchAgentState(currentAgentId.value, chatId),
       fetchThreadAttachments(chatId)
     ])
-    if (chatId === currentChatId.value) agentPanelFilesystemRefreshVersion.value += 1
+    if (bumpFilesystemRefresh && chatId === currentChatId.value) {
+      agentPanelFilesystemRefreshVersion.value += 1
+    }
   } finally {
     isRefreshingState.value = false
   }
@@ -3881,7 +3956,6 @@ const loadChatsList = async () => {
   if (props.singleMode && !agentId) {
     console.warn('No agent selected, cannot load chats list')
     threads.value = []
-    resetAgentPanelState()
     setCurrentThreadId(null)
     threadAttachmentsMap.value = {}
     return
@@ -3956,12 +4030,11 @@ watch(
     }
 
     if (newAgentId !== oldAgentId) {
-      // 清理当前线程状态
+      // 清理当前线程状态（面板状态的关闭/恢复由 watch(currentChatId) 统一处理）
       setCurrentThreadId(null)
       threadMessages.value = {}
       threadRuns.value = {}
       threadAttachmentsMap.value = {}
-      resetAgentPanelState()
       // 清理所有线程状态
       resetOnGoingConv()
 
@@ -4020,6 +4093,11 @@ watch(
 
 watch(currentChatId, (threadId, oldThreadId) => {
   if (threadId === oldThreadId) return
+  // 会话级面板状态：先把离开的会话存档，再恢复目标会话（无存档则回到默认关闭态）。
+  // 放在这里而不是 selectChat 里，是因为侧边栏点击会先直接改写 store 的 currentThreadId
+  // （AppLayout.handleSelectChat），此时 selectChat 已看不到旧线程，无法判断"发生了切换"。
+  saveAgentPanelStateForThread(oldThreadId)
+  restoreAgentPanelStateForThread(threadId)
   // 旧线程已被删除时丢弃输入草稿，避免写入无法再次访问的孤儿缓存
   const keepInput = !oldThreadId || threads.value.some((thread) => thread.id === oldThreadId)
   // 切换线程：保存旧线程的输入草稿，并还原新线程（或新建对话）的草稿
