@@ -1,25 +1,72 @@
 """聊天请求的知识库检索范围与轻量意图策略。"""
 
 import asyncio
+import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 _MENTION_RE = re.compile(r'@knowledge:(?:"((?:\\.|[^"\\])*)"|(\S+))')
-_NO_KB_PATTERNS = (
+# 任意提及语法（@skill:xxx / @agent:xxx / @knowledge:xxx），仅用于意图判定前剥离。
+# 不剥离会让模型把“mysql reporter”这类产品名误当成内部系统，从而误判需要检索知识库。
+_ANY_MENTION_RE = re.compile(r'@[A-Za-z_][\w-]*:(?:"(?:\\.|[^"\\])*"|\S+)')
+# 内部资料信号：命中即检索，优先级高于非检索词（避免“公司制度怎么翻译”被创作类词覆盖）
+_INTERNAL_KB_PATTERNS = (
+    "知识库",
+    "内部",
+    "公司",
+    "部门",
+    "我们",
+    "制度",
+    "规定",
+    "流程",
+    "规范",
+    "标准",
+    "文档",
+    "文件",
+    "资料",
+    "报告",
+    "纪要",
+    "项目",
+)
+# 明确不需要检索的问题类型
+_NON_KB_PATTERNS = (
     "你好",
     "您好",
     "谢谢",
     "晚安",
     "早上好",
+    "你是谁",
+    "介绍一下自己",
+    "你会干什么",
+    "几点",
+    "天气",
     "翻译",
     "润色",
     "改写",
     "改成",
-    "计算",
-    "等于多少",
+    "总结一下",
+    "起个名字",
+    "生成图片",
+    "生成一张图",
+    "画图",
+    "写代码",
     "代码格式",
     "格式化代码",
+    "计算",
+    "等于多少",
+)
+# 能力询问（如“你能查公司制度吗”），归为不检索
+_CAPABILITY_PATTERN = re.compile(r"(?:你能|能否|可以|支持|会不会|能不能).{0,30}(?:吗|么|？|\?)")
+# 技能/工具认知类询问（如“mysql-reporter 这是什么技能”“XX 怎么用”）。
+# 这类问题问的是“某个工具/技能本身是什么”，与内部资料无关，必须确定性判为不检索，
+# 不能交给模型兜底——实测模型看到陌生产品名会误判为“疑似内部系统”而选择检索，且结果会抖动。
+_SKILL_INQUIRY_PATTERN = re.compile(
+    r"(?:什么技能|什么工具|什么能力|是什么东西|是干嘛|干嘛的|干什么用|做什么用|什么用的"
+    r"|怎么用|如何使用|怎么使用|能做什么|主要功能|有什么功能|有哪些功能|有什么特性|有什么作用|有什么用)"
 )
 _KB_PATTERNS = (
     "知识库",
@@ -33,6 +80,10 @@ _KB_PATTERNS = (
     "文档中",
     "资料中",
 )
+
+INTENT_SEARCH = "SEARCH_KB"
+INTENT_NO_SEARCH = "NO_KB"
+INTENT_UNKNOWN = "UNKNOWN"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,21 +107,76 @@ def parse_knowledge_mentions(query: str) -> tuple[str, ...]:
     return tuple(values)
 
 
+def strip_mention_syntax(query: str) -> str:
+    """剥离 @skill:@agent:@knowledge: 等提及语法，只留用户真实问题。
+
+    仅供意图判定使用；@knowledge 提及本身仍由 ``parse_knowledge_mentions`` 从原文解析。
+    """
+    return _ANY_MENTION_RE.sub(" ", str(query or "")).strip()
+
+
 def classify_knowledge_intent(query: str) -> str:
-    """用低成本规则判断是否需要知识库；无法确定时默认检索。"""
-    text = str(query or "").strip()
+    """用双向规则判断知识库意图；两边都未命中时返回 UNKNOWN。"""
+    text = strip_mention_syntax(query)
     if not text:
-        return "NO_KB"
-    if any(pattern in text for pattern in _NO_KB_PATTERNS) and not any(pattern in text for pattern in _KB_PATTERNS):
-        return "NO_KB"
-    return "SEARCH_KB"
+        return INTENT_NO_SEARCH
+    # 内部资料信号优先，避免“公司制度怎么翻译”被创作类词覆盖。
+    # 该优先级同时保证「@技能 + 需要查内部资料」的场景不会被能力询问规则误伤。
+    if any(pattern in text for pattern in _INTERNAL_KB_PATTERNS) or any(pattern in text for pattern in _KB_PATTERNS):
+        return INTENT_SEARCH
+    if (
+        any(pattern in text for pattern in _NON_KB_PATTERNS)
+        or _CAPABILITY_PATTERN.search(text)
+        or _SKILL_INQUIRY_PATTERN.search(text)
+    ):
+        return INTENT_NO_SEARCH
+    return INTENT_UNKNOWN
 
 
-async def decide_knowledge_retrieval(query: str, user: Any) -> KnowledgeRetrievalDecision:
+async def resolve_knowledge_intent(query: str, model_spec: str | None = None) -> str:
+    """先用规则分类；无法确定时用低温度模型判断是否必须查内部资料。"""
+    rule_result = classify_knowledge_intent(query)
+    if rule_result != INTENT_UNKNOWN:
+        return rule_result
+    # 没有可用模型时保守跳过检索，避免像旧策略那样对所有问题都发起检索。
+    if not model_spec:
+        return INTENT_NO_SEARCH
+    try:
+        from yuxi.models.chat import select_model
+
+        model = select_model(model_spec, temperature=0)
+        response = await model.call(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "判断用户问题是否必须依赖公司内部资料才能准确回答。"
+                        '只返回JSON，不要解释，格式为 {"intent":"SEARCH"} 或 {"intent":"NO_SEARCH"}。'
+                        "内部制度、项目事实、公司文档、历史记录等选 SEARCH；"
+                        "通用知识、闲聊、能力询问、创作任务，以及询问某个技能/工具/功能本身是什么或怎么用，选 NO_SEARCH。"
+                    ),
+                },
+                {"role": "user", "content": strip_mention_syntax(query)},
+            ],
+            stream=False,
+        )
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(response.content).strip(), flags=re.IGNORECASE)
+        payload = json.loads(raw)
+        intent = str(payload.get("intent", "")).strip().upper() if isinstance(payload, dict) else ""
+        return INTENT_SEARCH if intent == "SEARCH" else INTENT_NO_SEARCH
+    except Exception:
+        logger.warning("知识库意图模型判断失败，按不检索处理", exc_info=True)
+        return INTENT_NO_SEARCH
+
+
+async def decide_knowledge_retrieval(
+    query: str, user: Any, *, model_spec: str | None = None
+) -> KnowledgeRetrievalDecision:
     """解析 @ 范围或动态选择当前用户可读的全局知识库。"""
     mentions = parse_knowledge_mentions(query)
-    if not mentions and classify_knowledge_intent(query) == "NO_KB":
-        return KnowledgeRetrievalDecision("NO_KB", (), False)
+    # 显式 @ 知识库是用户给出的明确约束，直接检索；否则先判定意图，规则判不出再交由模型兜底。
+    if not mentions and await resolve_knowledge_intent(query, model_spec) == INTENT_NO_SEARCH:
+        return KnowledgeRetrievalDecision(INTENT_NO_SEARCH, (), False)
 
     from yuxi.knowledge.runtime import knowledge_base
 
