@@ -28,4 +28,4 @@ Compose 和隔离验收使用 Quay 的同版本 MinIO，并固定与原镜像一
 
 删除必要步骤和缩窄 PR 路径的负向测试由现有 checker 拒绝。恢复构建前 Pages 配置会使 workflow 回归测试失败；恢复 helper 的 skip 会使错误响应回归失败，正常响应仍可创建线程。文件安全通过真实 HTTP 验证拒绝结果与宿主文件未被覆盖。Chrome 恢复验收读取最终 DOM，并独立查询 PostgreSQL 中的 Request、Run 和 Message。
 
-本地冷缓存验证使用新建 BuildKit 内容存储，完整下载 Linux amd64 MinIO 镜像层后执行版本检查。冷下载后的对象写入与回读通过。该证据仅证明镜像可冷获取和运行；应用测试使用依赖匹配的本地 API 镜像。本地验证与 GitHub 干净 runner 的整套 workflow 分开记录。测试分支的首轮远端检查中，工程契约、后端、Web、Ruff、CLI 与文档构建通过；Runtime 已通过冷构建、readiness、事务及 Run 审计检查，但确定性 Agent 组出现 Sandbox 操作超时与模型缓存空窗，后续步骤未执行。完整远端通过前不能关闭 #117；本决定不代表生产上线。
+本地冷缓存验证使用新建 BuildKit 内容存储，完整下载 Linux amd64 MinIO 镜像层后执行版本检查。冷下载后的对象写入与回读通过。该证据仅证明镜像可冷获取和运行；应用测试使用依赖匹配的本地 API 镜像。本地验证与 GitHub 干净 runner 的整套 workflow 分开记录。测试分支的首轮远端检查中，工程契约、后端、Web、Ruff、CLI 与文档构建通过；Runtime 已通过冷构建、readiness、事务及 Run 审计检查，但确定性 Agent 组出现 Sandbox 操作超时与模型缓存空窗，后续步骤未执行。后续远端已通过确定性 Agent 组，身份检查暴露历史测试准备仍依赖已删除的用户角色字段和旧 OIDC 恢复签名。迁移测试显式构造旧角色列及有效管理员，HTTP 创建用户采用当前请求模型，恢复调用传入原部门；凭据 tombstone、幂等和认证拒绝断言保留。本地真实 PostgreSQL 与 HTTP 身份检查 21 项通过；完整远端通过前不能关闭 #117，本决定不代表生产上线。
