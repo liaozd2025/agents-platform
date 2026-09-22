@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import importlib
 import os
 import subprocess
@@ -1898,3 +1899,155 @@ async def test_old_over_budget_pending_run_does_not_prepare(monkeypatch):
     await run_worker.process_agent_run({"job_try": 1}, run.id)
     load.assert_not_awaited()
     assert terminal.await_args.kwargs["error_type"] == "run_retry_exhausted"
+
+
+@pytest.mark.parametrize("finish", ["timeout", "cancel"])
+async def test_parent_wait_preserves_timeout_and_owns_child_cleanup(monkeypatch, finish):
+    """等待超时不结束子执行；取消父运行必须关闭子执行且不继续后续副作用。"""
+    from yuxi.services import agent_run_service
+
+    entered, release, closed, continued = (asyncio.Event() for _ in range(4))
+    effects = []
+    graph_context = ContextVar("synthetic-parent-graph", default=None)
+    child_task = None
+
+    async def process(ctx, run_id):
+        """子执行吞取消模拟 ARQ 顶层，父等待仍须独立停止。"""
+        nonlocal child_task
+        if run_id == "child":
+            child_task = asyncio.current_task()
+            assert graph_context.get() is None, "子 Run 不得继承父模型的事件和审计上下文"
+            entered.set()
+            try:
+                await release.wait()
+                effects.append("child")
+            except asyncio.CancelledError:
+                return
+            finally:
+                closed.set()
+        else:
+            graph_context.set("parent-graph")
+            try:
+                await agent_run_service.await_agent_run_result(run_id="child", current_uid="user")
+                effects.append("parent after wait")
+            except asyncio.CancelledError:
+                child_task.cancel()  # 模拟父持久取消向子 Owner 发出的停止信号。
+                raise
+            except agent_run_service.AgentRunWaitTimeout:
+                assert not closed.is_set(), "等待上限不能取消独立子执行"
+                continued.set()
+                await release.wait()
+                await closed.wait()
+
+    async def events(**kwargs):
+        """以事件流结束模拟既有等待上限，取消场景持续等待。"""
+        await entered.wait()
+        if finish == "cancel":
+            await asyncio.Event().wait()
+        if False:
+            yield None
+
+    monkeypatch.setattr(run_worker, "_process_agent_run", process)
+    monkeypatch.setattr(
+        run_worker,
+        "_get_run",
+        AsyncMock(
+            return_value=SimpleNamespace(run_type="subagent", created_by_run_id="parent", uid="user", status="pending")
+        ),
+    )
+    monkeypatch.setattr(agent_run_service, "stream_agent_run_events", events)
+    monkeypatch.setattr(agent_run_service, "load_agent_run_result", AsyncMock(return_value={"status": "running"}))
+    parent = asyncio.create_task(run_worker.process_agent_run({}, "parent"))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        if finish == "timeout":
+            await asyncio.wait_for(continued.wait(), 1)
+            release.set()
+            await asyncio.wait_for(parent, 1)
+            assert effects == ["child"]
+        else:
+            parent.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(parent, 1)
+            release.set()
+            await asyncio.sleep(0)
+            assert effects == []
+        assert closed.is_set()
+    finally:
+        parent.cancel()
+        await asyncio.gather(parent, return_exceptions=True)
+
+
+async def test_waited_child_preclaim_failure_is_visible_and_can_be_waited_again(monkeypatch):
+    """领取前异常不能藏在后台 Task；重等仍 pending 的子任务可重新推进。"""
+    from yuxi.services import agent_run_service
+
+    finished = asyncio.Event()
+    attempts = []
+
+    async def get_run(run_id):
+        """第一次读取失败，第二次返回合法待执行子任务。"""
+        attempts.append(run_id)
+        if len(attempts) == 1:
+            raise OSError("synthetic preclaim database failure")
+        return SimpleNamespace(run_type="subagent", created_by_run_id="parent", uid="user", status="pending")
+
+    async def process(ctx, run_id):
+        """父明确接收错误后重等，子只执行一次。"""
+        if run_id == "child":
+            finished.set()
+            return
+        with pytest.raises(OSError, match="preclaim"):
+            await agent_run_service.await_agent_run_result(run_id="child", current_uid="user")
+        result = await agent_run_service.await_agent_run_result(run_id="child", current_uid="user")
+        assert result["status"] == "completed"
+
+    async def events(**kwargs):
+        """事件流周期使后台领取有执行机会。"""
+        await asyncio.sleep(0)
+        yield "event"
+
+    monkeypatch.setattr(run_worker, "_get_run", get_run)
+    monkeypatch.setattr(run_worker, "_process_agent_run", process)
+    monkeypatch.setattr(agent_run_service, "stream_agent_run_events", events)
+    monkeypatch.setattr(agent_run_service, "load_agent_run_result", AsyncMock(return_value={"status": "completed"}))
+    await run_worker.process_agent_run({}, "parent")
+    assert attempts == ["child", "child"]
+    assert finished.is_set()
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [None, {"run_type": "chat"}, {"created_by_run_id": "other-parent"}, {"uid": "other-user"}, {"status": "running"}],
+)
+async def test_waited_execution_rejects_targets_outside_owned_pending_children(monkeypatch, invalid):
+    """等待能力不能领取他人、其他父运行、普通或已经拥有执行者的 Run。"""
+    from yuxi.services import agent_run_service
+
+    executed = []
+
+    async def process(ctx, run_id):
+        """错误目标若越过 guard，留下独立可观察执行记录。"""
+        if run_id == "parent":
+            await agent_run_service.await_agent_run_result(run_id="target", current_uid="user")
+        else:
+            executed.append(run_id)
+
+    async def events(**kwargs):
+        """让领取 Task 运行，不替代权限断言。"""
+        await asyncio.sleep(0)
+        yield "event"
+
+    target = (
+        None
+        if invalid is None
+        else SimpleNamespace(
+            **({"run_type": "subagent", "created_by_run_id": "parent", "uid": "user", "status": "pending"} | invalid)
+        )
+    )
+    monkeypatch.setattr(run_worker, "_process_agent_run", process)
+    monkeypatch.setattr(run_worker, "_get_run", AsyncMock(return_value=target))
+    monkeypatch.setattr(agent_run_service, "stream_agent_run_events", events)
+    monkeypatch.setattr(agent_run_service, "load_agent_run_result", AsyncMock(return_value={"status": "completed"}))
+    await run_worker.process_agent_run({}, "parent")
+    assert executed == []

@@ -56,6 +56,12 @@ API/worker 不信任浏览器内存中的完整配置。请求可以提供受限
 
 Viewer、附件和 artifact API 通过持久化 Workspace/Workdir 读取文件，不连接 Agent execution runtime。沙盒虚拟路径、Viewer scope、对象 URL 和宿主机路径在各自边界中转换，不能互相替代。
 
+## 子运行与执行位置
+
+父 Run 调用 `task` 或 `subagent_await` 等待子运行时，worker 可在父执行作用域内推进尚未领取的自身子 Run。子运行使用独立上下文、Run、Attempt 和 PostgreSQL lease；父子共享 Workdir，但模型事件与工具审计各自绑定自己的 Run。每父同时最多推进一个子运行，已经由其他 worker 持有 lease 的子运行由原 Owner 完成。
+
+等待超时只结束等待，子运行持续到自身或父运行终结。父终态的持久取消通知子 Owner 停止，父执行作用域等待子运行完成收尾。ARQ 槽数限制同时执行的队列作业数；父等待超时后继续工作时，可与其子运行同时活跃，实际活跃 Run 不等于槽数。取舍及饱和、取消和产物验证见[父任务等待时推进子任务](../develop-guides/decisions/implemented/2026-09-22-subagent-capacity.md)。
+
 ## 用户定时 Agent
 
 用户定时 Agent 由 `scheduled_agent_jobs` 保存 Project、Agent、提示词、审批模式和计划，worker 在 PostgreSQL 行锁下为到期任务创建唯一 occurrence。每次 occurrence 创建绑定原 Project 的独立 Conversation，并复用统一 AgentRun Request/Run 链路；触发记录只保存配置快照和提交状态，排队与执行状态分别从 AgentRunRequest 和 AgentRun 读取。明确的领域错误终结 occurrence，未知瞬时错误在下一轮重查 Request；单条失败不阻断同批任务。Redis/ARQ 只负责唤醒。

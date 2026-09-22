@@ -1,0 +1,9 @@
+services:
+  api:
+    environment:
+      SUBAGENT_CAPACITY_E2E: '1'
+  worker:
+    environment:
+      YUXI_WORKER_MAX_JOBS: '4'
+  replay:
+    command: [python, /app/test/e2e/runs/capacity_model.py]

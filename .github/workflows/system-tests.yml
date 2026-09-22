@@ -282,6 +282,8 @@ jobs:
         run: |
           echo "API_IMAGE=$(docker compose images -q api)" >> "$GITHUB_ENV"
           echo "PROVISIONER_IMAGE=$(docker compose images -q sandbox-provisioner)" >> "$GITHUB_ENV"
+      - name: Verify saturated parent and child execution
+        run: bash backend/test/e2e/runs/run_subagent_capacity.sh "$API_IMAGE" "$PROVISIONER_IMAGE"
       - name: Verify Web and CLI recovery in real Chrome
         env:
           CHROME_BIN: google-chrome

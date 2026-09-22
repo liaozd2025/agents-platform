@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -1019,13 +1021,14 @@ async def test_stream_agent_run_events_does_not_fallback_end_before_runtime_clea
     monkeypatch.setattr(agent_run_service.asyncio, "sleep", stop_after_one_poll)
 
     chunks = []
-    async for chunk in agent_run_service.stream_agent_run_events(
-        run_id="run-1",
-        after_seq="0",
-        current_uid="user-1",
-        verbose=False,
-    ):
-        chunks.append(chunk)
+    with pytest.raises(asyncio.CancelledError):
+        async for chunk in agent_run_service.stream_agent_run_events(
+            run_id="run-1",
+            after_seq="0",
+            current_uid="user-1",
+            verbose=False,
+        ):
+            chunks.append(chunk)
 
     assert sleep_calls == 1
     assert not any(chunk.startswith("event: end") for chunk in chunks)
@@ -2185,3 +2188,33 @@ def test_compact_stream_chunk_retains_status_and_field(field: str, chunk: dict):
 
     assert compact["status"] == chunk["status"]
     assert compact[field] == chunk[field]
+
+
+@pytest.mark.asyncio
+async def test_real_event_wait_propagates_cancellation_without_loading_result(monkeypatch):
+    """真实 SSE 取消不能伪装为排空成功，再让父工具继续执行。"""
+    entered = asyncio.Event()
+
+    async def events(*args, **kwargs):
+        """阻塞在实际事件读取边界，保留真实流与等待实现。"""
+        entered.set()
+        await asyncio.Event().wait()
+
+    loaded = []
+
+    async def load(**kwargs):
+        """任何取消后的结果读取都属于错误继续。"""
+        loaded.append(kwargs)
+        return {"status": "completed"}
+
+    monkeypatch.setattr(
+        agent_run_service, "_load_stream_run_for_user", AsyncMock(return_value=SimpleNamespace(status="running"))
+    )
+    monkeypatch.setattr(agent_run_service, "list_run_stream_events", events)
+    monkeypatch.setattr(agent_run_service, "load_agent_run_result", load)
+    waiter = asyncio.create_task(agent_run_service.await_agent_run_result(run_id="child", current_uid="user"))
+    await asyncio.wait_for(entered.wait(), 1)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert loaded == []

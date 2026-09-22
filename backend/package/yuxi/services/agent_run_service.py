@@ -17,7 +17,9 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from random import uniform
 from time import monotonic
@@ -903,6 +905,21 @@ async def load_agent_run_result(*, run_id: str, current_uid: str) -> dict:
         return await get_agent_run_result(run_id=run_id, current_uid=current_uid, db=db)
 
 
+_waited_run_executor: ContextVar[Callable[[str, str], asyncio.Task[None]] | None] = ContextVar(
+    "waited_run_executor", default=None
+)
+
+
+@contextmanager
+def agent_run_wait_executor(executor: Callable[[str, str], asyncio.Task[None]]):
+    """只在当前 worker 执行树中绑定等待时推进子运行的能力。"""
+    token = _waited_run_executor.set(executor)
+    try:
+        yield
+    finally:
+        _waited_run_executor.reset(token)
+
+
 async def await_agent_run_result(*, run_id: str, current_uid: str) -> dict:
     """阻塞至 run 终结并返回最终结果，供 cron 等 in-process 调用。
 
@@ -910,8 +927,13 @@ async def await_agent_run_result(*, run_id: str, current_uid: str) -> dict:
     因此排空即等待，无需额外轮询。等待上限继承事件流内部的 ``SSE_MAX_CONNECTION_MINUTES``。
     如果等待结束后 run 仍非终态，抛出 ``AgentRunWaitTimeout``，避免调用方把非终态误当最终结果。
     """
+    executor = _waited_run_executor.get()
+    execution = executor(run_id, current_uid) if executor is not None else None
     async for _ in stream_agent_run_events(run_id=run_id, after_seq="0-0", current_uid=current_uid, verbose=False):
-        pass
+        if execution is not None and execution.done():
+            execution.result()
+    if execution is not None and execution.done():
+        execution.result()
     result = await load_agent_run_result(run_id=run_id, current_uid=current_uid)
     if str(result.get("status") or "") not in TERMINAL_RUN_STATUSES:
         raise AgentRunWaitTimeout(result)
@@ -1110,7 +1132,7 @@ async def stream_agent_run_events(
                 idle_seconds = monotonic() - last_event_at
                 poll_interval = _next_run_sse_poll_interval(poll_interval, idle_seconds)
     except asyncio.CancelledError:
-        return
+        raise
 
 
 async def get_active_run_by_thread(*, thread_id: str, current_uid: str, db: AsyncSession) -> dict:

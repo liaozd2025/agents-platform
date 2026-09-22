@@ -7,6 +7,7 @@ import json
 import os
 import time
 import uuid
+from contextvars import Context
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -897,6 +898,59 @@ async def _consume_stream_with_cancel(agen, run_ctx: RunContext):
 
 
 async def process_agent_run(ctx, run_id: str):
+    """在父执行作用域内串行推进等待的子运行，领取仍由持久 lease 竞争。"""
+    from yuxi.services.agent_run_service import agent_run_wait_executor
+
+    child_execution = asyncio.Lock()
+    children: dict[str, asyncio.Task] = {}
+
+    async def execute_waited_child(child_id: str, uid: str) -> None:
+        """只推进本父运行的 pending 子任务，不越过已有执行 Owner。"""
+        async with child_execution:
+            for _ in range(WorkerSettings.max_tries):
+                child = await _get_run(child_id)
+                if (
+                    child is None
+                    or child.run_type != "subagent"
+                    or child.created_by_run_id != run_id
+                    or child.uid != uid
+                    or child.status != "pending"
+                ):
+                    return
+                try:
+                    await _process_agent_run(ctx, child_id)
+                except RetryableRunError:
+                    # 准备失败只在持久 Attempt 预算内重试，执行后不确定结果不重放。
+                    continue
+                return
+
+    def start_waited_child(child_id: str, uid: str) -> asyncio.Task[None]:
+        """等待超时只结束等待；子执行持续到自身或父运行结束。"""
+        if child_id not in children or children[child_id].done():
+            # 子 Run 从持久输入恢复，不能继承父 LangGraph 的配置、事件流和工具审计上下文。
+            children[child_id] = asyncio.create_task(execute_waited_child(child_id, uid), context=Context())
+        return children[child_id]
+
+    with agent_run_wait_executor(start_waited_child):
+        try:
+            await _process_agent_run(ctx, run_id)
+        finally:
+            # 持久终态已通知后代停止；再次 Task.cancel 会打断子 Owner 的终态收敛。
+            cleanup = asyncio.gather(*children.values(), return_exceptions=True)
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            for result in cleanup.result():
+                if isinstance(result, Exception):
+                    logger.warning(f"Run {run_id} child execution ended with {type(result).__name__}")
+            if cancelled:
+                raise asyncio.CancelledError
+
+
+async def _process_agent_run(ctx, run_id: str):
     """执行队列中的 AgentRun，并只从 run 列和输入消息恢复运行参数。"""
     run = await _get_run(run_id)
     if not run:
