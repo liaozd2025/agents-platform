@@ -451,6 +451,7 @@ async def dispatch_next_request(
     uid: str,
     agent_slug: str,
     thread_id: str,
+    skip_locked: bool = False,
 ) -> str | None:
     """派发线程队头请求。自管会话，提交后投递 ARQ。
 
@@ -459,7 +460,9 @@ async def dispatch_next_request(
     run_id = None
     workdir_binding = None
     async with pg_manager.get_async_session_context() as db:
-        conversation = await ConversationRepository(db).lock_conversation_by_thread_id(thread_id)
+        conversation = await ConversationRepository(db).lock_conversation_by_thread_id(
+            thread_id, skip_locked=skip_locked
+        )
         if not _conversation_matches(conversation, uid=uid, agent_slug=agent_slug):
             return None
         workdir_binding = await resolve_conversation_workdir_binding(
@@ -517,18 +520,12 @@ async def recover_pending_dispatches() -> None:
         scopes = {tuple(row) for row in pending_result.all()}
         scopes.update(tuple(row) for row in scopes_result.all())
 
-    recovered = await asyncio.gather(
-        *(
-            dispatch_next_request(uid=uid, agent_slug=agent_slug, thread_id=thread_id)
-            for uid, agent_slug, thread_id in scopes
-        ),
-        return_exceptions=True,
-    )
-    for result in recovered:
-        if isinstance(result, BaseException):
-            logger.error(f"Failed to recover pending run scope: {result}")
+    for uid, agent_slug, thread_id in scopes:
+        try:
+            run_id = await dispatch_next_request(uid=uid, agent_slug=agent_slug, thread_id=thread_id, skip_locked=True)
+        except Exception as exc:
+            logger.error(f"Failed to recover pending run scope: {exc}")
             continue
-        run_id = result
         if run_id:
             logger.info(f"Recovered pending run or queue: {run_id}")
 

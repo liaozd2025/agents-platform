@@ -29,6 +29,13 @@ for ((i=0; i<600; i++)); do
 done
 [[ -f "$KB_E2E_STATE_DIR/stop-worker" ]]
 "${compose[@]}" stop -t 30 worker
+touch "$KB_E2E_STATE_DIR/worker-stopped"
+for ((i=0; i<300; i++)); do
+    if [[ -f "$KB_E2E_STATE_DIR/pending-created" ]]; then break; fi
+    if ! kill -0 "$test_pid" 2>/dev/null; then wait "$test_pid"; exit 1; fi
+    sleep 0.1
+done
+[[ -f "$KB_E2E_STATE_DIR/pending-created" ]]
 "${compose[@]}" up -d --no-deps worker
 touch "$KB_E2E_STATE_DIR/worker-restarted"
 wait "$test_pid"

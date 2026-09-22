@@ -64,6 +64,8 @@ Viewer、附件和 artifact API 通过持久化 Workspace/Workdir 读取文件�
 
 ## 恢复和失败
 
+恢复扫描逐个处理去重后的 pending Run 与 queued Request 线程，每个恢复进程同时最多一个派发事务。数据库行锁已被占用的线程由 `SKIP LOCKED` 跳过，留待后续周期重查；其他线程继续派发。实时提交和终态后的直接派发仍等待线程行锁，Run 与消息写入的事务提交后才发布 ARQ。取舍见[恢复扫描决策](../develop-guides/decisions/implemented/2026-09-22-recovery-scan-capacity.md)。
+
 审批或用户问题中断时，系统把中断信息保存在对应 Run/checkpoint。resume 会根据线程绑定的 Agent 和当前用户重新构建 Context，再创建新的 Run；它不会从相邻 Run 猜测模型、工具或文件结果。
 
 如果 Agent 配置、模型、权限或工作区文件在两个 Run 之间发生变化，新的运行会使用新的有效配置；已完成 Run 的输出和事件仍绑定原来的 `request_id`、`run_id` 和消息。
