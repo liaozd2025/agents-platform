@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from types import SimpleNamespace
@@ -13,9 +14,9 @@ from sqlalchemy import func as sa_func
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from yuxi.services.agent_request_queue_service import (
+    NOT_IMPLEMENTED_QUEUE_POLICIES,
     DispatchResult,
     IntakeResult,
-    NOT_IMPLEMENTED_QUEUE_POLICIES,
     cancel_queued_request,
     finalize_dispatch,
     finalize_intake,
@@ -218,12 +219,20 @@ async def test_recover_pending_dispatches_isolates_failed_scope(monkeypatch: pyt
         yield Db()
 
     recovered: list[str] = []
+    active = peak = 0
 
     async def dispatch_next_request(**kwargs):
-        if kwargs["thread_id"] == "bad-thread":
-            raise RuntimeError("broken scope")
-        recovered.append(kwargs["thread_id"])
-        return "run-good"
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        try:
+            await asyncio.sleep(0)
+            if kwargs["thread_id"] == "bad-thread":
+                raise RuntimeError("broken scope")
+            recovered.append(kwargs["thread_id"])
+            return "run-good"
+        finally:
+            active -= 1
 
     from yuxi.services import agent_request_queue_service as service
 
@@ -233,6 +242,7 @@ async def test_recover_pending_dispatches_isolates_failed_scope(monkeypatch: pyt
     await service.recover_pending_dispatches()
 
     assert recovered == ["good-thread"]
+    assert peak == 1, "恢复不能为所有 scope 同时占用连接"
 
 
 @pytest.mark.asyncio
@@ -258,7 +268,7 @@ async def test_pending_linked_run_is_enqueued_without_opening_missing_directory(
         def __init__(self, _db):
             pass
 
-        async def lock_conversation_by_thread_id(self, _thread_id):
+        async def lock_conversation_by_thread_id(self, _thread_id, *, skip_locked=False):
             return conversation
 
     class RunRepo:
@@ -870,7 +880,6 @@ async def test_intake_idempotent_returns_existing(session):
 @pytest.mark.asyncio
 async def test_intake_idempotent_rejects_cross_user(session):
     from fastapi import HTTPException
-
     from yuxi.services.input_message_service import build_chat_input_message
 
     await _seed_thread(session)
@@ -893,7 +902,6 @@ async def test_intake_idempotent_rejects_cross_user(session):
 @pytest.mark.asyncio
 async def test_intake_idempotent_rejects_scope_mismatch(session):
     from fastapi import HTTPException
-
     from yuxi.services.input_message_service import build_chat_input_message
     from yuxi.storage.postgres.models_business import Conversation
 

@@ -1,0 +1,6 @@
+services:
+  api:
+    environment:
+      MODEL_FAILURE_E2E: '1'
+  replay:
+    command: [python, /app/test/e2e/runs/model_failure_fixture.py]

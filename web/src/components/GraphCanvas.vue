@@ -439,7 +439,10 @@ function renderGraph() {
   }
   // Three.js 提供真实三维坐标、轨道旋转和景深；粒子沿关系线流动强化科幻反馈。
   // 该库先返回图谱实例工厂，再传入挂载容器；直接把容器传给工厂只会得到未挂载的配置对象。
-  graphInstance ??= new ForceGraph3D(container.value, { controlType: 'orbit' })
+  // 原写法是 ??= 逻辑赋值（需 Chrome 85+），低版本会抛语法错误导致整个应用起不来。
+  // graphInstance 只可能是实例或 null/undefined（都是 falsy 之外的判断等价），
+  // 所以用 || 改写语义不变，且不用把下面这一长串链式初始化整块缩进。
+  graphInstance = graphInstance || new ForceGraph3D(container.value, { controlType: 'orbit' })
     .backgroundColor(theme.background)
     .showNavInfo(false)
     .enableNodeDrag(true)

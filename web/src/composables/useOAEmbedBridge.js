@@ -1,4 +1,4 @@
-import { onActivated, onDeactivated, onMounted, onUnmounted, ref, unref } from 'vue'
+import { onMounted, onUnmounted, ref, unref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChatThreadsStore } from '@/stores/chatThreads'
 import { useProjectsStore } from '@/stores/projects'
@@ -13,12 +13,18 @@ import { canAccessRoute, getAuthenticatedHomePath } from '@/utils/authNavigation
 import {
   createOAEmbedBridge,
   getOAEmbedRenewalDelay,
+  getOAEmbedRenewalTimerDelay,
   parseOAEmbedAllowedOrigins
 } from '@/utils/oaEmbedBridge'
 import { setOAEmbedAuthRequiredHandler, setOAEmbedNavigateHandler } from '@/utils/oaEmbedSession'
 
+// 仅用于定位 iframe 生命周期问题：模块级计数可以区分组件重建与同一实例重复启动。
+let embedBridgeInstanceCount = 0
+let embedBridgeStartCount = 0
+let embedBridgeStopCount = 0
 /** 在嵌入路由中将父项目下发的 OA 账号交换为 Yuxi 登录态。 */
 export function useOAEmbedBridge(enabled) {
+  const instanceId = ++embedBridgeInstanceCount
   const userStore = useUserStore()
   const chatThreadsStore = useChatThreadsStore()
   const projectsStore = useProjectsStore()
@@ -40,7 +46,16 @@ export function useOAEmbedBridge(enabled) {
     clearRenewalTimer()
     const delay = getOAEmbedRenewalDelay(accessToken)
     if (delay === null) return
-    renewalTimer = window.setTimeout(requestAuthRequired, delay)
+    // 记录实际等待时间，便于确认短有效期 token 不会在换票后立刻触发 logout/abort。
+    console.info('[OA iframe][诊断] 已安排 token 续期', { delayMs: delay })
+    const timerDelay = getOAEmbedRenewalTimerDelay(delay)
+    if (timerDelay === null) return
+    if (timerDelay < delay) {
+      // 长 token 先等待一个安全的分段时长，回调中重新计算剩余时间，避免 setTimeout 溢出。
+      renewalTimer = window.setTimeout(() => scheduleRenewal(accessToken), timerDelay)
+      return
+    }
+    renewalTimer = window.setTimeout(requestAuthRequired, timerDelay)
   }
 
   const clearAuthorization = (message) => {
@@ -58,6 +73,14 @@ export function useOAEmbedBridge(enabled) {
   }
 
   const startBridge = () => {
+    embedBridgeStartCount += 1
+    console.info('[OA iframe][诊断] startBridge', {
+      instanceId,
+      startCount: embedBridgeStartCount,
+      path: window.location.pathname,
+      hasBridge: Boolean(bridge),
+      enabled: Boolean(unref(enabled))
+    })
     if (bridge) return
     if (!unref(enabled)) {
       isAuthorized.value = true
@@ -76,7 +99,7 @@ export function useOAEmbedBridge(enabled) {
     bridge = createOAEmbedBridge({
       allowedOrigins,
       onAccount: async (account) => {
-        clearAuthorization('正在验证 OA 账号')
+        // 换票成功前不登出旧会话，避免 abort 认证控制器并取消正在加载的业务接口。
         try {
           const loginData = await authApi.exchangeOAAccount(account)
           await userStore.acceptEmbedToken(loginData.access_token)
@@ -105,7 +128,15 @@ export function useOAEmbedBridge(enabled) {
     bridge.start()
   }
 
-  const stopBridge = () => {
+  const stopBridge = (clearSession = false) => {
+    embedBridgeStopCount += 1
+    console.info('[OA iframe][诊断] stopBridge', {
+      instanceId,
+      stopCount: embedBridgeStopCount,
+      path: window.location.pathname,
+      clearSession,
+      hasBridge: Boolean(bridge)
+    })
     clearRenewalTimer()
     bridge?.stop()
     bridge = null
@@ -113,15 +144,14 @@ export function useOAEmbedBridge(enabled) {
     clearAuthRequiredHandler = null
     clearNavigateHandler?.()
     clearNavigateHandler = null
-    if (unref(enabled)) {
+    // keep-alive 切换只暂停桥接监听，真正卸载时才清理登录态。
+    if (clearSession && unref(enabled)) {
       clearAuthorization('等待 OA 授权')
     }
   }
 
   onMounted(startBridge)
-  onActivated(startBridge)
-  onDeactivated(stopBridge)
-  onUnmounted(stopBridge)
+  onUnmounted(() => stopBridge(true))
 
   return {
     isAuthorized,

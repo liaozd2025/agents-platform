@@ -128,6 +128,13 @@ function emitChange(item) {
     color: var(--gray-2000);
     background-color: color-mix(in srgb, var(--gray-800) 6%, var(--gray-0));
   }
+
+  /* color-mix 降级（Chrome 86 及更低内核不支持，整条声明会丢失）。静态值取亮色主题等价色。 */
+  @supports not (background-color: color-mix(in srgb, red, blue)) {
+    &.active {
+      background-color: #f3f3f3; /* color-mix(in srgb, var(--gray-800) 6%, var(--gray-0)) */
+    }
+  }
 }
 
 .page-header-right {

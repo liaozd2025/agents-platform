@@ -41,6 +41,54 @@ async function withServer(run) {
   }
 }
 
+test('知识库图片仅向同源图片接口发送认证头', async () => {
+  await withServer(async (server) => {
+    storageValues.set('user_token', 'synthetic-image-token')
+    globalThis.window = { location: new URL('https://app.example/agent') }
+    setActivePinia(createPinia())
+    const calls = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url, options })
+      return new Response('image-bytes', { headers: { 'content-type': 'image/png' } })
+    }
+    try {
+      const { fetchKnowledgeImage } = await server.ssrLoadModule('/src/apis/knowledge_api.js')
+      for (const src of [
+        'https://outside.example/api/knowledge/databases/a/images/x',
+        '//outside.example/api/knowledge/databases/a/images/x',
+        'http://app.example/api/knowledge/databases/a/images/x',
+        'https://app.example:444/api/knowledge/databases/a/images/x',
+        '/capture?looks=/api/knowledge/databases/a/images/x',
+        '/prefix/api/knowledge/databases/a/images/x',
+        '/api/knowledge/databases/a/images/../../../../capture',
+        'data:image/png;base64,AA==',
+        'http://['
+      ]) {
+        assert.equal(await fetchKnowledgeImage(src), null, src)
+      }
+      assert.equal(calls.length, 0)
+      for (const src of [
+        '/api/knowledge/databases/a/images/x',
+        'https://app.example/api/knowledge/databases/a/images/x',
+        '//app.example/api/knowledge/databases/a/images/x'
+      ]) {
+        const blob = await fetchKnowledgeImage(src)
+        assert.ok(blob instanceof Blob)
+        assert.equal(await blob.text(), 'image-bytes')
+      }
+      assert.equal(calls.length, 3)
+      for (const { url, options } of calls) {
+        assert.equal(url, 'https://app.example/api/knowledge/databases/a/images/x')
+        assert.equal(options.headers.Authorization, 'Bearer synthetic-image-token')
+        assert.equal(options.mode, 'same-origin')
+      }
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
 test('公开登录 401 保留服务端错误且不清理当前会话', async () => {
   await withServer(async (server) => {
     storageValues.set('user_token', 'existing-token')
@@ -467,5 +515,56 @@ test('工具元数据 API 使用普通用户认证且普通用户可正常请求
     assert.equal(result.success, true)
     assert.equal(result.data.length, 1)
     assert.equal(result.data[0].slug, 'web_search')
+  })
+})
+
+test('创建 Run 丢响应后仅以原编号和原请求体重放', async () => {
+  await withServer(async (server) => {
+    globalThis.window = { location: { href: '/current' } }
+    const calls = []
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url, body: JSON.parse(options.body) })
+      if (calls.length === 1) throw new TypeError('synthetic response lost after commit')
+      return new Response(JSON.stringify({ request_id: 'stable-request', run_id: 'same-run' }), {
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const { agentApi } = await server.ssrLoadModule('/src/apis/agent_api.js')
+    const result = await agentApi.createAgentRun({
+      query: 'once',
+      thread_id: 'same-thread',
+      agent_slug: 'agent',
+      meta: { request_id: 'stable-request', attachment_file_ids: ['file'] },
+      model_spec: 'provider:model'
+    })
+    assert.equal(result.run_id, 'same-run')
+    assert.equal(calls.length, 2)
+    assert.deepEqual(calls[0], calls[1])
+  })
+})
+
+test('提交被明确拒绝或缺少幂等编号时不自动重放，重放丢响应保留未知结果', async () => {
+  await withServer(async (server) => {
+    const { agentApi } = await server.ssrLoadModule('/src/apis/agent_api.js')
+    for (const [meta, status, count, uncertain] of [
+      [{ request_id: 'stable' }, 400, 1, false],
+      [{}, 0, 1, false],
+      [{ request_id: 'stable' }, 0, 2, true]
+    ]) {
+      let calls = 0
+      globalThis.fetch = async () => {
+        calls++
+        if (!status) throw new TypeError('connection lost')
+        return new Response(JSON.stringify({ detail: 'rejected' }), {
+          status,
+          headers: { 'content-type': 'application/json' }
+        })
+      }
+      await assert.rejects(agentApi.createAgentRun({ query: 'once', meta }), (error) => {
+        assert.equal(Boolean(error.submissionUncertain), uncertain)
+        return true
+      })
+      assert.equal(calls, count)
+    }
   })
 })

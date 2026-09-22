@@ -1,0 +1,33 @@
+name: CLI Tests
+
+on:
+  pull_request:
+    paths:
+      - 'packages/yuxi-cli/**'
+      - '.github/workflows/cli.yml'
+  push:
+    branches: ['**']
+    tags: ['v[0-9]*']
+    paths:
+      - 'packages/yuxi-cli/**'
+      - '.github/workflows/cli.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/yuxi-cli
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.12.6'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: uv sync --frozen --group test
+      - run: uv run --no-sync pytest

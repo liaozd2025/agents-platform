@@ -447,6 +447,13 @@ defineExpose({
     transform: translateY(-1px);
   }
 
+  /* color-mix 降级（Chrome 86 及更低内核不支持，整条声明会丢失）。静态值取亮色主题等价色。 */
+  @supports not (box-shadow: color-mix(in srgb, red, blue)) {
+    &:hover {
+      box-shadow: 0 4px 8px rgba(120, 132, 223, 0.25); /* color-mix(in srgb, var(--main-bright) 25%, transparent) */
+    }
+  }
+
   &:disabled {
     opacity: 0.5;
     color: var(--gray-0);

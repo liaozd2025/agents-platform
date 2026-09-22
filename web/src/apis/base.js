@@ -90,6 +90,12 @@ function publicErrorMessage(url, status, headers, requiresAuth) {
 /** 统一处理普通请求与流式请求的 401，并在嵌入态请求 OA 刷新令牌。 */
 export function handleUnauthorizedError(error) {
   const userStore = useUserStore()
+  // 该入口也被 SSE 等直接 fetch 调用，补充来源堆栈以覆盖统一请求层之外的 401。
+  console.warn('[认证诊断] 进入未授权处理', {
+    errorMessage: error?.message || '',
+    status: error?.status ?? null,
+    stack: new Error().stack
+  })
   if (requestOAEmbedAuthentication()) {
     if (userStore.isLoggedIn) userStore.logout()
     throw error
@@ -168,6 +174,10 @@ export async function apiRequest(url, options = {}, requiresAuth = true, respons
       }
 
       if (response.status === 401 && requiresAuth) {
+        // 401 会触发 OA 重新授权并取消全部并发请求；必须先记录首个失败接口，避免把后续 AbortError 误判为根因。
+        console.warn('[认证诊断] 首个受保护接口返回 401', {
+          ...safeRequestMetadata(url, requestOptions, response)
+        })
         handleUnauthorizedError(error)
       } else if (response.status === 403) {
         throw error

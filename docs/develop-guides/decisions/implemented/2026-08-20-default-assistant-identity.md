@@ -26,3 +26,7 @@ Owner：backend/package/yuxi/agents/buildin/chatbot/prompt.py
 | 验收主张 | 失败面 | 语义 Owner | 直接证据 / 命令 | 负向案例 | 当前结果 |
 |---|---|---|---|---|---|
 | 默认系统提示词使用九典身份且不包含“语析” | 默认聊天仍回答旧品牌身份，或身份回答附加其他内容 | `backend/package/yuxi/agents/buildin/chatbot/prompt.py` | `docker compose exec -T api uv run --group test pytest test/unit/agents/test_chatbot_prompt.py -q` | 恢复旧身份声明后，`test_default_chatbot_identifies_as_jiudian_ai_assistant` 因缺少九典身份并出现“语析”而失败 | Passed |
+
+## 关系
+
+本记录确立的九典默认身份仍然有效，但其注入规则已被 [自定义智能体的系统提示词优先于默认身份](2026-09-21-custom-agent-prompt-identity-precedence.md) 部分取代：默认身份改为与 Agent 自定义系统提示词互斥注入。因此本记录「其余回答规范、文件系统约束和自定义 Agent 系统提示词拼接顺序保持不变」中的拼接顺序结论不再成立。

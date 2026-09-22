@@ -286,7 +286,13 @@ export const useAgentStore = defineStore(
     }
 
     function resetAgentConfig() {
-      agentConfig.value = { ...originalAgentConfig.value }
+      // 新建智能体时清空「当前配置」与「比对基线」两者。
+      // 原实现只把 agentConfig 回滚为 originalAgentConfig（即上一个选中 agent 的配置），
+      // 会造成两个问题：新建弹窗预填上一个 agent 的残留配置；且因两侧相等，
+      // changedAgentConfig 为空 → hasConfigChanges 为 false → 新建提交不带 config_json，
+      // 表单显示有内容却被静默丢弃。清空基线后，用户在弹窗里的任何填写都会被视为变更并提交。
+      agentConfig.value = {}
+      originalAgentConfig.value = {}
     }
 
     function updateAgentConfig(updates) {

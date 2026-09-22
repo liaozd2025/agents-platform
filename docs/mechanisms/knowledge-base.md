@@ -87,7 +87,9 @@ worker 用唯一 attempt token claim Task 并续租 lease；重复投递和失�
 
 ## Agent 如何看到知识库
 
-运行时准备阶段先按用户权限读取知识库，再与 Agent 的 `Context.knowledges` 求交集，结果保存为 `_visible_knowledge_bases`。工具的 `kb_id`、`file_id` 和文件名必须属于这份运行时快照；新的 Run 会重新计算权限，正在运行的 Context 不会因中途撤权而自动刷新。
+运行时准备阶段按用户可读范围与 Agent 的 `Context.knowledges` 求交集。每次知识库工具执行前，共用入口通过现有 Manager 和 repository 从 PostgreSQL 重读用户组织与知识库共享配置，再与本次任务的选库范围求交集；会话保存的 `_visible_knowledge_bases` 不作为后续执行授权。工具只在重新确认的知识库内查找目标文件，权限查询失败时停止读取并返回无可访问知识库。
+
+共享撤销已提交且后续工具尚未通过权限检查时，撤权对运行中的 Context 生效。检查与内容读取不在同一事务中，已经通过检查的操作、历史消息及已下载文件不会被收回。功能角色、登录锁定和账号删除的检查仍由各入口原有规则负责，共享范围复核不统一这些口径。
 
 知识库工具由内置 `knowledge-base` Skill 提供。模型读取该 Skill 的 `SKILL.md` 后，才会看到：
 

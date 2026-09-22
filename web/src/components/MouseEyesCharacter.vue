@@ -218,7 +218,14 @@ onBeforeUnmount(() => {
  */
 .mouse-eyes {
   position: absolute;
-  inset: 0;
+  /*
+   * 不用 inset 简写：它需要 Chrome 87+，而内网终端存在 Chrome 86（无 VPN、无法升级），
+   * 一旦失效这个绝对定位容器就是 0×0，整块插画直接空白。四向属性写法完全等价且全版本通用。
+   */
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   overflow: hidden;
   /* 装饰层不参与事件，避免遮挡左侧区域的鼠标交互 */
   pointer-events: none;
@@ -261,6 +268,19 @@ onBeforeUnmount(() => {
 }
 
 /*
+ * < Chrome 88 没有 aspect-ratio：.stage 的 height:42% + width:auto 推不出宽度，
+ * 宽度会退化成「按 hero-img 的 width:100% 撑满容器」，角色被横向拉宽（实测 478px，正常 154px）。
+ * 降级办法：交给 img 用它自己的固有比例算宽度（素材 brand-kid-hero.png 是 580×883，
+ * 与上面 .stage 声明的 580/883 完全一致，所以两者结果等价）。
+ * 用 @supports 包住，现代浏览器一个字节都不受影响。
+ */
+@supports not (aspect-ratio: 580 / 883) {
+  .hero-img {
+    width: auto;
+  }
+}
+
+/*
  * 眼睛定位：按素材量取的像素坐标换算成图片百分比（底图为 580×883）。
  * 瞳孔中心为左 (500, 528)、右 (656, 546)（源素材坐标），
  * 换算后左眼落在 33.3% / 48.7%、右眼落在 60.2% / 50.7%。
@@ -279,6 +299,22 @@ onBeforeUnmount(() => {
   overflow: hidden;
   border-radius: 50%;
   transform: translate(-50%, -50%);
+}
+
+/*
+ * < Chrome 88 没有 aspect-ratio：.eye 只声明了宽度，高度会塌成 0（眼睛直接看不见）。
+ * 降级办法用 padding-bottom 百分比撑高 —— padding 百分比永远按「包含块宽度」解析，
+ * 与 width:17.2% 同源，因此得到的正是正方形眼球框。
+ * 瞳孔用 inset:0 + margin:auto 相对 .eye 的 padding box 居中，padding 计入 padding box，
+ * 所以瞳孔尺寸与可移动半径都不变；JS 侧 measureEyes 读的是 offsetWidth / offsetHeight
+ * （getBoundingClientRect 同理），二者都把 padding 算在内，测量结果不受影响。
+ * 同样用 @supports 包住，现代浏览器保持原样。
+ */
+@supports not (aspect-ratio: 1) {
+  .eye {
+    height: 0;
+    padding-bottom: 17.2%;
+  }
 }
 
 .eye.is-right {
@@ -301,7 +337,11 @@ onBeforeUnmount(() => {
  */
 .pupil {
   position: absolute;
-  inset: 0;
+  /* 同 .mouse-eyes：避开需要 Chrome 87+ 的 inset，保证老内核上瞳孔定位与居中仍成立。 */
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   margin: auto;
   width: 82%;
   height: 82%;

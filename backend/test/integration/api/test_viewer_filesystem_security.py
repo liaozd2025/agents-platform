@@ -10,13 +10,13 @@ from yuxi.workspace.paths import user_workdir_host_dir
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 
-async def _create_thread_for_user(test_client, headers: dict[str, str]) -> tuple[str, str]:
+async def create_thread_for_user(test_client, headers: dict[str, str]) -> tuple[str, str]:
+    """创建真实安全测试线程，缺失默认智能体时立即失败。"""
     agent_resp = await test_client.get("/api/agent/default", headers=headers)
     assert agent_resp.status_code == 200, agent_resp.text
     agent = agent_resp.json().get("agent") or {}
     agent_id = agent.get("slug") or agent.get("id")
-    if not agent_id:
-        pytest.skip("Default agent payload missing id field.")
+    assert agent_id, "Default agent payload missing id field."
 
     create_resp = await test_client.post(
         "/api/chat/thread",
@@ -37,7 +37,7 @@ async def _create_thread_for_user(test_client, headers: dict[str, str]) -> tuple
 async def test_viewer_download_blocks_project_symlink_escape(test_client, standard_user):
     headers = standard_user["headers"]
     uid = str(standard_user["user"]["uid"])
-    thread_id, workdir_path = await _create_thread_for_user(test_client, headers)
+    thread_id, workdir_path = await create_thread_for_user(test_client, headers)
 
     project_root = f"/home/gem/user-data/{workdir_path}"
     file_path = f"{project_root}/escape.txt"
@@ -55,7 +55,7 @@ async def test_viewer_download_blocks_project_symlink_escape(test_client, standa
 async def test_viewer_upload_blocks_project_symlink_escape(test_client, standard_user, tmp_path: Path):
     headers = standard_user["headers"]
     uid = str(standard_user["user"]["uid"])
-    thread_id, workdir_path = await _create_thread_for_user(test_client, headers)
+    thread_id, workdir_path = await create_thread_for_user(test_client, headers)
 
     project_root = f"/home/gem/user-data/{workdir_path}"
     outside_dir = tmp_path / f"yuxi-viewer-{uuid.uuid4().hex}"
@@ -77,7 +77,7 @@ async def test_viewer_upload_blocks_project_symlink_escape(test_client, standard
 async def test_viewer_upload_preserves_non_directory_parent_error(test_client, standard_user):
     headers = standard_user["headers"]
     uid = str(standard_user["user"]["uid"])
-    thread_id, workdir_path = await _create_thread_for_user(test_client, headers)
+    thread_id, workdir_path = await create_thread_for_user(test_client, headers)
 
     (user_workdir_host_dir(uid, workdir_path) / "occupied").write_text("file", encoding="utf-8")
 
@@ -95,7 +95,7 @@ async def test_viewer_upload_preserves_non_directory_parent_error(test_client, s
 async def test_viewer_upload_does_not_replace_hidden_target_symlink(test_client, standard_user, tmp_path: Path):
     headers = standard_user["headers"]
     uid = str(standard_user["user"]["uid"])
-    thread_id, workdir_path = await _create_thread_for_user(test_client, headers)
+    thread_id, workdir_path = await create_thread_for_user(test_client, headers)
 
     outside = tmp_path / f"yuxi-viewer-target-{uuid.uuid4().hex}.txt"
     outside.write_text("outside", encoding="utf-8")

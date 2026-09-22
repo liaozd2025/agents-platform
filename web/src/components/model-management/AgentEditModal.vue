@@ -357,10 +357,15 @@ const saveAgent = async () => {
   saving.value = true
   try {
     const payload = buildAgentPayload()
+    // 模型配置（系统提示词、模型、工具等）在「新增」与「编辑」两条路径都必须提交：
+    // 后端 POST /api/agent 与 PUT /api/agent/{id} 都接受 config_json，
+    // 此前只在编辑分支且 hasConfigChanges 为真时才带上，导致新增弹窗里填写的
+    // 模型配置被静默丢弃（界面仍提示「智能体已创建」）。
+    if (agentStore.hasConfigChanges) {
+      payload.config_json = { context: agentStore.changedAgentConfig }
+    }
+
     if (editingAgentId.value) {
-      if (agentStore.hasConfigChanges) {
-        payload.config_json = { context: agentStore.changedAgentConfig }
-      }
       const updated = await agentStore.updateAgentProfile(editingAgentId.value, payload)
       captureProfileBaseline()
       emit('saved', { mode: 'edit', agent: updated })
@@ -827,6 +832,13 @@ defineExpose({
   font-weight: 600;
   opacity: 0;
   transition: opacity 0.16s ease;
+}
+
+/* color-mix 降级（Chrome 86 及更低内核不支持，整条声明会丢失）。静态值取亮色主题等价色。 */
+@supports not (background: color-mix(in srgb, red, blue)) {
+  .agent-icon-mask {
+    background: rgba(30, 31, 31, 0.62); /* color-mix(in srgb, var(--gray-900) 62%, transparent) */
+  }
 }
 
 .agent-icon-upload.is-empty .agent-icon-mask {

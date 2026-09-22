@@ -1,0 +1,7 @@
+# 复用上一项 E2E 的隔离应用拓扑，只替换确定性模型与 MCP fixture。
+services:
+  api:
+    environment:
+      RUN_RETRY_E2E: '1'
+  replay:
+    command: [python, /app/test/e2e/runs/retry_fixture.py]

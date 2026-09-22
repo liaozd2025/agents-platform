@@ -20,6 +20,8 @@ export function setOAEmbedAuthRequiredHandler(handler) {
 /** 请求 OA 重新授权；返回是否存在活动嵌入会话。 */
 export function requestOAEmbedAuthentication() {
   if (!authRequiredHandler) return false
+  // 重新授权会清理认证控制器并取消全部并发请求；记录调用堆栈定位真实 401 来源。
+  console.warn('[认证诊断] 收到重新授权请求', { stack: new Error().stack })
   authRequiredHandler()
   return true
 }

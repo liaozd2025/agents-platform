@@ -18,12 +18,17 @@
     <nav class="login-navbar">
       <div class="navbar-content">
         <div class="brand-container" @click="goHome" style="cursor: pointer">
-          <img v-if="brandLogo" :src="brandLogo" alt="logo" class="brand-logo" />
-          <h1 class="brand-text">
-            <span v-if="brandOrgName" class="brand-org">{{ brandOrgName }}</span>
-            <span v-if="brandOrgName && brandName !== brandOrgName" class="brand-separator"></span>
-            <span v-if="brandName !== brandOrgName" class="brand-main">{{ brandName }}</span>
-          </h1>
+          <!-- 品牌配置（/api/system/info）就绪前整体不渲染：
+               避免先闪一帧兜底文案（brand-main 样式，与正式的 brand-org 颜色不同）再跳成正式内容。
+               接口失败时 isLoaded 保持 false，品牌位留空而不是显示错误文案。 -->
+          <template v-if="infoStore.isLoaded">
+            <img v-if="brandLogo" :src="brandLogo" alt="logo" class="brand-logo" />
+            <h1 class="brand-text">
+              <span v-if="brandOrgName" class="brand-org">{{ brandOrgName }}</span>
+              <span v-if="brandOrgName && brandName !== brandOrgName" class="brand-separator"></span>
+              <span v-if="brandName !== brandOrgName" class="brand-main">{{ brandName }}</span>
+            </h1>
+          </template>
         </div>
       </div>
     </nav>
@@ -274,7 +279,8 @@ const brandOrgName = computed(() => {
 })
 const brandName = computed(() => {
   const orgName = brandOrgName.value
-  const brandNameRaw = infoStore.branding?.name?.trim() || 'Yuxi'
+  // 兜底用产品名「智能体平台」，不要用内部代号 Yuxi（品牌配置接口未返回时用户会看到它）
+  const brandNameRaw = infoStore.branding?.name?.trim() || '智能体平台'
 
   if (orgName && brandNameRaw && orgName !== brandNameRaw) {
     return brandNameRaw
@@ -474,6 +480,8 @@ const handleOIDCLogin = async () => {
       const redirectPath =
         sessionStorage.getItem('redirect') || router.currentRoute.value.query.redirect || '/'
       sessionStorage.setItem('oidc_redirect', redirectPath)
+      // 记录“保持登录 30 天”的勾选状态，供 OIDC 回调（OIDCCallbackView）决定令牌写 localStorage 还是 sessionStorage。
+      // 必须用 sessionStorage：它跟随当前标签页，跨站往返 IdP 后仍可读；localStorage 会跨标签页串味。
       sessionStorage.setItem('oidc_remember_login', String(rememberLogin.value))
 
       // 跳转到 OIDC Provider
@@ -884,7 +892,10 @@ onUnmounted(() => {
   margin-top: 16px;
   padding: 10px 12px;
   background-color: var(--color-error-50);
-  border: 1px solid color-mix(in srgb, var(--color-error-500) 25%, transparent);
+  /* 原写法 color-mix(in srgb, var(--color-error-500) 25%, transparent) 需要 Chrome 111+，
+     低版本浏览器会让整条 border 声明失效（边框直接消失），故固定为等价的 rgba：
+     --color-error-500 = #ff4d4f，25% 不透明度叠加 transparent。 */
+  border: 1px solid rgba(255, 77, 79, 0.25);
   border-radius: 6px;
   color: var(--color-error-700);
   font-size: 13px;
@@ -946,7 +957,8 @@ onUnmounted(() => {
 
       &:hover {
         color: var(--gray-0);
-        background-color: color-mix(in srgb, var(--gray-0) 10%, transparent);
+        /* 同 .error-message：color-mix() 需 Chrome 111+，低版本会丢掉这条背景色，改为等价 rgba */
+        background-color: rgba(255, 255, 255, 0.1);
       }
     }
   }

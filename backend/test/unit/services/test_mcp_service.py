@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -49,6 +50,42 @@ class _FakeClient:
 
     async def get_tools(self):
         return self._tools
+
+
+@pytest.mark.parametrize("transport", ["sse", "streamable_http", "streamable-http", "http"])
+@pytest.mark.parametrize(
+    "target",
+    ["http://example.test/moved", "https://other.test/moved", "https://example.test:444/moved"],
+)
+async def test_mcp_http_factory_blocks_changed_origin_before_send(monkeypatch, transport, target):
+    """协议、主机或端口变化时，所有 HTTP 传输别名均在发送前拒绝。"""
+    sent = []
+
+    def wire(request):
+        """只记录实际到达传输层的请求。"""
+        sent.append(request.url)
+        return httpx.Response(307, headers={"Location": target})
+
+    monkeypatch.setattr(
+        mcp_service,
+        "create_mcp_http_client",
+        lambda **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(wire), follow_redirects=True, **kwargs),
+    )
+    config = {"remote": {"transport": transport, "url": "https://example.test/mcp"}}
+    client = await mcp_service.get_mcp_client(config)
+    assert "httpx_client_factory" not in config["remote"]
+    factory = client.connections["remote"]["httpx_client_factory"]
+    async with factory(headers={"X-Vendor-Key": "synthetic-key"}) as http:
+        with pytest.raises(httpx.RequestError, match="must stay on the configured origin"):
+            await http.get("https://example.test/mcp")
+    assert sent == [httpx.URL("https://example.test/mcp")]
+
+
+async def test_mcp_client_preserves_builtin_stdio_config():
+    """HTTP 安全策略不进入内置 stdio 配置或持久化配置。"""
+    config = {"builtin": {"transport": "stdio", "command": "mcp-server-chart", "args": []}}
+    client = await mcp_service.get_mcp_client(config)
+    assert client.connections == config
 
 
 async def test_ensure_builtin_mcp_servers_removes_retired_system_server(monkeypatch, mcp_session):

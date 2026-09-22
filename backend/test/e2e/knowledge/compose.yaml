@@ -1,0 +1,98 @@
+x-app: &app
+  image: ${KB_E2E_API_IMAGE:?Provide the dependency-matched local API image}
+  pull_policy: never
+  user: '0:0'
+  working_dir: /app
+  entrypoint: [uv, run, --no-sync]
+  environment:
+    POSTGRES_URL: postgresql+asyncpg://kb_test:synthetic-test-only@postgres/kb_test
+    REDIS_URL: redis://redis:6379/0
+    MINIO_URI: http://minio:9000
+    MINIO_ACCESS_KEY: minioadmin
+    MINIO_SECRET_KEY: minioadmin
+    JWT_SECRET_KEY: kb-test-jwt-synthetic-key-only-12345678
+    API_KEY_DERIVATION_SECRET: kb-test-api-synthetic-key-only-12345678
+    SANDBOX_PROVISIONER_TOKEN: kb-test-sandbox-synthetic-key-12345678
+    SANDBOX_PROVISIONER_URL: http://sandbox-provisioner:8002
+    YUXI_ENV: development
+    YUXI_RUNTIME_DIR: /state/runtime
+    YUXI_USER_DATA_DIR: /state/threads
+    YUXI_SKILL_DATA_DIR: /state/skills
+    YUXI_SKILL_PROJECTION_DIR: /state/projections
+    YUXI_LEGACY_STORAGE_DIR: /state/legacy
+    POSTGRES_POOL_SIZE: '8'
+    POSTGRES_MAX_OVERFLOW: '4'
+    LANGGRAPH_POSTGRES_POOL_SIZE: '4'
+    YUXI_WORKER_MAX_JOBS: '2'
+    PYTHONDONTWRITEBYTECODE: '1'
+    TEST_KB_BASE_URL: http://api:5050
+    TEST_KB_MODEL_URL: http://replay:8777
+  volumes:
+    - ${KB_E2E_REPO_ROOT:?}/backend/package:/app/package:ro
+    - ${KB_E2E_REPO_ROOT}/backend/server:/app/server:ro
+    - ${KB_E2E_REPO_ROOT}/backend/test:/app/test:ro
+    - ${KB_E2E_STATE_DIR:?}:/state
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    pull_policy: never
+    environment:
+      POSTGRES_USER: kb_test
+      POSTGRES_PASSWORD: synthetic-test-only
+      POSTGRES_DB: kb_test
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U kb_test -d kb_test]
+      interval: 1s
+      retries: 30
+  redis:
+    image: redis:7.4.10-alpine
+    pull_policy: never
+  minio:
+    image: quay.io/minio/minio:RELEASE.2023-03-20T20-16-18Z@sha256:6d770d7f255cda1f18d841ffc4365cb7e0d237f6af6a15fcdb587480cd7c3b93
+    pull_policy: never
+    command: [server, /data]
+    tmpfs: [/data]
+  sandbox-provisioner:
+    image: ${KB_E2E_PROVISIONER_IMAGE:?Provide the local provisioner image}
+    pull_policy: never
+    environment:
+      SANDBOX_PROVISIONER_TOKEN: kb-test-sandbox-synthetic-key-12345678
+      DOCKER_SANDBOX_PREFIX: ${COMPOSE_PROJECT_NAME}
+      DOCKER_NETWORK_PREFIX: ${COMPOSE_PROJECT_NAME}
+      PROVISIONER_BACKEND: docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${KB_E2E_STATE_DIR}/threads:/app/user-data
+      - ${KB_E2E_STATE_DIR}/projections:/app/skill-projections
+      - ${KB_E2E_REPO_ROOT}/docker/sandbox_provisioner/app.py:/app/app.py:ro
+      - ${KB_E2E_REPO_ROOT}/docker/sandbox_provisioner/sandbox-entrypoint.py:/app/sandbox-entrypoint.py:ro
+  migrator:
+    <<: *app
+    command: [python, -m, yuxi.storage_migration]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  api:
+    <<: *app
+    command: [uvicorn, server.main:app, --host, 0.0.0.0, --port, '5050']
+    depends_on: &migrated
+      migrator:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:5050/api/system/ready]
+      interval: 1s
+      timeout: 3s
+      retries: 90
+  worker:
+    <<: *app
+    command: [python, -m, server.worker_main]
+    depends_on: *migrated
+  replay:
+    <<: *app
+    command: [python, /app/test/e2e/knowledge/revocation_model.py]
+
+networks:
+  default:
+    internal: true

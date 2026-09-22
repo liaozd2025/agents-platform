@@ -64,6 +64,8 @@ Viewer、附件和 artifact API 通过持久化 Workspace/Workdir 读取文件�
 
 ## 恢复和失败
 
+恢复扫描逐个处理去重后的 pending Run 与 queued Request 线程，每个恢复进程同时最多一个派发事务。数据库行锁已被占用的线程由 `SKIP LOCKED` 跳过，留待后续周期重查；其他线程继续派发。实时提交和终态后的直接派发仍等待线程行锁，Run 与消息写入的事务提交后才发布 ARQ。取舍见[恢复扫描决策](../develop-guides/decisions/implemented/2026-09-22-recovery-scan-capacity.md)。
+
 审批或用户问题中断时，系统把中断信息保存在对应 Run/checkpoint。resume 会根据线程绑定的 Agent 和当前用户重新构建 Context，再创建新的 Run；它不会从相邻 Run 猜测模型、工具或文件结果。
 
 如果 Agent 配置、模型、权限或工作区文件在两个 Run 之间发生变化，新的运行会使用新的有效配置；已完成 Run 的输出和事件仍绑定原来的 `request_id`、`run_id` 和消息。
@@ -86,6 +88,8 @@ Viewer、附件和 artifact API 通过持久化 Workspace/Workdir 读取文件�
 `GET /api/chat/thread/{thread_id}/history` 返回当前用户可见线程的 `thread`、`runs` 和 `history`。`thread` 复用线程列表的标题、Project、Workdir 和状态投影；`runs` 按创建时间与 ID 排序，包含该 Conversation 的全部轻量 Run，包括没有普通消息的失败、取消和运行中记录。当前 History 不分页，Runs 与其采用相同的完整线程范围；Model/Tool 详细审计仍由独立审计接口按需读取。
 
 `runs` 每项包含 `run_id`、`request_id`、`run_type`、`created_by_run_id`、`status` 和 `timing`。Run 输入、运行清单和内部执行数据不进入这个阅读投影。`history` 中的消息通过 `run_id` 关联 Run，不包含 `run_timing`、`run_started_at` 或 `run_finished_at`；没有 Run 关联的旧消息仍保留。前端分别存储消息与 Runs，按 Run ID 分组，回复耗时和调试 Run 详情读取同一 Run 时间投影。
+
+主聊天和子线程列表初次挂载最近 20 个显示条目，“查看更早消息”每次增加 20 个；完整消息仍保留供引用和导出，切换线程重置显示窗口。流式 Markdown 按 100ms 合并更新，终态立即刷新完整正文。聊天组件卸载后关闭所有线程订阅、清空缓冲，并拒绝迟到回调重建线程状态；具体取舍和浏览器对照见[长聊天渲染](../develop-guides/decisions/implemented/2026-09-22-chat-render-capacity.md)。
 
 History 读取不改变已读标记。页面加载历史后以 `POST /api/chat/thread/{thread_id}/viewed` 显式标记已查看，并使用该操作返回的 Thread 更新侧栏。读取未知、已删除或其他用户的线程返回 404。多个查询遵循当前数据库事务隔离；响应不承诺跨 SQL 原子快照，运行中变化通过 SSE 与持久化重读收敛。
 

@@ -952,3 +952,61 @@ def _async_get_file_download(content: bytes, filename: str):
         }
 
     return _impl
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "denied"),
+    [
+        ("list_kbs", {"dummy": ""}, "当前没有可访问的知识库"),
+        ("get_mindmap", {"kb_name": "Private"}, "知识库 'Private' 不存在或当前会话未启用"),
+        ("query_kb", {"kb_id": "private", "query_text": "sentinel"}, "无法获取当前会话可访问的知识库"),
+        ("open_kb_document", {"kb_id": "private", "file_id": "file"}, "无法获取当前会话可访问的知识库"),
+        (
+            "find_kb_document",
+            {"kb_id": "private", "file_id": "file", "patterns": ["sentinel"]},
+            "无法获取当前会话可访问的知识库",
+        ),
+        ("search_file", {"query": "sentinel"}, "无法获取当前会话可访问的知识库"),
+        ("download_kb_file", {"kb_id": "private", "file_id": "file"}, "无法获取当前会话可访问的知识库"),
+    ],
+)
+async def test_held_runtime_rechecks_visibility(monkeypatch, tool_name, arguments, denied):
+    """同一个运行对象撤权后，七个公开工具都返回拒绝结果。"""
+    import yuxi.knowledge.runtime as knowledge_runtime
+
+    visible = [SimpleNamespace(kb_id="private", name="Private", description="secret", kb_type="milvus")]
+
+    async def current_databases(uid):
+        """模拟权限来源在运行期间发生变化。"""
+        assert uid == "reader"
+        return visible
+
+    monkeypatch.setattr(knowledge_runtime.knowledge_base, "get_databases_by_uid", current_databases)
+    runtime = SimpleNamespace(context=SimpleNamespace(uid="reader", knowledges=["private"]))
+    assert (await tools.list_kbs.coroutine(dummy="", runtime=runtime))[0]["kb_id"] == "private"
+    visible.clear()
+    assert await _run_tool(_tool_callable(getattr(tools, tool_name)), runtime=runtime, **arguments) == denied
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query_fails", [False, True])
+async def test_visibility_refresh_keeps_task_scope_and_fails_closed(monkeypatch, query_fails):
+    """刷新不扩大任务选库范围，查询失败不能退回旧权限。"""
+    import yuxi.knowledge.runtime as knowledge_runtime
+
+    async def current_databases(uid):
+        """返回仍有权限但未选中的库，或模拟权限源故障。"""
+        if query_fails:
+            raise RuntimeError("synthetic database unavailable")
+        return [SimpleNamespace(kb_id="other", name="Other", description="", kb_type="milvus")]
+
+    monkeypatch.setattr(knowledge_runtime.knowledge_base, "get_databases_by_uid", current_databases)
+    context = SimpleNamespace(
+        uid="reader",
+        knowledges=["private"],
+        _visible_knowledge_bases=[{"kb_id": "private", "name": "Private"}],
+    )
+    assert (
+        await tools.list_kbs.coroutine(dummy="", runtime=SimpleNamespace(context=context)) == "当前没有可访问的知识库"
+    )

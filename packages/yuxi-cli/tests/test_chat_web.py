@@ -194,7 +194,7 @@ def test_browser_events_handles_retry_interrupt_and_child_thread():
     )
 
     assert list(_browser_events(events, thread_id="thread-1")) == [
-        {"type": "error", "message": "运行结束：interrupted"},
+        {"type": "error", "message": "运行结束：interrupted", "terminal": True},
         {"type": "done", "status": "interrupted"},
     ]
 
@@ -235,7 +235,13 @@ def test_local_server_streams_chat_without_exposing_api_key():
         assert "session-secret" in page
         assert "yxkey_" not in page
 
-        body = json.dumps({"message": "你好", "thread_id": None})
+        body = json.dumps(
+            {
+                "request_id": "11111111-1111-4111-8111-111111111111",
+                "message": "你好",
+                "thread_id": None,
+            }
+        )
         connection.request(
             "POST",
             "/api/chat",
@@ -264,6 +270,7 @@ def test_local_server_streams_chat_without_exposing_api_key():
         {"type": "done", "status": "completed"},
     ]
     assert client.calls[0]["message"] == "你好"
+    assert client.calls[0]["request_id"] == "11111111-1111-4111-8111-111111111111"
 
 
 def test_local_server_returns_state_command_without_run_stream():
@@ -274,7 +281,13 @@ def test_local_server_returns_state_command_without_run_stream():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     connection = http.client.HTTPConnection(*server.server_address, timeout=5)
-    body = json.dumps({"message": "/state", "thread_id": "thread-1"})
+    body = json.dumps(
+        {
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "message": "/state",
+            "thread_id": "thread-1",
+        }
+    )
 
     try:
         connection.request(
@@ -316,7 +329,13 @@ def test_local_server_waits_queued_request_before_run_stream():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     connection = http.client.HTTPConnection(*server.server_address, timeout=5)
-    body = json.dumps({"message": "排队消息", "thread_id": "thread-1"})
+    body = json.dumps(
+        {
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "message": "排队消息",
+            "thread_id": "thread-1",
+        }
+    )
 
     try:
         connection.request(
@@ -354,7 +373,13 @@ def test_local_server_returns_approval_hint_without_error():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     connection = http.client.HTTPConnection(*server.server_address, timeout=5)
-    body = json.dumps({"message": "执行敏感操作", "thread_id": "thread-1"})
+    body = json.dumps(
+        {
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "message": "执行敏感操作",
+            "thread_id": "thread-1",
+        }
+    )
 
     try:
         connection.request(
@@ -395,7 +420,13 @@ def test_local_server_flushes_delta_before_remote_stream_ends():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     connection = http.client.HTTPConnection(*server.server_address, timeout=5)
-    body = json.dumps({"message": "流式测试", "thread_id": None})
+    body = json.dumps(
+        {
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "message": "流式测试",
+            "thread_id": None,
+        }
+    )
 
     try:
         connection.request(
@@ -436,7 +467,13 @@ def test_local_server_reports_truncated_remote_stream():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     connection = http.client.HTTPConnection(*server.server_address, timeout=5)
-    body = json.dumps({"message": "截断测试", "thread_id": None})
+    body = json.dumps(
+        {
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "message": "截断测试",
+            "thread_id": None,
+        }
+    )
 
     try:
         connection.request(
@@ -496,7 +533,7 @@ def test_local_server_rejects_untrusted_requests(headers, expected_error):
         thread.join(timeout=5)
 
     assert response.status == 403
-    assert payload == {"error": expected_error}
+    assert payload == {"error": expected_error, "uncertain": False, "terminal": False}
     assert client.calls == []
 
 
@@ -589,3 +626,108 @@ def test_run_web_chat_opens_browser_and_closes_resources(tmp_path, monkeypatch):
     assert opened_urls == ["http://127.0.0.1:43210"]
     assert fake_servers[0].closed is True
     assert fake_clients[0].closed is True
+
+
+@pytest.mark.parametrize("request_id", [None, "", "invalid", 7])
+def test_local_server_requires_browser_request_identity(request_id):
+    """缺少稳定身份时不得向远端创建任务。"""
+    client = FakeChatClient()
+    server = ChatWebServer(
+        ("127.0.0.1", 0), client, "default-chatbot", "session-secret"
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = http.client.HTTPConnection(*server.server_address, timeout=5)
+    try:
+        connection.request(
+            "POST",
+            "/api/chat",
+            body=json.dumps({"message": "once", "request_id": request_id}),
+            headers={"X-Yuxi-Chat-Token": "session-secret"},
+        )
+        response = connection.getresponse()
+        assert response.status == 400
+        assert "request_id" in json.loads(response.read())["error"]
+        assert client.calls == []
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("outcome", ["lost", "cancelled", "rejected", "failed"])
+def test_recovery_keeps_identity_and_distinguishes_known_queue_end(outcome):
+    """未知结果保留身份；权威队列终态允许用户开始下一条消息。"""
+    from yuxi_cli.client import ClientError
+
+    class RecoveringClient(QueuedChatClient):
+        """提供丢响应与已结束队列的协议对照。"""
+
+        def create_agent_chat_run(self, **kwargs):
+            """记录原编号，首发按需模拟丢响应。"""
+            result = super().create_agent_chat_run(**kwargs)
+            if outcome == "lost" and len(self.calls) == 1:
+                raise ClientError("synthetic response lost")
+            return result
+
+        def stream_agent_request_events(self, url):
+            """返回真实协议形状的队列终态。"""
+            if outcome == "lost":
+                yield from super().stream_agent_request_events(url)
+            else:
+                yield {"event": outcome, "data": json.dumps({"status": outcome})}
+
+    client = RecoveringClient()
+    server = ChatWebServer(
+        ("127.0.0.1", 0), client, "default-chatbot", "session-secret"
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    body = {
+        "message": "once",
+        "thread_id": None,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+    }
+    try:
+        for attempt in range(2):
+            connection = http.client.HTTPConnection(*server.server_address, timeout=5)
+            connection.request(
+                "POST",
+                "/api/chat",
+                body=json.dumps(body),
+                headers={"X-Yuxi-Chat-Token": "session-secret"},
+            )
+            response = connection.getresponse()
+            content = response.read()
+            connection.close()
+            if outcome == "lost" and attempt == 1:
+                assert response.status == 200
+                assert json.loads(content.splitlines()[-1])["status"] == "completed"
+            else:
+                error = json.loads(content)
+                assert error["uncertain"] is (outcome == "lost")
+                assert error["terminal"] is (outcome != "lost")
+        assert client.calls[0] == client.calls[1]
+        assert client.calls[0]["request_id"] == body["request_id"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("reason", ["db_error", "redis_error"])
+def test_run_transport_error_keeps_submission_unconfirmed(reason):
+    """真实 SSE 传输错误没有业务 retryable 标记，必须保留原发送身份。"""
+    events = [{"event": "error", "data": json.dumps({
+        "run_id": "run-1", "message": "运行事件流暂时不可用，请重连", "reason": reason
+    })}]
+    assert list(_browser_events(events)) == [{
+        "type": "error", "message": "运行事件流暂时不可用，请重连", "terminal": False
+    }]
+    events = [{"event": "error", "data": json.dumps({
+        "payload": {"chunk": {"error_message": "运行失败", "retryable": False}}
+    })}]
+    assert list(_browser_events(events)) == [{
+        "type": "error", "message": "运行失败", "terminal": True
+    }]

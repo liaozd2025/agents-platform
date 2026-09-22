@@ -36,6 +36,8 @@
 
 `SubAgentBackend` 复用文件、Skills、Summary、待办、重试和用量等能力，但不挂载子智能体 middleware，并过滤不适合子智能体的敏感或交互工具。
 
+主智能体与子智能体的模型重试耗尽后，原异常继续交给运行错误处理，Run 和 Attempt 收敛为失败，错误信息通过错误字段与事件返回。重试后成功的模型调用仍正常完成；模型错误不会被包装为成功回答。
+
 ## Skills 和知识库
 
 Skills middleware 将 Skill 说明按模型请求注入：预加载 Skill 从首轮开放依赖，普通 Skill 在模型读取对应 `SKILL.md` 后激活，再开放声明的工具和 MCP。

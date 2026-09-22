@@ -44,6 +44,8 @@ async def test_api_key_schema_upgrade_is_idempotent_and_preserves_safe_history()
         )
         async with scoped_engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            # 本例从旧 API Key 表和旧用户角色字段共同升级。
+            await connection.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR NOT NULL DEFAULT 'user'"))
             await connection.execute(text("DROP TABLE cli_auth_sessions"))
             await connection.execute(text("DROP TABLE api_keys"))
             await connection.execute(
@@ -90,7 +92,7 @@ async def test_api_key_schema_upgrade_is_idempotent_and_preserves_safe_history()
                     INSERT INTO users (
                         username, uid, password_hash, role, login_failed_count, is_deleted
                     ) VALUES (
-                        'migration active', 'migration_active', '$argon2id$placeholder', 'user', 0, 0
+                        'migration active', 'migration_active', '$argon2id$placeholder', 'superadmin', 0, 0
                     ) RETURNING id
                     """
                 )

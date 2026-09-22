@@ -1469,6 +1469,42 @@ const copyAllTimelineJson = async () => {
   background: var(--main-200);
 }
 
+/* color-mix 降级（Chrome 86 及更低内核不支持 color-mix → 下列 8 条声明会被整条丢弃）。
+   静态值取亮色主题的等价混合色；暗色主题下会略偏色。现代浏览器不进此块，行为不变。 */
+@supports not (background: color-mix(in srgb, red, blue)) {
+  .timeline-mark-selected {
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.82); /* color-mix(in srgb, var(--gray-0) 82%, transparent) */
+  }
+
+  .operation-span {
+    background: rgba(189, 191, 191, 0.45); /* color-mix(in srgb, var(--gray-400) 45%, transparent) */
+  }
+
+  .span-ai {
+    background: rgba(158, 166, 224, 0.45); /* color-mix(in srgb, var(--main-400) 45%, transparent) */
+  }
+
+  .span-tool {
+    background: rgba(232, 213, 177, 0.55); /* color-mix(in srgb, var(--second-300) 55%, transparent) */
+  }
+
+  .span-error {
+    background: rgba(255, 77, 79, 0.38); /* color-mix(in srgb, var(--color-error-500) 38%, transparent) */
+  }
+
+  .range-mask {
+    background: rgba(228, 230, 230, 0.78); /* color-mix(in srgb, var(--gray-200) 78%, transparent) */
+  }
+
+  .selected-window {
+    background: rgba(233, 235, 247, 0.18); /* color-mix(in srgb, var(--main-100) 18%, transparent) */
+  }
+
+  .range-input::-webkit-slider-thumb {
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7); /* color-mix(in srgb, var(--gray-0) 70%, transparent) */
+  }
+}
+
 .operation-span {
   height: 8px;
   border-left: 2px solid var(--gray-500);
