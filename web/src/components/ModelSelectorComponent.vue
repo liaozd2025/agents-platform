@@ -294,6 +294,8 @@ const getModelInfo = (model) => modelMetadataBySpec.value[model.spec] || {}
 
 // 聊天输入框没有任何默认模型时，使用接口返回的第一个可用模型。
 // 该行为由调用方显式开启，避免影响设置页等需要用户手动选择的场景。
+// 兜底选择带 autoSelected 标记：调用方据此区分「用户手动选择」与「系统兜底」，
+// 只有前者才应写入用户偏好（见 AgentChatComponent.handleModelSelect）。
 const selectFirstModelIfNeeded = () => {
   if (!props.autoSelectFirst || props.disabled || props.model_spec) return
 
@@ -306,7 +308,7 @@ const selectFirstModelIfNeeded = () => {
   }
 
   console.info(`[模型选择] 初始未选择模型，自动选择 ${firstModel.spec}`)
-  emit('select-model', firstModel.spec)
+  emit('select-model', firstModel.spec, { autoSelected: true })
 }
 
 const initializeDefaultModel = async () => {
