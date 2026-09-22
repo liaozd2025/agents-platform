@@ -9,7 +9,6 @@ from typing import Any, Literal
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages.utils import count_tokens_approximately
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-
 from yuxi.models.chat import load_chat_model
 from yuxi.models.providers.cache import model_cache
 
