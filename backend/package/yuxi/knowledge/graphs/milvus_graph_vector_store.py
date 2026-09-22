@@ -130,12 +130,9 @@ class MilvusGraphVectorStore:
 
     def drop_graph_collections(self, kb_id: str) -> None:
         for collection_name in [graph_entity_collection_name(kb_id), graph_triple_collection_name(kb_id)]:
-            try:
-                if utility.has_collection(collection_name, using=self.connection_alias):
-                    utility.drop_collection(collection_name, using=self.connection_alias)
-                    logger.info(f"Dropped Milvus graph collection {collection_name}")
-            except Exception as exc:
-                logger.error(f"Failed to drop Milvus graph collection {collection_name}: {exc}")
+            if utility.has_collection(collection_name, using=self.connection_alias):
+                utility.drop_collection(collection_name, using=self.connection_alias)
+                logger.info(f"Dropped Milvus graph collection {collection_name}")
 
     def _get_embedding_function(self, embedding_model_spec: str):
         model = select_embedding_model(embedding_model_spec)

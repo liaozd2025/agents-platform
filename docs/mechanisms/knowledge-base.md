@@ -77,6 +77,12 @@ stateDiagram-v2
 
 Milvus 索引会把 chunk 写入 PostgreSQL 和 Milvus。它不是跨存储事务：任一侧失败时会尝试补偿并把文件置为 `error_indexing`，排查时需要同时查看两侧。
 
+## 删除与存储一致性
+
+文件删除由 executor 清理原件、解析 Markdown、预览 PDF、chunk 向量和图内容，文件夹递归使用同一路径。共享解析图片保留到整库删除时按知识库前缀清理。外部存储清理成功后才删除 PostgreSQL 文件记录；图引用事务等待图向量与 Neo4j 清理成功后提交，失败回滚以保留重试标识。
+
+完成标记缺失时，Neo4j 仍可能已收到写入，因此文件及整库删除直接清理图内容并要求 Neo4j 可达。普通重索引只在图标记或引用存在时执行图清理。多存储删除不是原子事务，失败时部分外部内容可能已移除；接口明确失败，恢复存储后重试删除。成功结果须通过各实际存储回读验证。
+
 ## Durable Task 和恢复
 
 上传原文件是同步对象存储操作；批量添加、解析、索引和图谱构建把 `task_type`、Handler 版本和可序列化 payload 保存到 PostgreSQL。提交后 API 只发布 `task_id`，ARQ worker 从 registry 加载领域 Handler。

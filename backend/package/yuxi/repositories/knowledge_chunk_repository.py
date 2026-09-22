@@ -3,10 +3,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, exists, func, or_, select, update
 
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_knowledge import KnowledgeChunk
+from yuxi.storage.postgres.models_knowledge import (
+    KnowledgeChunk,
+    KnowledgeGraphEntityMention,
+    KnowledgeGraphTripleMention,
+)
 from yuxi.utils.datetime_utils import utc_isoformat
 
 SQL_IN_BATCH_SIZE = 10_000
@@ -183,12 +187,21 @@ class KnowledgeChunkRepository:
             for chunk in chunks
         ]
 
-    async def count_graph_indexed_by_file_id(self, file_id: str) -> int:
+    async def count_graph_data_by_file_id(self, file_id: str) -> int:
+        """统计已写图结构或已完成图向量的 chunk。"""
         async with pg_manager.get_async_session_context() as session:
             result = await session.execute(
                 select(func.count())
                 .select_from(KnowledgeChunk)
-                .where(KnowledgeChunk.file_id == file_id, KnowledgeChunk.graph_indexed.is_(True))
+                .where(
+                    KnowledgeChunk.file_id == file_id,
+                    or_(
+                        KnowledgeChunk.graph_structure_indexed.is_(True),
+                        KnowledgeChunk.graph_indexed.is_(True),
+                        exists().where(KnowledgeGraphEntityMention.file_id == file_id),
+                        exists().where(KnowledgeGraphTripleMention.file_id == file_id),
+                    ),
+                )
             )
             return int(result.scalar() or 0)
 

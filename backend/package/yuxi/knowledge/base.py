@@ -789,6 +789,23 @@ class KnowledgeBase(ABC):
         """
         pass
 
+    async def delete_file_storage_objects(self, kb_id: str, file_id: str, file_meta: dict) -> None:
+        """删除文件拥有的对象；失败保留元数据供重试，共享图片由整库清理。"""
+        from yuxi.knowledge.utils.kb_utils import is_minio_url, parse_minio_url
+        from yuxi.storage.minio import get_minio_client
+
+        if file_meta.get("is_folder"):
+            return
+        client = get_minio_client()
+        file_path = file_meta.get("minio_url") or file_meta.get("path") or ""
+        if is_minio_url(file_path):
+            bucket, object_name = parse_minio_url(file_path)
+            await client.adelete_file(bucket, object_name)
+        parsed_bucket = client.KB_BUCKETS["parsed"]
+        if await asyncio.to_thread(client.client.bucket_exists, parsed_bucket):
+            await client.adelete_file(parsed_bucket, f"{kb_id}/parsed/{file_id}.md")
+            await client.adelete_file(parsed_bucket, f"{kb_id}/preview/{file_id}.pdf")
+
     async def cleanup_database_resources(self, kb_id: str) -> dict:
         """
         清理知识库关联的文件与存储资源。
@@ -817,11 +834,8 @@ class KnowledgeBase(ABC):
                 file_id = record.file_id
                 file_path = record.minio_url or record.path
                 if file_path and is_minio_url(file_path):
-                    try:
-                        bucket_name, object_name = parse_minio_url(file_path)
-                        await minio_client.adelete_file(bucket_name, object_name)
-                    except Exception as e:
-                        logger.warning(f"Failed to delete MinIO file {file_path}: {e}")
+                    bucket_name, object_name = parse_minio_url(file_path)
+                    await minio_client.adelete_file(bucket_name, object_name)
 
                 # 删除解析后的 markdown 文件
                 parsed_object = f"{kb_id}/parsed/{file_id}.md"
@@ -837,19 +851,14 @@ class KnowledgeBase(ABC):
         cleanup_tasks = [minio_client.adelete_objects_by_prefix(bucket_name, prefix) for bucket_name in cleanup_buckets]
         await asyncio.gather(*cleanup_tasks)
 
-        # 3. 删除知识库的文件记录；知识库主记录由 Manager 统一删除。
-        await file_repo.delete_by_kb_id(kb_id)
-
-        # 删除工作目录
+        # 工作目录也清理成功后才删除重试所需元数据。
         working_dir = os.path.join(self.work_dir, kb_id)
         if os.path.exists(working_dir):
             import shutil
 
-            try:
-                shutil.rmtree(working_dir)
-            except Exception as e:
-                logger.error(f"Error deleting working directory {working_dir}: {e}")
+            await asyncio.to_thread(shutil.rmtree, working_dir)
 
+        await file_repo.delete_by_kb_id(kb_id)
         return {"message": "删除成功"}
 
     async def detect_data_inconsistencies(

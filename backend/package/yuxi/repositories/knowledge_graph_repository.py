@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -287,7 +289,9 @@ class KnowledgeGraphRepository:
                     .on_conflict_do_nothing(index_elements=["triple_id", "chunk_id"])
                 )
 
-    async def delete_file_references(self, file_id: str) -> tuple[list[str], list[str]]:
+    @asynccontextmanager
+    async def delete_file_references(self, file_id: str) -> AsyncIterator[tuple[list[str], list[str]]]:
+        """外部清理完成才提交图引用删除；失败回滚以保留重试标识。"""
         async with pg_manager.get_async_session_context() as session:
             affected_entity_ids = list(
                 (
@@ -370,7 +374,7 @@ class KnowledgeGraphRepository:
                         delete(KnowledgeGraphEntity).where(KnowledgeGraphEntity.entity_id.in_(orphan_entity_ids))
                     )
 
-            return orphan_entity_ids, orphan_triple_ids
+            yield orphan_entity_ids, orphan_triple_ids
 
     async def delete_by_kb_id(self, kb_id: str) -> None:
         async with pg_manager.get_async_session_context() as session:

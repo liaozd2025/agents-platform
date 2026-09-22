@@ -742,13 +742,13 @@ class MilvusGraphService:
         self.graph_vector_store.drop_graph_collections(kb_id)
 
     async def delete_file_graph(self, kb_id: str, file_id: str) -> None:
-        orphan_entity_ids, orphan_triple_ids = await self.graph_repo.delete_file_references(file_id)
-        await self.graph_vector_store.delete_graph_records(
-            kb_id,
-            entity_ids=orphan_entity_ids,
-            triple_ids=orphan_triple_ids,
-        )
-        await asyncio.to_thread(self._delete_file_graph_from_neo4j, kb_id, file_id)
+        async with self.graph_repo.delete_file_references(file_id) as (orphan_entity_ids, orphan_triple_ids):
+            await self.graph_vector_store.delete_graph_records(
+                kb_id,
+                entity_ids=orphan_entity_ids,
+                triple_ids=orphan_triple_ids,
+            )
+            await asyncio.to_thread(self._delete_file_graph_from_neo4j, kb_id, file_id)
 
     def _delete_file_graph_from_neo4j(self, kb_id: str, file_id: str) -> None:
         label = safe_neo4j_label(kb_id)

@@ -15,8 +15,8 @@ from yuxi.config.options import system_options
 from yuxi.knowledge.base import KBNameConflictError, KBNotFoundError
 from yuxi.knowledge.chunking.ragflow_like.presets import get_chunk_preset_options
 from yuxi.knowledge.graphs.milvus_graph_service import GRAPH_TASK_TYPE, MilvusGraphService
-from yuxi.knowledge.read_models import KnowledgeBaseDetail
 from yuxi.knowledge.parser.capabilities import SUPPORTED_FILE_EXTENSIONS, is_supported_file_extension
+from yuxi.knowledge.read_models import KnowledgeBaseDetail
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.knowledge.utils import calculate_content_hash, is_minio_url, params_for_uploaded_document, parse_minio_url
 from yuxi.knowledge.utils.mindmap_utils import (
@@ -47,15 +47,17 @@ from yuxi.storage.postgres.models_business import User
 from yuxi.utils import logger
 from yuxi.utils.upload_utils import MAX_UPLOAD_SIZE_BYTES, read_upload_with_limit, write_upload_to_path
 
-from server.utils.knowledge_response import serialize_knowledge_base, serialize_knowledge_base_list
 from server.utils.auth_middleware import get_authorization_context, get_db
 from server.utils.knowledge_permissions import (
     ensure_knowledge_base_permission as _ensure_database_permission,
+)
+from server.utils.knowledge_permissions import (
     require_knowledge_base_manage,
     require_knowledge_base_manage_permission,
     require_knowledge_base_read,
     require_knowledge_base_read_permission,
 )
+from server.utils.knowledge_response import serialize_knowledge_base, serialize_knowledge_base_list
 
 knowledge = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
@@ -135,27 +137,6 @@ media_types = {
     ".h": "text/x-chdr",
     ".hpp": "text/x-c++hdr",
 }
-
-
-async def _delete_document_storage_objects(kb_id: str, doc_id: str, file_path: str) -> None:
-    minio_client = get_minio_client()
-
-    if is_minio_url(file_path):
-        try:
-            bucket_name, object_name = parse_minio_url(file_path)
-            await minio_client.adelete_file(bucket_name, object_name)
-        except Exception as minio_error:
-            logger.warning(f"从MinIO删除原始文件失败: {minio_error}")
-
-    try:
-        await minio_client.adelete_file(minio_client.KB_BUCKETS["parsed"], f"{kb_id}/parsed/{doc_id}.md")
-    except Exception as minio_error:
-        logger.warning(f"从MinIO删除解析结果失败: {minio_error}")
-
-    try:
-        await minio_client.adelete_file(minio_client.KB_BUCKETS["parsed"], f"{kb_id}/preview/{doc_id}.pdf")
-    except Exception as minio_error:
-        logger.warning(f"从MinIO删除预览 PDF 失败: {minio_error}")
 
 
 async def _require_manage_permission_if_kb_id(kb_id: str | None, current_user: User) -> None:
@@ -1067,11 +1048,6 @@ async def batch_delete_documents(
                 deleted_count += 1
                 continue
 
-            file_path = file_meta_info.get("meta", {}).get("path", "")
-
-            await _delete_document_storage_objects(kb_id, doc_id, file_path)
-
-            # 无论MinIO删除是否成功，都继续从知识库删除
             await knowledge_base.delete_file(kb_id, doc_id)
             deleted_count += 1
 
@@ -1112,11 +1088,6 @@ async def delete_document(kb_id: str, doc_id: str, current_user: User = Depends(
             await knowledge_base.delete_folder(kb_id, doc_id)
             return {"message": "文件夹删除成功"}
 
-        file_path = file_meta_info.get("meta", {}).get("path", "")
-
-        await _delete_document_storage_objects(kb_id, doc_id, file_path)
-
-        # 无论MinIO删除是否成功，都继续从知识库删除
         await knowledge_base.delete_file(kb_id, doc_id)
 
         # 同步清理导图快照，移除已删除文件对应的叶子节点

@@ -3,9 +3,8 @@ import threading
 import types
 
 import pytest
-from pymilvus import CollectionSchema, DataType, FieldSchema, Function, FunctionType
-
 import yuxi.knowledge.implementations.milvus as milvus_module
+from pymilvus import CollectionSchema, DataType, FieldSchema, Function, FunctionType
 from yuxi.knowledge.base import FileStatus, KnowledgeBase
 from yuxi.knowledge.chunking.ragflow_like.nlp import count_tokens
 from yuxi.knowledge.implementations.milvus import (
@@ -186,17 +185,11 @@ async def test_cleanup_database_resources_offloads_milvus_cleanup(monkeypatch):
         lambda kb_id, using: record_cleanup("drop_collection"),
     )
 
-    class FakeGraphVectorStore:
-        def __init__(self):
-            record_cleanup("graph_init")
+    class FakeGraphService:
+        def delete_graph(self, kb_id):
+            record_cleanup("delete_graph")
 
-        def drop_graph_collections(self, kb_id):
-            record_cleanup("drop_graph_collections")
-
-    monkeypatch.setattr(
-        "yuxi.knowledge.graphs.milvus_graph_vector_store.MilvusGraphVectorStore",
-        FakeGraphVectorStore,
-    )
+    monkeypatch.setattr("yuxi.knowledge.graphs.milvus_graph_service.MilvusGraphService", FakeGraphService)
 
     async def delete_base(self, kb_id):
         calls.append("delete_base")
@@ -207,7 +200,7 @@ async def test_cleanup_database_resources_offloads_milvus_cleanup(monkeypatch):
     result = await kb.cleanup_database_resources("db")
 
     assert result == {"message": "删除成功"}
-    assert calls == ["has_collection", "drop_collection", "graph_init", "drop_graph_collections", "delete_base"]
+    assert calls == ["delete_graph", "has_collection", "drop_collection", "delete_base"]
     assert cleanup_threads
     assert all(thread_id != event_loop_thread for thread_id in cleanup_threads)
 
@@ -452,7 +445,7 @@ async def test_delete_file_chunks_only_resets_file_stats(monkeypatch):
             self.delete_calls = []
             repos.append(self)
 
-        async def count_graph_indexed_by_file_id(self, file_id):
+        async def count_graph_data_by_file_id(self, file_id):
             return 0
 
         async def delete_by_file_id(self, file_id):
@@ -767,3 +760,42 @@ async def test_existing_incompatible_collection_is_preserved(monkeypatch, descri
     with pytest.raises(ValueError, match="保留"):
         await kb._create_kb_instance("db", EMBEDDING_MODEL_SPEC)
     assert collection.records == ["existing-chunk"]
+
+
+@pytest.mark.parametrize("failed_store", ["vector", "graph"])
+async def test_failed_delete_keeps_postgres_retry_facts(monkeypatch, failed_store):
+    """外部清理失败必须保留文件和 chunk，不能报告成功。"""
+
+    class ChunkRepo:
+        deleted = False
+
+        async def count_graph_data_by_file_id(self, file_id):
+            return int(failed_store == "graph")
+
+        async def delete_by_file_id(self, file_id):
+            self.deleted = True
+
+    chunks = ChunkRepo()
+    monkeypatch.setattr(milvus_module, "KnowledgeChunkRepository", lambda: chunks)
+    files = FakeKnowledgeFileRepository({"file-1": make_file_record(chunk_count=2, token_count=10)})
+    patch_file_repository(monkeypatch, files)
+
+    async def failed_cleanup(*args):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(
+        "yuxi.knowledge.graphs.milvus_graph_service.MilvusGraphService",
+        lambda: types.SimpleNamespace(delete_file_graph=failed_cleanup),
+    )
+    kb = MilvusKB.__new__(MilvusKB)
+
+    async def collection(kb_id):
+        return object()
+
+    kb._get_existing_milvus_collection = collection
+    kb._delete_file_chunks_from_milvus = failed_cleanup
+    with pytest.raises(RuntimeError, match="store unavailable"):
+        await kb.delete_file_chunks_only("db", "file-1")
+    assert not chunks.deleted
+    assert files.records["file-1"].chunk_count == 2
+    assert files.records["file-1"].token_count == 10

@@ -1,0 +1,45 @@
+x-storage-env: &storage-env
+  MILVUS_URI: http://milvus:19530
+  MILVUS_DB: default
+  NEO4J_URI: bolt://graph:7687
+  NEO4J_USERNAME: neo4j
+  NEO4J_PASSWORD: synthetic-only-123
+services:
+  api:
+    environment: *storage-env
+  worker:
+    environment: *storage-env
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    command: [etcd, -advertise-client-urls=http://etcd:2379, -listen-client-urls=http://0.0.0.0:2379, --data-dir=/etcd]
+    tmpfs: [/etcd]
+  milvus:
+    image: milvusdb/milvus:v2.5.6
+    command: [milvus, run, standalone]
+    security_opt: [seccomp:unconfined]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: minioadmin
+      MINIO_SECRET_ACCESS_KEY: minioadmin
+      MILVUS_LOG_LEVEL: error
+    tmpfs: [/var/lib/milvus]
+    depends_on: [etcd, minio]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:9091/healthz]
+      interval: 2s
+      timeout: 3s
+      retries: 90
+  graph:
+    image: neo4j:5.26.29
+    environment:
+      NEO4J_AUTH: neo4j/synthetic-only-123
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 128m
+    tmpfs: [/data, /logs]
+    healthcheck:
+      test: [CMD-SHELL, "cypher-shell -a bolt://localhost:7687 -u neo4j -p synthetic-only-123 'RETURN 1' >/dev/null"]
+      interval: 3s
+      timeout: 10s
+      retries: 40

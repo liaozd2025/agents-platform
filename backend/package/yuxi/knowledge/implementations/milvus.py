@@ -1188,25 +1188,18 @@ class MilvusKB(KnowledgeBase):
 
         return sorted(fused.values(), key=lambda item: item.get("fusion_score", 0.0), reverse=True)
 
-    async def delete_file_chunks_only(self, kb_id: str, file_id: str) -> None:
+    async def delete_file_chunks_only(self, kb_id: str, file_id: str, *, clear_untracked_graph: bool = False) -> None:
         """仅删除文件的chunks数据，保留元数据（用于更新操作）"""
         chunk_repo = KnowledgeChunkRepository()
-        if await chunk_repo.count_graph_indexed_by_file_id(file_id):
+        # 删除文件时不能用未提交的投影标记证明 Neo4j 没有内容。
+        if clear_untracked_graph or await chunk_repo.count_graph_data_by_file_id(file_id):
             from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
 
-            try:
-                await MilvusGraphService().delete_file_graph(kb_id, file_id)
-            except Exception as e:
-                logger.error(f"Failed to delete graph data for file {file_id}: {e}")
-        await chunk_repo.delete_by_file_id(file_id)
+            await MilvusGraphService().delete_file_graph(kb_id, file_id)
         collection = await self._get_existing_milvus_collection(kb_id)
-
         if collection:
-            # 先查询文件是否存在，避免不必要的删除操作
-            try:
-                await self._delete_file_chunks_from_milvus(collection, file_id)
-            except Exception as e:
-                logger.error(f"Error checking file existence in Milvus: {e}")
+            await self._delete_file_chunks_from_milvus(collection, file_id)
+        await chunk_repo.delete_by_file_id(file_id)
         await KnowledgeFileRepository().update_fields(
             file_id=file_id,
             kb_id=kb_id,
@@ -1215,9 +1208,9 @@ class MilvusKB(KnowledgeBase):
 
     async def delete_file(self, kb_id: str, file_id: str) -> None:
         """删除文件（包括元数据）"""
-        # 先删除 Milvus 中的 chunks 数据
-        await self.delete_file_chunks_only(kb_id, file_id)
-
+        file_meta = await self._load_file_meta(kb_id, file_id)
+        await self.delete_file_storage_objects(kb_id, file_id, file_meta)
+        await self.delete_file_chunks_only(kb_id, file_id, clear_untracked_graph=True)
         await KnowledgeFileRepository().delete(file_id)
 
     async def get_file_basic_info(self, kb_id: str, file_id: str) -> dict:
@@ -1274,19 +1267,13 @@ class MilvusKB(KnowledgeBase):
     async def cleanup_database_resources(self, kb_id: str) -> dict:
         """清理知识库资源，同时删除 Milvus 集合。"""
 
+        from yuxi.knowledge.graphs.milvus_graph_service import MilvusGraphService
+
+        await asyncio.to_thread(MilvusGraphService().delete_graph, kb_id)
+
         def delete_milvus_collections() -> None:
-            try:
-                if utility.has_collection(kb_id, using=self.connection_alias):
-                    utility.drop_collection(kb_id, using=self.connection_alias)
-                    logger.info(f"Dropped Milvus collection for {kb_id}")
-                else:
-                    logger.info(f"Milvus collection {kb_id} does not exist, skipping")
-            except Exception as e:
-                logger.error(f"Failed to drop Milvus collection {kb_id}: {e}")
-
-            from yuxi.knowledge.graphs.milvus_graph_vector_store import MilvusGraphVectorStore
-
-            MilvusGraphVectorStore().drop_graph_collections(kb_id)
+            if utility.has_collection(kb_id, using=self.connection_alias):
+                utility.drop_collection(kb_id, using=self.connection_alias)
 
         await asyncio.to_thread(delete_milvus_collections)
 
