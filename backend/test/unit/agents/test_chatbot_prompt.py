@@ -112,3 +112,23 @@ def test_is_custom_system_prompt_excludes_default_placeholder():
     assert is_custom_system_prompt("   ") is False
     assert is_custom_system_prompt(DEFAULT_SYSTEM_PROMPT_PLACEHOLDER) is False
     assert is_custom_system_prompt("你是采购合规助手。") is True
+
+
+def test_missing_runtime_flag_falls_back_to_content_check():
+    """运行时标志缺失时的兜底路径：退回按 system_prompt 内容判定。
+
+    生产链路始终经 build_agent_input_context 写入 system_prompt_is_custom，
+    不会走到这里；兜底分支只能看到追加工作区内容之后的值，因此在「未配置 + 有工作区
+    AGENTS.md/USER.md」的组合下会判为已自定义，与主路径结论不同。本用例固定该兜底行为，
+    并提醒：新增直接构造 Context 的调用路径时必须自行提供 system_prompt_is_custom。
+    """
+    prompt = build_prompt_with_context(
+        SimpleNamespace(
+            workdir_path="/home/gem/user-data/projects/demo",
+            system_prompt="用户工作区 agents/AGENTS.md 内容：\n# AGENTS\n",
+            # 故意不提供 system_prompt_is_custom，命中回退分支
+        )
+    )
+
+    assert CUSTOM_PROMPT_HEADER in prompt
+    assert "只回答“我是九典AI助手”" not in prompt
