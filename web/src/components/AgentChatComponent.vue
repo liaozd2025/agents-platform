@@ -956,7 +956,12 @@ import ProjectSelectionSection from '@/components/ProjectSelectionSection.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { enrichTaskToolCalls, parseToolCallArgs } from '@/components/ToolCallingResult/toolRegistry'
 import { getConversationDisplayItems } from '@/utils/messageGrouping'
-import { resolveConversationModel } from '@/utils/conversationModel'
+import {
+  clearChatModelPreference,
+  readChatModelPreference,
+  resolveConversationModel,
+  writeChatModelPreference
+} from '@/utils/conversationModel'
 import { makeChildThreadId } from '@/utils/subagentThread'
 import { isSubagentLaunchToolName, mergeSubagentRunsForDisplay } from '@/utils/subagentRuns'
 import {
@@ -1518,24 +1523,39 @@ watch(
 )
 
 // ==================== 对话级模型覆盖 ====================
-// 用户手动选择和已有会话绑定优先；新会话由模型选择器选择已配置列表首项。
+// 优先级：本会话的显式选择 → 会话绑定的模型 → 用户本地偏好（新建会话继承上次手动选择）。
+// 偏好为空（从未手动选择过）时，仍由模型选择器从已配置模型列表中选择首项兜底。
 const DRAFT_MODEL_KEY = '__draft__'
 const selectedModelByThread = reactive({})
+// 用户最近一次手动选择的模型：新建会话时沿用，避免每次都回落到列表首项
+const savedChatModel = ref(readChatModelPreference())
 const savedToolApprovalMode = ref(readToolApprovalModePreference())
 const currentModelSpec = computed(
   () =>
     resolveConversationModel({
       selectedModel: selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY],
-      conversationModel: currentThread.value?.metadata?.model_spec
+      conversationModel: currentThread.value?.metadata?.model_spec,
+      savedModel: savedChatModel.value
     })
 )
-const handleModelSelect = (spec) => {
-  if (typeof spec === 'string') {
-    if (spec) {
-      selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY] = spec
-    } else {
-      delete selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY]
+// 手动选择（含清空）写入本地偏好供后续新建会话继承；
+// 选择器兜底选中的首项带 autoSelected 标记，不写偏好，保留「用户从未选择过」的状态。
+const handleModelSelect = (spec, options = {}) => {
+  if (typeof spec !== 'string') return
+
+  if (spec) {
+    selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY] = spec
+    if (!options.autoSelected) {
+      savedChatModel.value = spec
+      writeChatModelPreference(spec)
     }
+    return
+  }
+
+  delete selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY]
+  if (!options.autoSelected) {
+    savedChatModel.value = ''
+    clearChatModelPreference()
   }
 }
 
