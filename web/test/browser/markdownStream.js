@@ -1,5 +1,5 @@
 import { createApp, h, nextTick, ref } from 'vue'
-import { createPinia } from 'pinia'
+import { createPinia, getActivePinia, setActivePinia } from 'pinia'
 import MarkdownPreview from '../../src/components/common/MarkdownPreview.vue'
 
 /** 固定时钟检查真实 Markdown DOM，避免用机器速度作为节流 oracle。 */
@@ -11,6 +11,7 @@ export async function checkMarkdownStream() {
   const app = createApp({
     render: () => h(MarkdownPreview, { content: content.value, streaming: streaming.value })
   })
+  const originalPinia = getActivePinia()
   app.use(createPinia())
   const originalSet = window.setTimeout,
     originalClear = window.clearTimeout
@@ -58,6 +59,7 @@ export async function checkMarkdownStream() {
   } finally {
     if (mounted) app.unmount()
     host.remove()
+    setActivePinia(originalPinia)
     window.setTimeout = originalSet
     window.clearTimeout = originalClear
   }
