@@ -31,6 +31,7 @@ const AnswerCitationModal = defineAsyncComponent(() =>
 )
 const props = defineProps({
   citationSources: { type: Array, default: () => [] },
+  streaming: { type: Boolean, default: false },
   content: {
     type: String,
     default: ''
@@ -42,6 +43,22 @@ const props = defineProps({
   codeCopy: {
     type: Boolean,
     default: false
+  }
+})
+
+const renderedContent = ref(props.content)
+let renderTimer = null
+watch([() => props.content, () => props.streaming], ([content, streaming]) => {
+  if (!streaming || !content) {
+    clearTimeout(renderTimer)
+    renderTimer = null
+    renderedContent.value = content
+  } else if (renderTimer === null) {
+    // 合并流式帧，计时器读取最新全文；终态直接刷新，不丢最后一批文本。
+    renderTimer = setTimeout(() => {
+      renderTimer = null
+      renderedContent.value = props.content
+    }, 100)
   }
 })
 
@@ -376,13 +393,14 @@ onMounted(async () => {
 window.addEventListener('message', handleHtmlPreviewHeight)
 
 onBeforeUnmount(() => {
+  clearTimeout(renderTimer)
   window.removeEventListener('message', handleHtmlPreviewHeight)
   htmlPreviewFrames.clear()
   revokeKbImageBlobUrls()
 })
 
 watch(
-  [() => props.content, shikiTheme, () => props.codeCopy],
+  [renderedContent, shikiTheme, () => props.codeCopy],
   async ([content, theme, codeCopy], _, onCleanup) => {
     let expired = false
     onCleanup(() => {
