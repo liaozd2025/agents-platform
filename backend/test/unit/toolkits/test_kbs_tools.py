@@ -355,6 +355,7 @@ async def test_find_kb_document_returns_context_windows(monkeypatch) -> None:
         assert max_windows == 5
         assert window_size == 80
         return {
+            "title": "原文.md",
             "semantic": False,
             "match_mode": "keyword",
             "total_matches": 2,
@@ -379,6 +380,7 @@ async def test_find_kb_document_returns_context_windows(monkeypatch) -> None:
     )
 
     assert result == {
+        "title": "原文.md",
         "kb_id": "db-1",
         "file_id": "file-1",
         "semantic": False,

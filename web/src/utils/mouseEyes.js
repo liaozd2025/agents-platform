@@ -26,13 +26,22 @@ export function calcPupilOffset(mouseX, mouseY, eyeRect, maxDistance, maxY = max
   // 保证鼠标跑得再远瞳孔也不会溢出眼眶。
   // 用 sqrt 而非 Math.hypot：hypot 带溢出保护、在 V8 上慢一个量级，这里每帧调用，取 sqrt。
   // 宽高分别限制，避免旋转后的包围盒让上下方向可移动距离被高估。
-  const normalizedX = maxDistance > 0 ? deltaX / maxDistance : 0
-  const normalizedY = maxY > 0 ? deltaY / maxY : 0
+  //
+  // maxDistance / maxY 为 0 表示「该方向不允许位移」：角色被画得很小时，眼球框只剩几十像素，
+  // 纵向安全边距就能把余量吃光（实测 27px 框余量 4.6px、扣完边距后为 0）。
+  // 这种情况必须把该轴位移压成 0。旧实现写成 `maxY > 0 ? deltaY / maxY : 0`，
+  // 只让该轴不参与归一化，等于取消了这个方向的上限：鼠标正对眼睛上方/下方时
+  // 另一轴 delta≈0、scale 退化为 1，瞳孔直接按「鼠标到眼球中心的真实距离」平移
+  // （实测 -660px，飞出 27px 的眼球框），眼球只剩一片眼白。
+  const canMoveX = maxDistance > 0
+  const canMoveY = maxY > 0
+  const normalizedX = canMoveX ? deltaX / maxDistance : 0
+  const normalizedY = canMoveY ? deltaY / maxY : 0
   const scale = Math.min(1, 1 / Math.sqrt(normalizedX * normalizedX + normalizedY * normalizedY))
   // deltaX 与 deltaY 同时为 0 时 atan2 返回 0，distance 也是 0，结果自然落在原点，无需额外分支
   return {
-    x: deltaX * scale,
-    y: deltaY * scale
+    x: canMoveX ? deltaX * scale : 0,
+    y: canMoveY ? deltaY * scale : 0
   }
 }
 

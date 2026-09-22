@@ -379,9 +379,10 @@ async def test_confirm_tmp_thread_attachments_writes_realtime_workdir(confirm_at
 
 
 @pytest.mark.asyncio
-async def test_parse_tmp_attachment_uses_object_name_for_type_validation(monkeypatch):
+@pytest.mark.parametrize("extension", ["doc", "docx"])
+async def test_parse_tmp_attachment_uses_object_name_for_type_validation(monkeypatch, extension):
     fake_minio = FakeMinioClient()
-    object_name = "tmp/chat_attachments/user-1/tmp-1/original/demo.docx"
+    object_name = f"tmp/chat_attachments/user-1/tmp-1/original/demo.{extension}"
     fake_minio.objects[("knowledgebases", object_name)] = b"docx-bytes"
     monkeypatch.setattr(service, "get_minio_client", lambda: fake_minio)
 

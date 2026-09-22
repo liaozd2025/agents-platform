@@ -178,6 +178,20 @@ jobs:
         run: docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_chat_router.py::test_thread_message_audits_return_persisted_facts_without_leaking_into_history -q --setup-show -o faulthandler_timeout=60
       - name: Verify deterministic Agent assembled path
         run: docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api uv run --no-sync --no-dev pytest test/e2e/test_deterministic_agent_path_e2e.py -q
+      - name: Verify answer citation evidence across child Runs and history
+        run: |
+          docker compose up -d milvus
+          for attempt in $(seq 1 60); do
+            if docker compose exec -T milvus curl -fsS http://localhost:9091/healthz >/dev/null; then
+              break
+            fi
+            if [ "$attempt" = 60 ]; then
+              docker compose logs etcd minio milvus --tail 200
+              exit 1
+            fi
+            sleep 2
+          done
+          docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api uv run --no-sync --no-dev pytest test/e2e/test_answer_citations_e2e.py -q
       - name: Verify identity transaction and replayable secret publication
         run: docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/services/test_identity_admin_service.py test/integration/services/test_api_key_schema_migration.py test/integration/services/test_api_key_user_lifecycle.py test/integration/api/test_apikey_router.py -q
       - name: Verify destructive storage migration and Skill authorization

@@ -9,7 +9,7 @@ Yuxi 把文档处理拆成两步：先把原文件保存到知识库，再根据
 知识库上传接口当前支持：
 
 - 文本：`.txt`、`.md`、`.html`、`.htm`、`.json`、`.csv`；
-- Office：`.docx`、`.pptx`、`.xls`、`.xlsx`；
+- Office：`.doc`、`.docx`、`.pptx`、`.xls`、`.xlsx`；
 - PDF：`.pdf`；
 - 图片：`.jpg`、`.jpeg`、`.png`、`.bmp`、`.tiff`、`.tif`；
 - ZIP：压缩包内必须包含 UTF-8 编码的 `.md` 文件。
@@ -22,14 +22,16 @@ ZIP 处理会优先使用名为 `full.md` 的 Markdown 文件，否则使用压�
 
 | 任务 | 执行位置 | 依赖与结果 |
 | --- | --- | --- |
-| 知识库、附件或 Agent 提取 Office 正文 | API/worker 的统一解析器 | Docling Slim 将 DOCX、PPTX、XLSX 转为 Markdown；旧 XLS 使用 LibreOffice Calc 转换后解析 |
+| 知识库、附件或 Agent 提取 Office 正文 | API/worker 的统一解析器 | Docling Slim 将 DOCX、PPTX、XLSX 转为 Markdown；旧 DOC/XLS 使用 LibreOffice Writer/Calc 转换后解析 |
 | 浏览器预览 Word/PPT | 后端预览服务 | LibreOffice Writer/Impress 将 DOC、DOCX、PPT、PPTX 转为 PDF |
 | 浏览器预览 Excel | 后端预览服务 | openpyxl/xlrd 读取 XLSX/XLS 内容和已保存的公式值 |
 | 编辑模板、生成文档、公式重算或版式检查 | 普通沙箱中的办公 Skill | 依赖部署的沙箱镜像与 Skill 所需工具，按需安装 LibreOffice |
 
 主、子 Agent 使用 `ocr_parse_file` 提取受支持文件的内容。工具经授权下载文件，在后端解析，再把完整 Markdown 写回当前 Project 的 `outputs/ocr/`，返回文件路径和短预览。较长结果通过 `read_file` 分段读取；编辑任务由普通 Agent/SubAgent 的文件、命令工具及办公 Skill 处理，并沿用工具审批。编辑原模板需要保留其结构，Markdown 只作为正文提取结果。
 
-Docling Slim 的依赖瘦身作用于后端：完整 Docling、Torch 和未使用的模型管线已移除。后端仍保留预览和旧 XLS 转换所需的 LibreOffice。普通沙箱使用独立镜像，后端安装的 LibreOffice 不会自动进入沙箱。Slim 不提供模板回填、公式重算或保真渲染；办公 Skill 的依赖需要在所选沙箱镜像中单独验证。旧 DOC/PPT 需要先转换为支持的格式才能使用统一解析器。
+聊天附件中的 DOC/DOCX 保留原件，由 Agent 按需调用 `ocr_parse_file`；上传弹窗的预解析仍仅支持 PDF 和图片。旧 DOC 由后端自动转换后解析，用户无需先转换，原件保持不变。损坏或无法转换的 DOC 会返回解析失败，不会进入仅支持 DOCX 的回退解析。
+
+Docling Slim 的依赖瘦身作用于后端：完整 Docling、Torch 和未使用的模型管线已移除。后端仍保留预览和旧 DOC/XLS 转换所需的 LibreOffice。普通沙箱使用独立镜像，后端安装的 LibreOffice 不会自动进入沙箱。Slim 不提供模板回填、公式重算或保真渲染；办公 Skill 的依赖需要在所选沙箱镜像中单独验证。旧 PPT 需要先转换为支持的格式才能使用统一解析器。
 
 ## 从 URL 导入网页
 
