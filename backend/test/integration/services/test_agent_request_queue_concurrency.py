@@ -13,12 +13,9 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-from yuxi.repositories.agent_run_request_repository import AgentRunRequestRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
-from yuxi.services import agent_request_queue_service
-from yuxi.services import context_compression_service
-from yuxi.services import run_worker
+from yuxi.repositories.agent_run_request_repository import AgentRunRequestRepository
+from yuxi.services import agent_request_queue_service, context_compression_service, run_worker
 from yuxi.services.input_message_service import build_chat_input_message
 from yuxi.storage.postgres.models_business import (
     AgentRun,
@@ -305,12 +302,18 @@ async def test_concurrent_steer_requests_keep_one_pending(monkeypatch: pytest.Mo
                 agent_slug="main",
                 uid=uid,
                 status="running",
+                worker_id=f"fixture:{uuid.uuid4()}",
+                heartbeat_at=utc_now_naive(),
+                lease_expires_at=utc_now_naive() + timedelta(minutes=5),
                 request_id=active_request_id,
                 conversation_id=conversation.id,
                 run_type="chat",
                 input_payload={},
             )
         )
+        await db.commit()
+        # 活跃夹具必须在真实恢复扫描后仍可引导，避免与 worker 周期清理竞态。
+        await AgentRunRepository(db).reconcile_expired_leases()
         await db.commit()
 
     async def submit(request_id: str):
@@ -341,7 +344,7 @@ async def test_concurrent_steer_requests_keep_one_pending(monkeypatch: pytest.Mo
 
         accepted = [result for result in results if not isinstance(result, Exception)]
         conflicts = [result for result in results if isinstance(result, HTTPException)]
-        assert len(accepted) == 1
+        assert len(accepted) == 1, results
         assert accepted[0].status == "queued"
         assert accepted[0].queue_policy == "steer"
         assert len(conflicts) == 1
