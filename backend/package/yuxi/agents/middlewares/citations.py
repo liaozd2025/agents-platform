@@ -3,13 +3,28 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated
+import re
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 from deepagents.middleware._utils import append_to_system_message
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.types import Command, Overwrite
+
+# 本轮没有任何可信来源时向模型显式声明，避免它照协议自造 <cite> 身份。
+NO_SOURCE_PROMPT = (
+    "本次没有取得任何可引用的来源，禁止输出 <cite> 标签，也不要编造来源身份；"
+    "直接回答即可。"
+)
+_CITE_TAG_RE = re.compile(r"<cite\b[^>]*>\s*\d*\s*</cite\s*>", re.IGNORECASE | re.DOTALL)
+_CITE_SOURCE_ATTR_RE = re.compile(r"\bsource\s*=\s*(?:\"([^\"]*)\"|'([^']*)')", re.IGNORECASE)
+
+
+def _cite_source(tag: str) -> str:
+    """读取单个 <cite> 标签声明的来源身份，缺失时返回空串。"""
+    attr = _CITE_SOURCE_ATTR_RE.search(tag)
+    return ((attr.group(1) or attr.group(2)) if attr else "").strip()
 
 
 def merge_citation_sources(existing: list[dict] | None, incoming: list[dict] | None) -> list[dict]:
@@ -77,6 +92,69 @@ def _safe_url(value: object) -> bool:
         return False
 
 
+def bound_citation_identities(sources: list[dict] | None) -> set[str]:
+    """收集本轮可信来源的可用身份（稳定 source 与可直接打开的 url）。"""
+    identities: set[str] = set()
+    for item in sources or []:
+        if not isinstance(item, dict):
+            continue
+        for key in ("source", "url"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                identities.add(value)
+    return identities
+
+
+def strip_unbound_citations(content: str, sources: list[dict] | None) -> str:
+    """剥离模型自造身份的 <cite> 标签，只保留已绑定来源或可直接打开的链接。
+
+    模型在没有任何来源时仍可能照引用协议编出一个 ``file:///…`` 身份，前端会
+    把它渲染成没有对应原文的徽标。这里以本轮采集到的可信来源为准做确定性兜底。
+    """
+    if not isinstance(content, str) or "<cite" not in content.lower():
+        return content
+    identities = bound_citation_identities(sources)
+
+    def _keep(match: re.Match[str]) -> str:
+        source = _cite_source(match.group(0))
+        return match.group(0) if source and (source in identities or _safe_url(source)) else ""
+
+    return _CITE_TAG_RE.sub(_keep, content)
+
+
+def collapse_duplicate_citations(content: str) -> str:
+    """折叠紧邻且指向同一来源的重复 <cite> 标签。
+
+    模型可能在结论同一处为同一份原文连续贴上多个引用标签（各自带自己的局部
+    编号），前端按来源归一化编号后就会渲染成并排的相同徽标。这里只折叠中间
+    仅有空白的相邻重复项；同一来源在正文不同位置被再次引用属于正常复引。
+    """
+    if not isinstance(content, str) or "<cite" not in content.lower():
+        return content
+    matches = list(_CITE_TAG_RE.finditer(content))
+    if len(matches) < 2:
+        return content
+
+    dropped: list[tuple[int, int]] = []
+    previous = matches[0]
+    for match in matches[1:]:
+        same_source = _cite_source(previous.group(0)) == _cite_source(match.group(0))
+        if same_source and not content[previous.end() : match.start()].strip():
+            dropped.append((previous.end(), match.end()))
+            previous = match
+            continue
+        previous = match
+    if not dropped:
+        return content
+    parts = []
+    cursor = 0
+    for start, end in dropped:
+        parts.append(content[cursor:start])
+        cursor = end
+    parts.append(content[cursor:])
+    return "".join(parts)
+
+
 def _tool_sources(name: str, message: ToolMessage) -> list[dict]:
     """只解析已知工具协议，不把模型自述或搜索摘要当作原文。"""
     if message.status == "error":
@@ -139,18 +217,44 @@ class CitationMiddleware(AgentMiddleware[CitationState]):
         """压缩或工具裁切后仍向模型提供本轮可用的来源身份。"""
         sources = request.state.get("citation_sources") or []
         if not sources:
-            return request
+            return request.override(system_message=append_to_system_message(request.system_message, NO_SOURCE_PROMPT))
         identities = [{key: source[key] for key in ("source", "source_type", "title")} for source in sources]
         prompt = "本次已取得的引用来源（仅为实际采用的结论引用）：\n" + json.dumps(identities, ensure_ascii=False)
         return request.override(system_message=append_to_system_message(request.system_message, prompt))
 
+    def _clean(self, content: str, sources: list[dict] | None) -> str:
+        """先剥离未绑定来源，再折叠相邻重复，避免删除后残留紧邻的相同徽标。"""
+        return collapse_duplicate_citations(strip_unbound_citations(content, sources))
+
+    def _drop_unbound_citations(self, response, sources):
+        """回答落库前剥离未绑定来源的引用标签，避免前端渲染幽灵徽标。"""
+        content = getattr(response, "content", None)
+        if isinstance(content, str):
+            cleaned = self._clean(content, sources)
+            return response if cleaned == content else response.model_copy(update={"content": cleaned})
+        if isinstance(content, list):
+            blocks: list[Any] = []
+            changed = False
+            for block in content:
+                text = block.get("text") if isinstance(block, dict) else None
+                if isinstance(text, str):
+                    cleaned = self._clean(text, sources)
+                    if cleaned != text:
+                        block = {**block, "text": cleaned}
+                        changed = True
+                blocks.append(block)
+            return response.model_copy(update={"content": blocks}) if changed else response
+        return response
+
     def wrap_model_call(self, request, handler):
-        """同步模型调用附带来源身份。"""
-        return handler(self._with_sources(request))
+        """同步模型调用附带来源身份，并回收未绑定来源的引用标签。"""
+        response = handler(self._with_sources(request))
+        return self._drop_unbound_citations(response, request.state.get("citation_sources") or [])
 
     async def awrap_model_call(self, request, handler):
-        """异步模型调用附带来源身份。"""
-        return await handler(self._with_sources(request))
+        """异步模型调用附带来源身份，并回收未绑定来源的引用标签。"""
+        response = await handler(self._with_sources(request))
+        return self._drop_unbound_citations(response, request.state.get("citation_sources") or [])
 
     def wrap_tool_call(self, request, handler):
         """在外层 filesystem 裁切之前捕获原始工具响应。"""

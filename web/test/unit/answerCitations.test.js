@@ -2,8 +2,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createMarkdownRenderer } from '../../src/utils/markdown_preview.js'
 import {
+  citationSourcesCacheKey,
   getMessageCitationSources,
   getToolCitationSources,
+  isBoundCitationSource,
   mergeCitationSources,
   resolveAnswerCitation,
   safeCitationUrl
@@ -53,6 +55,20 @@ test('代码块与行内代码中的引用不产生按钮，也不占用编号',
   assert.match(html, />1<\/button>/)
 })
 
+test('紧邻的同一来源引用只渲染一个徽标，正文他处复引正常保留', () => {
+  const cite = (number) => `<cite source="kb://kb-a/file-1" type="file">${number}</cite>`
+  const numbers = (content) =>
+    [...renderer.render(content).matchAll(/aria-label="查看引用 (\d+) 原文"/g)].map((m) => m[1])
+
+  // 模型在同一处连贴两个相同来源的标签（自带局部编号），归一化后不得并排显示
+  assert.deepEqual(numbers(`共处${cite(1)}${cite(6)}。`), ['1'])
+  assert.deepEqual(numbers(`共处${cite(1)} ${cite(6)}。`), ['1'])
+  assert.deepEqual(numbers(`${cite(1)}${cite(6)}${cite(3)}`), ['1'])
+  // 不同来源相邻，以及同一来源在正文其他位置被再次引用，都属于正常引用
+  const other = '<cite source="kb://kb-b/file-2" type="file">2</cite>'
+  assert.deepEqual(numbers(`甲${cite(1)}${other}乙${cite(3)}`), ['1', '2', '1'])
+})
+
 test('引用属性按文本转义，危险地址和相对地址不能成为打开入口', () => {
   const html = renderer.render(
     '<cite source="https://example.com/?q=&quot; onmouseover=&quot;alert(1)" type="url">1</cite>'
@@ -87,6 +103,36 @@ test('同名文件保持不同身份，同一来源的多个真实片段合并',
   const unknown = resolveAnswerCitation('同名.pdf', sources)
   assert.deepEqual(unknown.excerpts, [])
   assert.equal(unknown.kb_id, undefined)
+})
+
+test('未绑定本消息来源的引用不渲染徽标，安全链接与已绑定来源保留', () => {
+  const fabricated = '<cite source="file:///home/gem/skills/image-gen/SKILL.md" type="file">1</cite>'
+  const bound = '<cite source="kb://kb-a/file-1" type="file">1</cite>'
+  const html = renderer.render(`甲${bound}假${fabricated}乙`, { answerCitationSources: [sourceA] })
+  assert.equal((html.match(/class="citation-ref"/g) || []).length, 1)
+  assert.equal(html.includes('file://'), false)
+  assert.match(html, />1<\/button>/)
+
+  const linked = '<cite source="https://example.com/a" type="url">1</cite>'
+  assert.match(renderer.render(linked, { answerCitationSources: [] }), /class="citation-ref"/)
+  // 未接入来源集合的渲染场景保持原行为
+  assert.match(renderer.render(fabricated), /class="citation-ref"/)
+  assert.match(
+    renderer.render('<cite source="https://example.com/summary" type="url">1</cite>', {
+      answerCitationSources: []
+    }),
+    /class="citation-ref"/
+  )
+})
+
+test('绑定判定与缓存键覆盖来源身份，避免不同来源串用渲染结果', () => {
+  assert.equal(isBoundCitationSource(sourceA.source, [sourceA]), true)
+  assert.equal(isBoundCitationSource('kb://kb-a/file-9', [sourceA]), false)
+  assert.equal(isBoundCitationSource('https://example.com/a', []), true)
+  assert.equal(isBoundCitationSource('file:///tmp/a.md', [sourceA]), false)
+  assert.equal(citationSourcesCacheKey(undefined), '')
+  assert.equal(citationSourcesCacheKey([sourceA]), `kb://kb-a/file-1\u0001`)
+  assert.notEqual(citationSourcesCacheKey([sourceA]), citationSourcesCacheKey([sourceB]))
 })
 
 test('历史回复只消费当前消息中精确来源，网页摘要不能充当原文', () => {
