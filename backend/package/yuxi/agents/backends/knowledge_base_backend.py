@@ -4,6 +4,7 @@ from typing import Any
 
 
 async def resolve_visible_knowledge_bases_for_context(context) -> list[dict[str, Any]]:
+    """实时读取权限，并与智能体、任务和本轮选库范围取交集。"""
     from yuxi.knowledge.runtime import knowledge_base
 
     uid = getattr(context, "uid", None)
@@ -21,10 +22,11 @@ async def resolve_visible_knowledge_bases_for_context(context) -> list[dict[str,
         }
         for summary in summaries
     ]
-    enabled_knowledges = getattr(context, "knowledges", None)
-    if enabled_knowledges is not None:
-        enabled_ids = {str(value).strip() for value in enabled_knowledges if str(value).strip()}
-        databases = [db for db in databases if str(db.get("kb_id") or "").strip() in enabled_ids]
+    for field_name in ("knowledges", "knowledge_task_scope", "knowledge_selected_kb_ids"):
+        selected = getattr(context, field_name, None)
+        if selected is not None:
+            allowed_ids = set(selected)
+            databases = [db for db in databases if db["kb_id"] in allowed_ids]
 
     setattr(context, "_visible_knowledge_bases", databases)
     return databases

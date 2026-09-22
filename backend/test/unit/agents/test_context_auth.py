@@ -10,6 +10,21 @@ import yuxi.agents.skills.service as skill_service
 from yuxi.knowledge.read_models import KnowledgeBaseSummary
 
 
+@pytest.mark.asyncio
+async def test_input_context_discards_client_knowledge_scope(monkeypatch):
+    from yuxi.agents import context as context_module
+
+    monkeypatch.setattr(context_module, "_load_workspace_agent_context", lambda _uid: "")
+    context = await context_module.build_agent_input_context(
+        {"knowledge_task_scope": ["forged"], "knowledge_selected_kb_ids": ["forged"], "knowledges": ["a"]},
+        thread_id="thread-1",
+        uid="u1",
+    )
+    assert "knowledge_task_scope" not in context
+    assert "knowledge_selected_kb_ids" not in context
+    assert context["knowledges"] == ["a"]
+
+
 def _knowledge_summary(kb_id: str) -> KnowledgeBaseSummary:
     return KnowledgeBaseSummary(
         kb_id=kb_id,

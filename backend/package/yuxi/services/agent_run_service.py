@@ -496,6 +496,10 @@ async def create_agent_run_view(
         "tool_approval_mode": resolved_tool_approval_mode,
     }
     if run_type == "resume" and scope.parent_run is not None:
+        for key in ("knowledge_task_scope", "knowledge_selected_kb_ids", "knowledge_allowed_kb_ids"):
+            input_payload[key] = scope.parent_run.input_payload.get(key, [])
+        if "knowledge_retrieval" in scope.parent_run.input_payload:
+            input_payload["knowledge_retrieval"] = scope.parent_run.input_payload["knowledge_retrieval"]
         if source is None:
             source = getattr(scope.parent_run, "source", None) or "chat"
         if channel is None:

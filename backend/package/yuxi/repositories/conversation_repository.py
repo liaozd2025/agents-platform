@@ -248,13 +248,19 @@ class ConversationRepository:
 
     async def set_model_spec(self, conversation: Conversation, model_spec: str) -> None:
         """在请求事务内更新对话绑定模型。"""
+        await self.db.refresh(conversation, with_for_update=True)
         metadata = dict(conversation.extra_metadata or {})
         metadata["model_spec"] = model_spec
         await self._save_metadata(conversation, metadata)
 
     async def _lock_conversation_by_id(self, conversation_id: int) -> Conversation | None:
         """锁定会话元数据，串行化同一线程的附件更新。"""
-        result = await self.db.execute(select(Conversation).where(Conversation.id == conversation_id).with_for_update())
+        result = await self.db.execute(
+            select(Conversation)
+            .where(Conversation.id == conversation_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         return result.scalar_one_or_none()
 
     async def add_message(
@@ -413,6 +419,48 @@ class ConversationRepository:
 
         result = await self.db.execute(query)
         return list(result.scalars().unique().all())
+
+    async def knowledge_routing_history(
+        self, conversation_id: int, *, run_id: str | None, input_message_id: int | None, limit: int = 8
+    ) -> list[dict]:
+        """读取选库所需的最近对话，排除本轮与 FIFO 后续尚未执行的输入。"""
+        query = select(Message).where(
+            Message.conversation_id == conversation_id,
+            Message.role.in_(("user", "assistant")),
+            or_(
+                Message.message_type.is_(None),
+                Message.message_type.notin_(AUDIT_MESSAGE_TYPES),
+                Message.id.in_(select(AgentRun.output_message_id).where(AgentRun.output_message_id.is_not(None))),
+            ),
+        )
+        if run_id:
+            query = query.where(or_(Message.run_id.is_(None), Message.run_id != run_id))
+        if input_message_id is not None:
+            query = query.where(or_(Message.role == "assistant", Message.id < input_message_id))
+        rows = (await self.db.scalars(query.order_by(Message.id.desc()).limit(limit))).all()
+        history = []
+        for message in reversed(rows):
+            metadata = message.extra_metadata or {}
+            sources = metadata.get("knowledge_sources") or []
+            history.append(
+                {
+                    "role": message.role,
+                    "content": str(message.content or "")[:4000],
+                    "knowledge_sources": [
+                        {key: source.get(key) for key in ("kb_id", "file_id", "chunk_id")}
+                        for source in sources
+                        if isinstance(source, dict)
+                    ],
+                }
+            )
+        return history
+
+    async def set_knowledge_task_scope(self, conversation: Conversation, scope: list[str] | None) -> None:
+        """锁定最新元数据后保存任务范围，保留并发附件与模型更新。"""
+        await self.db.refresh(conversation, with_for_update=True)
+        metadata = dict(conversation.extra_metadata or {})
+        metadata["knowledge_task_scope"] = scope
+        await self._save_metadata(conversation, metadata)
 
     async def get_tool_artifacts(self, conversation_id: int) -> dict[tuple[str, str], dict]:
         """按 Run 与工具调用身份读取历史引用，避免加载完整工具正文。"""
@@ -892,6 +940,8 @@ class ConversationRepository:
         if not conversation:
             return None
 
+        if metadata is not None:
+            await self.db.refresh(conversation, with_for_update=True)
         normalized_title = self._normalize_title(title)
         if normalized_title is not None:
             conversation.title = normalized_title

@@ -91,6 +91,8 @@ async def build_agent_input_context(
 ) -> dict:
     """构建上下文，读取工作区前同步当前用户资料。"""
     input_context = dict(agent_config or {})
+    input_context.pop("knowledge_task_scope", None)
+    input_context.pop("knowledge_selected_kb_ids", None)
     if db is not None:
         from yuxi.services.user_memory_service import sync_user_profile_to_memory
 
@@ -245,6 +247,16 @@ class BaseContext:
             "type": "list",
             "kind": "knowledges",
         },
+    )
+
+    knowledge_task_scope: list[str] | None = field(
+        default=None,
+        metadata={"name": "任务知识库范围", "configurable": False, "hide": True},
+    )
+
+    knowledge_selected_kb_ids: list[str] | None = field(
+        default=None,
+        metadata={"name": "本轮选中知识库", "configurable": False, "hide": True},
     )
 
     mcps: list[str] | None = field(
@@ -534,6 +546,8 @@ async def normalize_agent_context_config(
     raw_context = dict(context) if isinstance(context, dict) else {}
     field_names = {item.name for item in fields(schema)}
     normalized = {key: value for key, value in raw_context.items() if key in field_names}
+    normalized.pop("knowledge_task_scope", None)
+    normalized.pop("knowledge_selected_kb_ids", None)
     resource_fields = AGENT_RUNTIME_RESOURCE_FIELDS & field_names
     fields_to_load = _resource_fields_requiring_available_keys(normalized, resource_fields)
     if fields_to_load:

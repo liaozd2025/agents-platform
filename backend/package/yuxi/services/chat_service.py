@@ -1106,6 +1106,136 @@ async def _ensure_thread_bound_agent(
     return conversation
 
 
+async def _prepare_knowledge_context(
+    *,
+    query: str,
+    human_message: HumanMessage,
+    current_user,
+    conversation,
+    conv_repo: ConversationRepository,
+    input_context: dict,
+    meta: dict,
+    db,
+) -> tuple[HumanMessage, list[dict]]:
+    """选库、检索并固化当前 Run 的可信范围，随后才能开始工具和子任务执行。"""
+    for key in ("knowledge_task_scope", "knowledge_selected_kb_ids", "knowledge_allowed_kb_ids"):
+        input_context.pop(key, None)
+    run_id = meta.get("run_id")
+    run_repo = AgentRunRepository(db)
+    run = await run_repo.get_run_for_user(str(run_id), str(current_user.uid)) if run_id else None
+    if run_id and (run is None or run.conversation_thread_id != meta["thread_id"]):
+        raise ValueError("知识库决策缺少当前 Run 的归属")
+    previous_scope = (conversation.extra_metadata or {}).get("knowledge_task_scope")
+    inherited_scope = None
+    if run is not None and run.run_type == "subagent":
+        inherited_scope = (run.input_payload.get("runtime") or {}).get("knowledge_task_scope", [])
+        if not isinstance(inherited_scope, list) or any(not isinstance(item, str) for item in inherited_scope):
+            raise ValueError("子任务知识库范围必须是服务端固化的列表")
+    history = await conv_repo.knowledge_routing_history(
+        conversation.id, run_id=run_id, input_message_id=run.input_message_id if run else None
+    )
+    started = asyncio.get_running_loop().time()
+    chunks = []
+    decision = None
+    counters = {"directory_reads": 0, "selection_calls": 0, "content_queries": 0}
+    audit = {"status": "error", "kb_ids": [], "result_count": 0}
+    payload = {
+        "knowledge_task_scope": inherited_scope if inherited_scope is not None else previous_scope,
+        "knowledge_selected_kb_ids": [],
+        "knowledge_allowed_kb_ids": [],
+    }
+    try:
+        decision = await decide_knowledge_retrieval(
+            query,
+            current_user,
+            model=input_context.get("model"),
+            history=history,
+            enabled_knowledges=input_context.get("knowledges"),
+            previous_scope=previous_scope,
+            inherited_scope=inherited_scope,
+            counters=counters,
+        )
+        payload.update(
+            {
+                "knowledge_task_scope": list(decision.task_scope) if decision.task_scope is not None else None,
+                "knowledge_selected_kb_ids": list(decision.kb_ids),
+                "knowledge_allowed_kb_ids": list(decision.allowed_kb_ids),
+            }
+        )
+        audit = {**decision.to_metadata(), "status": "error", "result_count": 0}
+        if decision.kb_ids:
+            chunks = await retrieve_for_decision(query, decision, user=current_user, counters=counters)
+        audit.update(
+            {
+                "status": "search" if decision.kb_ids else "clarify" if decision.clarification else "skip",
+                "result_count": len(chunks),
+            }
+        )
+    except Exception as exc:
+        audit.update(
+            {
+                "status": "error",
+                "error_code": getattr(exc, "code", "knowledge_retrieval_failed"),
+                "result_count": len(chunks),
+            }
+        )
+        raise
+    finally:
+        audit["counts"] = counters
+        audit["duration_ms"] = round((asyncio.get_running_loop().time() - started) * 1000)
+        meta["knowledge_retrieval"] = audit
+        payload["knowledge_retrieval"] = audit
+        if run_id:
+            await run_repo.set_knowledge_retrieval(
+                str(run_id), worker_id=str(meta.get("worker_id") or ""), payload=payload
+            )
+        if decision is not None:
+            await conv_repo.set_knowledge_task_scope(conversation, payload["knowledge_task_scope"])
+        # 子 Run 创建会从父 Run 读取范围；必须先提交，不能仅靠可改写的 prompt/context。
+        await db.commit()
+
+    input_context.update({key: value for key, value in payload.items() if key != "knowledge_retrieval"})
+    notes = []
+    if decision.kb_ids:
+        notes.append(format_retrieval_context(chunks))
+    if decision.clarification:
+        notes.append(f"知识库范围仍有影响回答的歧义，请先简短追问：{decision.clarification}")
+    missing = [item.get("kb_id") for item in audit.get("assessments", []) if item.get("missing_description")]
+    if missing:
+        notes.append("以下知识库描述缺失，本轮暂按库名判断，请提示管理员补充描述：" + "、".join(missing))
+    if decision.task_relation == "new":
+        notes.append("当前是新任务，旧任务的知识库资料不能自动作为本轮依据。")
+    if notes:
+        context = "\n\n<knowledge_context>\n" + "\n".join(notes) + "\n</knowledge_context>"
+        content = human_message.content
+        human_message = human_message.model_copy(
+            update={
+                "content": content + context
+                if isinstance(content, str)
+                else [*content, {"type": "text", "text": context}]
+            }
+        )
+    return human_message, chunks
+
+
+async def _restore_knowledge_context(*, input_context: dict, meta: dict, uid: str, thread_id: str, db) -> None:
+    """恢复只采用本次 Run 已固化范围，不从相邻运行或客户端配置猜测。"""
+    for key in ("knowledge_task_scope", "knowledge_selected_kb_ids", "knowledge_allowed_kb_ids"):
+        input_context.pop(key, None)
+    run_id = meta.get("run_id")
+    if not run_id:
+        input_context.update(knowledge_task_scope=[], knowledge_selected_kb_ids=[], knowledge_allowed_kb_ids=[])
+        return
+    run = await AgentRunRepository(db).get_run_for_user(str(run_id), uid)
+    if run is None or run.conversation_thread_id != thread_id:
+        raise ValueError("知识库恢复范围缺少当前 Run 的归属")
+    payload = run.input_payload or {}
+    for key in ("knowledge_task_scope", "knowledge_selected_kb_ids", "knowledge_allowed_kb_ids"):
+        input_context[key] = payload.get(key, [])
+    if "knowledge_retrieval" in payload:
+        meta["knowledge_retrieval"] = payload["knowledge_retrieval"]
+
+
 async def stream_agent_chat(
     *,
     agent_slug: str,
@@ -1235,25 +1365,16 @@ async def stream_agent_chat(
             serialize_attachment(attachment, thread_id=thread_id) for attachment in thread_attachment_records
         ]
         persisted_human_message = human_message
-        retrieval_chunks: list[dict[str, Any]] = []
-        retrieval_decision = await decide_knowledge_retrieval(query, current_user)
-        if retrieval_decision.kb_ids:
-            retrieval_chunks = await retrieve_for_decision(query, retrieval_decision)
-            retrieval_context = format_retrieval_context(retrieval_chunks)
-            if isinstance(human_message.content, str):
-                human_message = human_message.model_copy(
-                    update={
-                        "content": (
-                            f"{human_message.content}\n\n<knowledge_context>\n{retrieval_context}\n</knowledge_context>"
-                        )
-                    }
-                )
-            meta["knowledge_retrieval"] = {
-                "intent": retrieval_decision.intent,
-                "kb_ids": list(retrieval_decision.kb_ids),
-                "mentioned": retrieval_decision.mentioned,
-                "result_count": len(retrieval_chunks),
-            }
+        human_message, retrieval_chunks = await _prepare_knowledge_context(
+            query=query,
+            human_message=human_message,
+            current_user=current_user,
+            conversation=conversation,
+            conv_repo=conv_repo,
+            input_context=input_context,
+            meta=meta,
+            db=db,
+        )
         human_message = human_message.model_copy(
             update={
                 "additional_kwargs": {
@@ -1422,7 +1543,10 @@ async def stream_agent_chat(
                 interrupt_error_type=interrupt_error_type,
                 interrupt_error_message=interrupt_error_message,
                 token_usage=_current_run_token_usage(agent_state, meta.get("run_id")),
-                assistant_additional_metadata={"knowledge_sources": retrieval_chunks} if retrieval_chunks else None,
+                assistant_additional_metadata={
+                    "knowledge_sources": retrieval_chunks,
+                    "knowledge_retrieval": meta["knowledge_retrieval"],
+                },
             )
         except Exception as e:
             logger.exception(f"Error saving messages from LangGraph state: {e}")
@@ -1464,7 +1588,7 @@ async def stream_agent_chat(
         logger.exception(f"Error streaming messages: {e}")
 
         error_msg = f"Error streaming messages: {e}"
-        error_type = "unexpected_error"
+        error_type = getattr(e, "code", "unexpected_error")
 
         full_msg = AIMessage(content="".join(accumulated_content)) if accumulated_content else None
 
@@ -1549,6 +1673,7 @@ async def stream_agent_resume(
         request_id=meta.get("request_id"),
         worker_id=meta.get("worker_id"),
     )
+    await _restore_knowledge_context(input_context=input_context, meta=meta, uid=uid, thread_id=thread_id, db=db)
     # 用户资料同步查询结束后归还连接，恢复流不持有业务事务。
     await db.commit()
     _apply_model_override(input_context, meta)

@@ -349,6 +349,16 @@ class AgentRunRepository:
         await self.db.flush()
         return run
 
+    async def set_knowledge_retrieval(self, run_id: str, *, worker_id: str, payload: dict) -> AgentRun:
+        """由持有租约的执行者保存当前 Run 选库审计和可信执行范围。"""
+        run = await self._lock_run(run_id)
+        if run is None:
+            raise ValueError("知识库决策对应的 AgentRun 不存在")
+        self._require_lease_owner(run, worker_id=worker_id, now=utc_now_naive(), action="保存知识库决策")
+        run.input_payload = {**(run.input_payload or {}), **payload}
+        await self.db.flush()
+        return run
+
     async def set_output_message(
         self,
         run_id: str,
@@ -1133,5 +1143,7 @@ class AgentRunRepository:
             raise ValueError(f"只有当前有效 AgentRun lease owner 可以{action}")
 
     async def _lock_run(self, run_id: str) -> AgentRun | None:
-        result = await self.db.execute(select(AgentRun).where(AgentRun.id == run_id).with_for_update())
+        result = await self.db.execute(
+            select(AgentRun).where(AgentRun.id == run_id).with_for_update().execution_options(populate_existing=True)
+        )
         return result.scalar_one_or_none()

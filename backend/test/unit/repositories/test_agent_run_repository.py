@@ -1051,3 +1051,17 @@ async def test_lock_memory_write_requires_current_top_level_lease_owner(session)
             request_id="memory-request",
             now=now + timedelta(seconds=2),
         )
+
+
+async def test_knowledge_decision_write_requires_lease_and_preserves_input_payload(session):
+    """失效执行者不能覆写知识范围，同一次输入其余字段必须保留。"""
+    repository = AgentRunRepository(session)
+    run = await _seed_running_run(session, run_id="knowledge-run", request_id="knowledge-request")
+    run.input_payload = {"model_spec": "provider:model"}
+    await repository.mark_running(run.id, worker_id="worker-a", lease_seconds=60)
+    with pytest.raises(ValueError, match="lease owner"):
+        await repository.set_knowledge_retrieval(run.id, worker_id="worker-b", payload={"knowledge_task_scope": ["B"]})
+    await repository.set_knowledge_retrieval(run.id, worker_id="worker-a", payload={"knowledge_task_scope": ["A"]})
+    await session.commit()
+    await session.refresh(run)
+    assert run.input_payload == {"model_spec": "provider:model", "knowledge_task_scope": ["A"]}

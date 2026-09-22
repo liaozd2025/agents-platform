@@ -26,8 +26,9 @@ from yuxi.utils import logger
 def get_common_kb_tools() -> list:
     """获取通用知识库工具列表
 
-    返回 7 个通用工具：
+    返回知识库目录、选库和内容工具：
     - list_kbs: 列出用户可访问的知识库
+    - select_kbs: 为新增信息需求按描述重新选库
     - get_mindmap: 获取指定知识库的思维导图
     - query_kb: 在指定知识库中检索
     - find_kb_document: 在指定文件内定位关键词或正则模式
@@ -37,6 +38,7 @@ def get_common_kb_tools() -> list:
     """
     return [
         list_kbs,
+        select_kbs,
         get_mindmap,
         query_kb,
         find_kb_document,
@@ -81,6 +83,54 @@ async def list_kbs(dummy: str, runtime: ToolRuntime) -> str:
         }
         for kb in available_kbs
     ]
+
+
+class SelectKBsInput(BaseModel):
+    """只向模型暴露新增信息需求，运行身份由服务端注入。"""
+
+    query: str = Field(min_length=1, description="需要从知识库补充的具体事实")
+
+
+@tool(category="knowledge", tags=["知识库"], display_name="按新增需求重新选库", args_schema=SelectKBsInput)
+async def select_kbs(query: str, runtime: ToolRuntime) -> dict:
+    """出现新信息需求时，按库描述重新选择本轮可查询的库，不扩大任务范围。"""
+    from yuxi.repositories.agent_run_repository import AgentRunRepository
+    from yuxi.services.knowledge_retrieval_policy import decide_knowledge_retrieval
+    from yuxi.storage.postgres.manager import pg_manager
+
+    context = runtime.context
+    if not getattr(context, "uid", None):
+        raise ValueError("无法获取用户信息")
+    if not query.strip():
+        raise ValueError("请说明需要补充的事实")
+    if not getattr(context, "run_id", None) or not getattr(context, "worker_id", None):
+        raise ValueError("缺少运行身份，不能更新选库结果")
+    counters = {"directory_reads": 0, "selection_calls": 0, "content_queries": 0}
+    decision = await decide_knowledge_retrieval(
+        query,
+        context,
+        model=context.model,
+        enabled_knowledges=context.knowledges,
+        inherited_scope=context.knowledge_task_scope,
+        counters=counters,
+    )
+    async with pg_manager.get_async_session_context() as db:
+        await AgentRunRepository(db).set_knowledge_retrieval(
+            context.run_id,
+            worker_id=context.worker_id,
+            payload={
+                "knowledge_selected_kb_ids": list(decision.kb_ids),
+            },
+        )
+        await db.commit()
+    context.knowledge_selected_kb_ids = list(decision.kb_ids)
+    return {
+        "intent": decision.intent,
+        "kb_ids": list(decision.kb_ids),
+        "assessments": list(decision.assessments),
+        "counts": counters,
+        "clarification": decision.clarification,
+    }
 
 
 class GetMindmapInput(BaseModel):
@@ -424,17 +474,9 @@ async def _resolve_visible_knowledge_bases_for_query(runtime: ToolRuntime | None
     if context is None:
         return []
 
-    visible_kbs = getattr(context, "_visible_knowledge_bases", None)
-    if isinstance(visible_kbs, list):
-        return visible_kbs
+    from yuxi.agents.backends.knowledge_base_backend import resolve_visible_knowledge_bases_for_context
 
-    try:
-        from yuxi.agents.backends.knowledge_base_backend import resolve_visible_knowledge_bases_for_context
-
-        return await resolve_visible_knowledge_bases_for_context(context)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"解析会话可见知识库失败: {exc}")
-        return []
+    return await resolve_visible_knowledge_bases_for_context(context)
 
 
 def _find_query_target(

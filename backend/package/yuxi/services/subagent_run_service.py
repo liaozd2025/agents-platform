@@ -229,10 +229,16 @@ class SubagentRunService:
             getattr(context, "model", None),
             self.db,
         )
+        parent_knowledge_scope = creator_run.input_payload.get("knowledge_allowed_kb_ids")
+        if not isinstance(parent_knowledge_scope, list) or any(
+            not isinstance(kb_id, str) for kb_id in parent_knowledge_scope
+        ):
+            raise ValueError("父运行缺少可信知识库范围，不能创建子智能体")
         runtime_payload = {
             "tool_call_id": tool_call_id,
             "subagent_name": scope.agent_item.name,
             "parent_thread_id": creator_run.conversation_thread_id,
+            "knowledge_task_scope": list(parent_knowledge_scope),
         }
         input_payload = {
             "model_spec": resolved_model_spec,

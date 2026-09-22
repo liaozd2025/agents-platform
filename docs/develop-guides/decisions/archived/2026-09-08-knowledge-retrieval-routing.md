@@ -1,8 +1,10 @@
 # 知识库检索范围路由
 
-状态：implemented
+状态：archived
 类型：feature
 Owner：backend/package/yuxi/services/knowledge_retrieval_policy.py
+
+本记录冻结历史取舍，当前行为由[基于知识库描述的大模型选库](../implemented/2026-09-22-on-demand-knowledge-retrieval.md)拥有。
 
 ## 问题
 

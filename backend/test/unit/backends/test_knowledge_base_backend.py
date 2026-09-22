@@ -36,3 +36,31 @@ async def test_resolve_visible_knowledge_bases_filters_by_kb_id(monkeypatch):
     databases = await knowledge_base_backend.resolve_visible_knowledge_bases_for_context(context)
 
     assert databases == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enabled", "task_scope", "selected", "expected"),
+    [
+        (None, None, None, ["a", "b"]),
+        (["a"], None, ["a", "b"], ["a"]),
+        (None, ["b"], ["a", "b"], ["b"]),
+        (None, None, [], []),
+        (None, [], None, []),
+        ([], None, None, []),
+    ],
+)
+async def test_scope_intersection_distinguishes_empty_and_unrestricted(
+    monkeypatch, enabled, task_scope, selected, expected
+):
+    import yuxi.knowledge.runtime as knowledge_runtime
+
+    async def visible(_uid):
+        return [SimpleNamespace(kb_id=key, name=key, description="资料", kb_type="milvus") for key in ("a", "b")]
+
+    monkeypatch.setattr(knowledge_runtime.knowledge_base, "get_databases_by_uid", visible)
+    context = SimpleNamespace(
+        uid="u1", knowledges=enabled, knowledge_task_scope=task_scope, knowledge_selected_kb_ids=selected
+    )
+    result = await knowledge_base_backend.resolve_visible_knowledge_bases_for_context(context)
+    assert [kb["kb_id"] for kb in result] == expected

@@ -80,8 +80,7 @@ class DifyKB(ReadOnlyConnectors):
         dataset_id = str(additional_params.get("dify_dataset_id") or "").strip()
 
         if not api_url or not token or not dataset_id:
-            logger.error(f"Dify config incomplete for kb_id={kb_id}")
-            return []
+            raise ValueError("Dify 知识库连接配置不完整")
 
         merged = {**config.query_options, **kwargs}
 
@@ -130,11 +129,11 @@ class DifyKB(ReadOnlyConnectors):
                 logger.error(
                     f"Dify query fallback failed for kb_id={kb_id}: {fallback_error}, {traceback.format_exc()}"
                 )
-                return []
+                raise RuntimeError("Dify 知识库检索失败") from fallback_error
 
-        records = response_json.get("records", []) if isinstance(response_json, dict) else []
+        records = response_json.get("records") if isinstance(response_json, dict) else None
         if not isinstance(records, list):
-            return []
+            raise ValueError("Dify 检索响应缺少有效 records")
 
         results = []
         for record in records:

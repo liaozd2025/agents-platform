@@ -229,6 +229,24 @@ async def run_citation_round(client, headers, case, file_ids, mode, *, adopted_f
         await consume_events(client, headers, run_id)
         run = await wait_for_run(client, headers, run_id)
     assert run["status"] == "completed", {key: run.get(key) for key in ("id", "status", "error_type", "error_message")}
+    conn = await asyncpg.connect(postgres_dsn())
+    try:
+        scopes = await conn.fetch(
+            "SELECT child.input_payload AS child_payload, parent.input_payload AS parent_payload "
+            "FROM agent_runs child JOIN agent_runs parent ON parent.id=child.created_by_run_id "
+            "WHERE parent.id=$1 AND child.run_type='subagent'",
+            source_run_id,
+        )
+    finally:
+        await conn.close()
+    assert scopes, "引用必须来自本次主 Run 创建的真实子 Run"
+    for row in scopes:
+        parent_payload = json.loads(row["parent_payload"])
+        child_payload = json.loads(row["child_payload"])
+        assert parent_payload["knowledge_allowed_kb_ids"] == [case["kb_id"]]
+        assert child_payload["runtime"]["knowledge_task_scope"] == [case["kb_id"]]
+        assert child_payload["knowledge_task_scope"] == [case["kb_id"]]
+        assert child_payload["knowledge_selected_kb_ids"] == [case["kb_id"]]
     return run, source_run_id, payload
 
 

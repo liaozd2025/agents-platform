@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import MethodType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,6 +25,107 @@ def _tool_callable(tool):
         return callback
 
     raise AssertionError(f"{tool.name} tool has no callable entry")
+
+
+def test_select_kbs_public_schema_excludes_runtime():
+    """能力发现必须能序列化工具参数，且不向模型暴露运行身份。"""
+    schema = tools.select_kbs.args_schema.model_json_schema()
+    assert set(schema["properties"]) == {"query"}
+
+
+@pytest.mark.asyncio
+async def test_tools_revalidate_permission_and_do_not_use_cached_catalog(monkeypatch):
+    import yuxi.knowledge.runtime as knowledge_runtime
+
+    async def revoked(_uid):
+        return []
+
+    monkeypatch.setattr(knowledge_runtime.knowledge_base, "get_databases_by_uid", revoked)
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(uid="u1", knowledges=None, _visible_knowledge_bases=[{"kb_id": "revoked"}])
+    )
+    assert await tools._resolve_visible_knowledge_bases_for_query(runtime) == []
+
+    async def unavailable(_uid):
+        raise ConnectionError("权限服务不可用")
+
+    monkeypatch.setattr(knowledge_runtime.knowledge_base, "get_databases_by_uid", unavailable)
+    with pytest.raises(ConnectionError, match="权限服务不可用"):
+        await tools._resolve_visible_knowledge_bases_for_query(runtime)
+
+
+@pytest.mark.asyncio
+async def test_select_kbs_changes_query_selection_without_expanding_task_scope(monkeypatch):
+    from yuxi.services import knowledge_retrieval_policy
+    from yuxi.repositories.agent_run_repository import AgentRunRepository
+    from yuxi.storage.postgres.manager import pg_manager
+
+    db = SimpleNamespace(commit=AsyncMock())
+
+    @asynccontextmanager
+    async def session():
+        yield db
+
+    saved = AsyncMock()
+    monkeypatch.setattr(pg_manager, "get_async_session_context", session)
+    monkeypatch.setattr(AgentRunRepository, "set_knowledge_retrieval", saved, raising=False)
+
+    async def decide(_query, _user, **kwargs):
+        assert kwargs["inherited_scope"] == ["a", "b"]
+        assert kwargs["enabled_knowledges"] == ["a", "b", "outside"]
+        return SimpleNamespace(
+            intent="SEARCH_KB",
+            kb_ids=("b",),
+            assessments=(),
+            clarification=None,
+            to_metadata=lambda: {"intent": "SEARCH_KB", "kb_ids": ["b"]},
+        )
+
+    monkeypatch.setattr(knowledge_retrieval_policy, "decide_knowledge_retrieval", decide)
+    context = SimpleNamespace(
+        uid="u1",
+        run_id="run-1",
+        worker_id="worker-1",
+        model="test:model",
+        knowledges=["a", "b", "outside"],
+        knowledge_task_scope=["a", "b"],
+        knowledge_selected_kb_ids=["a"],
+    )
+    result = await _tool_callable(tools.select_kbs)("补充另一项事实", SimpleNamespace(context=context))
+    assert result["kb_ids"] == ["b"]
+    assert context.knowledge_selected_kb_ids == ["b"]
+    assert context.knowledge_task_scope == ["a", "b"]
+    assert saved.call_args.kwargs["payload"] == {"knowledge_selected_kb_ids": ["b"]}
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("query_kb", {"kb_id": "b", "query_text": "资料"}),
+        ("open_kb_document", {"kb_id": "b", "file_id": "file-b"}),
+        ("find_kb_document", {"kb_id": "b", "file_id": "file-b", "patterns": ["资料"]}),
+        ("download_kb_file", {"kb_id": "b", "file_id": "file-b"}),
+        ("get_mindmap", {"kb_name": "b"}),
+        ("search_file", {"kb_name": "b"}),
+    ],
+)
+async def test_all_content_tools_reject_readable_but_out_of_task_scope(monkeypatch, tool_name, arguments):
+    import yuxi.knowledge.runtime as knowledge_runtime
+
+    async def readable(_uid):
+        return [SimpleNamespace(kb_id=key, name=key, description="资料", kb_type="milvus") for key in ("a", "b")]
+
+    monkeypatch.setattr(knowledge_runtime.knowledge_base, "get_databases_by_uid", readable)
+    runtime = SimpleNamespace(
+        context=SimpleNamespace(
+            uid="u1", knowledges=None, knowledge_task_scope=["a"], knowledge_selected_kb_ids=["a", "b"]
+        )
+    )
+    result = await _tool_callable(getattr(tools, tool_name))(**arguments, runtime=runtime)
+    assert isinstance(result, str)
+    assert "不存在" in result or "不可访问" in result or "未启用" in result
 
 
 def _query_kb_callable():

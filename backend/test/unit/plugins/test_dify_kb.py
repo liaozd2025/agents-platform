@@ -141,7 +141,8 @@ async def test_dify_kb_aquery_maps_records(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dify_kb_aquery_error_returns_empty(monkeypatch, tmp_path):
+async def test_dify_kb_aquery_error_is_not_an_empty_result(monkeypatch, tmp_path):
+    """连接失败不能被上层记录为成功无命中。"""
     kb = DifyKB(str(tmp_path))
     slug = "kb_test_dify_error"
     additional_params = {
@@ -161,9 +162,26 @@ async def test_dify_kb_aquery_error_returns_empty(monkeypatch, tmp_path):
         lambda **kwargs: _FakeAsyncClient(raises=RuntimeError("boom"), **kwargs),
     )
 
-    result = await kb.aquery(
-        "hello",
-        slug,
-        config=config,
+    with pytest.raises(RuntimeError, match="Dify 知识库检索失败"):
+        await kb.aquery("hello", slug, config=config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [{}, {"records": None}, {"records": "invalid"}, {"records": []}])
+async def test_dify_only_valid_empty_records_mean_no_matches(monkeypatch, tmp_path, payload):
+    """协议错误与合法空结果拥有不同结局。"""
+    from unittest.mock import AsyncMock
+
+    kb = DifyKB(str(tmp_path))
+    config = KnowledgeBaseConfig(
+        kb_id="kb-dify",
+        kb_type="dify",
+        query_params={"options": {}},
+        additional_params={"dify_api_url": "https://example.com/v1", "dify_token": "test", "dify_dataset_id": "test"},
     )
-    assert result == []
+    monkeypatch.setattr(kb, "_request_dify", AsyncMock(return_value=payload))
+    if payload == {"records": []}:
+        assert await kb.aquery("问题", "kb-dify", config=config) == []
+    else:
+        with pytest.raises(ValueError, match="records"):
+            await kb.aquery("问题", "kb-dify", config=config)

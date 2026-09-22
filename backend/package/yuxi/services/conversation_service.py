@@ -34,6 +34,7 @@ MODEL_HISTORY_METADATA_KEYS = frozenset(
         "attachments",
         "source",
         "knowledge_sources",
+        "knowledge_retrieval",
         "citation_sources",
         "error_type",
         "error_message",
@@ -133,7 +134,12 @@ async def create_thread_view(
             )
 
     thread_id = str(uuid.uuid4())
-    thread_metadata = dict(metadata or {})
+    thread_metadata = {
+        key: value
+        for key, value in (metadata or {}).items()
+        if key
+        not in {"knowledge_task_scope", "knowledge_selected_kb_ids", "knowledge_allowed_kb_ids", "knowledge_retrieval"}
+    }
     thread_metadata["backend_id"] = agent_item.backend_id
     if project_id:
         project = await project_repo.lock_active_selectable_for_user(

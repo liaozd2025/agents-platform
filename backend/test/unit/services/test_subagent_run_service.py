@@ -732,7 +732,7 @@ async def test_subagent_run_service_create_run_record_persists_subagent_context(
         id="parent-run",
         conversation_id=10,
         conversation_thread_id="parent-thread",
-        input_payload={"tool_approval_mode": "default"},
+        input_payload={"tool_approval_mode": "default", "knowledge_allowed_kb_ids": ["allowed-kb"]},
     )
     relation = _relation(child_thread_id="child-thread", parent_conversation_id=10, subagent_slug="worker")
 
@@ -767,6 +767,7 @@ async def test_subagent_run_service_create_run_record_persists_subagent_context(
             "tool_call_id": "tool-1",
             "subagent_name": "Worker",
             "parent_thread_id": "parent-thread",
+            "knowledge_task_scope": ["allowed-kb"],
         },
     }
     assert db.committed is False
@@ -782,7 +783,7 @@ async def test_subagent_run_service_create_run_record_uses_creator_runtime_scope
         id="parent-run",
         conversation_id=10,
         conversation_thread_id="current-parent-thread",
-        input_payload={"tool_approval_mode": "always_trust"},
+        input_payload={"tool_approval_mode": "always_trust", "knowledge_allowed_kb_ids": []},
     )
     relation = _relation(child_thread_id="child-thread", parent_conversation_id=10, subagent_slug="worker")
 
@@ -799,6 +800,30 @@ async def test_subagent_run_service_create_run_record_uses_creator_runtime_scope
     assert db.created_run_kwargs["created_by_run_id"] == "parent-run"
     assert db.created_run_kwargs["input_payload"]["runtime"]["parent_thread_id"] == "current-parent-thread"
     assert db.created_run_kwargs["input_payload"]["tool_approval_mode"] == "always_trust"
+    assert db.created_run_kwargs["input_payload"]["runtime"]["knowledge_task_scope"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [None, "forged", [42]])
+async def test_subagent_rejects_missing_or_invalid_parent_knowledge_scope(monkeypatch, scope):
+    db = _FakeDB()
+    _patch_run_record_creation(monkeypatch, db)
+    creator_run = SimpleNamespace(
+        id="parent-run",
+        conversation_id=10,
+        conversation_thread_id="parent-thread",
+        input_payload={"knowledge_allowed_kb_ids": scope},
+    )
+    with pytest.raises(ValueError, match="父运行缺少可信知识库范围"):
+        await SubagentRunService(db)._create_run_record(
+            input_message=build_chat_input_message("delegate"),
+            request_id="req",
+            current_uid="user-1",
+            model_spec=None,
+            creator_run=creator_run,
+            relation=_relation(child_thread_id="child-thread", parent_conversation_id=10, subagent_slug="worker"),
+            tool_call_id="tool-1",
+        )
 
 
 @pytest.mark.asyncio

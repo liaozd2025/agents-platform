@@ -2,6 +2,7 @@
 
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -390,6 +391,15 @@ async def test_stream_agent_resume_commits_before_stream_and_routes_subagent_chu
 
     db.commit_count = 0
     monkeypatch.setattr(svc, "save_messages_from_langgraph_state", fail_output_persistence)
+    monkeypatch.setattr(
+        svc,
+        "AgentRunRepository",
+        lambda _db: SimpleNamespace(
+            get_run_for_user=AsyncMock(
+                return_value=SimpleNamespace(conversation_thread_id="parent-thread", input_payload={})
+            )
+        ),
+    )
     failing_chunks = []
     async for raw in stream_agent_resume(
         thread_id="parent-thread",

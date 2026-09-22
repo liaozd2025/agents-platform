@@ -198,7 +198,7 @@ def _citation_response(request: dict) -> tuple[dict, str]:
     """引用回放只在真实工具返回匹配原文和子回复之后继续模型步骤。"""
     messages = request["messages"]
     payload = next(
-        json.loads(message["content"].split("CITATION_REPLAY:", 1)[1])
+        json.JSONDecoder().raw_decode(message["content"].split("CITATION_REPLAY:", 1)[1])[0]
         for message in reversed(messages)
         if message.get("role") == "user" and "CITATION_REPLAY:" in str(message.get("content"))
     )
@@ -228,6 +228,8 @@ def _citation_response(request: dict) -> tuple[dict, str]:
         file_id = payload["file_ids"][0]
         tool_id = f"call-citation-{token}-open"
         if tool_id not in results:
+            if f"call-citation-{token}-select" not in results:
+                return call("select", "select_kbs", {"query": "CITATION_SELECT:" + payload["kb_id"]})
             return call("open", "open_kb_document", {"kb_id": payload["kb_id"], "file_id": file_id})
         document = json.loads(results[tool_id])
         if document.get("kb_id") != payload["kb_id"] or document.get("file_id") != file_id:
@@ -292,6 +294,31 @@ def _citation_response(request: dict) -> tuple[dict, str]:
     return {"content": "\n\n".join(summaries)}, "stop"
 
 
+def selection_completion(request: dict, selection: dict) -> dict:
+    """按真实结构化适配器请求返回 JSON 或工具参数，不执行应用内 monkeypatch。"""
+    message = {"role": "assistant", "content": json.dumps(selection, ensure_ascii=False)}
+    finish = "stop"
+    tools = request.get("tools") or []
+    if tools:
+        message["content"] = None
+        message["tool_calls"] = [
+            {
+                "id": "call-selection",
+                "type": "function",
+                "function": {"name": tools[0]["function"]["name"], "arguments": json.dumps(selection)},
+            }
+        ]
+        finish = "tool_calls"
+    return {
+        "id": "selection-replay",
+        "object": "chat.completion",
+        "created": 1,
+        "model": request["model"],
+        "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
 class ReplayHandler(BaseHTTPRequestHandler):
     """只实现测试所需的 health 与 chat completions 协议。"""
 
@@ -320,6 +347,40 @@ class ReplayHandler(BaseHTTPRequestHandler):
             request = json.loads(self.rfile.read(length) or b"{}")
         except (TypeError, ValueError, json.JSONDecodeError):
             self._write_json(400, {"error": "invalid_json"})
+            return
+
+        selection_request = any(
+            item.get("function", {}).get("name") == "KnowledgeSelection" for item in request.get("tools") or []
+        ) or (request.get("response_format", {}).get("json_schema", {}).get("name") == "KnowledgeSelection")
+        if (
+            selection_request
+            and request.get("stream") is not True
+            and self.headers.get("authorization") == EXPECTED_AUTHORIZATION
+            and request.get("model") == EXPECTED_MODEL
+        ):
+            try:
+                routing = json.loads(request["messages"][-1]["content"])
+                catalog = routing["catalog"]
+            except (ValueError, KeyError, TypeError):
+                self._write_json(422, {"error": "invalid_selection_request"})
+                return
+            query = routing["query"]
+            selected_id = query.removeprefix("CITATION_SELECT:") if query.startswith("CITATION_SELECT:") else None
+            selection = {
+                "task_relation": "continue",
+                "explicit_scope": None,
+                "requested_kb_ids": [],
+                "clarification": None,
+                "assessments": [
+                    {
+                        "kb_id": item["kb_id"],
+                        "status": "select" if item["kb_id"] == selected_id else "skip",
+                        "reason": "原文读取需要此库" if item["kb_id"] == selected_id else "本轮无需内容检索",
+                    }
+                    for item in catalog
+                ],
+            }
+            self._write_json(200, selection_completion(request, selection))
             return
 
         request_error = _validate_request(self.headers.get("authorization"), request)

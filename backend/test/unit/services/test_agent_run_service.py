@@ -2081,7 +2081,14 @@ async def test_create_resume_run_inherits_parent_model_spec(monkeypatch: pytest.
             id="parent-run",
             conversation_thread_id="thread-1",
             status="interrupted",
-            input_payload={"model_spec": "parent-model", "tool_approval_mode": "always_trust"},
+            input_payload={
+                "model_spec": "parent-model",
+                "tool_approval_mode": "always_trust",
+                "knowledge_task_scope": ["a"],
+                "knowledge_selected_kb_ids": [],
+                "knowledge_allowed_kb_ids": ["a"],
+                "knowledge_retrieval": {"intent": "NO_KB"},
+            },
         ),
     )
 
@@ -2099,6 +2106,10 @@ async def test_create_resume_run_inherits_parent_model_spec(monkeypatch: pytest.
 
     assert db.created_run_kwargs["input_payload"]["model_spec"] == "parent-model"
     assert db.created_run_kwargs["input_payload"]["tool_approval_mode"] == "always_trust"
+    assert db.created_run_kwargs["input_payload"]["knowledge_task_scope"] == ["a"]
+    assert db.created_run_kwargs["input_payload"]["knowledge_selected_kb_ids"] == []
+    assert db.created_run_kwargs["input_payload"]["knowledge_allowed_kb_ids"] == ["a"]
+    assert db.created_run_kwargs["input_payload"]["knowledge_retrieval"] == {"intent": "NO_KB"}
 
 
 @pytest.mark.asyncio
@@ -2126,6 +2137,9 @@ async def test_create_resume_run_defaults_tool_approval_mode_for_legacy_parent(m
     )
 
     assert db.created_run_kwargs["input_payload"]["tool_approval_mode"] == agent_run_service.DEFAULT_TOOL_APPROVAL_MODE
+    assert db.created_run_kwargs["input_payload"]["knowledge_task_scope"] == []
+    assert db.created_run_kwargs["input_payload"]["knowledge_selected_kb_ids"] == []
+    assert db.created_run_kwargs["input_payload"]["knowledge_allowed_kb_ids"] == []
 
 
 def test_resolve_tool_approval_mode_uses_request_then_agent_config_then_default():

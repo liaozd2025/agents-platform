@@ -29,9 +29,12 @@ flowchart LR
     MilvusKB --> Graph[("Neo4j，可选")]
     Connector --> External["外部检索 API"]
 
-    Context["Agent Context.knowledges"] --> Visible["用户权限 ∩ Agent 选择"]
+    Context["Agent Context.knowledges"] --> Visible["实时权限 ∩ Agent 启用 ∩ 任务范围"]
+    Visible --> Selector["问题与库描述：大模型逐库选择"]
+    Selector --> Retrieval["本轮选中库的内容检索"]
+    Retrieval --> Manager
     Visible --> Skill["knowledge-base Skill"]
-    Skill --> Tools["知识库工具"]
+    Skill --> Tools["工具执行前重新校验范围"]
     Tools --> Manager
 ```
 
@@ -87,16 +90,20 @@ worker 用唯一 attempt token claim Task 并续租 lease；重复投递和失�
 
 ## Agent 如何看到知识库
 
-运行时准备阶段先按用户权限读取知识库，再与 Agent 的 `Context.knowledges` 求交集，结果保存为 `_visible_knowledge_bases`。工具的 `kb_id`、`file_id` 和文件名必须属于这份运行时快照；新的 Run 会重新计算权限，正在运行的 Context 不会因中途撤权而自动刷新。
+聊天服务在内容检索前读取用户有权访问、Agent 已启用的知识库目录。选库模型结合当前问题、必要历史和各库名称、描述逐库判断，可以选择零个、一个或多个库；问题所属类别不构成跳过依据。缺少描述时按库名判断，并在运行结果中标记缺失、提示补充；有影响回答的歧义时简短追问。模型或协议错误显式记录，不能退回全库检索。
+
+任务明确允许的库与本轮选中的库分别保存。明确范围延续到当前任务的追问，切换新任务重新判断；只限定范围不等于每轮强制查询。子任务继承父运行的有效硬范围并与自己的配置取交集。工具每次执行时重新读取权限，再与 Agent 启用、任务范围及本轮选择取交集；中途撤权后不能沿用旧快照访问。
 
 知识库工具由内置 `knowledge-base` Skill 提供。模型读取该 Skill 的 `SKILL.md` 后，才会看到：
 
 ```text
-list_kbs、query_kb、find_kb_document、open_kb_document、
+list_kbs、select_kbs、query_kb、find_kb_document、open_kb_document、
 get_mindmap、search_file、download_kb_file
 ```
 
-推荐顺序是：列出可见知识库 → 检索候选片段 → 用 `file_id` 打开或定位原文。`download_kb_file` 会把有权访问的原始二进制写入当前 Project 的 `outputs`，供后续工具处理。知识库不会映射为 `/home/gem/kbs` 沙盒目录。
+工具沿用本轮选库结果。任务出现新的事实需求时，`select_kbs` 在任务允许范围内重新按描述选择；已有证据足够时直接使用，避免重复查询。内容检索后可以用 `file_id` 打开或定位原文；`download_kb_file` 将有权访问的原始二进制写入当前 Project 的 `outputs`。知识库不会映射为 `/home/gem/kbs` 沙盒目录。
+
+PostgreSQL 的 Run 保存本轮选择、逐库理由、错误和有效范围，Conversation 保存同一任务延续的范围。选中某库只表示预计能补充信息，不保证有命中，也不意味着最终回答采用；最终引用仍须对应实际使用的资料。审批恢复读取被恢复运行保存的范围，不能从相邻运行猜测。
 
 ## 权限
 
@@ -107,7 +114,7 @@ get_mindmap、search_file、download_kb_file
 - 原文件上传入口要求管理员，并在传入 `kb_id` 时继续检查该知识库的 manage 权限；
 - 前端守卫、按钮隐藏、Agent 配置和提示词只控制呈现或缩小范围，不能授予权限。
 
-Agent 的 `knowledges` 只能缩小用户已有权限。子智能体使用自己的配置，但仍沿用发起用户的身份。私有解析图片通过带知识库权限校验的 API 读取，MinIO 对象 URL 不是授权凭证。
+Agent 的 `knowledges` 只能缩小用户已有权限。子智能体沿用发起用户的身份，同时受父运行有效知识库范围约束。私有解析图片通过带知识库权限校验的 API 读取，MinIO 对象 URL 不是授权凭证。
 
 ## 失败和重试
 
@@ -116,9 +123,13 @@ Agent 的 `knowledges` 只能缩小用户已有权限。子智能体使用自己
 - 索引缺少 Markdown：文件回到 `uploaded`，必须重新解析，不会生成空索引。
 - Durable Task 失败、取消或 lease 过期：只能说明后台动作未完成，不能推断外部存储没有部分写入；知识任务不会在未知副作用上自动重放。
 - Redis 缓存异常：Manager 回源 PostgreSQL；不支持的知识库类型或 executor 初始化失败会明确阻止操作。
+- 选库模型失败、非法响应或内容检索失败：记录失败，不能作为“未找到资料”继续声称检索成功；合法空结果才表示没有命中。外部 Dify、Notion 查询失败会向调用者传递错误。
 
 ## 源码定位与验证
 
+- [描述选库策略](https://github.com/liaozd2025/agents-platform/blob/main/backend/package/yuxi/services/knowledge_retrieval_policy.py)：逐库选择、模型输出校验与检索错误语义
+- [聊天服务](https://github.com/liaozd2025/agents-platform/blob/main/backend/package/yuxi/services/chat_service.py)：任务上下文、运行审计与范围持久化
+- [描述选库 E2E](https://github.com/liaozd2025/agents-platform/blob/main/backend/test/e2e/test_knowledge_description_routing_e2e.py)：真实 HTTP、worker、PostgreSQL 与受控模型/检索协议的范围回读；不代表外部模型语义准确率
 - [知识库路由](https://github.com/xerrors/Yuxi/blob/main/backend/server/routers/knowledge_router.py)：权限、上传、任务和状态筛选
 - [KnowledgeBaseManager](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/knowledge/manager.py)：配置回源、可见性和 executor 调度
 - [知识库基类](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/knowledge/base.py)：文件状态和解析流程

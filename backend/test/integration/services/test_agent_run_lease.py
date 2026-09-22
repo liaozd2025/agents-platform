@@ -1817,3 +1817,195 @@ async def test_cancel_execution_tree_locks_root_before_descendants(lease_databas
             cancel_task.cancel()
             await asyncio.gather(cancel_task, return_exceptions=True)
         await _cleanup_runs(session_factory, [root_thread, child_thread])
+
+
+@pytest.mark.parametrize("scope_last", [True, False])
+async def test_knowledge_scope_preserves_interleaved_metadata_updates(lease_database, scope_last):
+    """双事务持有旧对象时，范围、附件与模型更新均保留最新提交。"""
+    _, session_factory = lease_database
+    run_id, thread_id, _ = await _create_run(session_factory)
+    try:
+        async with session_factory() as first, session_factory() as second:
+            run = await first.get(AgentRun, run_id)
+            stale = await first.get(Conversation, run.conversation_id)
+            fresh = await second.get(Conversation, run.conversation_id)
+            if scope_last:
+                await ConversationRepository(second).add_attachment(fresh.id, {"file_id": "new-attachment"})
+                await ConversationRepository(second).set_model_spec(fresh, "new:model")
+                await second.commit()
+                await ConversationRepository(first).set_knowledge_task_scope(stale, ["A"])
+            else:
+                await ConversationRepository(second).set_knowledge_task_scope(fresh, ["A"])
+                await second.commit()
+                await ConversationRepository(first).add_attachment(stale.id, {"file_id": "new-attachment"})
+                await ConversationRepository(first).set_model_spec(stale, "new:model")
+            await first.commit()
+        async with session_factory() as reader:
+            saved = await reader.get(Conversation, run.conversation_id)
+            assert saved.extra_metadata == {
+                "knowledge_task_scope": ["A"],
+                "attachments": [{"file_id": "new-attachment"}],
+                "model_spec": "new:model",
+            }
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])
+
+
+async def test_knowledge_scope_uses_heartbeat_renewed_lease(lease_database, monkeypatch):
+    """选库持有旧 Run 时，另一事务的续租必须被锁定后的校验读取。"""
+    from yuxi.repositories import agent_run_repository
+
+    _, session_factory = lease_database
+    now = utc_now_naive()
+    owner = "knowledge-lease-owner"
+    run_id, thread_id, _ = await _create_run(
+        session_factory, status="running", worker_id=owner, lease_expires_at=now + timedelta(seconds=1)
+    )
+    try:
+        async with session_factory() as selection_db:
+            stale = await selection_db.get(AgentRun, run_id)
+            async with session_factory() as heartbeat_db:
+                renewed = await AgentRunRepository(heartbeat_db).renew_lease(
+                    run_id, worker_id=owner, lease_seconds=120, now=now + timedelta(milliseconds=500)
+                )
+                assert renewed
+                await heartbeat_db.commit()
+            assert stale.lease_expires_at == now + timedelta(seconds=1)
+            monkeypatch.setattr(agent_run_repository, "utc_now_naive", lambda: now + timedelta(seconds=30))
+            await AgentRunRepository(selection_db).set_knowledge_retrieval(
+                run_id, worker_id=owner, payload={"knowledge_task_scope": ["A"]}
+            )
+            await selection_db.commit()
+        async with session_factory() as reader:
+            saved = await reader.get(AgentRun, run_id)
+            assert saved.input_payload["knowledge_task_scope"] == ["A"]
+            assert saved.lease_expires_at == now + timedelta(seconds=120, milliseconds=500)
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])
+
+
+async def test_failed_retrieval_keeps_scope_for_next_run(lease_database, monkeypatch):
+    """首次限定 A 后内容失败，下一 Run 仍从数据库继承 A 并拒绝 B。"""
+    from langchain.messages import HumanMessage
+    from yuxi.knowledge.runtime import knowledge_base
+    from yuxi.services import knowledge_retrieval_policy as policy
+
+    _, session_factory = lease_database
+    owner = "knowledge-failure-owner"
+    run_id, thread_id, _ = await _create_run(
+        session_factory, status="running", worker_id=owner, lease_expires_at=utc_now_naive() + timedelta(minutes=5)
+    )
+    response = {
+        "task_relation": "continue",
+        "explicit_scope": ["A"],
+        "requested_kb_ids": [],
+        "assessments": [
+            {"kb_id": "A", "status": "select", "reason": "查制度"},
+            {"kb_id": "B", "status": "skip", "reason": "不需要"},
+        ],
+        "clarification": None,
+    }
+    monkeypatch.setattr(
+        knowledge_base,
+        "get_databases_by_uid",
+        AsyncMock(return_value=[SimpleNamespace(kb_id=key, name=key, description="制度") for key in ("A", "B")]),
+    )
+    monkeypatch.setattr(policy.model_cache, "get_model_info", lambda model: None)
+    monkeypatch.setattr(
+        policy,
+        "load_chat_model",
+        lambda *args, **kwargs: SimpleNamespace(
+            with_structured_output=lambda schema: SimpleNamespace(ainvoke=AsyncMock(return_value=response))
+        ),
+    )
+    retrieve = AsyncMock(side_effect=ConnectionError("内容后端不可用"))
+    monkeypatch.setattr(knowledge_base, "retrieve", retrieve)
+    try:
+        async with session_factory() as first:
+            run = await first.get(AgentRun, run_id)
+            conversation = await first.get(Conversation, run.conversation_id)
+            uid = run.uid
+            args = dict(
+                query="只用 A 查制度",
+                human_message=HumanMessage(content="只用 A 查制度"),
+                current_user=SimpleNamespace(uid=uid),
+                conversation=conversation,
+                conv_repo=ConversationRepository(first),
+                input_context={"model": "test:model"},
+                meta={"run_id": run_id, "thread_id": thread_id, "worker_id": owner},
+                db=first,
+            )
+            with pytest.raises(policy.KnowledgeRetrievalError, match="retrieval_unavailable"):
+                await chat_service._prepare_knowledge_context(**args)
+            await AgentRunRepository(first).set_terminal_status(run_id, status="failed", worker_id=owner)
+            await first.commit()
+        async with session_factory() as following:
+            conversation = await ConversationRepository(following).get_conversation_by_thread_id(thread_id)
+            assert conversation.extra_metadata["knowledge_task_scope"] == ["A"]
+            request_id = f"scope-followup-{uuid.uuid4()}"
+            message = Message(
+                conversation_id=conversation.id, role="user", content="继续，查询 B", request_id=request_id
+            )
+            following.add(message)
+            await following.flush()
+            next_run = await AgentRunRepository(following).create_run(
+                run_id=str(uuid.uuid4()),
+                conversation_thread_id=thread_id,
+                agent_slug="main",
+                uid=uid,
+                request_id=request_id,
+                input_payload={},
+                conversation_id=conversation.id,
+                input_message_id=message.id,
+            )
+            await AgentRunRepository(following).mark_running(next_run.id, worker_id=owner, lease_seconds=120)
+            await following.commit()
+            response["explicit_scope"] = None
+            response["assessments"][0]["status"] = "skip"
+            response["assessments"][1]["status"] = "select"
+            args.update(
+                query="继续，查询 B",
+                human_message=HumanMessage(content="继续，查询 B"),
+                conversation=conversation,
+                conv_repo=ConversationRepository(following),
+                input_context={"model": "test:model"},
+                meta={"run_id": next_run.id, "thread_id": thread_id, "worker_id": owner},
+                db=following,
+            )
+            with pytest.raises(policy.KnowledgeSelectionError, match="scope_expansion_denied"):
+                await chat_service._prepare_knowledge_context(**args)
+        assert retrieve.await_args_list == [(("A", "只用 A 查制度"),)]
+        async with session_factory() as reader:
+            original = await reader.get(AgentRun, run_id)
+            assert original.input_payload["knowledge_task_scope"] == ["A"]
+            assert original.input_payload["knowledge_retrieval"]["status"] == "error"
+            assert original.input_payload["knowledge_retrieval"]["counts"] == {
+                "directory_reads": 2,
+                "selection_calls": 1,
+                "content_queries": 1,
+            }
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])
+
+
+async def test_approval_metadata_update_preserves_concurrently_saved_scope(lease_database):
+    """审批更新持有旧会话时，必须保留选库事务新提交的任务限制。"""
+    _, session_factory = lease_database
+    run_id, thread_id, _ = await _create_run(session_factory)
+    try:
+        async with session_factory() as approval_db, session_factory() as selection_db:
+            run = await approval_db.get(AgentRun, run_id)
+            stale = await approval_db.get(Conversation, run.conversation_id)
+            selected = await selection_db.get(Conversation, run.conversation_id)
+            await ConversationRepository(selection_db).set_knowledge_task_scope(selected, ["A"])
+            await selection_db.commit()
+            assert (stale.extra_metadata or {}).get("knowledge_task_scope") is None
+            await ConversationRepository(approval_db).update_conversation(
+                thread_id, metadata={"tool_approval_mode": "ask"}, title="更新标题"
+            )
+        async with session_factory() as reader:
+            saved = await reader.get(Conversation, run.conversation_id)
+            assert saved.extra_metadata == {"knowledge_task_scope": ["A"], "tool_approval_mode": "ask"}
+            assert saved.title == "更新标题"
+    finally:
+        await _cleanup_runs(session_factory, [thread_id])

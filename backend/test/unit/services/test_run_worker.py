@@ -1142,6 +1142,7 @@ async def test_process_agent_run_retryable_error_retries_then_completes(monkeypa
 
 @pytest.mark.asyncio
 async def test_finish_run_terminal_loser_does_not_append_end_event(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(run_worker, "_read_run_token_usage_from_state", AsyncMock(return_value=None))
     events: list[tuple[str, dict]] = []
 
     async def fake_mark_terminal(run_id: str, status: str, **kwargs):
@@ -1181,6 +1182,7 @@ async def test_process_subagent_run_restores_runtime_context(monkeypatch: pytest
         "model_spec": "provider:model",
         "runtime": {
             "parent_thread_id": "parent-thread",
+            "knowledge_task_scope": ["allowed-kb"],
         },
     }
     _patch_common(monkeypatch, run_obj)
@@ -1209,6 +1211,7 @@ async def test_process_subagent_run_restores_runtime_context(monkeypatch: pytest
     meta = captured["meta"]
     assert meta["run_type"] == "subagent"
     assert meta["parent_thread_id"] == "parent-thread"
+    assert meta["knowledge_task_scope"] == ["allowed-kb"]
     assert meta["runtime_scope_id"] == "parent-thread"
     assert meta["workdir_relative_path"] == "projects/11111111-1111-4111-8111-111111111111"
     assert captured["agent_slug"] == "worker"

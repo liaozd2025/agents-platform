@@ -211,14 +211,10 @@ async def test_notion_open_file_content_rejects_unknown_parent(monkeypatch, noti
 
 
 @pytest.mark.asyncio
-async def test_notion_kb_aquery_error_returns_empty(monkeypatch, notion_kb):
+async def test_notion_kb_aquery_error_is_not_an_empty_result(monkeypatch, notion_kb):
+    """外部检索失败必须保留失败语义。"""
     kb, config = notion_kb
     monkeypatch.setattr("yuxi.knowledge.implementations.notion._NotionClient", _FailingNotionClient)
 
-    result = await kb.aquery(
-        "reasoning",
-        "kb_notion",
-        config=config,
-    )
-
-    assert result == []
+    with pytest.raises(RuntimeError, match="Notion 知识库检索失败"):
+        await kb.aquery("reasoning", "kb_notion", config=config)

@@ -127,13 +127,15 @@ async def test_create_thread_view_loads_user_for_agent_visibility(session, monke
         agent_slug="main",
         request_id=None,
         title="new-thread",
-        metadata={},
+        metadata={"knowledge_task_scope": ["forged"], "custom": "keep"},
         db=session,
         current_uid="user-1",
     )
 
     assert result["agent_id"] == "main"
     assert result["metadata"]["backend_id"] == "ChatbotAgent"
+    assert "knowledge_task_scope" not in result["metadata"]
+    assert result["metadata"]["custom"] == "keep"
 
 
 async def test_list_threads_view_uses_joined_projects_without_per_thread_lookup(session, monkeypatch):

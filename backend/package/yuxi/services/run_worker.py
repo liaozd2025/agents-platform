@@ -1036,6 +1036,7 @@ async def process_agent_run(ctx, run_id: str):
         }
         if run_type == "subagent":
             meta["parent_thread_id"] = runtime.get("parent_thread_id")
+            meta["knowledge_task_scope"] = runtime.get("knowledge_task_scope", [])
         if input_metadata.get("source"):
             meta["source"] = input_metadata.get("source")
         if isinstance(input_metadata.get("agent_invocation_meta"), dict):
