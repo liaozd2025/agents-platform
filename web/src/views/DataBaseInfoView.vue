@@ -125,6 +125,19 @@
                 </div>
               </button>
               <button
+                v-if="canManageDatabase && retryIndexCount > 0"
+                type="button"
+                class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-warning file-stat-summary"
+                :disabled="store.state.chunkLoading"
+                @click="confirmBatchRetryIndex"
+              >
+                <CircleAlert :size="16" />
+                <div class="file-stat-inline">
+                  <span class="file-stat-value">{{ retryIndexCount }}</span>
+                  <span class="file-stat-label">重试入库</span>
+                </div>
+              </button>
+              <button
                 type="button"
                 class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-stat-card file-stat-summary"
                 :class="{ 'file-stat-warning': virtualFolderStatus.has_virtual_folders }"
@@ -695,6 +708,10 @@ const pendingIndexCount = computed(() => {
   return Number(store.database.stats?.pending_index_count || 0)
 })
 
+const retryIndexCount = computed(() => {
+  return Number(store.database.stats?.retry_index_count || 0)
+})
+
 const confirmBatchParse = () => {
   const count = pendingParseCount.value
   if (count <= 0) {
@@ -716,6 +733,19 @@ const confirmBatchIndex = () => {
   }
 
   const opened = fileTableRef.value?.startPendingIndex?.(count)
+  if (!opened) {
+    message.error('文件列表尚未加载完成，请稍后再试')
+  }
+}
+
+const confirmBatchRetryIndex = () => {
+  const count = retryIndexCount.value
+  if (count <= 0) {
+    message.info('没有入库失败的文档')
+    return
+  }
+
+  const opened = fileTableRef.value?.startPendingRetryIndex?.(count)
   if (!opened) {
     message.error('文件列表尚未加载完成，请稍后再试')
   }

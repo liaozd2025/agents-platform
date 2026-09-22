@@ -243,6 +243,7 @@ class KnowledgeBaseManager:
             "token_count": 0,
             "pending_parse_count": 0,
             "pending_index_count": 0,
+            "retry_index_count": 0,
             "processing_count": 0,
         }
         if not isinstance(stats, dict):
