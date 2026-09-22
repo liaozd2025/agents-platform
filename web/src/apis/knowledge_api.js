@@ -1,5 +1,23 @@
 import { apiDelete, apiGet, apiPost, apiPut, apiRequest, buildQuery } from './base'
 
+/** 仅为同源知识库图片附加认证，其他图片交给浏览器普通加载。 */
+export async function fetchKnowledgeImage(src) {
+  let url
+  try {
+    url = new URL(src, window.location.href)
+  } catch {
+    return null
+  }
+  if (
+    url.origin !== window.location.origin ||
+    !/^\/api\/knowledge\/databases\/[^/]+\/images\//.test(url.pathname)
+  ) {
+    return null
+  }
+  const response = await apiGet(url.href, { mode: 'same-origin' }, true, 'response')
+  return response.blob()
+}
+
 /**
  * 知识库管理API模块
  * 包含数据库管理、文档管理、查询接口等功能

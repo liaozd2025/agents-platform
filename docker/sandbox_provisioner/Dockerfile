@@ -9,6 +9,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt --index https://pypi.tuna.tsinghua.edu.cn/simple
 
 COPY app.py /app/app.py
+COPY sandbox-entrypoint.py /app/sandbox-entrypoint.py
 
 EXPOSE 8002
 

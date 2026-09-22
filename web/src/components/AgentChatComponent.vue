@@ -268,6 +268,22 @@
                   :inert="currentToolApprovalVisible"
                   :aria-hidden="currentToolApprovalVisible ? 'true' : undefined"
                 >
+                  <a-alert
+                    v-if="currentThreadState?.pendingSubmission?.uncertain"
+                    type="warning"
+                    message="发送结果尚未确认，恢复会继续原请求。"
+                    role="status"
+                  >
+                    <template #action>
+                      <a-button
+                        :loading="currentThreadState.pendingSubmission.sending"
+                        @click="
+                          handleSendMessage({ submission: currentThreadState.pendingSubmission })
+                        "
+                        >恢复发送</a-button
+                      >
+                    </template>
+                  </a-alert>
                   <AgentInputArea
                     ref="agentInputAreaRef"
                     v-model="userInput"
@@ -2518,6 +2534,7 @@ const isSendButtonDisabled = computed(() => {
   return (
     sendCooldownActive.value ||
     props.sendDisabled ||
+    (Boolean(currentThreadState.value?.pendingSubmission) && !isProcessing.value) ||
     isWaitingForUserAction.value ||
     (!userInput.value && !isProcessing.value) ||
     !currentAgent.value ||
@@ -3327,22 +3344,26 @@ const selectThreadFromRoute = async (threadId) => {
   return true
 }
 
-const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
-  const text = userInput.value.trim()
-  const imageContent = image?.imageContent || null
+const handleSendMessage = async ({ image, queuePolicy = 'enqueue', submission = null } = {}) => {
+  const text = submission?.body.query ?? userInput.value.trim()
+  const imageContent = submission?.body.image_content ?? image?.imageContent ?? null
+  if (submission?.sending || (!submission && currentThreadState.value?.pendingSubmission)) return
+  if (submission) queuePolicy = submission.body.queue_policy
   if (
-    (!text && !image) ||
+    (!text && !imageContent) ||
     !currentAgent.value ||
-    sendCooldownActive.value ||
+    (!submission && sendCooldownActive.value) ||
     props.sendDisabled ||
     isWaitingForUserAction.value
   )
     return
 
+  if (submission) submission.sending = true
+
   // 发送后进入短暂冷却，防止连续触发停止
   startSendCooldown()
 
-  let threadId = currentChatId.value
+  let threadId = submission?.body.thread_id || currentChatId.value
   if (!threadId) {
     try {
       threadId = await ensureActiveThread(text)
@@ -3355,11 +3376,13 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
     // 该线程由草稿发送创建，清理新建对话草稿，避免已发送文本再次还原
     threadDraftSession.clearDraftThread()
   }
-  // 每次请求都下发输入框展示的模型，后端在同一事务内绑定到 Conversation。
-  const modelSpec = currentModelSpec.value || null
-  const toolApprovalMode = currentToolApprovalMode.value
+  // 首次发送使用当前展示模型；恢复时沿用原请求模型。
+  const modelSpec = submission ? submission.body.model_spec : currentModelSpec.value || null
+  const toolApprovalMode = submission
+    ? submission.body.tool_approval_mode
+    : currentToolApprovalMode.value
 
-  userInput.value = ''
+  if (!submission) userInput.value = ''
 
   await nextTick()
   scrollController.scrollToBottom(true)
@@ -3372,12 +3395,12 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
     hideApprovalState()
   }
 
-  const pendingAttachments = [...currentPendingThreadAttachments.value]
+  const pendingAttachments = submission?.attachments || [...currentPendingThreadAttachments.value]
   const pendingAttachmentFileIds = pendingAttachments
     .map((attachment) => attachment.file_id)
     .filter(Boolean)
 
-  if ((threadMessages.value[threadId] || []).length === 0) {
+  if (!submission && (threadMessages.value[threadId] || []).length === 0) {
     const autoTitle = text.replace(/\s+/g, ' ').trim().slice(0, 2000)
     if (autoTitle) {
       void (async () => {
@@ -3400,9 +3423,11 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
     }
   }
 
-  const requestId = createClientRequestId()
-  const previousAttachments = markAttachmentsRequestId(threadId, pendingAttachments, requestId)
-  if (!hadActiveRun) {
+  const requestId = submission?.body.meta.request_id || createClientRequestId()
+  const previousAttachments =
+    submission?.previousAttachments ||
+    markAttachmentsRequestId(threadId, pendingAttachments, requestId)
+  if (!submission && !hadActiveRun) {
     resetOnGoingConv(threadId)
     insertOptimisticHumanMessage(threadState, {
       requestId,
@@ -3414,7 +3439,7 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
       }))
     })
     threadState.isStreaming = true
-  } else {
+  } else if (!submission) {
     threadState.queuedRequests.push({
       request_id: requestId,
       status: 'sending',
@@ -3423,8 +3448,10 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
     })
   }
 
-  try {
-    const runResp = await agentApi.createAgentRun({
+  const pending = submission || {
+    attachments: pendingAttachments,
+    previousAttachments,
+    body: {
       query: text,
       agent_slug: currentAgentId.value,
       thread_id: threadId,
@@ -3436,7 +3463,13 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
       model_spec: modelSpec,
       tool_approval_mode: toolApprovalMode,
       queue_policy: queuePolicy
-    })
+    }
+  }
+  pending.sending = true
+  threadState.pendingSubmission = pending
+  try {
+    const runResp = await agentApi.createAgentRun(pending.body)
+    threadState.pendingSubmission = null
     const status = runResp?.status
     const runId = runResp?.run_id
     const sendingRequest = threadState.queuedRequests.find(
@@ -3489,6 +3522,17 @@ const handleSendMessage = async ({ image, queuePolicy = 'enqueue' } = {}) => {
       throw new Error('创建 run 失败：缺少 run_id')
     }
   } catch (error) {
+    if (threadState.pendingSubmission && (error.submissionUncertain || submission)) {
+      threadState.pendingSubmission.sending = false
+      threadState.pendingSubmission.uncertain = true
+      if (!threadState.activeRunId) {
+        threadState.isStreaming = false
+        threadState.replyLoadingVisible = false
+      }
+      message.warning('发送结果尚未确认，请点击“恢复发送”继续原请求')
+      return
+    }
+    threadState.pendingSubmission = null
     threadState.queuedRequests = threadState.queuedRequests.filter(
       (request) => request.request_id !== requestId
     )

@@ -114,6 +114,8 @@ Compose 默认把 `/var/run/docker.sock`、UserWorkspace 和 Skill projection �
 
 Docker 内存限制同时约束 memory+swap，容器不额外获得 swap 预算。provisioner 在创建、发现和代理请求时回读实际资源配置；存活实例与当前策略不匹配时返回 `sandbox_resource_policy_mismatch`，保留实例。调整策略前使用正常任务结束或既有停机流程排空实例，再重新创建；不要以自动删除正在工作的实例来应用新限额。
 
+Docker 和 Kubernetes 的执行入口使用独立 Sandbox API Key。升级认证入口或轮换 `SANDBOX_PROVISIONER_TOKEN` 前，必须停止接收新任务，等待已有任务结束并排空旧 Sandbox，再更新 provisioner。缺少当前认证策略的旧实例会返回 `sandbox_auth_policy_mismatch`（409），策略检查不会立即销毁或重建实例，既有闲置回收仍然适用；此响应不会关闭旧实例自身的直连端口，不能代替排空。密钥由 provisioner 自动派生，不要在 Agent 环境或 `sandbox.env` 手工配置 `SANDBOX_API_KEY`、`JWT_PUBLIC_KEY`。默认 AIO 1.11.0 镜像支持该入口；自定义镜像必须保留相同认证模板与启动脚本，否则启动显式失败。具体边界见[执行认证决策](../develop-guides/decisions/implemented/2026-09-21-sandbox-execution-auth.md)。
+
 provisioner 会扫描 Docker 已占用网段，从专用地址池中为新 Sandbox 选择不重叠的独立子网；并发分配冲突时重新选择，池耗尽时返回 503。`SANDBOX_DOCKER_SUBNET_PREFIX` 留空时 provisioner 使用 `/28`，最大只能设置为 `/29`，确保网络有足够地址容纳网关、provisioner 和 Sandbox。网络删除后子网可再次使用。部署者必须确认地址池不与宿主机路由、VPN 或其他 Docker 网络重叠，并在冲突时通过 `SANDBOX_DOCKER_ADDRESS_POOL` 覆盖 Compose 默认值。
 
 运行时挂载：

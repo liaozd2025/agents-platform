@@ -3,6 +3,7 @@
 import json
 import os
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg_pool import AsyncConnectionPool
@@ -373,6 +374,7 @@ class PostgresManager(metaclass=SingletonMeta):
         self.langgraph_checkpointer = None
         self._langgraph_checkpointer_setup = False
         self._initialized = False
+        self._migration_connection = ContextVar("migration_connection", default=None)
 
     def initialize(self):
         """初始化数据库连接"""
@@ -425,9 +427,10 @@ class PostgresManager(metaclass=SingletonMeta):
             )
 
             self._initialized = True
-            logger.info(f"PostgreSQL manager initialized for knowledge base: {db_url.split('@')[0]}://***")
+            logger.info("PostgreSQL manager initialized for knowledge base")
         except Exception as e:
-            logger.error(f"Failed to initialize PostgreSQL manager: {e}")
+            # 驱动异常正文也可能包含完整连接串，只记录异常类型。
+            logger.error(f"Failed to initialize PostgreSQL manager ({type(e).__name__})")
             # 不抛出异常，允许应用启动，但在使用时会报错
 
     def _check_initialized(self):
@@ -451,7 +454,7 @@ class PostgresManager(metaclass=SingletonMeta):
             async with self.langgraph_pool.connection() as connection:
                 await connection.execute("SELECT pg_advisory_lock(94721802)")
                 try:
-                    await checkpointer.setup()
+                    await AsyncPostgresSaver(connection).setup()
                 finally:
                     try:
                         cursor = await connection.execute("SELECT pg_advisory_unlock(94721802)")
@@ -468,28 +471,56 @@ class PostgresManager(metaclass=SingletonMeta):
 
     @asynccontextmanager
     async def schema_migration_lock(self):
-        """用独立 PostgreSQL session 串行化唯一 Schema migrator。"""
+        """迁移锁与本任务的所有 Schema/业务事务共用同一物理连接。"""
         self._check_initialized()
         async with self.async_engine.connect() as conn:
             params = {"lock_scope": "yuxi:schema-migration"}
-            await conn.execute(text("SELECT pg_advisory_lock(hashtextextended(:lock_scope, 0))"), params)
-            await conn.commit()
+            token = None
             try:
+                await conn.execute(text("SELECT pg_advisory_lock(hashtextextended(:lock_scope, 0))"), params)
+                await conn.commit()
+                token = self._migration_connection.set(conn)
                 yield
             finally:
-                unlocked = await conn.scalar(
-                    text("SELECT pg_advisory_unlock(hashtextextended(:lock_scope, 0))"),
-                    params,
-                )
-                await conn.commit()
-                if unlocked is not True:
-                    await conn.close()
-                    raise RuntimeError("Failed to release Yuxi schema migration advisory lock")
+                if token is not None:
+                    self._migration_connection.reset(token)
+                try:
+                    # 失效连接不得自动重连；新 backend 不拥有旧 session 的锁。
+                    if conn.invalidated or conn.closed:
+                        raise RuntimeError("Schema migration lock connection was lost")
+                    await conn.rollback()
+                    unlocked = await conn.scalar(
+                        text("SELECT pg_advisory_unlock(hashtextextended(:lock_scope, 0))"), params
+                    )
+                    await conn.commit()
+                    if token is not None and unlocked is not True:
+                        raise RuntimeError("Failed to release Yuxi schema migration advisory lock")
+                except BaseException:
+                    await conn.invalidate()
+                    raise
+
+    def _locked_migration_connection(self):
+        """返回本任务的持锁连接；已失效时禁止 Session 或 DDL 借新连接继续迁移。"""
+        conn = self._migration_connection.get()
+        if conn is not None and (conn.closed or conn.invalidated):
+            raise RuntimeError("Schema migration lock connection was lost")
+        return conn
+
+    @asynccontextmanager
+    async def _schema_transaction(self):
+        """迁移复用持锁连接，其他调用保留引擎的独立事务。"""
+        conn = self._locked_migration_connection()
+        if conn is None:
+            async with self.async_engine.begin() as connection:
+                yield connection
+        else:
+            async with conn.begin():
+                yield conn
 
     async def create_schema_version_table(self) -> None:
         """创建轻量 Schema 版本表；仅允许迁移器调用。"""
         self._check_initialized()
-        async with self.async_engine.begin() as conn:
+        async with self._schema_transaction() as conn:
             await conn.execute(
                 text(
                     f"""
@@ -505,7 +536,7 @@ class PostgresManager(metaclass=SingletonMeta):
     async def get_schema_versions(self) -> dict[str, int]:
         """读取当前数据库已完成的 Yuxi Schema 版本。"""
         self._check_initialized()
-        async with self.async_engine.connect() as conn:
+        async with self._schema_transaction() as conn:
             exists = await conn.scalar(
                 text("SELECT to_regclass(:table_name) IS NOT NULL"),
                 {"table_name": SCHEMA_VERSION_TABLE},
@@ -518,7 +549,7 @@ class PostgresManager(metaclass=SingletonMeta):
     async def record_schema_version(self, domain: str, version: int) -> None:
         """在对应域迁移完整成功后记录当前版本。"""
         self._check_initialized()
-        async with self.async_engine.begin() as conn:
+        async with self._schema_transaction() as conn:
             await conn.execute(
                 text(
                     f"""
@@ -550,28 +581,28 @@ class PostgresManager(metaclass=SingletonMeta):
     async def create_knowledge_tables(self):
         """创建知识与评估表。"""
         self._check_initialized()
-        async with self.async_engine.begin() as conn:
+        async with self._schema_transaction() as conn:
             await conn.run_sync(KnowledgeBase.metadata.create_all)
         logger.info("PostgreSQL knowledge tables created/checked")
 
     async def create_business_tables(self):
         """创建所有业务数据表"""
         self._check_initialized()
-        async with self.async_engine.begin() as conn:
+        async with self._schema_transaction() as conn:
             await conn.run_sync(BusinessBase.metadata.create_all)
         logger.info("PostgreSQL business tables created/checked")
 
     async def upgrade_knowledge_schema_v1_to_v2(self) -> None:
         """为知识文件处理中间态增加 Durable Task attempt owner。"""
         self._check_initialized()
-        async with self.async_engine.begin() as conn:
+        async with self._schema_transaction() as conn:
             for statement in KNOWLEDGE_FILE_TASK_OWNER_SCHEMA_STATEMENTS:
                 await conn.execute(text(statement))
 
     async def drop_tables(self):
         """删除所有表（慎用！）"""
         self._check_initialized()
-        async with self.async_engine.begin() as conn:
+        async with self._schema_transaction() as conn:
             await conn.run_sync(BusinessBase.metadata.drop_all)
             await conn.run_sync(KnowledgeBase.metadata.drop_all)
         logger.info("PostgreSQL tables dropped")
@@ -946,7 +977,7 @@ class PostgresManager(metaclass=SingletonMeta):
             ),
         ]
 
-        async with self.async_engine.begin() as conn:
+        async with self._schema_transaction() as conn:
             for stmt in stmts:
                 await conn.execute(text(stmt))
 
@@ -1849,7 +1880,7 @@ class PostgresManager(metaclass=SingletonMeta):
             """,
             *TASK_DURABLE_SCHEMA_STATEMENTS,
         ]
-        async with self.async_engine.begin() as conn:
+        async with self._schema_transaction() as conn:
             # 历史未绑定用户的 API Key 会在下方迁移语句里被静默删除，先计数告警
             # 便于运维凭据失效时回溯；DELETE 之后无法再查询这些 Key。
             try:
@@ -1911,13 +1942,14 @@ class PostgresManager(metaclass=SingletonMeta):
     async def get_async_session(self) -> AsyncSession:
         """获取异步数据库会话"""
         self.initialize()  # 确保已初始化
-        return self.AsyncSession()
+        conn = self._locked_migration_connection()
+        return self.AsyncSession(bind=conn) if conn is not None else self.AsyncSession()
 
     @asynccontextmanager
     async def get_async_session_context(self):
         """获取异步数据库会话的上下文管理器"""
         self.initialize()  # 确保已初始化
-        session = self.AsyncSession()
+        session = await self.get_async_session()
         try:
             yield session
             await session.commit()

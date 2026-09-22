@@ -152,7 +152,7 @@ async def _create_isolated_manager(prefix: str):
     scoped_engine = create_async_engine(
         os.environ["POSTGRES_URL"],
         pool_pre_ping=True,
-        connect_args={"server_settings": {"search_path": schema}},
+        connect_args={"server_settings": {"search_path": schema, "application_name": schema}},
     )
     return schema, admin_engine, scoped_engine, _scoped_manager(scoped_engine)
 
@@ -736,3 +736,147 @@ async def test_supported_business_versions_run_real_ddl_before_advancing_version
         async with admin_engine.begin() as connection:
             await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await admin_engine.dispose()
+
+
+@pytest.mark.parametrize("write_kind", ["session", "schema"])
+async def test_lost_migration_lock_cannot_commit_from_old_owner(write_kind) -> None:
+    """真实终止持锁 backend 后，新 owner 可提交，旧事务与后续版本写入均不能提交。"""
+    schema, admin, engine, manager = await _create_isolated_manager("pytest_lost_lock")
+    entered = asyncio.Event()
+    resume_old = asyncio.Event()
+    old_errors = []
+    try:
+        await manager.create_schema_version_table()
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE migration_markers (writer TEXT PRIMARY KEY)"))
+
+        async def old_owner():
+            """在真实业务事务中等待锁连接被终止，然后尝试提交与再次写入。"""
+            try:
+                async with manager.schema_migration_lock():
+                    if write_kind == "session":
+                        async with manager.get_async_session_context() as db:
+                            await db.execute(text("INSERT INTO migration_markers VALUES ('old')"))
+                            entered.set()
+                            await resume_old.wait()
+                            try:
+                                await db.commit()
+                            except Exception as exc:
+                                old_errors.append(type(exc).__name__)
+                                await db.rollback()
+                    else:
+                        entered.set()
+                        await resume_old.wait()
+                    # 失败后的新事务也不能由连接池自动接上一个没有持锁的新 backend。
+                    await manager.record_schema_version("probe", 99)
+            except Exception as exc:
+                old_errors.append(type(exc).__name__)
+
+        task = asyncio.create_task(old_owner())
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            async with admin.begin() as conn:
+                pid = await conn.scalar(
+                    text(
+                        "SELECT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid "
+                        "WHERE a.datname=current_database() AND a.application_name=:app "
+                        "AND locktype='advisory' AND granted "
+                        "AND classid::bigint=((hashtextextended('yuxi:schema-migration',0)>>32)&4294967295) "
+                        "AND objid::bigint=(hashtextextended('yuxi:schema-migration',0)&4294967295)"
+                    ),
+                    {"app": schema},
+                )
+                assert pid is not None
+                assert await conn.scalar(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+            async with asyncio.timeout(5):
+                async with manager.schema_migration_lock():
+                    await manager.record_schema_version("probe", 2)
+                    async with manager.get_async_session_context() as db:
+                        await db.execute(text("INSERT INTO migration_markers VALUES ('new')"))
+            resume_old.set()
+            await asyncio.wait_for(task, 5)
+            async with engine.begin() as conn:
+                assert (
+                    await conn.execute(text("SELECT writer FROM migration_markers ORDER BY writer"))
+                ).scalars().all() == ["new"]
+                assert await conn.scalar(text("SELECT version FROM yuxi_schema_migrations WHERE domain='probe'")) == 2
+            assert old_errors
+        finally:
+            resume_old.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    finally:
+        await _drop_isolated_schema(schema, admin, engine)
+
+
+async def test_checkpoint_setup_writes_on_its_lock_connection(monkeypatch) -> None:
+    """checkpoint 真实迁移被锁阻塞时终止其持锁 backend，DDL 不得由另一连接继续提交。"""
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    from psycopg_pool import AsyncConnectionPool
+
+    schema, admin, engine, manager = await _create_isolated_manager("pytest_checkpoint_lock")
+    pool = AsyncConnectionPool(
+        os.environ["POSTGRES_URL"].replace("+asyncpg", ""),
+        open=False,
+        kwargs={"autocommit": True, "options": f"-csearch_path={schema}", "application_name": schema},
+    )
+    await pool.open()
+    manager.langgraph_pool = pool
+    # 只替换第三方库的迁移输入，保留真实 saver、连接池、SQL 和提交路径。
+    monkeypatch.setattr(
+        AsyncPostgresSaver,
+        "MIGRATIONS",
+        [
+            "CREATE TABLE IF NOT EXISTS checkpoint_migrations (v INTEGER PRIMARY KEY)",
+            "CREATE TABLE checkpoint_lock_marker AS SELECT pg_backend_pid() AS writer "
+            "FROM (SELECT pg_advisory_xact_lock(94721803)) AS barrier",
+        ],
+    )
+    task = None
+    try:
+        async with admin.connect() as barrier:
+            await barrier.execute(text("SELECT pg_advisory_lock(94721803)"))
+            task = asyncio.create_task(manager.setup_langgraph_checkpointer())
+            try:
+                for _ in range(100):
+                    async with admin.begin() as conn:
+                        waiting = await conn.scalar(
+                            text(
+                                "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid "
+                                "WHERE a.datname=current_database() AND a.application_name=:app "
+                                "AND locktype='advisory' AND objid=94721803 AND NOT granted"
+                            ),
+                            {"app": schema},
+                        )
+                        if waiting:
+                            pid = await conn.scalar(
+                                text(
+                                    "SELECT l.pid FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid "
+                                    "WHERE a.datname=current_database() AND a.application_name=:app "
+                                    "AND locktype='advisory' AND objid=94721802 AND granted"
+                                ),
+                                {"app": schema},
+                            )
+                            assert pid is not None
+                            assert await conn.scalar(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+                            break
+                    await asyncio.sleep(0.05)
+                else:
+                    pytest.fail("未观察到 checkpoint 迁移进入真实数据库阻塞")
+            finally:
+                await barrier.execute(text("SELECT pg_advisory_unlock(94721803)"))
+        with pytest.raises(Exception):
+            await asyncio.wait_for(task, 5)
+        async with engine.begin() as conn:
+            assert await conn.scalar(text("SELECT to_regclass('checkpoint_lock_marker')")) is None
+        # 新持锁连接正常接续同一 migration，独立读取最终表与版本。
+        await manager.setup_langgraph_checkpointer()
+        async with engine.begin() as conn:
+            assert await conn.scalar(text("SELECT count(*) FROM checkpoint_lock_marker")) == 1
+            assert await conn.scalar(text("SELECT max(v) FROM checkpoint_migrations")) == 1
+    finally:
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await pool.close()
+        await _drop_isolated_schema(schema, admin, engine)

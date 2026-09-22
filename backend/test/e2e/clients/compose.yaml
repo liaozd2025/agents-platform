@@ -1,0 +1,9 @@
+services:
+  api:
+    networks: [default, browser]
+    ports: ["127.0.0.1:${CLIENT_API_PORT}:5050"]
+  replay:
+    command: [python, /app/test/e2e/clients/fixture.py, model]
+
+networks:
+  browser: {}

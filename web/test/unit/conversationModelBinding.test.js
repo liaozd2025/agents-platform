@@ -50,7 +50,7 @@ test('发送请求使用当前展示模型并同步 Conversation metadata', () =
     source.indexOf('const handleDirectSteer')
   )
 
-  assert.match(sendBlock, /const modelSpec = currentModelSpec\.value \|\| null/)
+  assert.match(sendBlock, /const modelSpec = submission \? submission\.body\.model_spec : currentModelSpec\.value \|\| null/)
   assert.match(sendBlock, /model_spec: modelSpec/)
   assert.match(sendBlock, /status !== 'rejected' && modelSpec/)
   assert.match(sendBlock, /thread\.metadata = \{ \.\.\.\(thread\.metadata \|\| \{\}\), model_spec: modelSpec \}/)

@@ -37,6 +37,7 @@ export function useAgentThreadState({
         lastRetryableJobTry: null,
         replyLoadingVisible: false,
         pendingRequestId: null,
+        pendingSubmission: null,
         pendingInterrupt: null,
         agentStateRequestVersion: 0,
         onGoingConv: createOnGoingConvState(),

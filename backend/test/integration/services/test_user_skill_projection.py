@@ -13,6 +13,7 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from yuxi.agents.skills import service as skill_service
+from yuxi.repositories.user_repository import UserRepository
 from yuxi.storage_migrations import v071_skills
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import Skill, User
@@ -87,7 +88,7 @@ async def test_projection_refresh_waits_for_lock_then_reloads_revoked_authorizat
 
     try:
         async with session_factory() as db:
-            user = User(username=uid, uid=uid, password_hash="test", role="user")
+            user = await UserRepository(db).create_with_db(db, {"username": uid, "uid": uid, "password_hash": "test"})
             skill = Skill(
                 slug=slug,
                 name=slug,
@@ -109,7 +110,7 @@ async def test_projection_refresh_waits_for_lock_then_reloads_revoked_authorizat
                 enabled=True,
                 created_by="another-user",
             )
-            db.add_all([user, skill])
+            db.add(skill)
             await db.commit()
             user_id = user.id
             skill_id = skill.id
@@ -275,7 +276,7 @@ async def test_legacy_shared_skill_migrates_without_touching_personal_workspace(
     skill_id: int | None = None
     try:
         async with session_factory() as db:
-            user = User(username=uid, uid=uid, password_hash="test", role="user")
+            user = await UserRepository(db).create_with_db(db, {"username": uid, "uid": uid, "password_hash": "test"})
             skill = Skill(
                 slug=shared_slug,
                 name=shared_slug,
@@ -293,7 +294,7 @@ async def test_legacy_shared_skill_migrates_without_touching_personal_workspace(
                 enabled=True,
                 created_by=uid,
             )
-            db.add_all([user, skill])
+            db.add(skill)
             await db.commit()
             user_id = user.id
             skill_id = skill.id

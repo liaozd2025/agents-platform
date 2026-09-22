@@ -424,10 +424,7 @@ async def _resolve_visible_knowledge_bases_for_query(runtime: ToolRuntime | None
     if context is None:
         return []
 
-    visible_kbs = getattr(context, "_visible_knowledge_bases", None)
-    if isinstance(visible_kbs, list):
-        return visible_kbs
-
+    # 会话中的旧列表不能作为执行授权，必须读取当前共享范围。
     try:
         from yuxi.agents.backends.knowledge_base_backend import resolve_visible_knowledge_bases_for_context
 

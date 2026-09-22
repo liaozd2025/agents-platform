@@ -91,7 +91,11 @@
 - **运行失败或取消**：已经排队的请求会暂停，页面显示原因。点击“继续队列”只会派发当前 FIFO 队头。
 - **运行中断**：等待审批或用户回答时，已有队列保留；新普通消息会在保存 Message/Request 前返回 `run_interrupted`。完成 resume 后，队列才继续。
 
-Worker shutdown、ARQ 超时和用户取消不是同一种结果。基础设施取消会释放 lease 并继续向上传播；临时执行故障会释放 lease 并请求 ARQ 重试，不能把失败的投递意图留成“看起来已派发”。
+worker 首次消费智能体执行流之前，基础设施取消或可重试故障可以在预算内释放 lease，保留 pending 投递意图。预算以 PostgreSQL 中同一 Run 的 Attempt 序号计算，沿用 WorkerSettings.max_tries，当前包含首次在内最多两次；ARQ 重新投递不会重置这个预算。耗尽后 Run 和当前 Attempt 记为 failed，错误类型为 `run_retry_exhausted`，错误事件标记 `retryable=false`。终态重复投递与 runtime 清理不增加 Attempt。
+
+进入 chat、resume 或 subagent 执行流后，传播到 worker 的同类异常将 Run 和当前 Attempt 记录为 failed，错误类型为 `execution_outcome_unknown`，不自动重放原输入。即使尚未观察到工具输出，远端动作也可能已经生效；用户应先核对操作结果，再决定是否重新发起。
+
+这个边界覆盖正常停止 worker 和执行中的 ARQ 超时向 worker 传播的取消，不把它们记成用户取消。执行流内部已经转换为 error 或 interrupted 事件的故障继续走原有事件收敛流程。显式用户取消仍以 PostgreSQL 的取消事实收敛；已提交终态不被覆盖，runtime cleanup 失败继续由原有清理流程恢复。
 
 ## 恢复和一致性
 
