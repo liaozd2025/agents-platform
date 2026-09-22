@@ -565,9 +565,19 @@ class MilvusKB(KnowledgeBase):
 
         pg_task = chunk_repo.batch_upsert(self._build_chunk_pg_records(kb_id, chunks))
         milvus_task = asyncio.to_thread(_insert_milvus_records)
-        results = await asyncio.gather(pg_task, milvus_task, return_exceptions=True)
+        writes = asyncio.gather(pg_task, milvus_task, return_exceptions=True)
+        cancelled = False
+        # to_thread 无法撤销已开始的写入；先等两侧收敛，再读取统计及发布取消。
+        while not writes.done():
+            try:
+                await asyncio.shield(writes)
+            except asyncio.CancelledError:
+                cancelled = True
+        results = writes.result()
         errors = [result for result in results if isinstance(result, Exception)]
         if not errors:
+            if cancelled:
+                raise asyncio.CancelledError
             return
 
         logger.error(f"Chunk double-write failed for file {file_id}, rolling back PostgreSQL and Milvus chunks")
@@ -804,9 +814,12 @@ class MilvusKB(KnowledgeBase):
                     current_task.uncancel()
             error_msg = "File indexing was cancelled" if isinstance(e, asyncio.CancelledError) else str(e)
             logger.error(f"Indexing failed for {file_id}: {error_msg}")
+            persisted_chunks = await KnowledgeChunkRepository().list_by_file_id(file_id)
             update_data = {
                 "status": FileStatus.ERROR_INDEXING,
                 "error_message": error_msg,
+                "chunk_count": len(persisted_chunks),
+                "token_count": sum(count_tokens(chunk.content) for chunk in persisted_chunks),
                 "processing_task_id": None,
                 "processing_owner": None,
             }

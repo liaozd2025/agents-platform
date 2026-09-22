@@ -376,10 +376,10 @@ async def _heartbeat_task(context: TaskContext, execution: asyncio.Task[Any]) ->
             context._request_cancel("lease_lost")
             execution.cancel()
             return
-        if cancel_requested:
+        if cancel_requested and not context.is_cancel_requested():
             context._request_cancel("cancelled")
             execution.cancel()
-            return
+        # 取消后的清理仍拥有副作用，持续续租到 handler 退出。
 
 
 async def _finish_task_failure(

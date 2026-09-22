@@ -822,3 +822,35 @@ async def test_parse_pending_documents_uses_params(monkeypatch):
         {"kb_id": "kb_1", "file_id": "file_pending_1", "params": params, "operator_id": "uid-user"}
     ]
     assert captured["parsed"] == [{"kb_id": "kb_1", "file_id": "file_pending_1", "operator_id": "uid-user"}]
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("action", ["index", "parse"])
+async def test_document_partial_failure_rejects_task_success(monkeypatch, pending, action):
+    """批次保留失败明细，运行器必须收到异常而非成功返回。"""
+
+    async def fail_index(*args, **kwargs):
+        raise RuntimeError("synthetic final chunk failure")
+
+    pages = iter([["file_1"], []])
+
+    async def list_pending(*args, **kwargs):
+        return next(pages)
+
+    monkeypatch.setattr(knowledge_task_service.knowledge_base, f"{action}_file", fail_index)
+    monkeypatch.setattr(knowledge_task_service.knowledge_base, "list_document_file_ids_by_statuses", list_pending)
+    context = FakeTaskContext(
+        {
+            "kb_id": "kb_1",
+            "file_ids": ["file_1"],
+            "operator_id": "user_1",
+            "scope": "pending" if pending else "selected",
+            "statuses": ["parsed"],
+            "count": 1,
+        }
+    )
+    with pytest.raises(RuntimeError, match="失败 1 个"):
+        await getattr(knowledge_task_service, f"run_knowledge_{action}")(context)
+    assert context.result["failed"] == 1
+    assert context.result["processed"] == 1
+    assert context.result["items"][0]["file_id"] == "file_1"

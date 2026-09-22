@@ -284,6 +284,8 @@ jobs:
           echo "PROVISIONER_IMAGE=$(docker compose images -q sandbox-provisioner)" >> "$GITHUB_ENV"
       - name: Verify knowledge deletion across actual stores
         run: bash backend/test/e2e/knowledge/run_delete.sh "$API_IMAGE" "$PROVISIONER_IMAGE"
+      - name: Verify partial indexing through actual worker and stores
+        run: bash backend/test/e2e/knowledge/run_index.sh "$API_IMAGE" "$PROVISIONER_IMAGE"
       - name: Verify worker startup recovers lost pending publication
         run: bash backend/test/e2e/runs/run_execution_retry.sh "$API_IMAGE" "$PROVISIONER_IMAGE"
       - name: Verify bounded recovery scanning under locked threads

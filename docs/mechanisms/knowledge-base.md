@@ -120,7 +120,7 @@ Agent 的 `knowledges` 只能缩小用户已有权限。子智能体使用自己
 ## 失败和重试
 
 - 解析失败或取消：文件进入 `error_parsing`，查看错误并重新提交解析；批量待解析入口只扫描 `uploaded`。
-- 索引失败或取消：文件进入 `error_indexing`，检查分块、嵌入和存储后重新入库；批量待入库入口扫描 `parsed` 和 `error_indexing`。
+- 索引失败或取消：文件进入 `error_indexing`，统计反映 PostgreSQL 中已经持久化的块；正在进行的双写先结束，再发布取消；取消清理期间 Task 持续续租，直到 handler 退出。检查分块、嵌入和存储后重新入库，重试先清理旧索引；批量待入库入口扫描 `parsed` 和 `error_indexing`。手动和待处理任务只要有文件失败就进入 `failed`，保留结果明细中的失败数。
 - 索引缺少 Markdown：文件回到 `uploaded`，必须重新解析，不会生成空索引。
 - Durable Task 失败、取消或 lease 过期：只能说明后台动作未完成，不能推断外部存储没有部分写入；知识任务不会在未知副作用上自动重放。
 - Redis 缓存异常：Manager 回源 PostgreSQL；不支持的知识库类型或 executor 初始化失败会明确阻止操作。

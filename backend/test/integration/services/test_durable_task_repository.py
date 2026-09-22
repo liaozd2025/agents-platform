@@ -844,3 +844,54 @@ async def test_concurrent_dedupe_creates_one_active_task(durable_task_schema) ->
     reused = [(record.id, is_created) for record, is_created in results if not is_created]
     assert len(created) == 1
     assert reused == [(created[0][0], False)]
+
+
+async def test_cancelled_execution_keeps_lease_until_drained(durable_task_schema, monkeypatch):
+    """取消清理跨越多个租约周期时保持 owner，阻止恢复器提前发布终态。"""
+    from yuxi.services import task_service
+
+    repo = TaskRepository()
+    task_id = uuid.uuid4().hex
+    await repo.create(task_id, _task_data())
+    _, claimed = await repo.claim(task_id, worker_id="draining-owner", lease_seconds=0.5)
+    assert claimed
+    context = TaskContext(task_id, "draining-owner", {})
+    entered = asyncio.Event()
+    draining = asyncio.Event()
+    release = asyncio.Event()
+
+    async def execution_body():
+        """模拟收到取消后仍需等待不可撤销的存储副作用。"""
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            draining.set()
+            await release.wait()
+            raise
+
+    monkeypatch.setattr(task_service, "TASK_HEARTBEAT_SECONDS", 0.05)
+    monkeypatch.setattr(task_service, "TASK_LEASE_SECONDS", 0.5)
+    execution = asyncio.create_task(execution_body())
+    heartbeat = asyncio.create_task(task_service._heartbeat_task(context, execution))
+    try:
+        await entered.wait()
+        await repo.request_cancel(task_id)
+        await asyncio.wait_for(draining.wait(), 2)
+        await asyncio.sleep(1.1)
+        assert not execution.done(), "持续续租不能再次取消正在排空的 handler"
+        assert await repo.reconcile_expired_leases() == []
+        record = await repo.get_by_id(task_id)
+        assert record.status == "running" and record.worker_id == "draining-owner"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        await heartbeat
+        assert await repo.finish_owned(task_id, worker_id=context.worker_id, status="cancelled", message="已取消")
+        record = await repo.get_by_id(task_id)
+        assert record.status == "cancelled" and record.worker_id is None
+    finally:
+        release.set()
+        heartbeat.cancel()
+        execution.cancel()
+        await asyncio.gather(heartbeat, execution, return_exceptions=True)

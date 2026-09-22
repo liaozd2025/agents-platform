@@ -1,0 +1,3 @@
+services:
+  replay:
+    command: [python, /app/test/e2e/knowledge/index_model.py]

@@ -374,6 +374,10 @@ async def test_index_file_persists_chunk_stats(monkeypatch):
     ],
 )
 async def test_cancellation_marks_file_retryable(monkeypatch, operation, expected_status, expected_message):
+    async def list_chunks(self, file_id):
+        return []
+
+    monkeypatch.setattr(milvus_module.KnowledgeChunkRepository, "list_by_file_id", list_chunks)
     kb = MilvusKB.__new__(MilvusKB)
     if operation == "parse":
         file_repo = FakeKnowledgeFileRepository(
@@ -799,3 +803,42 @@ async def test_failed_delete_keeps_postgres_retry_facts(monkeypatch, failed_stor
     assert not chunks.deleted
     assert files.records["file-1"].chunk_count == 2
     assert files.records["file-1"].token_count == 10
+
+
+async def test_cancelled_double_write_finishes_before_publishing_cancellation(monkeypatch):
+    """取消不能让实际存储线程在任务已收敛后继续写入。"""
+    entered = threading.Event()
+    release = threading.Event()
+    persisted = []
+
+    class ChunkRepo:
+        async def batch_upsert(self, records):
+            """记录数据库侧完成。"""
+            persisted.append("pg")
+
+    class BlockingCollection:
+        def insert(self, entities):
+            """在不可取消的线程写入前设置屏障。"""
+            entered.set()
+            assert release.wait(5)
+            persisted.append("milvus")
+
+    monkeypatch.setattr(milvus_module, "KnowledgeChunkRepository", ChunkRepo)
+    kb = MilvusKB.__new__(MilvusKB)
+    task = asyncio.create_task(
+        kb._insert_chunks_to_stores("db", "file-1", BlockingCollection(), [make_chunk(0)], [[0.1]])
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert persisted == ["pg", "milvus"]
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)

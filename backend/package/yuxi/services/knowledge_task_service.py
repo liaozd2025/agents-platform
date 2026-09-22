@@ -236,6 +236,8 @@ async def _run_file_ids(context: TaskContext, *, action: str) -> dict:
     result = {"items": processed_items, "processed": len(processed_items), "failed": failed_count}
     await context.set_result(result)
     await context.set_progress(100.0, f"{label}完成，失败 {failed_count} 个")
+    if failed_count:
+        raise RuntimeError(f"{label}完成，失败 {failed_count} 个")
     return result
 
 
@@ -319,6 +321,8 @@ async def _run_pending_files(context: TaskContext, *, action: str) -> dict:
         100.0,
         f"{label}完成，失败 {failed_count} 个" if processed_count else f"没有待{label}文档",
     )
+    if failed_count:
+        raise RuntimeError(f"{label}完成，失败 {failed_count} 个")
     return result
 
 
