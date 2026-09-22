@@ -198,6 +198,7 @@ async def test_context_compression_holds_thread_lock_until_checkpoint_update(mon
     monkeypatch.setattr(context_compression_service, "resolve_agent_run_model_spec", model_spec)
     monkeypatch.setattr(context_compression_service, "ensure_conversation_workdir_available", workdir)
     monkeypatch.setattr(context_compression_service, "_ensure_runtime_available", runtime)
+    monkeypatch.setattr(context_compression_service, "_release_runtime", runtime)
     monkeypatch.setattr(context_compression_service, "build_agent_input_context", build_context)
     monkeypatch.setattr(context_compression_service, "_compress_agent_checkpoint", compress)
     monkeypatch.setattr(
