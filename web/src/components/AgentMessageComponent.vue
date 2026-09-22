@@ -49,6 +49,7 @@
         v-if="parsedData.content"
         :key="message.id"
         :content="parsedData.content"
+        :streaming="isProcessing"
         :citation-sources="citationSources"
         code-copy
         class="message-md"
