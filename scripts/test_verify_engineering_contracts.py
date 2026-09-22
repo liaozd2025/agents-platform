@@ -147,6 +147,8 @@ jobs:
       - run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_agent_run_lease.py -q
       - run: docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_agent_run_result_causality.py -q
       - run: docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_chat_router.py::test_thread_message_audits_return_persisted_facts_without_leaking_into_history -q --setup-show -o faulthandler_timeout=60
+      - run: >-
+          docker pull "$(docker compose config --format json | python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["sandbox-provisioner"]["environment"]["SANDBOX_IMAGE"])')"
       - run: docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api uv run --no-sync --no-dev pytest test/e2e/test_deterministic_agent_path_e2e.py -q
       - run: docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/services/test_identity_admin_service.py test/integration/services/test_api_key_schema_migration.py test/integration/services/test_api_key_user_lifecycle.py test/integration/api/test_apikey_router.py -q
       - run: |
@@ -496,6 +498,7 @@ jobs:
         path = self.root / ".github/workflows/system-tests.yml"
         original = path.read_text(encoding="utf-8")
         for test_path in (
+            'docker pull',
             "test/integration/services/test_project_workdir_provisioner.py",
             "test/integration/services/test_arq_worker_dispatch.py",
             "test/integration/services/test_knowledge_stats_refresh.py",

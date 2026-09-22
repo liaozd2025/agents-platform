@@ -40,6 +40,12 @@ def _require_e2e_credentials() -> tuple[str, str]:
 
 
 @pytest.fixture(scope="session")
+def e2e_credentials() -> tuple[str, str]:
+    """复用端到端测试身份，供不同生命周期的 HTTP fixture 登录。"""
+    return _require_e2e_credentials()
+
+
+@pytest.fixture(scope="session")
 def e2e_base_url() -> str:
     return E2E_BASE_URL
 
@@ -97,8 +103,8 @@ async def e2e_client(e2e_base_url: str) -> AsyncGenerator[httpx.AsyncClient, Non
 
 
 @pytest_asyncio.fixture(scope="function")
-async def e2e_headers(e2e_client: httpx.AsyncClient) -> dict[str, str]:
-    username, password = _require_e2e_credentials()
+async def e2e_headers(e2e_client: httpx.AsyncClient, e2e_credentials) -> dict[str, str]:
+    username, password = e2e_credentials
     response = await e2e_client.post("/api/auth/token", data={"username": username, "password": password})
     if response.status_code != 200:
         pytest.fail(f"E2E login failed (status={response.status_code}): {response.text}")

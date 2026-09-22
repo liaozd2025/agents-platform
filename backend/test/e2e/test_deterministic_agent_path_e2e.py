@@ -13,6 +13,7 @@ from io import BytesIO
 import asyncpg
 import httpx
 import pytest
+import pytest_asyncio
 from docx import Document
 from e2e_helpers import cancel_run, consume_events, delete_agent, postgres_dsn, wait_for_run
 from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend, get_sandbox_provider
@@ -123,6 +124,21 @@ async def test_replay_rejects_requests_outside_deterministic_contract() -> None:
             response = await client.post("/v1/chat/completions", headers=headers, json=body)
             assert response.status_code == 422, response.text
             assert response.json() == {"error": expected_error}
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module", autouse=True)
+async def replay_provider(e2e_base_url, e2e_credentials):
+    """整组共用稳定模型配置，避免逐例删建留下 worker 缓存空窗。"""
+    username, password = e2e_credentials
+    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=30) as client:
+        response = await client.post("/api/auth/token", data={"username": username, "password": password})
+        assert response.status_code == 200, response.text
+        headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+        await _create_provider(client, headers)
+        try:
+            yield
+        finally:
+            await _delete_provider(client, headers)
 
 
 async def _create_provider(client: httpx.AsyncClient, headers: dict[str, str]) -> None:
@@ -290,7 +306,6 @@ async def test_subagent_worker_enforces_inherited_write_policy(e2e_client, e2e_h
     me = await e2e_client.get("/api/auth/me", headers=e2e_headers)
     assert me.status_code == 200, me.text
     uid = str(me.json()["uid"])
-    await _create_provider(e2e_client, e2e_headers)
     agents = []
     thread_id = child_thread_id = run_id = workdir_path = probe_path = None
     try:
@@ -399,14 +414,12 @@ async def test_subagent_worker_enforces_inherited_write_policy(e2e_client, e2e_h
                 assert response.status_code in {200, 404}, response.text
         for slug in reversed(agents):
             await delete_agent(e2e_client, e2e_headers, slug)
-        await _delete_provider(e2e_client, e2e_headers)
 
 
 async def test_office_content_extraction_uses_backend_without_pi_child(e2e_client, e2e_headers):
     """真实 HTTP、worker、沙箱传输和 Docling 产物证明正文提取不启动 PI。"""
     me = await e2e_client.get("/api/auth/me", headers=e2e_headers)
     assert me.status_code == 200, me.text
-    await _create_provider(e2e_client, e2e_headers)
     slug = await _create_agent(e2e_client, e2e_headers, str(me.json()["uid"]))
     thread_id = None
     try:
@@ -471,7 +484,6 @@ async def test_office_content_extraction_uses_backend_without_pi_child(e2e_clien
         if thread_id:
             await e2e_client.delete(f"/api/chat/thread/{thread_id}", headers=e2e_headers)
         await delete_agent(e2e_client, e2e_headers, slug)
-        await _delete_provider(e2e_client, e2e_headers)
 
 
 async def _assert_persisted_causality(run_id: str, request_id: str) -> None:
@@ -707,7 +719,6 @@ async def test_deterministic_agent_path_reaches_persisted_result(
     assert me_response.status_code == 200, me_response.text
     uid = str(me_response.json()["uid"])
 
-    await _create_provider(e2e_client, e2e_headers)
     agent_slug: str | None = None
     thread_id: str | None = None
     run_id: str | None = None
@@ -818,7 +829,6 @@ async def test_deterministic_agent_path_reaches_persisted_result(
             assert thread_delete.status_code in {200, 404}, thread_delete.text
         if agent_slug:
             await delete_agent(e2e_client, e2e_headers, agent_slug)
-        await _delete_provider(e2e_client, e2e_headers)
 
 
 async def test_scheduled_task_run_now_reaches_exact_conversation_and_result(
@@ -830,7 +840,6 @@ async def test_scheduled_task_run_now_reaches_exact_conversation_and_result(
     assert me_response.status_code == 200, me_response.text
     uid = str(me_response.json()["uid"])
 
-    await _create_provider(e2e_client, e2e_headers)
     agent_slug: str | None = None
     directory_name: str | None = None
     project_id: str | None = None
@@ -927,7 +936,6 @@ async def test_scheduled_task_run_now_reaches_exact_conversation_and_result(
             assert directory_name not in {item["name"] for item in tree_response.json()["entries"]}
         if agent_slug:
             await delete_agent(e2e_client, e2e_headers, agent_slug)
-        await _delete_provider(e2e_client, e2e_headers)
 
 
 async def test_resume_with_offloaded_tool_result_publishes_stream_owned_audit(
@@ -939,7 +947,6 @@ async def test_resume_with_offloaded_tool_result_publishes_stream_owned_audit(
     assert me_response.status_code == 200, me_response.text
     uid = str(me_response.json()["uid"])
 
-    await _create_provider(e2e_client, e2e_headers)
     agent_slug: str | None = None
     thread_id: str | None = None
     workdir_path: str | None = None
@@ -1048,7 +1055,6 @@ async def test_resume_with_offloaded_tool_result_publishes_stream_owned_audit(
             assert thread_delete.status_code in {200, 404}, thread_delete.text
         if agent_slug:
             await delete_agent(e2e_client, e2e_headers, agent_slug)
-        await _delete_provider(e2e_client, e2e_headers)
 
 
 async def test_deterministic_tool_error_is_persisted_by_tool_message(
@@ -1060,7 +1066,6 @@ async def test_deterministic_tool_error_is_persisted_by_tool_message(
     assert me_response.status_code == 200, me_response.text
     uid = str(me_response.json()["uid"])
 
-    await _create_provider(e2e_client, e2e_headers)
     agent_slug: str | None = None
     thread_id: str | None = None
     try:
@@ -1115,7 +1120,6 @@ async def test_deterministic_tool_error_is_persisted_by_tool_message(
             assert thread_delete.status_code in {200, 404}, thread_delete.text
         if agent_slug:
             await delete_agent(e2e_client, e2e_headers, agent_slug)
-        await _delete_provider(e2e_client, e2e_headers)
 
 
 async def test_cancelled_run_keeps_trace_and_closes_running_model_audit(
@@ -1127,7 +1131,6 @@ async def test_cancelled_run_keeps_trace_and_closes_running_model_audit(
     assert me_response.status_code == 200, me_response.text
     uid = str(me_response.json()["uid"])
 
-    await _create_provider(e2e_client, e2e_headers)
     agent_slug: str | None = None
     thread_id: str | None = None
     run_id: str | None = None
@@ -1229,7 +1232,6 @@ async def test_cancelled_run_keeps_trace_and_closes_running_model_audit(
             assert thread_delete.status_code in {200, 404}, thread_delete.text
         if agent_slug:
             await delete_agent(e2e_client, e2e_headers, agent_slug)
-        await _delete_provider(e2e_client, e2e_headers)
 
 
 async def test_attachment_is_written_to_user_workspace_workdir_and_survives_runtime_recreation(
@@ -1239,7 +1241,6 @@ async def test_attachment_is_written_to_user_workspace_workdir_and_survives_runt
     me_response = await e2e_client.get("/api/auth/me", headers=e2e_headers)
     assert me_response.status_code == 200, me_response.text
     uid = str(me_response.json()["uid"])
-    await _create_provider(e2e_client, e2e_headers)
 
     agent_slug: str | None = None
     thread_id: str | None = None
@@ -1354,4 +1355,3 @@ async def test_attachment_is_written_to_user_workspace_workdir_and_survives_runt
             assert thread_delete.status_code in {200, 404}, thread_delete.text
         if agent_slug:
             await delete_agent(e2e_client, e2e_headers, agent_slug)
-        await _delete_provider(e2e_client, e2e_headers)

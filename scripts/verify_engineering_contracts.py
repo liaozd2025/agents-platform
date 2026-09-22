@@ -140,6 +140,7 @@ WORKFLOW_CONTRACTS = (
     WorkflowContract(
         path=".github/workflows/system-tests.yml",
         commands=(
+            'docker pull "$(docker compose config --format json | python3 -c \'import json, sys; print(json.load(sys.stdin)["services"]["sandbox-provisioner"]["environment"]["SANDBOX_IMAGE"])\')"',
             'docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_arq_worker_dispatch.py -q',
             'docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_knowledge_stats_refresh.py -q',
             'docker compose exec -T -e TEST_USERNAME=${E2E_USERNAME} -e TEST_PASSWORD=${E2E_PASSWORD} api uv run --no-sync --no-dev pytest test/integration/api/test_task_router.py::test_enqueue_document_creates_task -q',
