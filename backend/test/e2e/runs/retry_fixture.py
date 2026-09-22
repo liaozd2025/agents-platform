@@ -17,7 +17,7 @@ mcp = FastMCP("retry-test", host="0.0.0.0", port=8778, stateless_http=True, json
 @mcp.tool()
 async def record_effect(marker: str) -> str:
     """先记录合成副作用，再等待测试允许返回；不执行任何业务操作。"""
-    if marker not in {"normal", "stopped"}:
+    if marker not in {"normal", "stopped", "recovered"}:
         raise ValueError("unexpected test marker")
     with (state / "effects.jsonl").open("a") as file:
         file.write(json.dumps({"marker": marker, "at": time.time()}) + "\n")

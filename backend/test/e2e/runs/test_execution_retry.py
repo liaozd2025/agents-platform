@@ -9,8 +9,12 @@ from pathlib import Path
 import asyncpg
 import httpx
 import pytest
-
-from yuxi.services.run_queue_service import close_queue_clients, get_arq_pool, list_recent_run_stream_events
+from yuxi.services.run_queue_service import (
+    close_queue_clients,
+    get_arq_pool,
+    get_redis_client,
+    list_recent_run_stream_events,
+)
 
 
 @pytest.mark.e2e
@@ -136,11 +140,38 @@ async def test_worker_restart_does_not_repeat_unknown_effect():
             assert len(effects("stopped")) == 1
             (state / "stop-worker").touch()
             for _ in range(600):
+                if (state / "worker-stopped").exists():
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                pytest.fail("宿主未停止 worker")
+            recovered = await submit("recovered")
+            assert await conn.fetchval("SELECT status FROM agent_runs WHERE id=$1", recovered) == "pending"
+            assert await conn.fetchval("SELECT count(*) FROM agent_run_attempts WHERE run_id=$1", recovered) == 0
+            # 模拟 owning transaction 已提交而投递丢失，必须由真实 worker 启动恢复扫描补发。
+            redis = await get_redis_client()
+            assert await redis.zrem("arq:queue", "run:" + recovered) == 1
+            await redis.delete("arq:job:run:" + recovered)
+            (state / "release-recovered").touch()
+            (state / "pending-created").touch()
+            for _ in range(600):
                 if (state / "worker-restarted").exists():
                     break
                 await asyncio.sleep(0.1)
             else:
                 pytest.fail("宿主未完成 worker 停止/重启")
+            recovered_row = await settled(recovered)
+            assert recovered_row["status"] == "completed" and len(effects("recovered")) == 1
+            recovered_output = await conn.fetchrow(
+                "SELECT run_id,content FROM messages WHERE id=$1", recovered_row["output_message_id"]
+            )
+            assert recovered_output["run_id"] == recovered and recovered_output["content"] == "DONE:recovered"
+            assert (
+                await conn.fetchval(
+                    "SELECT count(*) FROM agent_run_attempts WHERE run_id=$1 AND outcome='completed'", recovered
+                )
+                == 1
+            )
             (state / "release-stopped").touch()
             # 显式再次投递同一 Run 并等待 job 返回，避免仅短暂观察不到重试。
             pool = await get_arq_pool()
