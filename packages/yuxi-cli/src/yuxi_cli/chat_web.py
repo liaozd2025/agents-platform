@@ -21,6 +21,11 @@ MAX_MESSAGE_BYTES = 32 * 1024
 class ChatWebError(Exception):
     """CLI Web Chat 无法启动或处理请求。"""
 
+    def __init__(self, message: str, *, terminal: bool = False):
+        """区分权威终态与尚未确认的传输结果。"""
+        super().__init__(message)
+        self.terminal = terminal
+
 
 class ChatWebServer(ThreadingHTTPServer):
     """仅监听本机并代理 Yuxi Agent 请求的临时 HTTP 服务。"""
@@ -85,17 +90,26 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._send_json_error(403, "会话令牌无效")
             return
 
+        submitted = False
         try:
             payload = self._read_payload()
             message = str(payload.get("message") or "").strip()
             if not message:
                 raise ChatWebError("消息不能为空")
+            request_id = payload.get("request_id")
+            if not isinstance(request_id, str):
+                raise ChatWebError("request_id 必须是有效 UUID")
+            try:
+                uuid.UUID(request_id)
+            except ValueError as exc:
+                raise ChatWebError("request_id 必须是有效 UUID") from exc
             thread_id = str(payload.get("thread_id") or "").strip() or None
+            submitted = True
             run = self.server.client.create_agent_chat_run(
                 message=message,
                 agent_slug=self.server.agent_slug,
                 thread_id=thread_id,
-                request_id=str(uuid.uuid4()),
+                request_id=request_id,
             )
             if run.get("kind") == "command":
                 command_name = str(run.get("command") or "")
@@ -111,7 +125,19 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             if not run_id:
                 raise ChatWebError(str(run.get("error") or "远端未返回 run_id"))
         except (ChatWebError, ClientError, json.JSONDecodeError) as exc:
-            self._send_json_error(400, str(exc))
+            status = exc.status_code if isinstance(exc, ClientError) else None
+            terminal = isinstance(exc, ChatWebError) and exc.terminal
+            uncertain = (
+                submitted
+                and not terminal
+                and (not status or status == 408 or status >= 500)
+            )
+            self._send_json_error(
+                502 if uncertain else 400,
+                str(exc),
+                uncertain=uncertain,
+                terminal=terminal,
+            )
             return
 
         self.send_response(200)
@@ -183,7 +209,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 }
             if event_type in {"cancelled", "rejected", "failed", "error"}:
                 message = data.get("message") or data.get("status") or event_type
-                raise ChatWebError(f"排队请求结束：{message}")
+                raise ChatWebError(
+                    f"排队请求结束：{message}", terminal=event_type != "error"
+                )
 
         raise ChatWebError("排队事件流在创建 Run 前断开，请重试")
 
@@ -213,8 +241,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         )
         self.wfile.flush()
 
-    def _send_json_error(self, status: int, message: str) -> None:
-        body = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
+    def _send_json_error(
+        self,
+        status: int,
+        message: str,
+        *,
+        uncertain: bool = False,
+        terminal: bool = False,
+    ) -> None:
+        body = json.dumps(
+            {"error": message, "uncertain": uncertain, "terminal": terminal},
+            ensure_ascii=False,
+        ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -284,7 +322,9 @@ def _browser_events(
                 or data.get("message")
                 or "运行失败"
             )
-            yield {"type": "error", "message": str(message)}
+            # SSE 自身的 DB/Redis 错误不携带运行失败标记，不能当作任务已结束。
+            terminal = chunk.get("retryable") is False or payload.get("retryable") is False
+            yield {"type": "error", "message": str(message), "terminal": terminal}
             return
         elif event_type == "end":
             saw_terminal = True
@@ -293,7 +333,11 @@ def _browser_events(
                 yield {"type": "done", "status": "waiting_approval"}
                 continue
             if status != "completed":
-                yield {"type": "error", "message": f"运行结束：{status}"}
+                yield {
+                    "type": "error",
+                    "message": f"运行结束：{status}",
+                    "terminal": True,
+                }
             yield {"type": "done", "status": status}
 
     if not saw_terminal:

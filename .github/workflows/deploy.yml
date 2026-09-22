@@ -24,8 +24,6 @@ on:
 # 设置 GITHUB_TOKEN 的权限，以允许部署到 GitHub Pages
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # 只允许同时进行一次部署，跳过正在运行和最新队列之间的运行队列
 # 但是，不要取消正在进行的运行，因为我们希望允许这些生产部署完成
@@ -50,8 +48,6 @@ jobs:
         uses: pnpm/action-setup@v6
         with:
           version: 11.24.0
-      - name: Setup Pages
-        uses: actions/configure-pages@v6
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
         working-directory: docs
@@ -65,6 +61,10 @@ jobs:
 
   # 部署工作
   deploy:
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: github-pages
@@ -73,6 +73,8 @@ jobs:
     runs-on: ubuntu-latest
     name: Deploy
     steps:
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

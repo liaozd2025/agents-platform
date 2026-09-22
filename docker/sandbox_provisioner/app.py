@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import ipaddress
 import logging
 import os
@@ -27,6 +29,11 @@ from pydantic import BaseModel, Field, model_validator
 logger = logging.getLogger(__name__)
 
 SANDBOX_ENV_FILE = Path(__file__).parent / "sandbox.env"
+SANDBOX_AUTH_ENTRYPOINT = [
+    "python3",
+    "-c",
+    Path(__file__).with_name("sandbox-entrypoint.py").read_text(),
+]
 DEFAULT_SANDBOX_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0"
 SANDBOX_RUNTIME_ENVIRONMENTS = {
     "core": {
@@ -307,6 +314,27 @@ def provisioner_token() -> str:
     return token
 
 
+def sandbox_api_key(sandbox_id: str) -> str:
+    """派生单个沙箱的执行密钥，不向沙箱暴露管理主密钥。"""
+    return hmac.new(
+        provisioner_token().encode(),
+        f"yuxi-sandbox-api:{sandbox_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def require_sandbox_auth_policy(sandbox_id: str, env: dict, entrypoint) -> None:
+    """拒绝继续复用没有完整认证入口的旧实例。"""
+    if (
+        entrypoint != SANDBOX_AUTH_ENTRYPOINT
+        or env.get("SANDBOX_API_KEY") != sandbox_api_key(sandbox_id)
+        or env.get("JWT_PUBLIC_KEY")
+    ):
+        raise SandboxAuthPolicyMismatchError(
+            "drain existing sandbox before enabling authentication"
+        )
+
+
 def require_provisioner_auth(
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
@@ -396,6 +424,15 @@ class SandboxResourcePolicyMismatchError(RuntimeError):
     detail: ClassVar[dict[str, str]] = {
         "code": "sandbox_resource_policy_mismatch",
         "message": "drain existing sandboxes before applying the resource policy",
+    }
+
+
+class SandboxAuthPolicyMismatchError(SandboxResourcePolicyMismatchError):
+    """认证策略不匹配时拒绝复用，由运维按既有生命周期排空。"""
+
+    detail: ClassVar[dict[str, str]] = {
+        "code": "sandbox_auth_policy_mismatch",
+        "message": "drain existing sandboxes before enabling authentication",
     }
 
 
@@ -580,7 +617,9 @@ class MemoryProvisionerBackend:
             self._records.pop(sandbox_id, None)
 
 
-def wait_for_sandbox_ready(sandbox_url: str, timeout_seconds: float = 30) -> bool:
+def wait_for_sandbox_ready(
+    sandbox_url: str, timeout_seconds: float = 30, *, sandbox_id: str
+) -> bool:
     deadline = time.monotonic() + timeout_seconds
     opener = request.build_opener(request.ProxyHandler({}))
     delay_seconds = SANDBOX_READY_INITIAL_DELAY_SECONDS
@@ -590,7 +629,10 @@ def wait_for_sandbox_ready(sandbox_url: str, timeout_seconds: float = 30) -> boo
             return False
         try:
             with opener.open(
-                f"{sandbox_url.rstrip('/')}/v1/sandbox",
+                request.Request(
+                    f"{sandbox_url.rstrip('/')}/v1/sandbox",
+                    headers={"X-AIO-API-Key": sandbox_api_key(sandbox_id)},
+                ),
                 timeout=min(SANDBOX_READY_REQUEST_TIMEOUT_SECONDS, remaining_seconds),
             ) as response:
                 status_code = getattr(response, "status", 200)
@@ -1016,6 +1058,12 @@ class LocalContainerProvisionerBackend:
 
     def _require_resource_policy(self, container) -> None:
         """回读 Docker 硬限制，拒绝复用旧的无限额或配置不匹配实例。"""
+        runtime = container.attrs.get("Config") or {}
+        require_sandbox_auth_policy(
+            (container.labels or {}).get("sandbox-id", ""),
+            dict(item.split("=", 1) for item in runtime.get("Env", []) if "=" in item),
+            runtime.get("Entrypoint"),
+        )
         config = container.attrs.get("HostConfig") or {}
         expected = {
             "Memory": self._limits.memory_mb * 1024**2,
@@ -1114,6 +1162,7 @@ class LocalContainerProvisionerBackend:
                         if not wait_for_sandbox_ready(
                             record.sandbox_url,
                             timeout_seconds=self._health_timeout_seconds,
+                            sandbox_id=sandbox_id,
                         ):
                             raise RuntimeError(
                                 f"sandbox {sandbox_id} is not ready at {record.sandbox_url}"
@@ -1166,6 +1215,7 @@ class LocalContainerProvisionerBackend:
             container_name = self._container_name(sandbox_id)
             run_kwargs = {
                 "name": container_name,
+                "entrypoint": SANDBOX_AUTH_ENTRYPOINT,
                 "detach": True,
                 "labels": {
                     "app": "yuxi-sandbox",
@@ -1207,7 +1257,15 @@ class LocalContainerProvisionerBackend:
                 merged_sandbox_env(self._sandbox_env, env or {}) if inherit_env else {}
             )
             sandbox_env.update(sandbox_runtime_environment(runtime_profile_name))
-            sandbox_env.update({"USER": "gem", "USER_UID": "1000", "USER_GID": "1000"})
+            sandbox_env.update(
+                {
+                    "USER": "gem",
+                    "USER_UID": "1000",
+                    "USER_GID": "1000",
+                    "SANDBOX_API_KEY": sandbox_api_key(sandbox_id),
+                    "JWT_PUBLIC_KEY": "",
+                }
+            )
             run_kwargs["environment"] = sandbox_env
 
             try:
@@ -1217,7 +1275,9 @@ class LocalContainerProvisionerBackend:
                 container.reload()
                 record = self._to_record(container, sandbox_id)
                 if not wait_for_sandbox_ready(
-                    record.sandbox_url, timeout_seconds=self._health_timeout_seconds
+                    record.sandbox_url,
+                    timeout_seconds=self._health_timeout_seconds,
+                    sandbox_id=sandbox_id,
                 ):
                     raise RuntimeError(
                         f"sandbox {sandbox_id} is not ready at {record.sandbox_url}"
@@ -1318,7 +1378,9 @@ class LocalContainerProvisionerBackend:
             return None
         if not record.sandbox_url:
             return None
-        if not wait_for_sandbox_ready(record.sandbox_url, timeout_seconds=5):
+        if not wait_for_sandbox_ready(
+            record.sandbox_url, timeout_seconds=5, sandbox_id=sandbox_id
+        ):
             return None
         return record
 
@@ -1405,7 +1467,15 @@ class KubernetesProvisionerBackend:
         pod_name = self._pod_name(sandbox_id)
         sandbox_env = merged_sandbox_env(self._sandbox_env, env) if inherit_env else {}
         sandbox_env.update(sandbox_runtime_environment(runtime_profile_name))
-        sandbox_env.update({"USER": "gem", "USER_UID": "1000", "USER_GID": "1000"})
+        sandbox_env.update(
+            {
+                "USER": "gem",
+                "USER_UID": "1000",
+                "USER_GID": "1000",
+                "SANDBOX_API_KEY": sandbox_api_key(sandbox_id),
+                "JWT_PUBLIC_KEY": "",
+            }
+        )
         env_vars = [
             self._client.V1EnvVar(name=key, value=value)
             for key, value in sandbox_env.items()
@@ -1486,6 +1556,7 @@ class KubernetesProvisionerBackend:
                     self._client.V1Container(
                         name="sandbox",
                         image=self._sandbox_image,
+                        command=SANDBOX_AUTH_ENTRYPOINT,
                         resources=resources,
                         env=env_vars,
                         working_dir=sandbox_workdir,
@@ -1670,6 +1741,14 @@ class KubernetesProvisionerBackend:
         """回读 Pod 的资源与内存盘预算，拒绝无界旧实例并保留其状态。"""
         from kubernetes.utils.quantity import parse_quantity
 
+        runtime = next(
+            (item for item in pod.spec.containers or [] if item.name == "sandbox"), None
+        )
+        require_sandbox_auth_policy(
+            (pod.metadata.labels or {}).get("sandbox-id", ""),
+            {item.name: item.value for item in getattr(runtime, "env", []) or []},
+            getattr(runtime, "command", None),
+        )
         expected = {
             "memory": self._limits.memory_mb * 1024**2,
             "cpu": parse_quantity(str(self._limits.cpus)),
@@ -1806,7 +1885,9 @@ class KubernetesProvisionerBackend:
             ):
                 raise ValueError("sandbox identity does not match created generation")
             if not wait_for_sandbox_ready(
-                record.sandbox_url, timeout_seconds=health_timeout
+                record.sandbox_url,
+                timeout_seconds=health_timeout,
+                sandbox_id=sandbox_id,
             ):
                 try:
                     self.delete(sandbox_id)
@@ -2380,6 +2461,7 @@ async def proxy_sandbox_request(sandbox_id: str, request: Request, path: str = "
         for key, value in request.headers.items()
         if key.lower() != "authorization" and key.lower() not in HOP_BY_HOP_HEADERS
     }
+    request_headers["x-aio-api-key"] = sandbox_api_key(sandbox_id)
     client: httpx.AsyncClient = request.app.state.http_client
     try:
         upstream_request = client.build_request(

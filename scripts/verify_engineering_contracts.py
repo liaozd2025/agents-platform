@@ -128,8 +128,31 @@ WORKFLOW_CONTRACTS = (
         required_paths=("web/**", ".github/workflows/web.yml"),
     ),
     WorkflowContract(
+        path=".github/workflows/deploy.yml",
+        commands=("pnpm install --frozen-lockfile", "pnpm run build"),
+        required_paths=("docs/**", ".github/workflows/deploy.yml"),
+    ),
+    WorkflowContract(
+        path=".github/workflows/cli.yml",
+        commands=("uv sync --frozen --group test", "uv run --no-sync pytest"),
+        required_paths=("packages/yuxi-cli/**", ".github/workflows/cli.yml"),
+    ),
+    WorkflowContract(
         path=".github/workflows/system-tests.yml",
         commands=(
+            'docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_arq_worker_dispatch.py -q',
+            'docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_knowledge_stats_refresh.py -q',
+            'docker compose exec -T -e TEST_USERNAME=${E2E_USERNAME} -e TEST_PASSWORD=${E2E_PASSWORD} api uv run --no-sync --no-dev pytest test/integration/api/test_task_router.py::test_enqueue_document_creates_task -q',
+
+            'docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_pi_retirement.py -q',
+            'docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/api/test_oidc_replica_flow.py -k test_oa_profile -q',
+            'docker compose run --rm --no-deps --entrypoint uv api run --no-sync --no-dev pytest test/integration/services/test_durable_task_repository.py -q',
+            'docker compose run --rm --no-deps --entrypoint uv -e DURABLE_TASK_GATE_ID=${{ github.run_id }} api run --no-sync --no-dev pytest test/integration/services/test_durable_task_worker_path.py::test_prepare_task_with_failed_initial_arq_publication -q',
+            'docker compose exec -T -e DURABLE_TASK_GATE_ID=${{ github.run_id }} api uv run --no-sync --no-dev pytest test/integration/services/test_durable_task_worker_path.py::test_shipping_worker_startup_recovers_pending_publication -q',
+            'docker compose exec -T -e DURABLE_TASK_GATE_ID=${{ github.run_id }} api uv run --no-sync --no-dev pytest test/integration/services/test_durable_task_worker_path.py::test_shipping_worker_failure_runs_domain_hook -q',
+            'docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_viewer_filesystem_security.py -q',
+            'bash backend/test/e2e/clients/run_recovery.sh "$API_IMAGE" "$PROVISIONER_IMAGE"',
+
             "docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/api/test_system_router_api.py::test_health_endpoint_is_public test/integration/api/test_system_router_api.py::test_readiness_endpoint_proves_core_runtime_dependencies test/integration/api/test_system_router_api.py::test_discovery_and_openapi_declare_full_knowledge_capabilities -q",
             "docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_schema_migration_version.py -q",
             "docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_agent_request_queue_concurrency.py -q",
@@ -147,6 +170,10 @@ WORKFLOW_CONTRACTS = (
             "backend/test/integration/**",
             "backend/test/e2e/**",
             "backend/test/support/**",
+            "backend/test/conftest.py",
+            "backend/test/live_api_cleanup.py",
+            "web/**",
+            "packages/yuxi-cli/**",
             "docker/**",
             ".github/workflows/system-tests.yml",
         ),

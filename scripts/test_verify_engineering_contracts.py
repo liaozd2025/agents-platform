@@ -120,13 +120,29 @@ jobs:
       - 'backend/test/integration/**'
       - 'backend/test/e2e/**'
       - 'backend/test/support/**'
+      - 'backend/test/conftest.py'
+      - 'backend/test/live_api_cleanup.py'
+      - 'web/**'
+      - 'packages/yuxi-cli/**'
       - 'docker/**'
       - '.github/workflows/system-tests.yml'
 jobs:
   system:
     steps:
       - run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/api/test_system_router_api.py::test_health_endpoint_is_public test/integration/api/test_system_router_api.py::test_readiness_endpoint_proves_core_runtime_dependencies test/integration/api/test_system_router_api.py::test_discovery_and_openapi_declare_full_knowledge_capabilities -q
+      - run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_arq_worker_dispatch.py -q
+      - run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_knowledge_stats_refresh.py -q
+      - run: docker compose exec -T -e TEST_USERNAME=${E2E_USERNAME} -e TEST_PASSWORD=${E2E_PASSWORD} api uv run --no-sync --no-dev pytest test/integration/api/test_task_router.py::test_enqueue_document_creates_task -q
       - run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_schema_migration_version.py -q
+      - run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_pi_retirement.py -q
+      - run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/api/test_oidc_replica_flow.py -k test_oa_profile -q
+      - run: docker compose run --rm --no-deps --entrypoint uv api run --no-sync --no-dev pytest test/integration/services/test_durable_task_repository.py -q
+      - run: docker compose run --rm --no-deps --entrypoint uv -e DURABLE_TASK_GATE_ID=${{ github.run_id }} api run --no-sync --no-dev pytest test/integration/services/test_durable_task_worker_path.py::test_prepare_task_with_failed_initial_arq_publication -q
+      - run: docker compose exec -T -e DURABLE_TASK_GATE_ID=${{ github.run_id }} api uv run --no-sync --no-dev pytest test/integration/services/test_durable_task_worker_path.py::test_shipping_worker_startup_recovers_pending_publication -q
+      - run: docker compose exec -T -e DURABLE_TASK_GATE_ID=${{ github.run_id }} api uv run --no-sync --no-dev pytest test/integration/services/test_durable_task_worker_path.py::test_shipping_worker_failure_runs_domain_hook -q
+      - run: docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_viewer_filesystem_security.py -q
+      - run: |
+          bash backend/test/e2e/clients/run_recovery.sh "$API_IMAGE" "$PROVISIONER_IMAGE"
       - run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_agent_request_queue_concurrency.py -q
       - run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_agent_run_lease.py -q
       - run: docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_agent_run_result_causality.py -q
@@ -154,6 +170,35 @@ jobs:
             exit 1
           fi
       - run: docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api uv run --no-sync --no-dev pytest test/e2e/test_agent_async_e2e.py -q
+""",
+        )
+
+        self._write(
+            ".github/workflows/deploy.yml",
+            """on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/deploy.yml'
+jobs:
+  build:
+    steps:
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+""",
+        )
+        self._write(
+            ".github/workflows/cli.yml",
+            """on:
+  pull_request:
+    paths:
+      - 'packages/yuxi-cli/**'
+      - '.github/workflows/cli.yml'
+jobs:
+  test:
+    steps:
+      - run: uv sync --frozen --group test
+      - run: uv run --no-sync pytest
 """,
         )
 
@@ -428,6 +473,10 @@ jobs:
             "backend/package/yuxi/**",
             "backend/test/e2e/**",
             "backend/test/support/**",
+            "backend/test/conftest.py",
+            "backend/test/live_api_cleanup.py",
+            "web/**",
+            "packages/yuxi-cli/**",
             "docker/**",
         ):
             with self.subTest(owning_path=owning_path):
@@ -448,6 +497,18 @@ jobs:
         original = path.read_text(encoding="utf-8")
         for test_path in (
             "test/integration/services/test_project_workdir_provisioner.py",
+            "test/integration/services/test_arq_worker_dispatch.py",
+            "test/integration/services/test_knowledge_stats_refresh.py",
+            "test/integration/api/test_task_router.py::test_enqueue_document_creates_task",
+            "test/integration/services/test_pi_retirement.py",
+            "test/integration/api/test_oidc_replica_flow.py",
+            "test/integration/services/test_durable_task_repository.py",
+            "--entrypoint uv",
+            "test/integration/services/test_durable_task_worker_path.py::test_prepare_task_with_failed_initial_arq_publication",
+            "test/integration/services/test_durable_task_worker_path.py::test_shipping_worker_startup_recovers_pending_publication",
+            "test/integration/services/test_durable_task_worker_path.py::test_shipping_worker_failure_runs_domain_hook",
+            "test/integration/api/test_viewer_filesystem_security.py",
+            "backend/test/e2e/clients/run_recovery.sh",
             "test/e2e/test_deterministic_agent_path_e2e.py",
             'docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_chat_router.py::test_thread_message_audits_return_persisted_facts_without_leaking_into_history -q --setup-show -o faulthandler_timeout=60',
         ):
@@ -462,6 +523,16 @@ jobs:
                 self.assertTrue(
                     any("缺少实际 run step" in error for error in self._errors())
                 )
+
+    def test_docs_and_cli_commands_cannot_be_removed(self) -> None:
+        """PR 构建和 CLI 行为测试必须真实执行。"""
+        for workflow, command in (("deploy", "pnpm run build"), ("cli", "uv run --no-sync pytest")):
+            with self.subTest(workflow=workflow):
+                path = self.root / f".github/workflows/{workflow}.yml"
+                original = path.read_text()
+                path.write_text(original.replace(command, "echo removed"))
+                self.assertTrue(any("缺少实际 run step" in error for error in self._errors()))
+                path.write_text(original)
 
     def test_authenticated_system_steps_cannot_drop_credentials(self) -> None:
         """恢复 HTTP 测试缺少账号的接线时 gate 必须拒绝。"""
@@ -1075,6 +1146,8 @@ Owner：owner.md
                 ".github/workflows/web.yml",
                 ".github/workflows/system-tests.yml",
                 ".github/workflows/real-provider-probe.yml",
+                ".github/workflows/cli.yml",
+                ".github/workflows/deploy.yml",
             },
         )
 

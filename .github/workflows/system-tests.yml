@@ -11,6 +11,10 @@ on:
       - 'backend/test/integration/**'
       - 'backend/test/e2e/**'
       - 'backend/test/support/**'
+      - 'backend/test/conftest.py'
+      - 'backend/test/live_api_cleanup.py'
+      - 'web/**'
+      - 'packages/yuxi-cli/**'
       - 'docker/**'
       - 'docker-compose.yml'
       - 'docker-compose.prod.yml'
@@ -28,6 +32,10 @@ on:
       - 'backend/test/integration/**'
       - 'backend/test/e2e/**'
       - 'backend/test/support/**'
+      - 'backend/test/conftest.py'
+      - 'backend/test/live_api_cleanup.py'
+      - 'web/**'
+      - 'packages/yuxi-cli/**'
       - 'docker/**'
       - 'docker-compose.yml'
       - 'docker-compose.prod.yml'
@@ -175,18 +183,26 @@ jobs:
             test/integration/services/test_workdir_user_workspace.py \
             test/integration/services/test_user_skill_projection.py \
             test/integration/api/test_skill_artifact_authorization.py -q
+      - name: Verify viewer filesystem security through HTTP
+        run: docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_viewer_filesystem_security.py -q
       - name: Verify real Sandbox storage isolation and shared projections
         run: docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_project_workdir_provisioner.py -q
       - name: Verify Durable Task worker path
         run: |
           docker compose stop api worker
           docker compose run --rm storage-migrator
-          docker compose run --rm --no-deps api \
-            uv run --no-sync --no-dev pytest test/integration/services/test_durable_task_repository.py -q
-          docker compose run --rm --no-deps \
+      - name: Verify Durable Task repository
+        run: |
+          docker compose run --rm --no-deps --entrypoint uv api \
+            run --no-sync --no-dev pytest test/integration/services/test_durable_task_repository.py -q
+      - name: Prepare failed Durable Task publication
+        run: |
+          docker compose run --rm --no-deps --entrypoint uv \
             -e DURABLE_TASK_GATE_ID=${{ github.run_id }} api \
-            uv run --no-sync --no-dev pytest \
+            run --no-sync --no-dev pytest \
               test/integration/services/test_durable_task_worker_path.py::test_prepare_task_with_failed_initial_arq_publication -q
+      - name: Restart Durable Task shipping services
+        run: |
           docker compose up -d --force-recreate milvus api worker
           for attempt in $(seq 1 60); do
             if docker compose exec -T milvus curl -fsS http://localhost:9091/healthz >/dev/null; then
@@ -208,17 +224,56 @@ jobs:
             fi
             sleep 2
           done
+      - name: Verify Durable Task recovery
+        run: |
           docker compose exec -T -e DURABLE_TASK_GATE_ID=${{ github.run_id }} api \
             uv run --no-sync --no-dev pytest \
               test/integration/services/test_durable_task_worker_path.py::test_shipping_worker_startup_recovers_pending_publication -q
+      - name: Verify Durable Task failure hook
+        run: |
           docker compose exec -T -e DURABLE_TASK_GATE_ID=${{ github.run_id }} api \
             uv run --no-sync --no-dev pytest \
               test/integration/services/test_durable_task_worker_path.py::test_shipping_worker_failure_runs_domain_hook -q
+      - name: Verify Durable Task enqueue HTTP
+        run: |
           docker compose exec -T \
             -e TEST_USERNAME=${E2E_USERNAME} \
             -e TEST_PASSWORD=${E2E_PASSWORD} api \
             uv run --no-sync --no-dev pytest \
               test/integration/api/test_task_router.py::test_enqueue_document_creates_task -q
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.24.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.12.6'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install browser test dependencies
+        run: |
+          pnpm --dir web install --frozen-lockfile
+          uv sync --project packages/yuxi-cli --frozen --group test
+          command -v google-chrome
+      - name: Resolve built runtime images
+        run: |
+          echo "API_IMAGE=$(docker compose images -q api)" >> "$GITHUB_ENV"
+          echo "PROVISIONER_IMAGE=$(docker compose images -q sandbox-provisioner)" >> "$GITHUB_ENV"
+      - name: Verify Web and CLI recovery in real Chrome
+        env:
+          CHROME_BIN: google-chrome
+          CLIENT_EVIDENCE_DIR: ${{ github.workspace }}/tmp/client-recovery-ci
+        run: |
+          bash backend/test/e2e/clients/run_recovery.sh "$API_IMAGE" "$PROVISIONER_IMAGE"
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: client-recovery-evidence
+          path: tmp/client-recovery-ci
       - name: Runtime logs on failure
         if: failure() || cancelled()
         run: docker compose logs api worker sandbox-provisioner --tail 300

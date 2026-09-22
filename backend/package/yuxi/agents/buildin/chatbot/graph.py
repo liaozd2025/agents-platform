@@ -56,7 +56,7 @@ async def _build_middlewares(context, backend):
             create_summary_middleware_from_context(context, backend=backend),
             TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
             PatchToolCallsMiddleware(),
-            ModelRetryMiddleware(max_retries=getattr(context, "model_retry_times", 2)),
+            ModelRetryMiddleware(max_retries=getattr(context, "model_retry_times", 2), on_failure="error"),
             ImageInputCompatibilityMiddleware(),
             TokenUsageMiddleware(),
         ]

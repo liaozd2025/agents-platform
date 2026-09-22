@@ -11,10 +11,14 @@ import asyncio
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
+import httpx
+from langchain_core.tools import ToolException
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.interceptors import MCPToolCallRequest, MCPToolCallResult
+from mcp.shared._httpx_utils import create_mcp_http_client
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -183,12 +187,36 @@ async def get_mcp_client(
 ) -> MultiServerMCPClient | None:
     """Initializes an MCP client with the given server configurations."""
     try:
-        client = MultiServerMCPClient(server_configs)  # pyright: ignore[reportArgumentType]
-        logger.info(f"Initialized MCP client with servers: {list(server_configs.keys())}")
+        connections = {name: dict(config) for name, config in (server_configs or {}).items()}
+        for config in connections.values():
+            if config.get("transport") in {"sse", "streamable_http", "streamable-http", "http"}:
+                config["httpx_client_factory"] = _mcp_http_client_factory(config["url"])
+        client = MultiServerMCPClient(connections)  # pyright: ignore[reportArgumentType]
+        logger.info(f"Initialized MCP client with servers: {list(connections)}")
         return client
     except Exception as e:
         logger.error("Failed to initialize MCP client: {}", e)
         return None
+
+
+def _mcp_http_client_factory(server_url: str) -> Callable[..., httpx.AsyncClient]:
+    """为连接绑定源站，阻止重定向把任意自定义凭据带到其他源。"""
+    url = httpx.URL(server_url)
+    origin = (url.scheme, url.host, url.port)
+
+    async def require_same_origin(request: httpx.Request) -> None:
+        """在每次网络发送前检查，包括重定向与认证重试。"""
+        target = request.url
+        if (target.scheme, target.host, target.port) != origin:
+            raise httpx.RequestError("MCP HTTP request must stay on the configured origin", request=request)
+
+    def create_client(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
+        """复用 SDK 默认设置，并保留已有请求 hook。"""
+        client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+        client.event_hooks["request"].append(require_same_origin)
+        return client
+
+    return create_client
 
 
 def to_camel_case(s: str) -> str:
@@ -299,6 +327,7 @@ async def get_mcp_tools(
             if client is None:
                 return []
 
+            client.tool_interceptors = [_require_mcp_tool_enabled]
             raw_tools = cast(list[Any], await client.get_tools())
 
             server_cc = to_camel_case(server_slug)
@@ -353,6 +382,17 @@ async def get_mcp_tools(
         return filtered_tools
 
     return all_processed_tools
+
+
+async def _require_mcp_tool_enabled(
+    request: MCPToolCallRequest,
+    handler: Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]],
+) -> MCPToolCallResult:
+    """每次执行前读取数据库，让禁用状态约束已交出的工具对象。"""
+    config = await get_enabled_mcp_server_config(request.server_name)
+    if config is None or request.name in (config.get("disabled_tools") or []):
+        raise ToolException("MCP 服务器或工具已禁用或删除，无法执行")
+    return await handler(request)
 
 
 async def get_tools_from_all_servers() -> list[Callable[..., Any]]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import runpy
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,12 @@ from fastapi.testclient import TestClient
 
 
 MODULE_NAME = "sandbox_provisioner_app_for_test"
+
+
+@pytest.fixture(autouse=True)
+def provisioner_test_token(monkeypatch):
+    """给隔离测试提供合成主密钥，各用例仍可覆盖或移除。"""
+    monkeypatch.setenv("SANDBOX_PROVISIONER_TOKEN", "synthetic-provisioner-key-for-unit-tests")
 
 
 def _find_module_path() -> Path:
@@ -102,7 +109,7 @@ def _docker_backend_with_running_container(monkeypatch, tmp_path):
     (tmp_path.parent / "skill-projections/user-1").mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(backend, "_get_container", lambda _sandbox_id: None)
     monkeypatch.setattr(backend, "_ensure_network", backend._network_name)
-    monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda _url, timeout_seconds: True)
+    monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda _url, timeout_seconds, **_kwargs: True)
     return module, backend, captured
 
 
@@ -186,6 +193,10 @@ def _capacity_backend(monkeypatch, tmp_path, *, total=2, per_user=2):
                 "PidsLimit": kwargs["pids_limit"],
                 "Tmpfs": kwargs["tmpfs"],
             }
+            self.attrs["Config"] = {
+                "Env": [f"{key}={value}" for key, value in kwargs["environment"].items()],
+                "Entrypoint": kwargs.get("entrypoint"),
+            }
 
         def reload(self):
             pass
@@ -202,6 +213,43 @@ def _capacity_backend(monkeypatch, tmp_path, *, total=2, per_user=2):
     monkeypatch.setattr(backend, "_ensure_network", backend._network_name)
     monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
     return module, backend, inventory
+
+
+@pytest.mark.parametrize("inherit_env", [False, True])
+def test_each_sandbox_has_its_own_unoverridable_auth(monkeypatch, tmp_path, inherit_env):
+    """两个实例独立认证，请求环境不能关闭或替换执行认证。"""
+    module, backend, inventory = _capacity_backend(monkeypatch, tmp_path)
+    backend._sandbox_env = {"SANDBOX_API_KEY": "global-key", "JWT_PUBLIC_KEY": "global-jwt"}
+    for name in ("alpha", "beta"):
+        (tmp_path / "shared" / name / "workspace").mkdir(parents=True)
+        (tmp_path.parent / "skill-projections" / name).mkdir(parents=True, exist_ok=True)
+        backend.create(
+            name, name, name, {"SANDBOX_API_KEY": "caller-key", "JWT_PUBLIC_KEY": "caller-jwt"}, inherit_env=inherit_env
+        )
+    environments = [dict(item.split("=", 1) for item in c.attrs["Config"]["Env"]) for c in inventory.values()]
+    assert all(len(env.get("SANDBOX_API_KEY", "")) >= 32 for env in environments)
+    assert environments[0]["SANDBOX_API_KEY"] != environments[1]["SANDBOX_API_KEY"]
+    assert all(not env.get("JWT_PUBLIC_KEY") for env in environments)
+    assert all("SANDBOX_PROVISIONER_TOKEN" not in env for env in environments)
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "missing map",
+        'map "$request_method:$request_uri" $target_workflow {',
+        'map "$request_method:$request_uri" $target_workflow {\n default unsafe;\n}',
+    ],
+)
+def test_unsupported_auth_template_never_starts_sandbox(monkeypatch, tmp_path, template):
+    """认证模板不兼容时停止启动，并保留原文件用于诊断。"""
+    path = tmp_path / "template.conf"
+    path.write_text(template)
+    monkeypatch.setattr("pathlib.Path", lambda _path: path)
+    monkeypatch.setattr(os, "execv", lambda *_args: pytest.fail("不兼容模板仍启动了 Sandbox"))
+    with pytest.raises(RuntimeError, match="unsupported Sandbox authentication template"):
+        runpy.run_path(str(MODULE_PATH.with_name("sandbox-entrypoint.py")))
+    assert path.read_text() == template
 
 
 def test_concurrent_creation_never_exceeds_capacity_and_reuses_identity(monkeypatch, tmp_path):
@@ -259,6 +307,20 @@ def test_reuse_and_discovery_reject_old_resource_policy_without_deleting(monkeyp
     with pytest.raises(module.SandboxResourcePolicyMismatchError):
         backend.discover("existing")
 
+    assert inventory["existing"].id == record.generation
+    assert inventory["existing"].status == "running"
+
+
+@pytest.mark.parametrize("field", ["Env", "Entrypoint"])
+def test_old_auth_policy_is_rejected_without_destroying_runtime(monkeypatch, tmp_path, field):
+    """无密钥或旧入口的实例不能被复用，排空由运维负责。"""
+    module, backend, inventory = _capacity_backend(monkeypatch, tmp_path)
+    record = backend.create("existing", "thread", "user", inherit_env=False)
+    inventory["existing"].attrs["Config"][field] = []
+    with pytest.raises(module.SandboxAuthPolicyMismatchError):
+        backend.create("existing", "thread", "user", inherit_env=False)
+    with pytest.raises(module.SandboxAuthPolicyMismatchError):
+        backend.discover("existing")
     assert inventory["existing"].id == record.generation
     assert inventory["existing"].status == "running"
 
@@ -449,7 +511,7 @@ def test_wait_for_sandbox_ready_uses_bounded_fast_backoff(monkeypatch):
         raising=False,
     )
 
-    assert module.wait_for_sandbox_ready("http://sandbox", timeout_seconds=2.2) is False
+    assert module.wait_for_sandbox_ready("http://sandbox", sandbox_id="test", timeout_seconds=2.2) is False
     assert clock.sleeps == pytest.approx([0.05, 0.1, 0.2, 0.4, 0.8, 0.65])
     assert all(0 < timeout <= 3 for timeout in probe_timeouts)
     assert clock.now == pytest.approx(2.2)
@@ -471,6 +533,7 @@ def test_wait_for_sandbox_ready_returns_immediately_when_first_probe_succeeds(mo
     class SuccessfulOpener:
         def open(self, _url, *, timeout):
             assert timeout == 3
+            assert _url.get_header("X-aio-api-key") == module.sandbox_api_key("test")
             return SuccessfulResponse()
 
     monkeypatch.setattr(
@@ -480,7 +543,7 @@ def test_wait_for_sandbox_ready_returns_immediately_when_first_probe_succeeds(mo
     )
     monkeypatch.setattr(module.request, "build_opener", lambda *_args: SuccessfulOpener())
 
-    assert module.wait_for_sandbox_ready("http://sandbox", timeout_seconds=30) is True
+    assert module.wait_for_sandbox_ready("http://sandbox", sandbox_id="test", timeout_seconds=30) is True
     assert sleeps == []
 
 
@@ -1039,7 +1102,7 @@ def test_authenticated_proxy_forwards_request_without_management_token(monkeypat
         )
         response = client.get(
             "/api/sandboxes/sandbox-proxy-test/proxy/v1/sandbox",
-            headers=headers,
+            headers={**headers, "X-AIO-API-Key": "caller-cannot-select-upstream-key"},
             params={"detail": "full"},
         )
         second_response = client.get(
@@ -1057,6 +1120,7 @@ def test_authenticated_proxy_forwards_request_without_management_token(monkeypat
     assert str(captured[0].url) == "http://agent-sandbox:8000/v1/sandbox?detail=full"
     assert str(captured[1].url) == "http://agent-sandbox:8000/v1/sandbox"
     assert "authorization" not in captured[0].headers
+    assert captured[0].headers["x-aio-api-key"] == module.sandbox_api_key("sandbox-proxy-test")
     assert "x-ignored" not in response.headers
 
 
@@ -1155,6 +1219,8 @@ def test_docker_ephemeral_sandbox_has_runtime_profile_and_identity_without_persi
         "USER": "gem",
         "USER_UID": "1000",
         "USER_GID": "1000",
+        "SANDBOX_API_KEY": module.sandbox_api_key("sandbox-1"),
+        "JWT_PUBLIC_KEY": "",
     }
     assert run_config["volumes"] == {}
     assert run_config["labels"]["storage-mode"] == "ephemeral"
@@ -1193,6 +1259,8 @@ def test_kubernetes_ephemeral_sandbox_uses_profile_and_only_empty_home(monkeypat
         "USER": "gem",
         "USER_UID": "1000",
         "USER_GID": "1000",
+        "SANDBOX_API_KEY": module.sandbox_api_key("sandbox-1"),
+        "JWT_PUBLIC_KEY": "",
     }
     sandbox_mounts = {mount.mount_path for mount in pod.spec.containers[0].volume_mounts}
     assert sandbox_mounts == {"/home/gem"}
@@ -1371,7 +1439,9 @@ def test_kubernetes_rejects_rebinding_existing_runtime_to_another_workdir(monkey
         )
 
 
-@pytest.mark.parametrize("changed", ["limits", "requests", "init_limits", "home_size", "home_medium"])
+@pytest.mark.parametrize(
+    "changed", ["limits", "requests", "init_limits", "home_size", "home_medium", "auth_env", "auth_entrypoint"]
+)
 def test_kubernetes_resource_policy_reads_pod_and_preserves_running_generation(monkeypatch, changed):
     module = _load_module()
     # SDK 是 provisioner 独立镜像的依赖；unit 固定外部 quantity oracle，真实 SDK 另在该镜像验证。
@@ -1420,6 +1490,10 @@ def test_kubernetes_resource_policy_reads_pod_and_preserves_running_generation(m
         pod.spec.init_containers[0].resources.limits = {}
     elif changed == "home_size":
         home.size_limit = None
+    elif changed == "auth_env":
+        pod.spec.containers[0].env = []
+    elif changed == "auth_entrypoint":
+        pod.spec.containers[0].command = []
     else:
         home.medium = ""
 
@@ -1575,7 +1649,7 @@ def test_docker_backend_cleans_up_sandbox_and_network_on_failure(monkeypatch, tm
     monkeypatch.setattr(backend, "_get_container", lambda _sandbox_id: created_container)
     monkeypatch.setattr(backend, "_ensure_network", backend._network_name)
     monkeypatch.setattr(backend, "_delete_network", deleted_networks.append)
-    monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda _url, timeout_seconds: False)
+    monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda _url, timeout_seconds, **_kwargs: False)
 
     with pytest.raises(RuntimeError, match=error_match):
         backend.create("sandbox-1", "thread-1", "user-1")
@@ -1860,7 +1934,7 @@ def test_docker_backend_serializes_create_and_delete_for_same_sandbox(monkeypatc
     backend._is_expected_skills_mount = lambda _container, _uid: True
     backend._is_on_expected_network = lambda _container, _sandbox_id: True
     backend._has_expected_user_data_mounts = lambda _container, _uid: True
-    monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda _url, timeout_seconds: True)
+    monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda _url, timeout_seconds, **_kwargs: True)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         create_future = executor.submit(create_sandbox)
@@ -1901,8 +1975,12 @@ def test_docker_backend_reconnects_provisioner_before_reusing_sandbox(monkeypatc
     class FakeContainer:
         name = "yuxi-sandbox-sandbox-1"
         status = "running"
-        labels = {"thread-id": "thread-1", "uid": "user-1"}
+        labels = {"thread-id": "thread-1", "uid": "user-1", "sandbox-id": "sandbox-1"}
         attrs = {
+            "Config": {
+                "Env": ["SANDBOX_API_KEY=" + module.sandbox_api_key("sandbox-1")],
+                "Entrypoint": module.SANDBOX_AUTH_ENTRYPOINT,
+            },
             "State": {"Status": "running"},
             "HostConfig": {
                 "Memory": 4 * 1024**3,
@@ -1923,7 +2001,7 @@ def test_docker_backend_reconnects_provisioner_before_reusing_sandbox(monkeypatc
     monkeypatch.setattr(backend, "_is_expected_skills_mount", lambda _container, _uid: True)
     monkeypatch.setattr(backend, "_is_on_expected_network", lambda _container, _sandbox_id: True)
     monkeypatch.setattr(backend, "_has_expected_user_data_mounts", lambda _container, _uid, _workdir=None: True)
-    monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda _url, timeout_seconds: bool(connected))
+    monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda _url, timeout_seconds, **_kwargs: bool(connected))
 
     record = backend.create("sandbox-1", "thread-1", "user-1")
 

@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/views/LoginView.vue（版式与状态接线）、web/src/components/MouseEyesCharacter.vue（插画组件）
+Owner：web/src/views/LoginView.vue
 
 ## 问题
 

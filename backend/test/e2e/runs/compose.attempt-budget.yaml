@@ -1,0 +1,13 @@
+services:
+  api:
+    # 领取屏障打开后才启动 ARQ heartbeat；测试末尾另外核验真实 readiness。
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:5050/api/system/health]
+    environment:
+      RUN_ATTEMPT_BUDGET_E2E: '1'
+  worker:
+    environment:
+      YUXI_JOB_TIMEOUT_SECONDS: '5'
+    command: [python, -m, test.e2e.runs.budget_worker]
+  replay:
+    command: [python, /app/test/e2e/runs/retry_fixture.py]
