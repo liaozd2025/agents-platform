@@ -52,7 +52,11 @@
           class="index-pending-alert"
           type="info"
           show-icon
-          :message="`将提交 ${pendingIndexTotalText} 个待入库文件，任务会在后台按批处理，可在任务中心查看进度。`"
+          :message="
+            isPendingRetryIndexOperation
+              ? `将提交 ${pendingIndexTotalText} 个入库失败的文件重试，任务会在后台按批处理，可在任务中心查看进度。`
+              : `将提交 ${pendingIndexTotalText} 个待入库文件，任务会在后台按批处理，可在任务中心查看进度。`
+          "
         />
         <ChunkParamsConfig
           :temp-chunk-params="indexParams"
@@ -668,6 +672,7 @@ defineExpose({
     await applyFilters({ status })
   },
   startPendingIndex: (count) => startPendingIndex(count),
+  startPendingRetryIndex: (count) => startPendingRetryIndex(count),
   startPendingParse: (count) => startPendingParse(count),
   getCurrentFolderId: () => store.fileBrowser.parentId,
   refresh: () => handleRefresh()
@@ -885,6 +890,7 @@ const buildIndexParamsPayload = () => {
 const currentIndexFileIds = ref([])
 const isBatchIndexOperation = ref(false)
 const isPendingIndexOperation = ref(false)
+const isPendingRetryIndexOperation = ref(false)
 const pendingIndexTotal = ref(0)
 const pendingIndexTotalText = computed(() =>
   Number(pendingIndexTotal.value || 0).toLocaleString('zh-CN')
@@ -1124,6 +1130,7 @@ const handleBatchIndex = async () => {
   currentIndexFileIds.value = [...validKeys]
   isBatchIndexOperation.value = true
   isPendingIndexOperation.value = false
+  isPendingRetryIndexOperation.value = false
   pendingIndexTotal.value = 0
   indexConfigModalTitle.value = '批量入库参数配置'
   indexConfigModalVisible.value = true
@@ -1144,8 +1151,32 @@ const startPendingIndex = (count = 0) => {
   currentIndexFileIds.value = []
   isBatchIndexOperation.value = false
   isPendingIndexOperation.value = true
+  isPendingRetryIndexOperation.value = false
   pendingIndexTotal.value = total
   indexConfigModalTitle.value = '待入库文件参数配置'
+  resetIndexParams()
+  indexConfigModalVisible.value = true
+  return true
+}
+
+const startPendingRetryIndex = (count = 0) => {
+  if (lock.value) {
+    message.warning('当前有文件处理中，请稍后再试')
+    return false
+  }
+
+  const total = Number(count || 0)
+  if (total <= 0) {
+    message.info('没有入库失败的文档')
+    return false
+  }
+
+  currentIndexFileIds.value = []
+  isBatchIndexOperation.value = false
+  isPendingIndexOperation.value = true
+  isPendingRetryIndexOperation.value = true
+  pendingIndexTotal.value = total
+  indexConfigModalTitle.value = '重试入库参数配置'
   resetIndexParams()
   indexConfigModalVisible.value = true
   return true
@@ -1282,6 +1313,7 @@ const handleIndexFile = async (record) => {
   currentIndexFileIds.value = [record.file_id]
   isBatchIndexOperation.value = false
   isPendingIndexOperation.value = false
+  isPendingRetryIndexOperation.value = false
   pendingIndexTotal.value = 0
   indexConfigModalTitle.value = '入库参数配置'
 
@@ -1296,6 +1328,7 @@ const handleReindexFile = async (record) => {
   currentIndexFileIds.value = [record.file_id]
   isBatchIndexOperation.value = false
   isPendingIndexOperation.value = false
+  isPendingRetryIndexOperation.value = false
   pendingIndexTotal.value = 0
   indexConfigModalTitle.value = '重新入库参数配置'
 
@@ -1309,9 +1342,11 @@ const handleReindexFile = async (record) => {
 const handleIndexConfigConfirm = async () => {
   try {
     const params = buildIndexParamsPayload()
-    const result = isPendingIndexOperation.value
-      ? await store.indexPendingFiles(params, pendingIndexTotal.value)
-      : await store.indexFiles(currentIndexFileIds.value, params)
+    const result = isPendingRetryIndexOperation.value
+      ? await store.retryIndexPendingFiles(params, pendingIndexTotal.value)
+      : isPendingIndexOperation.value
+        ? await store.indexPendingFiles(params, pendingIndexTotal.value)
+        : await store.indexFiles(currentIndexFileIds.value, params)
     if (result) {
       currentIndexFileIds.value = []
       pendingIndexTotal.value = 0
@@ -1324,6 +1359,7 @@ const handleIndexConfigConfirm = async () => {
 
       isBatchIndexOperation.value = false
       isPendingIndexOperation.value = false
+      isPendingRetryIndexOperation.value = false
       resetIndexParams()
     } else {
       // message.error(`入库失败: ${result.message}`); // store already shows message
@@ -1341,6 +1377,7 @@ const handleIndexConfigCancel = () => {
   currentIndexFileIds.value = []
   isBatchIndexOperation.value = false
   isPendingIndexOperation.value = false
+  isPendingRetryIndexOperation.value = false
   pendingIndexTotal.value = 0
   resetIndexParams()
 }

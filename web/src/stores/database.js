@@ -651,6 +651,38 @@ export const useDatabaseStore = defineStore('database', () => {
     }
   }
 
+  async function retryIndexPendingFiles(params = {}, count = 0) {
+    const registerTask = taskerStore.createTaskRegistration()
+    state.chunkLoading = true
+    try {
+      const data = await documentApi.retryIndexPendingDocuments(kbId.value, params)
+      if (data.status === 'success' || data.status === 'queued') {
+        enableAutoRefresh('auto')
+        message.success(data.message || '重试入库任务已提交')
+        if (data.task_id) {
+          registerTask({
+            task_id: data.task_id,
+            name: `文档重试入库 (${kbId.value})`,
+            task_type: 'knowledge_index',
+            message: data.message,
+            payload: { kb_id: kbId.value, count: data.queued_count || count, scope: 'retry_index' }
+          })
+        }
+        await delayedRefresh()
+        return true
+      } else {
+        message.error(data.message || '提交失败')
+        return false
+      }
+    } catch (error) {
+      console.error(error)
+      message.error(error.message || '请求失败')
+      return false
+    } finally {
+      state.chunkLoading = false
+    }
+  }
+
   function openFileDetail(fileId) {
     const nextFileId = typeof fileId === 'object' ? fileId?.file_id : fileId
     if (!nextFileId) {
@@ -836,6 +868,7 @@ export const useDatabaseStore = defineStore('database', () => {
     parsePendingFiles,
     indexFiles,
     indexPendingFiles,
+    retryIndexPendingFiles,
     openFileDetail,
     closeFileDetail,
     loadQueryParams,

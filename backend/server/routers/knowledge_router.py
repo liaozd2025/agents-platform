@@ -16,6 +16,12 @@ from yuxi.knowledge.base import KBNameConflictError, KBNotFoundError
 from yuxi.knowledge.chunking.ragflow_like.presets import get_chunk_preset_options
 from yuxi.knowledge.graphs.milvus_graph_service import GRAPH_TASK_TYPE, MilvusGraphService
 from yuxi.knowledge.read_models import KnowledgeBaseDetail
+from yuxi.knowledge.parser.archive_utils import (
+    ArchiveFormatError,
+    ArchiveScanReport,
+    is_parsed_result_archive,
+    iter_archive_entries,
+)
 from yuxi.knowledge.parser.capabilities import SUPPORTED_FILE_EXTENSIONS, is_supported_file_extension
 from yuxi.knowledge.runtime import knowledge_base
 from yuxi.knowledge.utils import calculate_content_hash, is_minio_url, params_for_uploaded_document, parse_minio_url
@@ -62,7 +68,12 @@ knowledge = APIRouter(prefix="/knowledge", tags=["knowledge"])
 ACTIVE_GRAPH_BUILD_STATUSES = {"pending", "running"}
 MAX_DIRECT_DOCUMENT_ACTION_FILE_IDS = 1000
 PENDING_PARSE_STATUSES = ["uploaded"]
-PENDING_INDEX_STATUSES = ["parsed", "error_indexing"]
+# 「待入库」在三处必须保持同一口径：统计（query_kb_file_stats.pending_index_count）、
+# 列表筛选项（status=parsed）、批量入库范围。入库失败的重试属于「重试入库」分类，
+# 由筛选 error_indexing + 行级/批量重试处理，不再混进「待入库」。
+PENDING_INDEX_STATUSES = ["parsed"]
+# 入库失败（含历史 failed 态）的批量重试范围，与列表筛选「重试入库」口径保持一致。
+RETRY_INDEX_STATUSES = ["error_indexing", "failed"]
 VIRTUAL_FOLDER_MIGRATION_TASK_TYPE = "knowledge_virtual_folder_migration"
 
 
@@ -872,37 +883,56 @@ async def _enqueue_pending_document_action_task(
     operator_id: str,
     db_info: KnowledgeBaseDetail,
     action: str,
+    retry: bool = False,
 ) -> dict:
-    """提交管理端按状态全量解析或入库任务。"""
+    """提交管理端按状态全量解析或入库任务。
+
+    ``retry=True`` 表示批量**重试入库失败**的文档：它只统计并处理
+    ``error_indexing`` / ``failed``，与「待入库」（仅 ``parsed``）严格区分，
+    避免把失败态混进"待入库"的数量与范围。
+    """
     if action == "parse":
         label = "解析"
         pending_count = db_info.pending_parse_count
         statuses = PENDING_PARSE_STATUSES
+        scope = "pending"
+        task_name = f"待解析文档解析 ({db_info.name})"
+        empty_message = "没有待解析文档"
+    elif retry:
+        label = "重试入库"
+        pending_count = db_info.retry_index_count
+        statuses = RETRY_INDEX_STATUSES
+        scope = "retry_index"
+        task_name = f"入库失败文档重试 ({db_info.name})"
+        empty_message = "没有入库失败的文档"
     else:
         label = "入库"
         pending_count = db_info.pending_index_count
         statuses = PENDING_INDEX_STATUSES
+        scope = "pending"
+        task_name = f"待入库文档入库 ({db_info.name})"
+        empty_message = "没有待入库文档"
 
     if pending_count <= 0:
-        return {"message": f"没有待{label}文档", "status": "success", "queued_count": 0}
+        return {"message": empty_message, "status": "success", "queued_count": 0}
 
     try:
         task, created = await tasker.enqueue_unique_by_payload(
-            name=f"待{label}文档{label} ({db_info.name})",
+            name=task_name,
             task_type=f"knowledge_{action}",
             payload={
                 "kb_id": kb_id,
-                "scope": "pending",
+                "scope": scope,
                 "action": action,
                 "statuses": statuses,
                 "count": pending_count,
                 "params": params,
                 "operator_id": operator_id,
             },
-            payload_match={"kb_id": kb_id, "scope": "pending", "action": action},
+            payload_match={"kb_id": kb_id, "scope": scope, "action": action},
         )
         return {
-            "message": f"{label}任务已提交" if created else f"已有待{label}任务正在执行",
+            "message": f"{label}任务已提交" if created else f"已有{label}任务正在执行",
             "status": "queued",
             "task_id": task.id,
             "queued_count": pending_count,
@@ -994,6 +1024,26 @@ async def index_pending_documents(
         operator_id=current_user.uid,
         db_info=db_info,
         action="index",
+    )
+
+
+@knowledge.post("/databases/{kb_id}/documents/retry-index-pending")
+async def retry_index_pending_documents(
+    kb_id: str,
+    payload: PendingIndexDocumentsRequest | None = None,
+    current_user: User = Depends(require_knowledge_base_manage),
+):
+    """批量重试入库失败的文档（error_indexing / failed）。"""
+    params = (payload.params if payload else None) or {}
+    logger.debug(f"Retry index pending documents for kb_id {kb_id}: {params=}")
+    db_info = await _ensure_database_supports_documents(kb_id, "文档重试入库")
+    return await _enqueue_pending_document_action_task(
+        kb_id=kb_id,
+        params=params,
+        operator_id=current_user.uid,
+        db_info=db_info,
+        action="index",
+        retry=True,
     )
 
 
@@ -1612,6 +1662,96 @@ async def import_workspace_files(
     return {"status": "success", "items": results}
 
 
+async def _upload_archive_documents(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    kb_id: str | None,
+    bucket_name: str,
+    folder: str,
+    archive_content_hash: str,
+) -> dict:
+    """把普通 ZIP 归档包解压后逐个上传，返回可批量入库的 items 列表。
+
+    与「解析结果包」（包内含 ``full.md``，合并为单个文档）不同，这里包内每个
+    受支持的文件都会成为**独立**文档，压缩工具写入的元数据（``__MACOSX/``、
+    ``.DS_Store`` 等）会被跳过并在 ``skipped_items`` 中说明。
+
+    每个 item 都带 ``inner_path``（包内相对路径），前端据此回传 ``source_path``，
+    后端把它写入展示名，知识库文件树会因此呈现压缩包内的原始目录层级。
+    """
+    report = ArchiveScanReport()
+    try:
+        entries = list(iter_archive_entries(file_bytes, report=report))
+    except ArchiveFormatError as archive_error:
+        raise HTTPException(status_code=400, detail=str(archive_error))
+
+    if not entries:
+        raise HTTPException(
+            status_code=400,
+            detail="压缩包内没有可导入的文件，仅支持 PDF、Word、Excel、PPT、图片、文本等格式",
+        )
+
+    items: list[dict] = []
+    seen_hashes: set[str] = set()
+    timestamp = int(time.time() * 1000)
+
+    for index, entry in enumerate(entries):
+        content_hash = await calculate_content_hash(entry.data)
+        if content_hash in seen_hashes:
+            report.skip(entry.inner_path, "duplicate_in_archive")
+            continue
+        if await knowledge_base.file_existed_in_db(kb_id, content_hash):
+            report.skip(entry.inner_path, "duplicate_in_database")
+            continue
+
+        entry_basename, entry_ext = os.path.splitext(entry.filename)
+        minio_filename = f"{entry_basename}_{timestamp}_{index}{entry_ext}"
+        object_name = f"{folder}/upload/{minio_filename}"
+
+        try:
+            minio_url = await aupload_file_to_minio(bucket_name, object_name, entry.data)
+        except Exception as upload_error:  # noqa: BLE001 - 单条失败不应中断整包
+            logger.error(f"归档条目上传失败 {entry.inner_path}: {upload_error}")
+            report.skip(entry.inner_path, "upload_failed")
+            continue
+
+        seen_hashes.add(content_hash)
+        same_name_files = await knowledge_base.get_same_name_files(kb_id, entry.filename.lower())
+        items.append(
+            {
+                "message": "Archive entry successfully uploaded",
+                "file_path": minio_url,
+                "minio_path": minio_url,
+                "kb_id": kb_id,
+                "content_hash": content_hash,
+                "filename": entry.filename,
+                "original_filename": entry_basename,
+                "inner_path": entry.inner_path,
+                "size": len(entry.data),
+                "minio_filename": minio_filename,
+                "object_name": object_name,
+                "bucket_name": bucket_name,
+                "same_name_files": same_name_files,
+                "has_same_name": len(same_name_files) > 0,
+            }
+        )
+
+    if not items:
+        raise HTTPException(status_code=409, detail="压缩包内文件均已存在于知识库中，无需重复上传")
+
+    return {
+        "status": "success",
+        "message": f"压缩包已解压，成功上传 {len(items)} 个文件",
+        "is_archive": True,
+        "archive_filename": filename,
+        "archive_content_hash": archive_content_hash,
+        "uploaded_count": len(items),
+        "skipped_items": report.skipped,
+        "items": items,
+    }
+
+
 @knowledge.post("/files/upload")
 async def upload_file(
     file: UploadFile = File(...),
@@ -1648,6 +1788,21 @@ async def upload_file(
 
     content_hash = await calculate_content_hash(file_bytes)
 
+    bucket_name = MinIOClient.KB_BUCKETS["documents"]
+    folder = kb_id if kb_id else "unknown"
+
+    # 普通资料包：解压后逐个文件作为独立文档上传；
+    # 解析结果包（含 full.md）保持原行为，由解析器合并为单个文档。
+    if ext == ".zip" and not is_parsed_result_archive(file_bytes):
+        return await _upload_archive_documents(
+            file_bytes=file_bytes,
+            filename=filename,
+            kb_id=kb_id,
+            bucket_name=bucket_name,
+            folder=folder,
+            archive_content_hash=content_hash,
+        )
+
     file_exists = await knowledge_base.file_existed_in_db(kb_id, content_hash)
     if file_exists:
         raise HTTPException(
@@ -1659,8 +1814,6 @@ async def upload_file(
     timestamp = int(time.time() * 1000)
     minio_filename = f"{basename}_{timestamp}{ext}"
 
-    bucket_name = MinIOClient.KB_BUCKETS["documents"]
-    folder = kb_id if kb_id else "unknown"
     object_name = f"{folder}/upload/{minio_filename}"
 
     # 上传到MinIO

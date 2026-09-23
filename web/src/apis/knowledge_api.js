@@ -332,6 +332,18 @@ export const documentApi = {
     return apiPost(`/api/knowledge/databases/${kbId}/documents/index-pending`, {
       params
     })
+  },
+
+  /**
+   * 批量重试入库失败的文档（error_indexing / failed）
+   * @param {string} kbId - 知识库ID
+   * @param {Object} params - 处理参数
+   * @returns {Promise} - 重试入库任务结果
+   */
+  retryIndexPendingDocuments: async (kbId, params = {}) => {
+    return apiPost(`/api/knowledge/databases/${kbId}/documents/retry-index-pending`, {
+      params
+    })
   }
 }
 

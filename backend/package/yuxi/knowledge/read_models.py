@@ -49,6 +49,7 @@ class KnowledgeBaseSummary:
     token_count: int = 0
     pending_parse_count: int = 0
     pending_index_count: int = 0
+    retry_index_count: int = 0
     processing_count: int = 0
     effective_permission: ResourcePermission | None = None
 

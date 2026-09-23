@@ -176,14 +176,16 @@ async def run_knowledge_ingest(context: TaskContext) -> dict:
 
 async def run_knowledge_parse(context: TaskContext) -> dict:
     """按指定文件或待处理状态执行可重建的解析任务。"""
-    if context.payload.get("scope") == "pending":
+    # scope="pending"（待处理）与 scope="retry_index"（入库失败批量重试）都走「按状态批量」流程
+    if context.payload.get("scope") in {"pending", "retry_index"}:
         return await _run_pending_files(context, action="parse")
     return await _run_file_ids(context, action="parse")
 
 
 async def run_knowledge_index(context: TaskContext) -> dict:
     """按指定文件或待处理状态执行可重建的索引任务。"""
-    if context.payload.get("scope") == "pending":
+    # scope="pending"（待处理）与 scope="retry_index"（入库失败批量重试）都走「按状态批量」流程
+    if context.payload.get("scope") in {"pending", "retry_index"}:
         return await _run_pending_files(context, action="index")
     return await _run_file_ids(context, action="index")
 
@@ -246,7 +248,12 @@ async def _run_pending_files(context: TaskContext, *, action: str) -> dict:
     initial_total = int(payload["count"])
     params = dict(payload.get("params") or {})
     operator_id = payload["operator_id"]
-    label = "解析" if action == "parse" else "入库"
+    if action == "parse":
+        label = "解析"
+    elif payload.get("scope") == "retry_index":
+        label = "重试入库"
+    else:
+        label = "入库"
     processing_owner = {
         "processing_task_id": context.task_id,
         "processing_owner": context.worker_id,

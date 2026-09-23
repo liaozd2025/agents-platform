@@ -30,7 +30,8 @@ const AnswerCitationModal = defineAsyncComponent(() =>
   import('@/components/sources/AnswerCitationModal.vue')
 )
 const props = defineProps({
-  citationSources: { type: Array, default: () => [] },
+  // null 表示调用方未接入引用来源，正文里的 <cite> 保持原样渲染。
+  citationSources: { type: Array, default: null },
   streaming: { type: Boolean, default: false },
   content: {
     type: String,
@@ -400,8 +401,8 @@ onBeforeUnmount(() => {
 })
 
 watch(
-  [renderedContent, shikiTheme, () => props.codeCopy],
-  async ([content, theme, codeCopy], _, onCleanup) => {
+  [renderedContent, shikiTheme, () => props.codeCopy, () => props.citationSources],
+  async ([content, theme, codeCopy, citationSources], _, onCleanup) => {
     let expired = false
     onCleanup(() => {
       expired = true
@@ -414,7 +415,7 @@ watch(
       return
     }
 
-    const html = await renderMarkdown(content, { theme })
+    const html = await renderMarkdown(content, { theme, citationSources })
     if (!expired) {
       replaceHtmlPreservingPreviews(html)
       revokeKbImageBlobUrls()

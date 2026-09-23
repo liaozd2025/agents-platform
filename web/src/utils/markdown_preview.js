@@ -5,7 +5,7 @@ import DOMPurify from 'dompurify'
 import { createHighlighter } from 'shiki'
 import { load as yamlLoad } from 'js-yaml'
 import { escapeHtml } from './html.js'
-import { markdownItCitations } from './answerCitations.js'
+import { citationSourcesCacheKey, markdownItCitations } from './answerCitations.js'
 import { normalizeCodeLanguage } from './file_preview.js'
 import { renderSvgBlocks } from './svgRenderer.js'
 import { renderHtmlPreviewBlocks } from './htmlPreviewRenderer.js'
@@ -208,7 +208,7 @@ const getRenderer = async (theme, needsHighlight) => {
   return rendererPromise
 }
 
-export const renderMarkdown = async (content, { theme = 'github-light' } = {}) => {
+export const renderMarkdown = async (content, { theme = 'github-light', citationSources } = {}) => {
   try {
     const normalizedContent = normalizeHtmlTagQuotes(normalizeLegacyMinioPublicUrls(content))
     const htmlPreviewContent = renderHtmlPreviewBlocks(normalizedContent, {
@@ -217,7 +217,8 @@ export const renderMarkdown = async (content, { theme = 'github-light' } = {}) =
     const svgContent = renderSvgBlocks(htmlPreviewContent)
     const themeName = normalizeTheme(theme)
     const needsHighlight = hasCodeFence(svgContent)
-    const cacheKey = `${needsHighlight ? themeName : 'plain'}\u0000${svgContent}`
+    const citationKey = citationSourcesCacheKey(citationSources)
+    const cacheKey = `${needsHighlight ? themeName : 'plain'}\u0000${citationKey}\u0000${svgContent}`
     const cachedHtml = renderedHtmlCache.get(cacheKey)
     if (cachedHtml !== undefined) return cachedHtml
 
@@ -231,7 +232,7 @@ export const renderMarkdown = async (content, { theme = 'github-light' } = {}) =
     }
 
     const md = await getRenderer(themeName, needsHighlight)
-    const html = DOMPurify.sanitize(md.render(svgContent), {
+    const html = DOMPurify.sanitize(md.render(svgContent, { answerCitationSources: citationSources }), {
       ADD_TAGS: ['input'],
       ADD_ATTR: [
         'class',

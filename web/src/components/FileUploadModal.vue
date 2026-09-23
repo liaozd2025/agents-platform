@@ -123,7 +123,9 @@
         >
           <p class="ant-upload-text">点击或将文件拖拽到此处</p>
           <p class="ant-upload-hint">支持类型: {{ uploadHint }}</p>
-          <div class="zip-tip" v-if="hasZipFiles">📦 ZIP包将自动解压提取 Markdown 与图片</div>
+          <div class="zip-tip" v-if="hasZipFiles">
+            📦 ZIP 包将自动解压：包内文档按原始目录层级逐个入库；含 full.md 的解析结果包则提取 Markdown 与图片
+          </div>
         </a-upload-dragger>
 
         <div v-if="showAggregateProgress" class="upload-progress-card">
@@ -794,6 +796,11 @@ const hasZipFiles = computed(() => {
       return false
     }
 
+    // 归档包（普通资料包）在上传响应里标记 is_archive
+    if (file.response?.is_archive) {
+      return true
+    }
+
     const filePath = file.response?.file_path || file.name
     if (!filePath) {
       return false
@@ -1302,35 +1309,64 @@ const chunkData = async () => {
   // 文件模式处理
   const imageExtensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif']
 
-  // 提取已上传的文件信息
+  // 提取已上传的文件信息。
+  // ZIP 归档包上传后服务端返回 is_archive + items（包内展开后的每个文件），
+  // 需要逐个注册为独立文档；其余情况一个上传文件对应一个文档。
   const items = []
   const content_hashes = {}
   const file_sizes = {}
   const source_paths = {}
+  let skippedArchiveEntries = 0
+
   for (const file of validFileList.value) {
     if (file.status !== 'done') continue
-    const file_path = file.response?.file_path
-    const content_hash = file.response?.content_hash
-    if (!file_path) continue
+    const response = file.response || {}
+    const isArchive = response.is_archive === true
+    const responseItems =
+      isArchive && Array.isArray(response.items) && response.items.length > 0
+        ? response.items
+        : [response]
 
-    items.push(file_path)
-    if (content_hash) content_hashes[file_path] = content_hash
-    if (Number.isFinite(file.response?.size)) file_sizes[file_path] = file.response.size
+    if (isArchive) {
+      skippedArchiveEntries += Array.isArray(response.skipped_items)
+        ? response.skipped_items.length
+        : 0
+    }
+
     const originalFile = file.originFileObj || file
     const relativePath = originalFile?.webkitRelativePath || file.webkitRelativePath
-    if (relativePath) {
-      source_paths[file_path] = relativePath
-    }
 
-    // 检查是否需要OCR
-    const ext = file_path.substring(file_path.lastIndexOf('.')).toLowerCase()
-    if (imageExtensions.includes(ext) && !isOcrEnabled.value) {
-      message.error({
-        content: '检测到图片文件，必须启用 OCR 才能提取文本内容。',
-        duration: 5
-      })
-      return
+    for (const entry of responseItems) {
+      const file_path = entry.file_path
+      if (!file_path) continue
+
+      items.push(file_path)
+      if (entry.content_hash) content_hashes[file_path] = entry.content_hash
+      if (Number.isFinite(entry.size)) file_sizes[file_path] = entry.size
+      // 保留目录层级：归档包用包内相对路径（如 父目录/子目录/a.pdf），
+      // 文件夹上传用 webkitRelativePath；后端会据此生成虚拟目录
+      const entrySourcePath = isArchive ? entry.inner_path : relativePath
+      if (entrySourcePath) {
+        source_paths[file_path] = entrySourcePath
+      }
+      mergeSameNameFiles(entry.same_name_files)
+
+      // 检查是否需要OCR
+      const ext = file_path.substring(file_path.lastIndexOf('.')).toLowerCase()
+      if (imageExtensions.includes(ext) && !isOcrEnabled.value) {
+        message.error({
+          content: '检测到图片文件，必须启用 OCR 才能提取文本内容。',
+          duration: 5
+        })
+        return
+      }
     }
+  }
+
+  if (skippedArchiveEntries > 0) {
+    message.warning(
+      `压缩包内有 ${skippedArchiveEntries} 个条目被跳过（系统元数据、不支持的格式或重复文件）`
+    )
   }
 
   if (items.length === 0) {

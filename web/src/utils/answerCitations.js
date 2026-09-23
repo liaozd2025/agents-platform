@@ -13,6 +13,22 @@ export function safeCitationUrl(value) {
   }
 }
 
+/** 只有绑定到本消息来源、或本身可直接打开的链接才允许渲染徽标。 */
+export function isBoundCitationSource(source, sources) {
+  if (typeof source !== 'string' || !source) return false
+  if (safeCitationUrl(source)) return true
+  return mergeCitationSources(sources).some((item) => item.source === source || item.url === source)
+}
+
+/** 渲染结果依赖来源集合，缓存键必须带上它以免串用。 */
+export function citationSourcesCacheKey(sources) {
+  if (!Array.isArray(sources)) return ''
+  return mergeCitationSources(sources)
+    .map((item) => `${item.source}\u0001${item.url || ''}`)
+    .sort()
+    .join('\u0002')
+}
+
 /** 在 Markdown 行内语法中编号，代码块和行内代码自然保持原样。 */
 export function markdownItCitations(md) {
   md.inline.ruler.before('html_inline', 'answer_citation', (state, silent) => {
@@ -22,6 +38,28 @@ export function markdownItCitations(md) {
     if (!sourceAttr) return false
     if (!silent) {
       const source = md.utils.unescapeAll(sourceAttr[1] || sourceAttr[2])
+      // 调用方显式给出来源集合时才过滤，未接入来源的渲染场景保持原行为。
+      const allowedSources = state.env.answerCitationSources
+      if (Array.isArray(allowedSources) && !isBoundCitationSource(source, allowedSources)) {
+        state.pos += match[0].length
+        return true
+      }
+      // 紧邻的上一个引用若指向同一来源，只保留一个徽标：模型可能在同一处为同一份
+      // 原文连续贴多个 <cite>（各自带局部编号），归一化后会并排显示相同的数字。
+      let previousIndex = state.tokens.length - 1
+      while (
+        previousIndex >= 0 &&
+        state.tokens[previousIndex].type === 'text' &&
+        !state.tokens[previousIndex].content.trim()
+      ) {
+        previousIndex -= 1
+      }
+      const previous = previousIndex >= 0 ? state.tokens[previousIndex] : null
+      if (previous?.type === 'answer_citation' && previous.meta?.source === source) {
+        state.tokens.splice(previousIndex + 1)
+        state.pos += match[0].length
+        return true
+      }
       const numbers = (state.env.answerCitationNumbers ||= new Map())
       if (!numbers.has(source)) numbers.set(source, numbers.size + 1)
       const token = state.push('answer_citation', '', 0)

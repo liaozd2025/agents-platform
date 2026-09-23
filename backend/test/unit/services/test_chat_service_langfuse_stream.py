@@ -235,7 +235,7 @@ def _patch_stream_scaffolding(
     async def fake_resolve_workdir(**_kwargs):
         return "projects/11111111-1111-4111-8111-111111111111"
 
-    async def fake_retrieval_decision(*_args):
+    async def fake_retrieval_decision(*_args, **_kwargs):
         """聊天流单测不访问知识库持久化，检索策略由独立测试覆盖。"""
         return SimpleNamespace(kb_ids=())
 

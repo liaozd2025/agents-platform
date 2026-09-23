@@ -1236,7 +1236,9 @@ async def stream_agent_chat(
         ]
         persisted_human_message = human_message
         retrieval_chunks: list[dict[str, Any]] = []
-        retrieval_decision = await decide_knowledge_retrieval(query, current_user)
+        retrieval_decision = await decide_knowledge_retrieval(
+            query, current_user, model_spec=input_context.get("model")
+        )
         if retrieval_decision.kb_ids:
             retrieval_chunks = await retrieve_for_decision(query, retrieval_decision)
             retrieval_context = format_retrieval_context(retrieval_chunks)

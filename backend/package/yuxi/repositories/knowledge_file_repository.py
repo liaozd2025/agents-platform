@@ -684,9 +684,15 @@ class KnowledgeFileRepository:
                 func.sum(case((non_folder & (KnowledgeFile.status == "uploaded"), 1), else_=0)).label(
                     "pending_parse_count"
                 ),
-                func.sum(case((non_folder & KnowledgeFile.status.in_(["parsed", "error_indexing"]), 1), else_=0)).label(
+                func.sum(case((non_folder & (KnowledgeFile.status == "parsed"), 1), else_=0)).label(
                     "pending_index_count"
                 ),
+                func.sum(
+                    case(
+                        (non_folder & KnowledgeFile.status.in_(["error_indexing", "failed"]), 1),
+                        else_=0,
+                    )
+                ).label("retry_index_count"),
                 func.sum(
                     case(
                         (
@@ -709,6 +715,7 @@ class KnowledgeFileRepository:
             "token_count": int(row.token_count or 0),
             "pending_parse_count": int(row.pending_parse_count or 0),
             "pending_index_count": int(row.pending_index_count or 0),
+            "retry_index_count": int(row.retry_index_count or 0),
             "processing_count": int(row.processing_count or 0),
         }
 
