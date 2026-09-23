@@ -82,7 +82,11 @@
         <!-- Main Chat Area -->
         <div class="chat-main" ref="chatMainRef">
           <!-- iframe 初始态欢迎区固定在顶部，避免与底部输入框的定位相互影响。 -->
-          <div v-if="props.embedMode && !conversations.length" class="embed-welcome">
+          <!-- 切换历史会话期间由骨架屏占位，不能先渲染初始欢迎区（会闪一下 logo 与欢迎语）。 -->
+          <div
+            v-if="props.embedMode && !conversations.length && !isThreadSkeletonActive"
+            class="embed-welcome"
+          >
             <img
               class="embed-welcome-logo"
               src="/jiudian-pharma-logo.png"
@@ -93,6 +97,31 @@
             <p>基于九典内部知识库检索，同时支持联网搜索，辅助文案编写等功能。</p>
           </div>
           <div class="chat-box">
+            <!-- 历史会话切换骨架：消息返回前占位，替代初始空态，避免页面结构来回跳变。 -->
+            <div
+              v-if="isThreadSkeletonActive"
+              class="chat-skeleton"
+              role="status"
+              aria-live="polite"
+              aria-busy="true"
+              aria-label="正在加载会话历史"
+            >
+              <div
+                v-for="row in THREAD_SKELETON_ROWS"
+                :key="row.key"
+                class="chat-skeleton-row"
+                :class="row.align === 'right' ? 'is-user' : 'is-ai'"
+              >
+                <div class="chat-skeleton-bubble">
+                  <span
+                    v-for="(width, lineIndex) in row.lines"
+                    :key="lineIndex"
+                    class="chat-skeleton-line"
+                    :style="{ width: `${width}%` }"
+                  ></span>
+                </div>
+              </div>
+            </div>
             <a-button v-if="messageWindow.hasEarlier" type="link" @click="visibleMessageCount += 20">
               查看更早消息
             </a-button>
@@ -174,17 +203,21 @@
           <div
             ref="messageInputDockRef"
             class="bottom"
-            :class="{ 'start-screen': !conversations.length }"
+            :class="{ 'start-screen': !conversations.length && !isThreadSkeletonActive }"
           >
             <div class="message-input-wrapper">
-              <!-- 加载状态：加载消息 -->
-              <div v-if="isLoadingMessages" class="chat-loading">
+              <!-- 加载状态：加载消息。骨架屏已在聊天区表达加载中，这里不重复显示小 spinner。 -->
+              <div v-if="isLoadingMessages && !isThreadSkeletonActive" class="chat-loading">
                 <div class="loading-spinner"></div>
                 <span>正在加载消息...</span>
               </div>
 
-              <!-- 新对话时显示不含品牌名称的通用欢迎语。 -->
-              <div v-if="!conversations.length && !props.embedMode" class="chat-greeting-input">
+              <!-- 新对话时显示不含品牌名称的通用欢迎语；切换历史会话时改由骨架屏占位。
+                   输入框本身保持底部固定定位，避免 start-screen 的居中样式造成位置跳变。 -->
+              <div
+                v-if="!conversations.length && !props.embedMode && !isThreadSkeletonActive"
+                class="chat-greeting-input"
+              >
                 <h1>{{ randomGreeting }}</h1>
               </div>
 
@@ -2093,6 +2126,28 @@ const currentThreadRuns = computed(() => threadRuns.value[currentChatId.value] |
 const currentRunById = computed(() => new Map(currentThreadRuns.value.map((run) => [run.run_id, run])))
 const getMessageRun = (message) => currentRunById.value.get(getMessageRunId(message)) || null
 const currentThreadHasHistory = computed(() => currentThreadMessages.value.length > 0)
+// 会话切换期间是否显示骨架屏。
+// 背景：切换历史会话时 currentThreadId 先被改写（侧边栏 AppLayout.handleSelectChat、
+// 路由 watch、selectChat 三处都会改写），消息要等 fetchThreadMessages 返回才写入
+// threadMessages，这段空窗里 currentThreadMessages 为空数组，导致模板里的空态判定
+// （embed 欢迎区 / 输入框 start-screen 居中 / 随机欢迎语）先渲染一次初始页，
+// 表现为"闪过初始会话页面再显示完整对话"。
+// 判定依据是 threadMessages 里有没有该会话的键：有键（含空数组，即真的空会话）说明
+// 已经加载过，直接渲染内容；无键说明本次是首次加载，用骨架屏占位。
+// 注意：该条件不依赖 isLoadingMessages，因为侧边栏路径下置位 isLoadingMessages 之前
+// 可能跨多个 macrotask（路由跳转、selectAgent），此时已经足够渲染出空态。
+const isThreadSkeletonActive = computed(() => {
+  const threadId = currentChatId.value
+  if (!threadId) return false
+  return threadMessages.value[threadId] === undefined
+})
+
+// 骨架屏模拟消息行：仅用于视觉占位，lines 为每行灰条的宽度百分比。
+const THREAD_SKELETON_ROWS = [
+  { key: 'row-1', align: 'left', lines: [82, 64] },
+  { key: 'row-2', align: 'right', lines: [46] },
+  { key: 'row-3', align: 'left', lines: [88, 76, 52] }
+]
 const currentThreadConfigNotice = computed(() => {
   if (!currentChatId.value) return null
   return threadConfigNoticeMap.value[currentChatId.value] || null
@@ -3032,10 +3087,18 @@ const fetchThreadMessages = async ({ agentId, threadId, delay = 0 }) => {
   try {
     const response = await agentApi.getAgentHistory(threadId)
     const history = response.history || []
+    // 赋值顺序即骨架屏的撤下时机：写入后 isThreadSkeletonActive 立即变 false，
+    // 本次渲染直接出真实内容，不会经过空态。
     threadMessages.value[threadId] = history
     threadRuns.value[threadId] = response.runs
     chatThreadsStore.upsertThread(response.thread)
   } catch (error) {
+    // 加载失败要撤下骨架屏：该函数不只在切换会话时调用，run 终态收敛、中断恢复、
+    // 审批提交后的刷新都会走这里；因此只有"从未加载过"（threadMessages 无此键）时才写
+    // 空数组占位，否则会把已加载会话正在显示的历史清空。错误提示仍由 handleChatError 给出。
+    if (threadMessages.value[threadId] === undefined) {
+      threadMessages.value[threadId] = []
+    }
     handleChatError(error, 'load')
     throw error
   }
@@ -4569,6 +4632,68 @@ watch(currentChatId, (threadId, oldThreadId) => {
     border-top-color: var(--main-color);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
+  }
+}
+
+// 会话切换骨架屏：消息返回前占据聊天气泡的位置，避免渲染初始欢迎态造成版式跳变。
+// 不使用 :where()/color-mix() 等需要更高内核的写法；flex gap 沿用项目既有约定
+// （基线内核对 gap < 84 不生效，退化表现只是灰条间距消失，不影响可读性）。
+.chat-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-top: 8px;
+}
+
+.chat-skeleton-row {
+  display: flex;
+
+  &.is-user {
+    justify-content: flex-end;
+  }
+
+  &.is-ai {
+    justify-content: flex-start;
+  }
+}
+
+.chat-skeleton-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 560px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--gray-50);
+}
+
+// 用户侧气泡贴近真实短气泡的宽度，减少加载完成时的横向跳动。
+.chat-skeleton-row.is-user .chat-skeleton-bubble {
+  max-width: 360px;
+}
+
+.chat-skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+  background-image: linear-gradient(
+    90deg,
+    var(--gray-100) 0%,
+    var(--gray-200) 50%,
+    var(--gray-100) 100%
+  );
+  background-size: 200% 100%;
+  animation: chat-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes chat-skeleton-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0 50%;
   }
 }
 
