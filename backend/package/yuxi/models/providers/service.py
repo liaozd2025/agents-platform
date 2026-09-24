@@ -300,10 +300,31 @@ async def get_model_provider_by_id(db: AsyncSession, provider_id: str) -> ModelP
     return await get_model_provider(db, provider_id)
 
 
+def _merge_builtin_model_modalities(existing_models: list[dict], builtin_models: list[dict]) -> bool:
+    """为已登记的内置模型补上缺失的 input_modalities，返回是否有改动。
+
+    只补空值：管理员已填写的声明（含有意留空前的历史值）保持不变，避免启动时覆盖人工配置。
+    """
+    declared_by_model_id = {
+        str(item.get("id")): item.get("input_modalities") for item in builtin_models if item.get("input_modalities")
+    }
+    changed = False
+    for model in existing_models:
+        if not isinstance(model, dict) or model.get("input_modalities"):
+            continue
+        declared = declared_by_model_id.get(str(model.get("id")))
+        if not declared:
+            continue
+        model["input_modalities"] = list(declared)
+        changed = True
+    return changed
+
+
 async def ensure_builtin_model_providers_in_db(db: AsyncSession) -> None:
     """确保独立模型配置模块的内置 provider 模板存在。
 
-    这里只补不存在的内置 provider，不覆盖管理员已编辑的配置。
+    这里只补不存在的内置 provider，不覆盖管理员已编辑的配置；
+    已存在的内置 provider 只补齐缺失的 enabled_models 与其中缺失的 input_modalities 声明。
     """
     existing = await list_model_providers(db)
     existing_ids = {p.provider_id: p for p in existing}
@@ -312,9 +333,18 @@ async def ensure_builtin_model_providers_in_db(db: AsyncSession) -> None:
         provider_id = provider_def["provider_id"]
         existing_provider = existing_ids.get(provider_id)
         if existing_provider:
+            changed = False
             if not existing_provider.enabled_models and provider_def.get("enabled_models"):
                 existing_provider.enabled_models = _normalize_model_list(provider_def["enabled_models"])
                 existing_provider.capabilities = provider_def.get("capabilities") or existing_provider.capabilities
+                changed = True
+            else:
+                models = [dict(item) for item in (existing_provider.enabled_models or []) if isinstance(item, dict)]
+                if _merge_builtin_model_modalities(models, provider_def.get("enabled_models") or []):
+                    # 重新赋值列表，确保 JSON 列的变更被 SQLAlchemy 检测到
+                    existing_provider.enabled_models = models
+                    changed = True
+            if changed:
                 existing_provider.updated_by = "system"
                 await db.flush()
             continue

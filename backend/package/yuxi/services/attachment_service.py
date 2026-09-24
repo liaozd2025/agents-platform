@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import os
 import tempfile
 import uuid
@@ -30,6 +32,20 @@ TMP_ATTACHMENT_PREFIX = "tmp/chat_attachments"
 TMP_ATTACHMENT_PARSE_EXTENSIONS = (*PDF_FILE_EXTENSIONS, *IMAGE_FILE_EXTENSIONS)
 TMP_ATTACHMENT_IMAGE_EXTENSIONS = IMAGE_FILE_EXTENSIONS
 TMP_ATTACHMENT_TTL = timedelta(hours=24)
+
+# 聊天输入内联图片（消息里贴的 base64 图片）落盘位置与命名前缀。
+# 与「对话附件」区分：这类图片不进 Conversation 附件元数据，只写文件供工具读取。
+INLINE_CHAT_IMAGE_DIR = "/uploads"
+INLINE_CHAT_IMAGE_PREFIX = "chat-image"
+
+# base64 图片魔数 → (扩展名, MIME)。只接受能识别的图片格式，避免把未知字节写成假图片。
+_IMAGE_SIGNATURE_TYPES: tuple[tuple[bytes, str, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", ".png", "image/png"),
+    (b"\xff\xd8\xff", ".jpg", "image/jpeg"),
+    (b"GIF87a", ".gif", "image/gif"),
+    (b"GIF89a", ".gif", "image/gif"),
+    (b"BM", ".bmp", "image/bmp"),
+)
 
 
 async def _require_user_conversation(conv_repo: ConversationRepository, thread_id: str, uid: str):
@@ -228,6 +244,61 @@ async def _rollback_stored_attachments(workdir, records: list[dict]) -> None:
                 await asyncio.to_thread(workdir.delete, scope)
             except Exception:
                 pass
+
+
+def _sniff_inline_image_type(content: bytes) -> tuple[str, str] | None:
+    """按魔数识别内联图片的 (扩展名, MIME)；无法识别时返回 None。"""
+    for signature, extension, mime_type in _IMAGE_SIGNATURE_TYPES:
+        if content.startswith(signature):
+            return extension, mime_type
+    # WEBP 是 RIFF 容器，前 4 字节不足以判定，必须再看第 8~12 字节的 "WEBP" 标记
+    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    return None
+
+
+async def persist_inline_chat_image(
+    *,
+    workdir,
+    image_content: str,
+    request_id: str | None,
+) -> dict | None:
+    """把聊天输入携带的内联 base64 图片落盘为 Workdir 内的参考图文件。
+
+    聊天输入框提交的图片只以 base64 存在于消息里，工具（如图生图参考图）拿不到文件路径；
+    这里把它写成与对话附件同形的记录，供调用方注入本轮模型输入。
+    文件名按 request_id 生成，重试同一请求时覆盖同一文件，不产生重复副本。
+    内容无法解码或格式无法识别时返回 None，由调用方决定降级行为（不伪造可用文件）。
+    """
+    try:
+        # validate=True：拒绝含非法字符的 base64，避免把损坏内容当图片写入
+        content = base64.b64decode(image_content, validate=True)
+    except (binascii.Error, ValueError):
+        logger.warning("聊天内联图片 base64 解码失败，跳过落盘")
+        return None
+
+    image_type = _sniff_inline_image_type(content)
+    if image_type is None:
+        logger.warning(f"聊天内联图片格式无法识别，跳过落盘 size={len(content)}")
+        return None
+    extension, mime_type = image_type
+
+    name_seed = _safe_file_name(str(request_id or "")) or uuid.uuid4().hex
+    file_name = f"{INLINE_CHAT_IMAGE_PREFIX}-{name_seed}{extension}"
+    scope = f"{INLINE_CHAT_IMAGE_DIR}/{file_name}"
+    await _write_workdir_file(workdir, scope, content)
+    runtime_path = runtime_path_for_workdir_scope(workdir.relative_path, scope)
+    logger.info(f"聊天内联图片已落盘为参考图: scope={scope} size={len(content)}")
+    return {
+        "file_id": f"{INLINE_CHAT_IMAGE_PREFIX}-{name_seed}",
+        "file_name": file_name,
+        "file_type": mime_type,
+        "file_size": len(content),
+        "status": "uploaded",
+        "uploaded_at": utc_isoformat(),
+        "path": runtime_path,
+        "original_path": runtime_path,
+    }
 
 
 async def _cleanup_expired_tmp_attachments(minio_client, bucket_name: str, uid: str) -> None:

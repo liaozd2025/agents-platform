@@ -58,20 +58,27 @@ BUILTIN_PROVIDERS: list[dict[str, Any]] = [
             # 该 provider 声明了 chat 能力，且系统默认模型 system_options.default_model
             # 就是 alibaba-cn:qwen3.7-max，此处必须登记对应 chat 模型，
             # 否则知识图谱抽取等依赖默认对话模型的链路会报「未找到模型」。
+            # input_modalities 是唯一的图片能力声明来源（DashScope 远端 /models 不返回能力字段）：
+            # qwen3.7-max 实测对任何图片输入都返回 400，只能处理文本；plus/flash 支持图片。
+            # 声明为 ["text"] 表示"确定不支持图片"，平台据此把图片交给视觉模型转述；
+            # 留空表示"未知"，平台会先试一次再由错误兜底。
             {
                 "id": "qwen3.7-max",
                 "type": "chat",
                 "display_name": "qwen3.7-max",
+                "input_modalities": ["text"],
             },
             {
                 "id": "qwen3.7-plus",
                 "type": "chat",
                 "display_name": "qwen3.7-plus",
+                "input_modalities": ["text", "image"],
             },
             {
                 "id": "qwen3.7-flash",
                 "type": "chat",
                 "display_name": "qwen3.7-flash",
+                "input_modalities": ["text", "image"],
             },
             {
                 "id": "text-embedding-v4",

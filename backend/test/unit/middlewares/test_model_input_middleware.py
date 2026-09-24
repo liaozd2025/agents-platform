@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
 from yuxi.agents.middlewares.model_input import ImageInputCompatibilityMiddleware
+from yuxi.services import image_input_service
 
 
 def _request(model, messages, tools=None) -> ModelRequest:
@@ -468,3 +469,259 @@ async def test_does_not_report_malformed_image_as_unsupported_model() -> None:
 
     with pytest.raises(RuntimeError, match="not a valid image"):
         await middleware.awrap_model_call(request, handler)
+
+
+# ==== 视觉转述（主模型不接受图片时交给配置的视觉模型） ====
+
+
+@pytest.fixture(autouse=True)
+def vision_settings(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """单测不访问配置存储与外部模型：默认视为"未配置视觉模型"，并清空进程内缓存。"""
+    settings = {"vision_model": None}
+
+    class _Options:
+        async def get(self):
+            return dict(settings)
+
+    monkeypatch.setattr(image_input_service, "system_options", _Options())
+    image_input_service._non_image_model_specs.clear()
+    image_input_service._vision_transcripts.clear()
+    return settings
+
+
+class _FakeVisionModel:
+    """视觉模型替身：记录调用入参，可按需返回转述或抛错。"""
+
+    def __init__(self, transcript: str = "图里是一枚红色的方形图标，几乎占满画面。", error: Exception | None = None):
+        self.transcript = transcript
+        self.error = error
+        self.calls: list = []
+
+    async def ainvoke(self, messages):
+        self.calls.append(messages)
+        if self.error is not None:
+            raise self.error
+        return AIMessage(content=self.transcript)
+
+
+def _yuxi_model(spec: str) -> SimpleNamespace:
+    """带 yuxi 元数据的模型替身，中间件据此识别模型身份。"""
+    return SimpleNamespace(metadata={"yuxi_model_spec": spec})
+
+
+def _image_request(spec: str = "alibaba-cn:qwen3.7-max", text: str = "根据这张图做图生图"):
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+    return _request(_yuxi_model(spec), [HumanMessage(content=[{"type": "text", "text": text}, image])])
+
+
+def _dashscope_rejection() -> RuntimeError:
+    """复现 DashScope 对非多模态模型的拒图报错（不含 image 关键词）。"""
+    error = RuntimeError(
+        "Error code: 400 - {'error': {'message': '<400> InternalError.Algo.InvalidParameter: "
+        "The provided messages input is invalid. The error info is [Unexpected item type in content.].'}}"
+    )
+    error.status_code = 400
+    return error
+
+
+def _text_of(message) -> str:
+    return "".join(block.get("text", "") for block in message.content_blocks if block.get("type") == "text")
+
+
+@pytest.mark.asyncio
+async def test_uses_configured_vision_model_when_provider_rejects_image(
+    vision_settings: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vision_settings["vision_model"] = "alibaba-cn:qwen3.7-flash"
+    vision_model = _FakeVisionModel()
+    monkeypatch.setattr("yuxi.models.chat.load_chat_model", lambda _spec, **_kwargs: vision_model)
+    middleware = ImageInputCompatibilityMiddleware()
+    seen = []
+
+    async def handler(request):
+        seen.append(request.messages)
+        if len(seen) == 1:
+            raise _dashscope_rejection()
+        return ModelResponse(result=[AIMessage(content="已按参考图生成")])
+
+    response = await middleware.awrap_model_call(_image_request(), handler)
+
+    assert response.result[0].content == "已按参考图生成"
+    assert len(seen) == 2
+    # 第二次主模型调用必须去掉图片块，换成视觉转述文本（去掉即回归原缺陷：主模型再次被拒）
+    assert [block["type"] for block in seen[1][0].content_blocks] == ["text", "text"]
+    second_text = _text_of(seen[1][0])
+    assert '<image_transcript source="alibaba-cn:qwen3.7-flash">' in second_text
+    assert "图里是一枚红色的方形图标" in second_text
+    assert "根据这张图做图生图" in second_text
+    # 转述请求带上了图片块与原始问题
+    sidecar_content = vision_model.calls[0][0].content
+    assert [block["type"] for block in sidecar_content] == ["text", "image", "text"]
+
+
+@pytest.mark.asyncio
+async def test_known_non_image_model_transcribes_before_calling_handler(
+    vision_settings: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vision_settings["vision_model"] = "alibaba-cn:qwen3.7-flash"
+    vision_model = _FakeVisionModel()
+    monkeypatch.setattr("yuxi.models.chat.load_chat_model", lambda _spec, **_kwargs: vision_model)
+    middleware = ImageInputCompatibilityMiddleware()
+    request = _image_request()
+    handler_calls = 0
+    delivered = []
+
+    async def handler(request):
+        nonlocal handler_calls
+        handler_calls += 1
+        delivered.append(request.messages)
+        if handler_calls == 1:
+            raise _dashscope_rejection()
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    await middleware.awrap_model_call(request, handler)
+    await middleware.awrap_model_call(request, handler)
+
+    # 第二次请求不再先发注定失败的调用：3 次 handler（1 失败 + 2 成功），且转述只付一次费
+    assert handler_calls == 3
+    assert len(vision_model.calls) == 1
+    assert [block["type"] for block in delivered[1][0].content_blocks] == ["text", "text"]
+    assert [block["type"] for block in delivered[2][0].content_blocks] == ["text", "text"]
+
+
+@pytest.mark.asyncio
+async def test_falls_back_to_ocr_when_vision_model_is_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail_load(_spec, **_kwargs):
+        raise AssertionError("未配置视觉模型时不应加载模型")
+
+    monkeypatch.setattr("yuxi.models.chat.load_chat_model", fail_load)
+    middleware = ImageInputCompatibilityMiddleware()
+
+    async def handler(_request):
+        raise _dashscope_rejection()
+
+    response = await middleware.awrap_model_call(_image_request(), handler)
+
+    assert response.result[0].content == "当前模型无法读取图片，且没有可供 OCR 工具解析的文件路径。"
+
+
+@pytest.mark.asyncio
+async def test_falls_back_to_ocr_when_vision_model_call_fails(
+    vision_settings: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """视觉模型不可用时仍要退回既有 OCR 兜底，而不是让本轮直接失败。"""
+    vision_settings["vision_model"] = "alibaba-cn:qwen3.7-flash"
+    vision_model = _FakeVisionModel(error=RuntimeError("vision model timeout"))
+    monkeypatch.setattr("yuxi.models.chat.load_chat_model", lambda _spec, **_kwargs: vision_model)
+    middleware = ImageInputCompatibilityMiddleware()
+    path = "/home/gem/user-data/uploads/image.png"
+    request = _request(
+        _yuxi_model("alibaba-cn:qwen3.7-max"),
+        [_read_file_call_message(path), _read_file_image_message(path)],
+    )
+
+    async def handler(_request):
+        raise _dashscope_rejection()
+
+    response = await middleware.awrap_model_call(request, handler)
+
+    assert response.result[0].tool_calls[0]["name"] == "ocr_parse_file"
+    assert response.result[0].tool_calls[0]["args"] == {"file_path": path}
+
+
+@pytest.mark.asyncio
+async def test_keeps_image_when_vision_model_is_the_main_model(
+    vision_settings: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """视觉模型与主模型相同时不得再调一次同一模型（否则必然同样被拒）。"""
+    vision_settings["vision_model"] = "alibaba-cn:qwen3.7-max"
+
+    def fail_load(_spec, **_kwargs):
+        raise AssertionError("视觉模型与主模型相同时不应加载模型")
+
+    monkeypatch.setattr("yuxi.models.chat.load_chat_model", fail_load)
+    middleware = ImageInputCompatibilityMiddleware()
+
+    async def handler(_request):
+        raise _dashscope_rejection()
+
+    response = await middleware.awrap_model_call(_image_request(), handler)
+
+    assert response.result[0].content == "当前模型无法读取图片，且没有可供 OCR 工具解析的文件路径。"
+
+
+# ==== read_file 抄错路径的工具执行前纠正 ====
+
+
+def _attachment_context_message(real_path: str) -> HumanMessage:
+    return HumanMessage(
+        content=[{"type": "text", "text": f"<attachment_context>\n- preview.png: {real_path}\n</attachment_context>"}]
+    )
+
+
+def _read_file_response(path: str, call_id: str = "call_rf") -> ModelResponse:
+    return ModelResponse(result=[AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"file_path": path}, "id": call_id}])])
+
+
+REAL_PATH = "/home/gem/user-data/projects/w1/uploads/9fc2ac5549a8434cb734e71009d6c16a_preview.png"
+TYPED_PATH = REAL_PATH.replace("9fc2ac55", "9fc2c554")
+
+
+@pytest.mark.asyncio
+async def test_corrects_mistyped_read_file_path_before_tool_execution() -> None:
+    """read_file 抄错 hash 时，工具执行前自动纠正为消息里的真实路径（实测缺陷回放）。"""
+    middleware = ImageInputCompatibilityMiddleware()
+    request = _request(_yuxi_model("alibaba-cn:qwen3.7-max"), [_attachment_context_message(REAL_PATH)])
+
+    async def handler(_request):
+        return _read_file_response(TYPED_PATH)
+
+    response = await middleware.awrap_model_call(request, handler)
+
+    assert response.result[0].tool_calls[0]["args"]["file_path"] == REAL_PATH
+
+
+@pytest.mark.asyncio
+async def test_keeps_ambiguous_read_file_path_untouched() -> None:
+    """候选与两个真实路径都只差一个字符（歧义）时不纠正，避免改错模型本意。"""
+    other = REAL_PATH[:-1] + "b"
+    middleware = ImageInputCompatibilityMiddleware()
+    request = _request(
+        _yuxi_model("alibaba-cn:qwen3.7-max"),
+        [_attachment_context_message(REAL_PATH), HumanMessage(content=[{"type": "text", "text": f"- {other}"}])],
+    )
+    ambiguous_candidate = REAL_PATH[:-1] + "x"
+
+    async def handler(_request):
+        return _read_file_response(ambiguous_candidate)
+
+    response = await middleware.awrap_model_call(request, handler)
+
+    assert response.result[0].tool_calls[0]["args"]["file_path"] == ambiguous_candidate
+
+
+@pytest.mark.asyncio
+async def test_keeps_exact_and_non_read_file_tool_calls_untouched() -> None:
+    """完全匹配的路径与其他工具的路径参数都不动。"""
+    middleware = ImageInputCompatibilityMiddleware()
+    request = _request(_yuxi_model("alibaba-cn:qwen3.7-max"), [_attachment_context_message(REAL_PATH)])
+    seen = {}
+
+    async def handler(_request):
+        seen["result"] = ModelResponse(
+            result=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "read_file", "args": {"file_path": REAL_PATH}, "id": "call_ok"},
+                        {"name": "execute", "args": {"command": f"cat {TYPED_PATH}"}, "id": "call_ex"},
+                    ],
+                )
+            ]
+        )
+        return seen["result"]
+
+    response = await middleware.awrap_model_call(request, handler)
+
+    assert response.result[0].tool_calls[0]["args"]["file_path"] == REAL_PATH
+    assert response.result[0].tool_calls[1]["args"]["command"] == f"cat {TYPED_PATH}"

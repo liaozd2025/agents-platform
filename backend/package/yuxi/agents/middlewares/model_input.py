@@ -9,6 +9,17 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, merge_
 from langchain_openai import ChatOpenAI
 
 from yuxi.agents.toolkits.buildin.tools import ocr_parse_file
+from yuxi.services.image_input_service import (
+    closest_real_path,
+    collect_absolute_paths,
+    is_known_non_image_model,
+    mark_non_image_model,
+    message_has_image,
+    message_text,
+    model_spec_of,
+    transcribe_message_images,
+)
+from yuxi.utils.logging_config import logger
 
 _TOOL_IMAGE_USER_TEXT = "Images returned by read_file are attached below. Inspect them when answering."
 _INVALID_TOOL_CALL_TEXT = (
@@ -25,6 +36,9 @@ _REJECTION_TERMS = (
     "text-only prompts",
     "unsupported",
 )
+# 部分供应商不点明"图片"，只说 content 项类型非法（如 DashScope 的
+# "Unexpected item type in content."）。调用方已确认本轮消息确实带图片，可直接判定为图片被拒。
+_CONTENT_TYPE_REJECTION_TERMS = ("unexpected item type in content",)
 _TRUNCATED_STOP_REASONS = {"length", "max_output_tokens", "max_tokens"}
 _MAX_TRUNCATION_CONTINUATIONS = 3
 _CONTINUE_TRUNCATED_RESPONSE = (
@@ -46,8 +60,12 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
         request = _normalize_invalid_tool_calls(request)
         image_paths = _read_file_image_paths(request.messages)
         request = _bridge_openai_tool_images(request)
+
+        def correcting_handler(req: ModelRequest) -> ModelResponse:
+            return _fix_mistyped_read_file_paths(req, handler(req))
+
         try:
-            return _continue_sync_model_response(request, handler)
+            return _continue_sync_model_response(request, correcting_handler)
         except Exception as exc:  # noqa: BLE001
             if _has_image(request.messages) and _is_image_input_rejection(exc):
                 return _ocr_fallback_response(image_paths)
@@ -61,12 +79,30 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
         request = _normalize_invalid_tool_calls(request)
         image_paths = _read_file_image_paths(request.messages)
         request = _bridge_openai_tool_images(request)
+
+        async def correcting_handler(req: ModelRequest) -> ModelResponse:
+            return _fix_mistyped_read_file_paths(req, await handler(req))
+
         try:
-            return await _continue_async_model_response(request, handler)
+            # 已知该模型不接受图片时直接转述，不再发一次注定失败的请求
+            if _has_image(request.messages) and is_known_non_image_model(model_spec_of(request.model)):
+                transcribed = await _transcribe_images(request)
+                if transcribed is not None:
+                    return await _continue_async_model_response(transcribed, correcting_handler)
+            return await _continue_async_model_response(request, correcting_handler)
         except Exception as exc:  # noqa: BLE001
-            if _has_image(request.messages) and _is_image_input_rejection(exc):
-                return _ocr_fallback_response(image_paths)
-            raise
+            if not (_has_image(request.messages) and _is_image_input_rejection(exc)):
+                raise
+            mark_non_image_model(model_spec_of(request.model))
+            logger.info(f"模型 {model_spec_of(request.model)} 拒绝了图片输入，改为视觉模型转述后重试")
+            # 先把图片交给视觉模型转述，让不支持图片的主模型也能继续；不可用时退回 OCR 兜底
+            transcribed = await _transcribe_images(request)
+            if transcribed is not None:
+                try:
+                    return await _continue_async_model_response(transcribed, correcting_handler)
+                except Exception as retry_exc:  # noqa: BLE001
+                    logger.warning(f"视觉转述后主模型仍然失败，退回 OCR 兜底: {retry_exc}")
+            return _ocr_fallback_response(image_paths)
 
 
 def _continue_sync_model_response(
@@ -298,6 +334,64 @@ def _read_file_image_paths(messages: list[Any]) -> list[str]:
     return paths
 
 
+async def _transcribe_images(request: ModelRequest) -> ModelRequest | None:
+    """用视觉模型把请求里的图片逐条替换为文本转述，返回新请求；不可用时返回 None 由调用方降级。"""
+    main_spec = model_spec_of(request.model)
+    replacements: dict[int, Any] = {}
+    for index, message in enumerate(request.messages):
+        if not message_has_image(message):
+            continue
+        transcribed = await transcribe_message_images(message, exclude_spec=main_spec)
+        if transcribed is None:
+            return None
+        replacements[index] = transcribed
+
+    if not replacements:
+        return None
+    messages = [replacements.get(index, message) for index, message in enumerate(request.messages)]
+    return request.override(messages=messages)
+
+
+def _fix_mistyped_read_file_paths(request: ModelRequest, response: ModelResponse) -> ModelResponse:
+    """纠正 read_file 工具调用里被模型抄错的长随机文件名。
+
+    长随机文件名是模型抄写易错点，抄错一个字符就会 404（实测
+    ``9fc2ac55…_preview.png`` 被抄成 ``9fc2c554…``）。这里在工具执行前，
+    把与消息文本中真实路径高度相似且无歧义的 file_path 纠正为真实路径；
+    完全匹配、无接近路径或存在歧义时不动。
+    """
+    real_paths = collect_absolute_paths("\n".join(message_text(m) for m in request.messages))
+    if not real_paths:
+        return response
+
+    changed = False
+    result: list[Any] = []
+    for message in response.result:
+        calls = list(getattr(message, "tool_calls", None) or [])
+        new_calls = []
+        message_changed = False
+        for call in calls:
+            fixed = call
+            if call.get("name") == "read_file":
+                args = call.get("args") or {}
+                path = args.get("file_path")
+                if isinstance(path, str) and path not in real_paths:
+                    best, _ratio, ambiguous = closest_real_path(path, real_paths)
+                    if best and not ambiguous:
+                        fixed = {**call, "args": {**args, "file_path": best}}
+                        message_changed = True
+                        logger.info(f"read_file 路径已自动纠正: {path} -> {best}")
+            new_calls.append(fixed)
+        if message_changed and new_calls != calls:
+            message = message.model_copy(update={"tool_calls": new_calls})
+            changed = True
+        result.append(message)
+
+    if not changed:
+        return response
+    return ModelResponse(result=result)
+
+
 def _ocr_fallback_response(image_paths: list[str]) -> ModelResponse:
     if not image_paths:
         return ModelResponse(result=[AIMessage(content="当前模型无法读取图片，且没有可供 OCR 工具解析的文件路径。")])
@@ -336,4 +430,7 @@ def _is_image_input_rejection(exc: Exception) -> bool:
         return False
 
     detail = str(exc).lower()
+    # 供应商只说 content 项类型非法、不说明图片时，由调用方依据"本轮确有图片"判定
+    if any(term in detail for term in _CONTENT_TYPE_REJECTION_TERMS):
+        return True
     return any(term in detail for term in _IMAGE_ERROR_TERMS) and any(term in detail for term in _REJECTION_TERMS)
