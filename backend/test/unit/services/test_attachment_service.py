@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import os
 import tempfile
@@ -271,6 +272,58 @@ async def test_upload_tmp_attachment_cleans_only_expired_user_tmp_groups(monkeyp
     )
 
     assert fake_minio.deleted_prefixes == [("knowledgebases", "tmp/chat_attachments/user-1/expired/")]
+
+
+@pytest.mark.asyncio
+async def test_persist_inline_chat_image_writes_retry_stable_reference_file():
+    """聊天内联图片落盘后必须给出工具可直接使用的 runtime 路径，且重试同一请求不产生副本。"""
+    backend = FakeWorkdirStorage()
+    workdir = FakeWorkdir(backend)
+    png_bytes = b"\x89PNG\r\n\x1a\nfake-png-body"
+    image_content = base64.b64encode(png_bytes).decode("utf-8")
+
+    record = await service.persist_inline_chat_image(
+        workdir=workdir,
+        image_content=image_content,
+        request_id="req-1",
+    )
+    retried = await service.persist_inline_chat_image(
+        workdir=workdir,
+        image_content=image_content,
+        request_id="req-1",
+    )
+
+    assert record is not None and retried is not None
+    assert record["file_name"] == "chat-image-req-1.png"
+    assert record["file_type"] == "image/png"
+    assert record["path"] == (
+        "/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111/uploads/chat-image-req-1.png"
+    )
+    assert record["original_path"] == record["path"]
+    assert retried["path"] == record["path"]
+    assert backend.files == {_scope_path(record["path"]): png_bytes}
+
+
+@pytest.mark.asyncio
+async def test_persist_inline_chat_image_rejects_content_it_cannot_verify():
+    """解码失败或格式无法识别时不得写出伪图片文件（目标缺陷的恢复点）。"""
+    backend = FakeWorkdirStorage()
+    workdir = FakeWorkdir(backend)
+
+    undecodable = await service.persist_inline_chat_image(
+        workdir=workdir,
+        image_content="not-base64!!",
+        request_id="req-2",
+    )
+    unknown_format = await service.persist_inline_chat_image(
+        workdir=workdir,
+        image_content=base64.b64encode(b"plain text payload").decode("utf-8"),
+        request_id="req-3",
+    )
+
+    assert undecodable is None
+    assert unknown_format is None
+    assert backend.files == {}
 
 
 def test_webp_attachment_requires_an_explicit_capable_ocr_engine():

@@ -120,6 +120,13 @@ system_options = Option(
                 "default": "alibaba-cn:qwen3-rerank",
             },
             {
+                "key": "vision_model",
+                "label": "视觉理解模型",
+                "type": "model",
+                # 主模型不接受图片输入（如 qwen3.7-max）时，由该模型先把图片转述成文本。
+                "default": "alibaba-cn:qwen3.7-flash",
+            },
+            {
                 "key": "default_ocr_engine",
                 "label": "默认 OCR 解析引擎",
                 "type": "ocr_engine",

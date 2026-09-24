@@ -35,7 +35,8 @@ from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.model_message_audit_repository import ModelMessageAuditRepository
 from yuxi.repositories.subagent_thread_repository import SubagentThreadRepository
 from yuxi.repositories.tool_message_audit_repository import ToolMessageAuditRepository
-from yuxi.services.attachment_service import serialize_attachment
+from yuxi.services.attachment_service import persist_inline_chat_image, serialize_attachment
+from yuxi.services.image_input_service import model_is_declared_text_only, transcribe_message_images
 from yuxi.services.input_message_service import AgentRunInputMessage
 from yuxi.services.knowledge_retrieval_policy import (
     decide_knowledge_retrieval,
@@ -63,6 +64,7 @@ from yuxi.utils.question_utils import (
 )
 from yuxi.utils.thread_utils import extract_thread_id as _metadata_thread_id
 from yuxi.workspace.paths import ensure_bound_user_workdir
+from yuxi.workspace.workdir import Workdir
 
 
 def _with_attachment_context(message: HumanMessage, attachments: list[dict]) -> HumanMessage:
@@ -1262,7 +1264,34 @@ async def stream_agent_chat(
                 }
             }
         )
-        messages = [_with_attachment_context(human_message, thread_attachments)]
+        # 聊天输入框里贴的图片只以 base64 存在于消息中，需要真实文件路径的工具（如图生图参考图）
+        # 拿不到它。这里额外落盘一份并随本轮模型输入注入，使模型看到的图和工具能读到的文件一致。
+        inline_image_attachments: list[dict] = []
+        if image_content:
+            try:
+                inline_image = await persist_inline_chat_image(
+                    workdir=Workdir.open_existing(uid, workdir_path),
+                    image_content=image_content,
+                    request_id=meta.get("request_id"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                # 落盘失败不阻断本轮对话：模型仍能通过多模态内容看到图片，只是工具拿不到文件路径。
+                logger.warning(f"聊天内联图片落盘失败，本轮按无文件路径继续: {exc}")
+            else:
+                if inline_image:
+                    inline_image_attachments.append(inline_image)
+
+        model_message = _with_attachment_context(human_message, [*thread_attachments, *inline_image_attachments])
+        # 模型已被声明为不支持图片时，先由视觉模型转述成文本再交给主模型，
+        # 主模型一次都不会被拒（未声明能力的模型仍由模型边界的错误兜底处理）。
+        if image_content and model_is_declared_text_only(input_context.get("model")):
+            logger.info(f"模型 {input_context.get('model')} 已声明不支持图片，先把图片转述为文本再交给主模型")
+            transcribed = await transcribe_message_images(model_message, exclude_spec=input_context.get("model"))
+            if transcribed is not None:
+                model_message = transcribed
+            else:
+                logger.warning("已声明不支持图片的模型未能完成图片转述，交由模型边界兜底")
+        messages = [model_message]
 
         init_msg = {
             "role": "user",
