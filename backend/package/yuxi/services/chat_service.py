@@ -1761,6 +1761,30 @@ async def _read_checkpoint_state(agent, *, uid: str, thread_id: str, context):
     return await graph.aget_state(langgraph_config)
 
 
+def _is_model_spec_usable(model_spec, source: str) -> bool:
+    """判断已绑定的模型 spec 是否仍可用（下架后读取会话不应因此失败）。
+
+    模型被供应商下架后，模型缓存中不再有该 spec，而会话的 model_spec 与最近一次
+    Run 的 input_payload 仍指向它。此时若原样交给模型解析层，整个
+    ``GET /api/chat/thread/{id}/state`` 会以 500 失败，用户连历史会话都打不开。
+    因此读取路径上把失效 spec 视为未绑定，交由下游回落到系统默认对话模型。
+
+    这里只做「是否还能解析」的判定，不做静默替换：真正发给用户的是哪个模型，
+    由前端模型选择器提示，不在本函数内决定。
+    """
+    if not isinstance(model_spec, str) or not model_spec.strip():
+        return False
+
+    from yuxi.models.providers.cache import model_cache
+
+    info = model_cache.get_model_info(model_spec.strip())
+    if info is not None and getattr(info, "model_type", None) == "chat":
+        return True
+
+    logger.warning(f"{source}模型 {model_spec.strip()} 已不可用，读取会话状态时忽略并回落系统默认")
+    return False
+
+
 async def get_agent_state_view(
     *,
     thread_id: str,
@@ -1824,11 +1848,11 @@ async def get_agent_state_view(
         )
         latest_run = await run_repo.get_latest_run_by_thread_for_user(thread_id, current_uid)
         conversation_model_spec = (getattr(conversation, "extra_metadata", None) or {}).get("model_spec")
-        if isinstance(conversation_model_spec, str) and conversation_model_spec.strip():
+        if _is_model_spec_usable(conversation_model_spec, "会话绑定"):
             input_context["model"] = conversation_model_spec.strip()
         elif conversation.status == "subagent" and latest_run and isinstance(latest_run.input_payload, dict):
             model_spec = latest_run.input_payload.get("model_spec")
-            if isinstance(model_spec, str) and model_spec.strip():
+            if _is_model_spec_usable(model_spec, "子智能体继承"):
                 input_context["model"] = model_spec.strip()
         if latest_run and isinstance(latest_run.input_payload, dict):
             tool_approval_mode = latest_run.input_payload.get("tool_approval_mode")
