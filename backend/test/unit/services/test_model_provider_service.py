@@ -7,6 +7,7 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from yuxi.models.providers.builtin import BUILTIN_PROVIDERS
 from yuxi.models.providers.service import (
+    _merge_builtin_model_modalities,
     _normalize_model_item,
     _normalize_payload,
     _normalize_remote_model,
@@ -108,6 +109,7 @@ async def test_create_provider_config_rejects_uid_header_without_signature_secre
 @pytest.mark.asyncio
 async def test_create_provider_config_rejects_gemini_uid_header(monkeypatch):
     """创建 Gemini provider 时不接受无法生效的 UID 请求头选项。"""
+
     async def missing_provider(db, provider_id):
         del db, provider_id
         return None
@@ -154,6 +156,7 @@ async def test_update_provider_config_checks_effective_uid_header_flag(monkeypat
 @pytest.mark.asyncio
 async def test_update_provider_config_rejects_gemini_when_uid_header_is_enabled(monkeypatch):
     """把已启用 UID 头的供应商改成 Gemini 时拒绝保存无效组合。"""
+
     async def existing_provider(db, provider_id):
         del db, provider_id
         return SimpleNamespace(include_user_uid=True, provider_type="openai", enabled_models=[])
@@ -553,3 +556,42 @@ def test_model_capabilities_reject_invalid_values(field, value):
     """模型能力字段在配置边界拒绝错误类型与非法值。"""
     with pytest.raises(ValueError):
         _normalize_model_item({"id": "m", "type": "chat", field: value})
+
+
+def test_builtin_provider_declares_input_modalities_for_dashscope_chat_models():
+    """内置 provider 必须声明图片能力：DashScope 远端不返回能力字段，这是唯一来源。"""
+    alibaba = next(item for item in BUILTIN_PROVIDERS if item["provider_id"] == "alibaba-cn")
+    modalities = {
+        model["id"]: model.get("input_modalities") for model in alibaba["enabled_models"] if model.get("type") == "chat"
+    }
+
+    assert modalities["qwen3.7-max"] == ["text"]
+    assert modalities["qwen3.7-plus"] == ["text", "image"]
+    assert modalities["qwen3.7-flash"] == ["text", "image"]
+
+
+def test_merge_builtin_model_modalities_only_fills_missing_values():
+    """补声明只补空值：管理员已填写的值不能被内置模板覆盖。"""
+    existing = [
+        {"id": "a", "type": "chat", "input_modalities": ["text", "audio"]},
+        {"id": "b", "type": "chat"},
+        {"id": "c", "type": "chat", "input_modalities": []},
+        {"id": "d", "type": "chat"},
+    ]
+    builtin = [
+        {"id": "a", "input_modalities": ["text"]},
+        {"id": "b", "input_modalities": ["text"]},
+        {"id": "c", "input_modalities": ["text"]},
+        {"id": "unknown", "input_modalities": ["text"]},
+    ]
+
+    changed = _merge_builtin_model_modalities(existing, builtin)
+
+    assert changed is True
+    assert existing[0]["input_modalities"] == ["text", "audio"]
+    assert existing[1]["input_modalities"] == ["text"]
+    assert existing[2]["input_modalities"] == ["text"]
+    assert existing[3] == {"id": "d", "type": "chat"}
+
+    # 全部已有声明时不再产生改动（不会每次启动都写库）
+    assert _merge_builtin_model_modalities(existing, builtin) is False

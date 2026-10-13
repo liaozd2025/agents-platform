@@ -1,0 +1,12 @@
+services:
+  api:
+    environment:
+      INLINE_IMAGES_E2E: '1'
+      YUXI_UID_SIGNATURE_SECRET: synthetic-inline-images-signing
+  worker:
+    environment:
+      YUXI_UID_SIGNATURE_SECRET: synthetic-inline-images-signing
+  replay:
+    environment:
+      YUXI_UID_SIGNATURE_SECRET: synthetic-inline-images-signing
+    command: [python, /app/test/e2e/runs/inline_images_model.py]

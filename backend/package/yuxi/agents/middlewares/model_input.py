@@ -8,6 +8,15 @@ from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, Mod
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, merge_message_runs
 from langchain_openai import ChatOpenAI
 
+from yuxi.services.image_input_service import (
+    is_known_non_image_model,
+    mark_non_image_model,
+    message_has_image,
+    model_spec_of,
+    transcribe_message_images,
+)
+from yuxi.utils.logging_config import logger
+
 _TOOL_IMAGE_USER_TEXT = "Images returned by read_file are attached below. Inspect them when answering."
 _INVALID_TOOL_CALL_TEXT = (
     "A previous tool call could not be parsed and was not executed. "
@@ -23,6 +32,9 @@ _REJECTION_TERMS = (
     "text-only prompts",
     "unsupported",
 )
+# 部分供应商不点明"图片"，只说 content 项类型非法（如 DashScope 的
+# "Unexpected item type in content."）。调用方已确认本轮消息确实带图片，可直接判定为图片被拒。
+_CONTENT_TYPE_REJECTION_TERMS = ("unexpected item type in content",)
 _TRUNCATED_STOP_REASONS = {"length", "max_output_tokens", "max_tokens"}
 _MAX_TRUNCATION_CONTINUATIONS = 3
 _CONTINUE_TRUNCATED_RESPONSE = (
@@ -47,6 +59,7 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
         request = _normalize_invalid_tool_calls(request)
         image_paths = _read_file_image_paths(request.messages)
         request = _bridge_openai_tool_images(request)
+
         try:
             return _continue_sync_model_response(request, handler)
         except Exception as exc:  # noqa: BLE001
@@ -62,12 +75,24 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
         request = _normalize_invalid_tool_calls(request)
         image_paths = _read_file_image_paths(request.messages)
         request = _bridge_openai_tool_images(request)
+
         try:
+            # 已知该模型不接受图片时直接转述，不再发一次注定失败的请求
+            if _has_image(request.messages) and is_known_non_image_model(model_spec_of(request.model)):
+                transcribed = await _transcribe_images(request)
+                if transcribed is not None:
+                    return await _continue_async_model_response(transcribed, handler)
             return await _continue_async_model_response(request, handler)
         except Exception as exc:  # noqa: BLE001
-            if _has_image(request.messages) and _is_image_input_rejection(exc):
-                return _ocr_fallback_response(image_paths, enabled=_ocr_tool_enabled(request))
-            raise
+            if not (_has_image(request.messages) and _is_image_input_rejection(exc)):
+                raise
+            mark_non_image_model(model_spec_of(request.model))
+            logger.info(f"模型 {model_spec_of(request.model)} 拒绝了图片输入，改为视觉模型转述后重试")
+            # 先把图片交给视觉模型转述，让不支持图片的主模型也能继续；不可用时退回 OCR 兜底
+            transcribed = await _transcribe_images(request)
+            if transcribed is not None:
+                return await _continue_async_model_response(transcribed, handler)
+            return _ocr_fallback_response(image_paths, enabled=_ocr_tool_enabled(request))
 
 
 def _continue_sync_model_response(
@@ -299,6 +324,30 @@ def _read_file_image_paths(messages: list[Any]) -> list[str]:
     return paths
 
 
+async def _transcribe_images(request: ModelRequest) -> ModelRequest | None:
+    """用视觉模型把请求里的图片逐条替换为文本转述，返回新请求；不可用时返回 None 由调用方降级。"""
+    main_spec = model_spec_of(request.model)
+    context = getattr(getattr(request, "runtime", None), "context", None)
+    replacements: dict[int, Any] = {}
+    for index, message in enumerate(request.messages):
+        if not message_has_image(message):
+            continue
+        transcribed = await transcribe_message_images(
+            message,
+            exclude_spec=main_spec,
+            uid=getattr(context, "uid", None),
+            session_id=getattr(context, "thread_id", None),
+        )
+        if transcribed is None:
+            return None
+        replacements[index] = transcribed
+
+    if not replacements:
+        return None
+    messages = [replacements.get(index, message) for index, message in enumerate(request.messages)]
+    return request.override(messages=messages)
+
+
 def _ocr_tool_enabled(request: ModelRequest) -> bool:
     """当前请求工具集中启用了 ocr_parse_file 时才允许 OCR fallback。"""
     return any(getattr(tool, "name", None) == "ocr_parse_file" for tool in (request.tools or []))
@@ -351,4 +400,7 @@ def _is_image_input_rejection(exc: Exception) -> bool:
         return False
 
     detail = str(exc).lower()
+    # 供应商只说 content 项类型非法、不说明图片时，由调用方依据"本轮确有图片"判定
+    if any(term in detail for term in _CONTENT_TYPE_REJECTION_TERMS):
+        return True
     return any(term in detail for term in _IMAGE_ERROR_TERMS) and any(term in detail for term in _REJECTION_TERMS)

@@ -36,7 +36,12 @@ from yuxi.repositories.model_message_audit_repository import ModelMessageAuditRe
 from yuxi.repositories.subagent_thread_repository import SubagentThreadRepository
 from yuxi.repositories.tool_message_audit_repository import ToolMessageAuditRepository
 from yuxi.services.agent_run_manifest_service import PreparedRunExecution
-from yuxi.services.attachment_service import serialize_attachment
+from yuxi.services.attachment_service import persist_inline_chat_image, serialize_attachment
+from yuxi.services.image_input_service import (
+    message_image_blocks,
+    model_is_declared_text_only,
+    transcribe_message_images,
+)
 from yuxi.services.input_message_service import AgentRunInputMessage
 from yuxi.services.knowledge_retrieval_policy import (
     decide_knowledge_retrieval,
@@ -62,6 +67,7 @@ from yuxi.utils.question_utils import (
     normalize_questions as _normalize_interrupt_questions,
 )
 from yuxi.utils.thread_utils import extract_thread_id as _metadata_thread_id
+from yuxi.workspace.workdir import Workdir
 
 
 def _with_attachment_context(message: HumanMessage, attachments: list[dict]) -> HumanMessage:
@@ -1143,7 +1149,36 @@ async def stream_agent_chat(
                 }
             }
         )
-        messages = [_with_attachment_context(human_message, thread_attachments)]
+        # 多图事实来自持久消息；旧 image_content 列只保存首图。
+        inline_image_attachments: list[dict] = []
+        for index, block in enumerate(message_image_blocks(human_message)):
+            encoded = block.get("base64")
+            if not encoded:
+                continue
+            request_id = meta["request_id"] if index == 0 else f"{meta['request_id']}-{index + 1}"
+            try:
+                inline_image = await persist_inline_chat_image(
+                    workdir=Workdir.open_existing(uid, context.workdir_relative_path),
+                    image_content=encoded,
+                    request_id=request_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"聊天内联图片落盘失败，本轮按无文件路径继续: {exc}")
+            else:
+                if inline_image:
+                    inline_image_attachments.append(inline_image)
+
+        model_message = _with_attachment_context(human_message, [*thread_attachments, *inline_image_attachments])
+        if message_image_blocks(model_message) and model_is_declared_text_only(context.model):
+            logger.info(f"模型 {context.model} 已声明不支持图片，先把图片转述为文本再交给主模型")
+            transcribed = await transcribe_message_images(
+                model_message, exclude_spec=context.model, uid=uid, session_id=thread_id
+            )
+            if transcribed is not None:
+                model_message = transcribed
+            else:
+                logger.warning("已声明不支持图片的模型未能完成图片转述，交由模型边界兜底")
+        messages = [model_message]
 
         init_msg = {
             "role": "user",
