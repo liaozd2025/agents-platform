@@ -5,7 +5,7 @@ import DOMPurify from 'dompurify'
 import { createHighlighter } from 'shiki'
 import { load as yamlLoad } from 'js-yaml'
 import { escapeHtml } from './html.js'
-import { markdownItCitations } from './answerCitations.js'
+import { markdownItCitations, getMessageCitationSources } from './answerCitations.js'
 import { normalizeCodeLanguage } from './file_preview.js'
 import { renderSvgBlocks } from './svgRenderer.js'
 import { renderHtmlPreviewBlocks } from './htmlPreviewRenderer.js'
@@ -190,6 +190,29 @@ export const createMarkdownRenderer = ({ themeName, highlighter }) =>
     .use(markdownItFrontmatterCard)
     .use(markdownItCitations)
 
+/** 正文与来源列表使用相同的 Markdown 预处理，避免代码示例占用引用编号。 */
+const prepareMarkdownContent = (content) => {
+  const normalizedContent = normalizeHtmlTagQuotes(normalizeLegacyMinioPublicUrls(content))
+  return renderSvgBlocks(
+    renderHtmlPreviewBlocks(normalizedContent, { sanitizeHtml: sanitizeHtmlPreviewSrcdoc })
+  )
+}
+
+const citationParser = createMarkdownRenderer({})
+
+/** 按正文实际引用的首次出现顺序绑定当前消息证据。 */
+export function getReferencedCitationSources(message) {
+  const env = {}
+  const content = typeof message?.content === 'string' ? message.content.trim() : ''
+  citationParser.parse(prepareMarkdownContent(content), env)
+  const sources = getMessageCitationSources(message)
+  const sourcesById = new Map(sources.map((citation) => [citation.source, citation]))
+  return [...(env.answerCitationNumbers || [])].flatMap(([source, number]) => {
+    const citation = sourcesById.get(source)
+    return citation ? [{ ...citation, number }] : []
+  })
+}
+
 const getRenderer = async (theme, needsHighlight) => {
   const themeName = normalizeTheme(theme)
   const cacheKey = needsHighlight ? themeName : 'plain'
@@ -210,11 +233,7 @@ const getRenderer = async (theme, needsHighlight) => {
 
 export const renderMarkdown = async (content, { theme = 'github-light' } = {}) => {
   try {
-    const normalizedContent = normalizeHtmlTagQuotes(normalizeLegacyMinioPublicUrls(content))
-    const htmlPreviewContent = renderHtmlPreviewBlocks(normalizedContent, {
-      sanitizeHtml: sanitizeHtmlPreviewSrcdoc
-    })
-    const svgContent = renderSvgBlocks(htmlPreviewContent)
+    const svgContent = prepareMarkdownContent(content)
     const themeName = normalizeTheme(theme)
     const needsHighlight = hasCodeFence(svgContent)
     const cacheKey = `${needsHighlight ? themeName : 'plain'}\u0000${svgContent}`

@@ -1,4 +1,19 @@
+from urllib.parse import parse_qs
+
 from yuxi.knowledge.source_references import build_knowledge_source_reference
+
+
+def test_source_reference_removes_nul_before_encoding_oa_url() -> None:
+    """OA 参数编码前清理 NUL，防止残留不可识别的任务号和标题。"""
+    source_ref = build_knowledge_source_reference("task_id  12\x003\ntitle  原\x00文\ntype_name  好文\x00共享\n")
+
+    assert source_ref["title"] == "原文"
+    assert source_ref["type_name"] == "好文共享"
+    assert parse_qs(source_ref["url"].split("?", 1)[1]) == {
+        "title": ["原文"],
+        "taskID": ["123"],
+        "ecType": ["1"],
+    }
 
 
 def test_build_knowledge_source_reference_uses_oa_article_header() -> None:
@@ -30,9 +45,7 @@ def test_build_knowledge_source_reference_without_task_id_has_no_url() -> None:
 
 def test_build_knowledge_source_reference_normalizes_news_oa_route() -> None:
     source_ref = build_knowledge_source_reference(
-        'task_id  "2441705.0"\n'
-        'title  "秋季高发！该怎么拯救我的过敏性鼻炎？"\n'
-        "type_name  新闻动态\n"
+        'task_id  "2441705.0"\ntitle  "秋季高发！该怎么拯救我的过敏性鼻炎？"\ntype_name  新闻动态\n'
     )
 
     assert source_ref["title"] == "秋季高发！该怎么拯救我的过敏性鼻炎？"
@@ -44,9 +57,7 @@ def test_build_knowledge_source_reference_normalizes_news_oa_route() -> None:
 
 def test_build_knowledge_source_reference_uses_goodarticles_page_type() -> None:
     source_ref = build_knowledge_source_reference(
-        "task_id  3104861\n"
-        "title  讲九典故事 扬文化风帆\n"
-        "type_name  goodarticles\n"
+        "task_id  3104861\ntitle  讲九典故事 扬文化风帆\ntype_name  goodarticles\n"
     )
 
     assert "/view-page/1?" in source_ref["url"]
@@ -56,9 +67,7 @@ def test_build_knowledge_source_reference_uses_goodarticles_page_type() -> None:
 
 def test_build_knowledge_source_reference_uses_good_articles_page_type() -> None:
     source_ref = build_knowledge_source_reference(
-        "task_id  3104861\n"
-        "title  讲九典故事 扬文化风帆\n"
-        "type_name  good_articles\n"
+        "task_id  3104861\ntitle  讲九典故事 扬文化风帆\ntype_name  good_articles\n"
     )
 
     assert "/view-page/1?" in source_ref["url"]

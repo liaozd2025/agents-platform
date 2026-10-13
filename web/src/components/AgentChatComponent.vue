@@ -148,7 +148,6 @@
                   :run="getMessageRun(getLastMessage(row.conv))"
                   :show-refs="['model', 'copy', 'sources']"
                   :is-latest-message="false"
-                  :sources="getConversationSources(row.conv)"
                 />
               </div>
               <div v-else class="chat-inline-notice">
@@ -1008,7 +1007,7 @@ const userStore = useUserStore()
 const messageDebugEnabled = computed(
   () => infoStore.debugMode && userStore.hasPermission('system_log:read')
 )
-const { agents, selectedAgentId, agentConfig, configurableItems, availableKnowledgeBases } =
+const { agents, selectedAgentId, agentConfig, configurableItems } =
   storeToRefs(agentStore)
 const { threads, currentThreadId, currentThread, threadCreationInFlight } =
   storeToRefs(chatThreadsStore)
@@ -3987,10 +3986,6 @@ const showMsgRefs = (msg, conv) => {
     return ['copy', 'sources']
   }
   return false
-}
-
-const getConversationSources = (conv) => {
-  return MessageProcessor.extractSourcesFromConversation(conv, availableKnowledgeBases.value)
 }
 
 // ==================== LIFECYCLE & WATCHERS ====================
