@@ -179,7 +179,12 @@
 
                   <a-form-item class="agreement-form-item">
                     <div class="agreement-row">
-                      <a-checkbox v-model:checked="rememberLogin">保持登录 30 天</a-checkbox>
+                      <a-checkbox
+                        v-model:checked="rememberLogin"
+                        @change="handleRememberLoginChange"
+                      >
+                        保持登录 30 天
+                      </a-checkbox>
                     </div>
                   </a-form-item>
 
@@ -262,6 +267,11 @@ import {
 } from '@lucide/vue'
 import { tryAutoStartOIDC, sanitizeRedirect } from '@/utils/oidcAutoStart'
 import { MIN_PASSWORD_LENGTH } from '@/utils/passwordValidation'
+import {
+  saveRememberedLogin,
+  loadRememberedLogin,
+  clearRememberedLogin
+} from '@/utils/rememberedLogin'
 import MouseEyesCharacter from '@/components/MouseEyesCharacter.vue'
 
 const router = useRouter()
@@ -296,7 +306,9 @@ const brandShortName = computed(() => {
 const isFirstRun = ref(false)
 const loading = ref(false)
 const errorMessage = ref('')
-// 勾选后跨浏览器会话保留令牌；后端令牌有效期固定为 30 天。
+// 该勾选同时控制两件事（同一个「保持登录」语义，避免再引入一个复选框）：
+// 1) 登录令牌跨浏览器会话保留（写 localStorage 而非 sessionStorage）；后端令牌有效期固定为 30 天。
+// 2) 登录成功后把账号与密码保存到本地，下次进入登录页自动回填。
 const rememberLogin = ref(false)
 const serverStatus = ref('loading')
 const serverError = ref('')
@@ -337,6 +349,18 @@ const adminForm = reactive({
 
 const goHome = () => {
   router.push('/')
+}
+
+/**
+ * 勾选框变化处理：取消勾选时立即清除已保存的凭据。
+ * 勾选状态是「是否记住密码」的唯一开关，必须即时生效——否则用户取消勾选后，
+ * 下次进入登录页仍会被自动填入密码，与用户的显式选择相矛盾。
+ * @param {object} event antd Checkbox 的 change 事件，checked 为当前勾选状态
+ */
+const handleRememberLoginChange = (event) => {
+  if (!event.target.checked) {
+    clearRememberedLogin()
+  }
 }
 
 // 清理倒计时器
@@ -410,6 +434,18 @@ const handleLogin = async () => {
       password: loginForm.password,
       rememberLogin: rememberLogin.value
     })
+
+    // 登录成功后才落地凭据，失败时不保存，避免错误密码被记住并在下次回填。
+    // 勾选 → 保存账号与密码供下次登录回填；未勾选 → 清掉上一次的残留，保证勾选状态与行为一致。
+    if (rememberLogin.value) {
+      // 浏览器禁用站点数据或存储配额耗尽时写入会失败：登录本身仍然成功，
+      // 但必须让用户知道密码没被记住，不能把「未记住」表现为静默成功
+      if (!saveRememberedLogin(loginForm.loginId, loginForm.password)) {
+        message.warning('未能记住本次登录密码，请检查浏览器是否允许本站保存数据')
+      }
+    } else {
+      clearRememberedLogin()
+    }
 
     message.success('登录成功')
 
@@ -583,6 +619,15 @@ onMounted(async () => {
   if (userStore.isLoggedIn) {
     router.push(sanitizeRedirect(route.query.redirect))
     return
+  }
+
+  // 回填「记住密码」保存的账号与密码。放在信息接口请求之前，尽量缩短表单从空到有值的可见时间。
+  // 有已保存凭据即说明用户上次勾选了记住密码，勾选框同步为选中，保证显示与实际行为一致。
+  const rememberedLogin = loadRememberedLogin()
+  if (rememberedLogin) {
+    loginForm.loginId = rememberedLogin.loginId
+    loginForm.password = rememberedLogin.password
+    rememberLogin.value = true
   }
 
   await infoStore.loadInfoConfig()

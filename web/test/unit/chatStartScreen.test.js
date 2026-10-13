@@ -19,22 +19,25 @@ test('路由决定新建布局，已有线程的加载和空消息不显示居�
   assert.ok(view.includes(':is-new-conversation="!getRouteThreadId()"'), '新建布局由路由传入')
   for (const isNewConversation of [false, true]) {
     for (const isLoadingMessages of [false, true]) {
-      for (const conversations of [[], [{ id: 'history' }]]) {
-        const html = await renderToString(
-          Vue.createSSRApp({
-            data: () => ({
-              isNewConversation,
-              props: { embedMode: false },
-              isLoadingMessages,
-              conversations,
-              randomGreeting: '欢迎测试'
-            }),
-            render
-          })
-        )
-        assert.equal(html.includes('start-screen'), isNewConversation)
-        assert.equal(html.includes('欢迎测试'), isNewConversation)
-        assert.equal(html.includes('正在加载消息'), isLoadingMessages)
+      for (const isThreadSkeletonActive of [false, true]) {
+        for (const conversations of [[], [{ id: 'history' }]]) {
+          const html = await renderToString(
+            Vue.createSSRApp({
+              data: () => ({
+                isNewConversation,
+                isThreadSkeletonActive,
+                props: { embedMode: false },
+                isLoadingMessages,
+                conversations,
+                randomGreeting: '欢迎测试'
+              }),
+              render
+            })
+          )
+          assert.equal(html.includes('start-screen'), isNewConversation && !isThreadSkeletonActive)
+          assert.equal(html.includes('欢迎测试'), isNewConversation && !isThreadSkeletonActive)
+          assert.equal(html.includes('正在加载消息'), isLoadingMessages && !isThreadSkeletonActive)
+        }
       }
     }
   }

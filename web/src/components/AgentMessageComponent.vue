@@ -78,7 +78,6 @@
           :message="message"
           :show-refs="showRefs"
           :is-latest-message="isLatestMessage"
-          :sources="messageSources"
           @retry="emit('retry')"
           @openRefs="emit('openRefs', $event)"
         />
@@ -137,8 +136,6 @@ import { Check, Copy, X } from '@lucide/vue'
 import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import MentionTextRenderer from '@/components/common/MentionTextRenderer.vue'
-import { useAgentStore } from '@/stores/agent'
-import { storeToRefs } from 'pinia'
 import { getMessageCitationSources } from '@/utils/answerCitations.js'
 import { MessageProcessor } from '@/utils/messageProcessor'
 import { inferImageMimeTypeFromBase64, normalizeAttachmentPreviews } from '@/utils/file_utils'
@@ -286,10 +283,6 @@ const getErrorMessage = computed(() => {
   }
 })
 
-// 引入智能体 store
-const agentStore = useAgentStore()
-const { availableKnowledgeBases } = storeToRefs(agentStore)
-
 const messageAttachments = computed(() =>
   normalizeAttachmentPreviews(props.message.extra_metadata?.attachments)
 )
@@ -314,13 +307,6 @@ const messageImages = computed(() => {
 const mentionDisplayLabels = computed(() => buildMentionDisplayLabels(props.mention || {}))
 
 const citationSources = computed(() => getMessageCitationSources(props.message))
-
-const messageSources = computed(() => {
-  if (props.message.type === 'ai') {
-    return MessageProcessor.extractSourcesFromMessage(props.message, availableKnowledgeBases.value)
-  }
-  return { knowledgeChunks: [], webSources: [] }
-})
 
 const validToolCalls = computed(() => enrichTaskToolCalls(props.message.tool_calls))
 

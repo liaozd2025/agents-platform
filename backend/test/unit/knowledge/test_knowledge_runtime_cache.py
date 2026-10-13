@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 from yuxi.knowledge.manager import KnowledgeBaseManager
+from yuxi.knowledge.utils import strip_nul_characters
 
 pytestmark = pytest.mark.unit
 
@@ -56,6 +57,23 @@ def _kb_row(*, name: str = "Knowledge", query_params: dict | None = None):
 
 
 @pytest.mark.asyncio
+async def test_aquery_removes_nul_from_provider_result(monkeypatch, tmp_path):
+    manager = KnowledgeBaseManager(str(tmp_path))
+    fake_kb = _FakeKnowledgeBase()
+    fake_kb.aquery = AsyncMock(return_value="原文\x00片段")
+    monkeypatch.setattr(
+        manager,
+        "get_kb_config",
+        AsyncMock(return_value=SimpleNamespace(kb_type="milvus")),
+    )
+    monkeypatch.setattr(manager, "_get_or_create_kb_instance", AsyncMock(return_value=fake_kb))
+
+    result = await manager.aquery("hello", "kb_1")
+
+    assert result == "原文片段"
+
+
+@pytest.mark.asyncio
 async def test_retrieve_uses_cached_config_without_postgres(monkeypatch, tmp_path):
     manager = KnowledgeBaseManager(str(tmp_path))
     fake_kb = _FakeKnowledgeBase()
@@ -94,6 +112,46 @@ async def test_retrieve_uses_cached_config_without_postgres(monkeypatch, tmp_pat
     assert config.query_options == {"top_k": 3}
     assert "stats" not in config.additional_params
     assert not hasattr(fake_kb, "_runtime_configs")
+
+
+@pytest.mark.asyncio
+async def test_retrieve_removes_nul_from_shared_provider_result(monkeypatch, tmp_path):
+    manager = KnowledgeBaseManager(str(tmp_path))
+    fake_kb = _FakeKnowledgeBase()
+    fake_kb.aquery = AsyncMock(
+        return_value=[
+            {
+                "content": "原文\x00片段",
+                "metadata": {"source\x00name": "文档\x00.pdf", "nested": ["标题\x00"]},
+            }
+        ]
+    )
+    _patch_supported_type(monkeypatch)
+    monkeypatch.setattr(
+        "yuxi.knowledge.manager.get_cached_kb_config",
+        AsyncMock(
+            return_value={
+                "kb_id": "kb_1",
+                "kb_type": "milvus",
+                "embedding_model_spec": "provider:embedding",
+                "query_params": {"options": {"top_k": 3}},
+                "additional_params": {"chunking": {"preset_id": "general"}},
+            }
+        ),
+    )
+    monkeypatch.setattr(manager, "_get_or_create_kb_instance", AsyncMock(return_value=fake_kb))
+
+    result = await manager.retrieve("kb_1", "hello")
+
+    assert result["results"][0] == {
+        "content": "原文片段",
+        "metadata": {"sourcename": "文档.pdf", "nested": ["标题"]},
+    }
+
+
+def test_strip_nul_characters_rejects_colliding_field_names():
+    with pytest.raises(ValueError, match="NUL 清理后发生重名"):
+        strip_nul_characters({"a\x00b": "first", "ab": "second"})
 
 
 @pytest.mark.asyncio
