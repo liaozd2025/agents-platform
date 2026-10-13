@@ -82,10 +82,24 @@
 
     <!-- 来源详情面板 -->
     <div v-if="isSourcesExpanded" class="sources-panel-body">
-      <KnowledgeSourceSection v-if="knowledgeChunks.length > 0" :chunks="knowledgeChunks" />
-      <WebSearchSourceSection v-if="webSources.length > 0" :sources="webSources" />
+      <button
+        v-for="citation in citedSources"
+        :key="citation.source"
+        type="button"
+        class="cited-source"
+        :aria-label="`查看引用 ${citation.number} 原文`"
+        @click="openCitation(citation.source)"
+      >
+        <span>{{ citation.number }}</span>
+        <span>{{ citation.title || citation.source }}</span>
+      </button>
     </div>
   </div>
+  <AnswerCitationModal
+    v-if="citationOpen"
+    v-model:open="citationOpen"
+    :citation="selectedCitation"
+  />
 
   <!-- Dislike reason modal -->
   <a-modal
@@ -108,7 +122,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, watch } from 'vue'
+import { ref, computed, reactive, watch, defineAsyncComponent } from 'vue'
 import { useClipboard } from '@vueuse/core'
 import { message as antMessage } from 'ant-design-vue'
 import {
@@ -123,9 +137,7 @@ import {
 } from '@lucide/vue'
 import { agentApi } from '@/apis'
 import { formatChatTime } from '@/utils/time'
-import KnowledgeSourceSection from '@/components/KnowledgeSourceSection.vue'
-import WebSearchSourceSection from '@/components/WebSearchSourceSection.vue'
-import { groupKnowledgeChunks } from '@/utils/kbResultGroups.js'
+import { getReferencedCitationSources } from '@/utils/markdown_preview.js'
 import { formatRunTimingDuration, getRunTotalLatencyMs } from '@/utils/runTiming'
 
 const emit = defineEmits(['retry', 'openRefs'])
@@ -139,10 +151,6 @@ const props = defineProps({
   isLatestMessage: {
     type: Boolean,
     default: false
-  },
-  sources: {
-    type: Object,
-    default: () => ({})
   }
 })
 
@@ -151,17 +159,23 @@ const msg = ref(props.message)
 // Sources state
 const isSourcesExpanded = ref(false)
 
-const knowledgeChunks = computed(() =>
-  Array.isArray(props.sources?.knowledgeChunks) ? props.sources.knowledgeChunks : []
+const citedSources = computed(() => getReferencedCitationSources(props.message))
+const sourceCount = computed(() => citedSources.value.length)
+const hasSources = computed(() => sourceCount.value > 0)
+const AnswerCitationModal = defineAsyncComponent(() =>
+  import('@/components/sources/AnswerCitationModal.vue')
 )
-const webSources = computed(() =>
-  Array.isArray(props.sources?.webSources) ? props.sources.webSources : []
+const citationOpen = ref(false)
+const selectedSource = ref('')
+const selectedCitation = computed(() =>
+  citedSources.value.find((item) => item.source === selectedSource.value)
 )
 
-const hasSources = computed(() => knowledgeChunks.value.length > 0 || webSources.value.length > 0)
-
-const knowledgeArticleCount = computed(() => groupKnowledgeChunks(knowledgeChunks.value).length)
-const sourceCount = computed(() => knowledgeArticleCount.value + webSources.value.length)
+/** 与正文引用打开同一份来源证据。 */
+const openCitation = (source) => {
+  selectedSource.value = source
+  citationOpen.value = true
+}
 
 const toggleSources = () => {
   isSourcesExpanded.value = !isSourcesExpanded.value
@@ -367,6 +381,27 @@ const cancelDislike = () => {
 
 <style lang="less" scoped>
 .refs {
+  .cited-source {
+    display: flex;
+    gap: 10px;
+    width: 100%;
+    padding: 10px;
+    border: 1px solid var(--gray-150);
+    border-radius: 8px;
+    background: var(--gray-0);
+    color: var(--gray-900);
+    text-align: left;
+    font: inherit;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+    &:hover {
+      background: var(--gray-50);
+    }
+    &:focus-visible {
+      outline: 2px solid var(--main-500);
+      outline-offset: 2px;
+    }
+  }
   display: flex;
   flex-direction: column;
   margin-bottom: 20px;

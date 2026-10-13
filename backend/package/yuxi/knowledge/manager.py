@@ -24,6 +24,7 @@ from yuxi.knowledge.read_models import (
     KnowledgeBaseSummary,
 )
 from yuxi.knowledge.schemas import FindOutputSchema, OpenOutputSchema
+from yuxi.knowledge.utils import strip_nul_characters
 from yuxi.knowledge.utils.security import redact_sensitive_params
 from yuxi.permissions import (
     ResourcePermission,
@@ -646,11 +647,13 @@ class KnowledgeBaseManager:
         """异步查询知识库"""
         config = await self.get_kb_config(kb_id)
         executor = await self._get_or_create_kb_instance(config.kb_type)
-        return await executor.aquery(
-            query_text,
-            kb_id,
-            config=config,
-            **kwargs,
+        return strip_nul_characters(
+            await executor.aquery(
+                query_text,
+                kb_id,
+                config=config,
+                **kwargs,
+            )
         )
 
     async def get_kb_query_params_config(self, kb_id: str) -> dict:
@@ -1159,14 +1162,16 @@ class KnowledgeBaseManager:
         """按 kb_id 加载最新运行时元数据并执行检索。"""
         config = await self.get_kb_config(kb_id)
         executor = await self._get_or_create_kb_instance(config.kb_type)
-        results = await executor.aquery(
-            query,
-            kb_id,
-            config=config,
-            agent_call=True,
-            **options,
+        results = strip_nul_characters(
+            await executor.aquery(
+                query,
+                kb_id,
+                config=config,
+                agent_call=True,
+                **options,
+            )
         )
-        return executor.build_search_output(kb_id, results)
+        return strip_nul_characters(executor.build_search_output(kb_id, results))
 
     async def open_document(
         self,
