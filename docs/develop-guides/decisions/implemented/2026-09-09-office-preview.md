@@ -14,7 +14,7 @@ Owner：backend/package/yuxi/utils/filepreview.py
 
 已确认的异常与展示边界：Word 和 PowerPoint 沿用静态 PDF 预览，不播放动画、音视频；保留 30 MB 文件上限，并对 Excel 展开规模设置有界保护；加密、损坏、超限或转换失败时说明原因并保留原文件下载，避免静默截断内容。
 
-通用格式与转换由 `backend/package/yuxi/utils/filepreview.py` 拥有，工作区与知识库保留各自存储、授权和缓存边界，遵循[既有 Owner 决策](2026-08-21-preview-owner-separation.md)。前端格式归一化由 `web/src/utils/file_preview.js` 拥有；`SpreadsheetPreview.vue` 使用原生表格渲染，后端 openpyxl 读取 XLSX、xlrd 读取 XLS，均只使用原文件保存值。Excel 解析在资源受限的独立子进程中执行。
+通用格式与转换由 `backend/package/yuxi/utils/filepreview.py` 拥有，工作区与知识库保留各自存储、授权和缓存边界，遵循[既有 Owner 决策](../archived/0.7.3/05-storage-workdir/2026-08-21-preview-owner-separation.md)。前端格式归一化由 `web/src/utils/file_preview.js` 拥有；`SpreadsheetPreview.vue` 使用原生表格渲染，后端 openpyxl 读取 XLSX、xlrd 读取 XLS，均只使用原文件保存值。Excel 解析在资源受限的独立子进程中执行。
 
 ## 替代方案
 

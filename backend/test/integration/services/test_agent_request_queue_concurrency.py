@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from yuxi.services.agent_request_service import AgentRequestInput, RunOrigin
+from yuxi.services import agent_request_service
+from types import SimpleNamespace
+
 import asyncio
 import os
 import uuid
+from yuxi.agents.context import BaseContext
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
@@ -95,7 +100,7 @@ async def test_concurrent_reject_requests_never_enter_queue(monkeypatch: pytest.
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     monkeypatch.setattr(
-        agent_request_queue_service,
+        agent_request_service,
         "resolve_agent_run_config",
         AsyncMock(return_value=("model", "default")),
     )
@@ -107,16 +112,19 @@ async def test_concurrent_reject_requests_never_enter_queue(monkeypatch: pytest.
 
     async def submit(request_id: str):
         async with session_factory() as db:
-            result = await agent_request_queue_service.intake_request(
+            result, _ = await agent_request_service._persist_request(
                 db=db,
-                request_id=request_id,
-                uid=uid,
-                agent_slug="main",
-                thread_id=thread_id,
-                queue_policy="reject",
-                input_message=build_chat_input_message(request_id),
                 agent_item=MagicMock(),
                 agent_backend=MagicMock(),
+                request_input=AgentRequestInput(
+                    request_id=request_id,
+                    agent_slug="main",
+                    thread_id=thread_id,
+                    input_message=build_chat_input_message(request_id),
+                    queue_policy="reject",
+                    origin=RunOrigin(source="chat", channel="web"),
+                ),
+                current_user=SimpleNamespace(uid=uid),
             )
             await db.commit()
             return result
@@ -180,9 +188,6 @@ async def test_context_compression_holds_thread_lock_until_checkpoint_update(mon
     async def runtime(**_kwargs):
         return None
 
-    async def build_context(agent_config, *, thread_id, uid):
-        return {**agent_config, "thread_id": thread_id, "uid": uid}
-
     async def compress(**_kwargs):
         compression_started.set()
         await asyncio.wait_for(release_compression.wait(), timeout=5)
@@ -190,19 +195,18 @@ async def test_context_compression_holds_thread_lock_until_checkpoint_update(mon
 
     monkeypatch.setattr(context_compression_service, "AgentRepository", AgentRepo)
     monkeypatch.setattr(
-        context_compression_service.agent_manager,
-        "get_agent",
-        lambda _backend_id: MagicMock(capabilities=["context_compression"]),
+        context_compression_service,
+        "get_agent_backend",
+        lambda _backend_id: MagicMock(capabilities=["context_compression"], context_schema=BaseContext),
     )
-    monkeypatch.setattr(context_compression_service, "normalize_agent_context_config", empty_config)
     monkeypatch.setattr(context_compression_service, "resolve_agent_run_model_spec", model_spec)
     monkeypatch.setattr(context_compression_service, "ensure_conversation_workdir_available", workdir)
     monkeypatch.setattr(context_compression_service, "_ensure_runtime_available", runtime)
     monkeypatch.setattr(context_compression_service, "_release_runtime", runtime)
-    monkeypatch.setattr(context_compression_service, "build_agent_input_context", build_context)
+    monkeypatch.setattr(context_compression_service, "prepare_agent_runtime_context", AsyncMock())
     monkeypatch.setattr(context_compression_service, "_compress_agent_checkpoint", compress)
     monkeypatch.setattr(
-        agent_request_queue_service,
+        agent_request_service,
         "resolve_agent_run_config",
         AsyncMock(return_value=("provider:model", "default")),
     )
@@ -221,15 +225,18 @@ async def test_context_compression_holds_thread_lock_until_checkpoint_update(mon
 
     async def submit_message():
         async with session_factory() as db:
-            result = await agent_request_queue_service.intake_request(
+            result, _ = await agent_request_service._persist_request(
                 db=db,
-                request_id=request_id,
-                uid=uid,
-                agent_slug="main",
-                thread_id=thread_id,
-                input_message=build_chat_input_message("hello"),
                 agent_item=MagicMock(),
                 agent_backend=MagicMock(),
+                request_input=AgentRequestInput(
+                    request_id=request_id,
+                    agent_slug="main",
+                    thread_id=thread_id,
+                    input_message=build_chat_input_message("hello"),
+                    origin=RunOrigin(source="chat", channel="web"),
+                ),
+                current_user=SimpleNamespace(uid=uid),
             )
             await db.commit()
             return result
@@ -264,7 +271,7 @@ async def test_concurrent_steer_requests_keep_one_pending(monkeypatch: pytest.Mo
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     monkeypatch.setattr(
-        agent_request_queue_service,
+        agent_request_service,
         "resolve_agent_run_config",
         AsyncMock(return_value=("model", "default")),
     )
@@ -314,16 +321,19 @@ async def test_concurrent_steer_requests_keep_one_pending(monkeypatch: pytest.Mo
     async def submit(request_id: str):
         async with session_factory() as db:
             try:
-                result = await agent_request_queue_service.intake_request(
+                result, _ = await agent_request_service._persist_request(
                     db=db,
-                    request_id=request_id,
-                    uid=uid,
-                    agent_slug="main",
-                    thread_id=thread_id,
-                    queue_policy="steer",
-                    input_message=build_chat_input_message(request_id),
                     agent_item=MagicMock(),
                     agent_backend=MagicMock(),
+                    request_input=AgentRequestInput(
+                        request_id=request_id,
+                        agent_slug="main",
+                        thread_id=thread_id,
+                        input_message=build_chat_input_message(request_id),
+                        queue_policy="steer",
+                        origin=RunOrigin(source="chat", channel="web"),
+                    ),
+                    current_user=SimpleNamespace(uid=uid),
                 )
                 await db.commit()
                 return result
@@ -365,7 +375,7 @@ async def test_concurrent_enqueue_dispatches_fifo_head(monkeypatch: pytest.Monke
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     monkeypatch.setattr(
-        agent_request_queue_service,
+        agent_request_service,
         "resolve_agent_run_config",
         AsyncMock(return_value=("model", "default")),
     )
@@ -390,16 +400,19 @@ async def test_concurrent_enqueue_dispatches_fifo_head(monkeypatch: pytest.Monke
 
     async def submit(request_id: str):
         async with session_factory() as db:
-            result = await agent_request_queue_service.intake_request(
+            result, _ = await agent_request_service._persist_request(
                 db=db,
-                request_id=request_id,
-                uid=uid,
-                agent_slug="main",
-                thread_id=thread_id,
-                queue_policy="enqueue",
-                input_message=build_chat_input_message(request_id),
                 agent_item=MagicMock(),
                 agent_backend=MagicMock(),
+                request_input=AgentRequestInput(
+                    request_id=request_id,
+                    agent_slug="main",
+                    thread_id=thread_id,
+                    input_message=build_chat_input_message(request_id),
+                    queue_policy="enqueue",
+                    origin=RunOrigin(source="chat", channel="web"),
+                ),
+                current_user=SimpleNamespace(uid=uid),
             )
             await db.commit()
             if request_id == request_ids[1]:
@@ -785,7 +798,7 @@ async def test_concurrent_request_id_reuse_across_threads_returns_scope_conflict
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     monkeypatch.setattr(
-        agent_request_queue_service,
+        agent_request_service,
         "resolve_agent_run_config",
         AsyncMock(return_value=("model", "default")),
     )
@@ -798,16 +811,19 @@ async def test_concurrent_request_id_reuse_across_threads_returns_scope_conflict
     async def submit(thread_id: str):
         async with session_factory() as db:
             try:
-                result = await agent_request_queue_service.intake_request(
+                result, _ = await agent_request_service._persist_request(
                     db=db,
-                    request_id=request_id,
-                    uid=uid,
-                    agent_slug="main",
-                    thread_id=thread_id,
-                    queue_policy="enqueue",
-                    input_message=build_chat_input_message(thread_id),
                     agent_item=MagicMock(),
                     agent_backend=MagicMock(),
+                    request_input=AgentRequestInput(
+                        request_id=request_id,
+                        agent_slug="main",
+                        thread_id=thread_id,
+                        input_message=build_chat_input_message(thread_id),
+                        queue_policy="enqueue",
+                        origin=RunOrigin(source="chat", channel="web"),
+                    ),
+                    current_user=SimpleNamespace(uid=uid),
                 )
                 await db.commit()
                 return result

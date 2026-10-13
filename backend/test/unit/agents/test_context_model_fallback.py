@@ -98,9 +98,7 @@ async def test_available_default_model_is_returned_as_is(fake_cache, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_delisted_default_model_falls_back_to_first_available(
-    fake_cache, monkeypatch: pytest.MonkeyPatch
-):
+async def test_delisted_default_model_falls_back_to_first_available(fake_cache, monkeypatch: pytest.MonkeyPatch):
     """系统默认对话模型被下架时，回落到可用列表首项，而不是把失效 spec 继续传下去。"""
     fake_cache(
         {
@@ -150,44 +148,75 @@ async def test_fallback_skips_non_chat_entries(fake_cache, monkeypatch: pytest.M
     assert await agent_context.resolve_available_default_chat_model() == ""
 
 
-def test_chat_service_ignores_delisted_conversation_model():
-    """读取会话状态时，已下架的会话绑定模型必须被忽略。
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model, expected",
+    [("provider:removed", "provider:available"), ("", "provider:available"), ("provider:chosen", "provider:chosen")],
+)
+async def test_prepare_agent_runtime_context_resolves_available_model(fake_cache, monkeypatch, model, expected):
+    """实际准备上下文时替换空值与下架模型，同时保留有效选择。"""
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
 
-    历史缺陷：`GET /api/chat/thread/{id}/state` 把会话绑定的 model_spec 原样交给模型
-    解析层，模型下架后抛 Unknown model spec，整个接口 500，用户连历史会话都打不开。
+    from yuxi.repositories.user_repository import UserRepository
+    from yuxi.services import user_memory_service
+    from yuxi.storage.postgres.manager import pg_manager
 
-    这里用源码断言而非 import chat_service：后者的导入链会连带 middlewares 等一整套
-    模块，任何一处环境缺失都会让本用例以「导入失败」而非「行为回归」告终，掩盖真实信号。
-    """
-    import inspect
-    import pathlib
+    class Session:
+        """资料同步所需的最小会话。"""
 
-    import yuxi.agents as agents_pkg
+        @asynccontextmanager
+        async def begin_nested(self):
+            yield
 
-    # services 是命名空间包（__file__ 可能为 None），从同包的 agents 模块所在目录上溯定位
-    source_path = pathlib.Path(agents_pkg.__file__).parent.parent / "services" / "chat_service.py"
-    source = source_path.read_text(encoding="utf-8")
+    @asynccontextmanager
+    async def session():
+        yield Session()
 
-    # 必须提供可解析性判定，并覆盖会话绑定与子智能体继承两条来源
-    assert "def _is_model_spec_usable(" in source
-    assert '_is_model_spec_usable(conversation_model_spec, "会话绑定")' in source
-    assert '_is_model_spec_usable(model_spec, "子智能体继承")' in source
-    # 不得退回「只判类型和空值」的原始写法
-    assert 'if isinstance(conversation_model_spec, str) and conversation_model_spec.strip():' not in source
+    fake_cache({"provider:available": "chat", "provider:chosen": "chat"})
+    monkeypatch.setattr(
+        type(agent_context.system_options), "get", AsyncMock(return_value={"default_model": "provider:removed"})
+    )
+    monkeypatch.setattr(pg_manager, "get_async_session_context", session)
+    monkeypatch.setattr(UserRepository, "get_by_uid_with_db", AsyncMock(return_value=None))
+    monkeypatch.setattr(user_memory_service, "sync_user_profile_to_memory", AsyncMock())
+    monkeypatch.setattr(agent_context, "_append_workspace_agent_prompt", AsyncMock())
+    context = agent_context.BaseContext(uid="synthetic-user", model=model)
+
+    assert await agent_context.prepare_agent_runtime_context(context) is context
+    assert context.model == expected
 
 
-def test_prepare_agent_runtime_context_falls_back_when_configured_model_delisted():
-    """锁死调用点：运行时上下文必须在模型下架时回落到可用模型。
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["provider:removed", "provider:embedding"])
+async def test_bound_run_rejects_unavailable_model_without_switching(fake_cache, monkeypatch, model):
+    """已接收 Run 的模型失效时显式失败，不能替用户改用默认模型。"""
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
 
-    只测辅助函数不够——把调用点退回「只判空」的原始写法时辅助函数测试仍会全绿，
-    但真实行为已经回归成：下架模型继续传给下游 → load_chat_model 抛
-    Unknown model spec → 会话状态接口 500。这里直接对调用点做源码断言。
-    """
-    import inspect
+    from yuxi.services import user_memory_service
+    from yuxi.storage.postgres.manager import pg_manager
 
-    source = inspect.getsource(agent_context.prepare_agent_runtime_context)
-    # 必须走可解析性判定，而不是只判空
-    assert "_is_model_spec_resolvable" in source
-    assert "resolve_available_default_chat_model" in source
-    # 不得退回只判空的原始写法
-    assert 'if not str(getattr(context, "model", "") or "").strip()' not in source
+    class Session:
+        """提供资料同步的局部事务。"""
+
+        @asynccontextmanager
+        async def begin_nested(self):
+            yield
+
+    @asynccontextmanager
+    async def session():
+        yield Session()
+
+    fake_cache({"provider:available": "chat", "provider:embedding": "embedding"})
+    fallback = AsyncMock(return_value="provider:available")
+    monkeypatch.setattr(agent_context, "resolve_available_default_chat_model", fallback)
+    monkeypatch.setattr(pg_manager, "get_async_session_context", session)
+    monkeypatch.setattr(user_memory_service, "sync_user_profile_to_memory", AsyncMock())
+    monkeypatch.setattr(agent_context, "_append_workspace_agent_prompt", AsyncMock())
+    context = agent_context.BaseContext(uid="synthetic-user", run_id="accepted-run", model=model)
+
+    with pytest.raises(ValueError, match="运行绑定的聊天模型已不可用"):
+        await agent_context.prepare_agent_runtime_context(context)
+    assert context.model == model
+    fallback.assert_not_awaited()

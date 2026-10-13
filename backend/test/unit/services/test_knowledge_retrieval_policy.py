@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from yuxi.agents.middlewares.citations import knowledge_citation_sources
 from yuxi.services import knowledge_retrieval_policy as policy
 from yuxi.knowledge.runtime import knowledge_base
 
@@ -90,3 +91,25 @@ async def test_retrieval_keeps_article_sources_and_allowed_kb_names(monkeypatch)
         "kb_id": "kb-1",
         "kb_name": "制度库",
     }
+
+
+@pytest.mark.asyncio
+async def test_retrieval_removes_nul_from_content_and_citation_metadata(monkeypatch):
+    async def retrieve(_kb_id, _query):
+        return {"results": [{"file_id": "file-1", "content": "原文\x00片段", "metadata": {"source": "文档\x00.pdf"}}]}
+
+    async def get_file_info(_kb_id, _file_id):
+        return {"content": "title  说明书\x00正文\n"}
+
+    monkeypatch.setattr(knowledge_base, "retrieve", retrieve)
+    monkeypatch.setattr(knowledge_base, "get_file_info", get_file_info)
+    decision = policy.KnowledgeRetrievalDecision("SEARCH_KB", ("kb-1",), True, (("kb-1", "制度库"),))
+
+    result = await policy.retrieve_for_decision("问题", decision)
+    citations = knowledge_citation_sources(result)
+
+    assert result[0]["content"] == "原文片段"
+    assert result[0]["metadata"]["source"] == "文档.pdf"
+    assert result[0]["metadata"]["source_ref"]["title"] == "说明书正文"
+    assert citations[0]["excerpts"] == [{"text": "原文片段"}]
+    assert "\x00" not in policy.format_retrieval_context(result)

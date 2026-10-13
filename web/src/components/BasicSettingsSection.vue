@@ -53,11 +53,7 @@
     </template>
 
     <!-- 服务链接部分 -->
-    <div v-if="canManageSystemConfig" class="section-title">服务链接</div>
     <div v-if="canManageSystemConfig">
-      <p class="section-description">
-        快速访问系统相关的外部服务，需要将 localhost 替换为实际的 IP 地址。
-      </p>
       <div class="services-grid">
         <div class="service-link-card">
           <div class="service-info">

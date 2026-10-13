@@ -1,5 +1,9 @@
 <script setup>
-import { computed, nextTick, reactive, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+
+import { Check } from '@lucide/vue'
+import ActionDropdown from '@/components/common/ActionDropdown.vue'
+import ActionTrigger from '@/components/common/ActionTrigger.vue'
 
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import ProjectSelectionSection from '@/components/ProjectSelectionSection.vue'
@@ -40,7 +44,7 @@ const agentValues = computed(() =>
 function initialForm(job) {
   const schedule = job ? parseCronExpression(job.cron_expression) : defaultSchedule
   return {
-    name: job?.name || '',
+    name: job?.name ?? '新建定时任务',
     prompt: job?.prompt || '',
     project_id: job?.project_id || '',
     agent_slug: job?.agent_slug || agentValues.value[0] || '',
@@ -55,6 +59,37 @@ function initialForm(job) {
 
 const form = reactive(initialForm(props.job))
 let hydrating = false
+const nameInput = ref(null)
+const agentDropdownOpen = ref(false)
+const agentSearch = ref('')
+const selectedAgentLabel = computed(() => {
+  const agent = props.agents.find((item) => (item.slug || item.id) === form.agent_slug)
+  return agent?.name || form.agent_slug || '选择智能体'
+})
+const filteredAgents = computed(() => {
+  const query = agentSearch.value.trim().toLocaleLowerCase()
+  return props.agents.filter((agent) =>
+    [agent.name, agent.slug, agent.id].some((value) =>
+      String(value || '')
+        .toLocaleLowerCase()
+        .includes(query)
+    )
+  )
+})
+
+/** 选择任务智能体，不改变全局对话的智能体。 */
+function selectAgent(agent) {
+  form.agent_slug = agent.slug || agent.id
+  agentDropdownOpen.value = false
+}
+
+/** 打开配置时选中名称，方便直接改名。 */
+function focusName() {
+  nameInput.value?.focus({ preventScroll: true })
+  nameInput.value?.select()
+}
+
+onMounted(focusName)
 
 const daysInSelectedMonth = computed(() => {
   if (form.frequency !== 'yearly') return 31
@@ -129,6 +164,7 @@ watch(
     Object.assign(form, initialForm(props.job))
     await nextTick()
     hydrating = false
+    if (previousJobId || !jobId) focusName()
   }
 )
 
@@ -150,6 +186,7 @@ function changeFrequency(frequency) {
   <section class="inline-editor" aria-label="任务配置">
     <div class="title-line">
       <input
+        ref="nameInput"
         v-model="form.name"
         class="name-input"
         maxlength="255"
@@ -177,15 +214,46 @@ function changeFrequency(frequency) {
         <div class="setting-row">
           <span>运行于</span>
           <div class="setting-control">
-            <select v-model="form.agent_slug" :disabled="saving" aria-label="执行智能体">
-              <option
-                v-for="agent in agents"
-                :key="agent.slug || agent.id"
-                :value="agent.slug || agent.id"
-              >
-                {{ agent.name || agent.slug || agent.id }}
-              </option>
-            </select>
+            <ActionDropdown
+              v-model:open="agentDropdownOpen"
+              v-model:search="agentSearch"
+              search-placeholder="搜索智能体"
+              :disabled="saving"
+            >
+              <template #trigger>
+                <ActionTrigger
+                  :label="selectedAgentLabel"
+                  :open="agentDropdownOpen"
+                  :disabled="saving"
+                  aria-label="执行智能体"
+                />
+              </template>
+              <div role="menu" aria-label="执行智能体">
+                <button
+                  v-for="agent in filteredAgents"
+                  :key="agent.slug || agent.id"
+                  type="button"
+                  role="menuitemradio"
+                  :aria-checked="form.agent_slug === (agent.slug || agent.id)"
+                  :disabled="saving"
+                  class="config-dropdown-item"
+                  :class="{ selected: form.agent_slug === (agent.slug || agent.id) }"
+                  @click="selectAgent(agent)"
+                >
+                  <span class="config-dropdown-item-label">{{
+                    agent.name || agent.slug || agent.id
+                  }}</span>
+                  <Check
+                    v-if="form.agent_slug === (agent.slug || agent.id)"
+                    :size="14"
+                    class="config-dropdown-item-check"
+                  />
+                </button>
+                <p v-if="!filteredAgents.length" class="agent-empty" role="status">
+                  {{ agentSearch.trim() ? '没有匹配的智能体' : '暂无可用智能体' }}
+                </p>
+              </div>
+            </ActionDropdown>
           </div>
         </div>
         <div class="setting-row">
@@ -230,18 +298,20 @@ function changeFrequency(frequency) {
       <div class="settings-card">
         <fieldset class="setting-row frequency-row">
           <legend class="sr-only">重复频率</legend>
-          <span aria-hidden="true">重复</span>
-          <div class="frequency-options">
-            <label v-for="frequency in scheduleFrequencies" :key="frequency.value">
-              <input
-                type="radio"
-                name="schedule-frequency"
-                :value="frequency.value"
-                :checked="form.frequency === frequency.value"
-                @change="changeFrequency(frequency.value)"
-              />
-              <span>{{ frequency.label }}</span>
-            </label>
+          <div class="frequency-content">
+            <span aria-hidden="true">重复</span>
+            <div class="frequency-options">
+              <label v-for="frequency in scheduleFrequencies" :key="frequency.value">
+                <input
+                  type="radio"
+                  name="schedule-frequency"
+                  :value="frequency.value"
+                  :checked="form.frequency === frequency.value"
+                  @change="changeFrequency(frequency.value)"
+                />
+                <span>{{ frequency.label }}</span>
+              </label>
+            </div>
           </div>
         </fieldset>
         <div v-if="form.frequency === 'weekly'" class="setting-row weekday-row">
@@ -427,7 +497,7 @@ function changeFrequency(frequency) {
   display: grid;
   min-height: 40px;
   margin: 0;
-  padding: 0 14px;
+  padding: 5px 14px;
   border-bottom: 1px solid var(--gray-100);
   grid-template-columns: 110px minmax(0, 1fr);
   align-items: center;
@@ -482,6 +552,20 @@ function changeFrequency(frequency) {
 }
 
 .frequency-row {
+  display: block;
+
+  .frequency-content {
+    display: grid;
+    min-height: 30px;
+    grid-template-columns: 110px minmax(0, 1fr);
+    align-items: center;
+
+    > span {
+      color: var(--gray-600);
+      font-size: 13px;
+    }
+  }
+
   min-inline-size: 0;
   border-top: 0;
   border-inline: 0;
@@ -510,9 +594,11 @@ function changeFrequency(frequency) {
 }
 
 .setting-control {
+  display: flex;
   width: min(240px, 100%);
   min-width: 0;
   justify-self: end;
+  justify-content: flex-end;
 }
 
 .weekday-options {
@@ -545,51 +631,33 @@ function changeFrequency(frequency) {
   }
 }
 
-.inline-editor :deep(.project-selection) {
-  display: block;
-  width: 100%;
-}
-
-.inline-editor :deep(.project-trigger),
-.inline-editor :deep(.model-select--nano),
-.inline-editor :deep(.config-dropdown-trigger) {
-  width: 100%;
-  max-width: none;
+.setting-control :deep(.config-dropdown-trigger) {
   height: 30px;
+  max-width: 100%;
   padding: 0 8px;
-  border: 1px solid transparent;
   border-radius: 5px;
-  background: transparent;
   color: var(--gray-900);
-  font: inherit;
-  font-size: 13px;
-  justify-content: flex-end;
-  text-align: right;
 }
 
-.inline-editor :deep(.project-trigger-label),
-.inline-editor :deep(.model-info),
-.inline-editor :deep(.model-text),
-.inline-editor :deep(.config-dropdown-text) {
-  flex: 0 1 auto;
-  font: inherit;
-  font-size: 13px;
-  text-align: right;
+.setting-control :deep(.config-dropdown-text),
+.setting-control :deep(.config-dropdown-chevron) {
+  display: block;
 }
 
-.inline-editor :deep(.config-dropdown-chevron) {
-  margin-left: 2px;
+.setting-control :deep(.collapse-label) {
+  width: auto;
 }
 
-.inline-editor :deep(.model-select-content) {
-  justify-content: flex-end;
+.setting-control :deep(.collapse-label .config-dropdown-compact-icon) {
+  display: none;
 }
 
-.inline-editor :deep(.project-trigger:hover:not(:disabled)),
-.inline-editor :deep(.model-select--nano:hover),
-.inline-editor :deep(.config-dropdown-trigger:hover:not(:disabled)) {
-  border-color: transparent;
-  background: var(--gray-50);
+.agent-empty {
+  margin: 0;
+  padding: 16px 12px;
+  color: var(--gray-500);
+  font-size: 12px;
+  text-align: center;
 }
 
 .sr-only {
@@ -628,7 +696,8 @@ function changeFrequency(frequency) {
     width: 100%;
   }
 
-  .setting-row {
+  .setting-row,
+  .frequency-row .frequency-content {
     grid-template-columns: 80px minmax(0, 1fr);
   }
 

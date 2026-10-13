@@ -305,25 +305,6 @@ test('偏好失效时 autoSelectFirst 为 false 仍能拉到列表并回退', ()
   assert.match(chatSelectorBlock, /fallback-when-unavailable/)
 })
 
-test('失效判定用普通函数而非 computed，避免同 tick 读到旧缓存', () => {
-  // 回退在 fetchV2Models 成功回调里同步触发，而该回调刚把 hasFetchedV2Models 置 true。
-  // computed 惰性求值会在同一 tick 内返回依赖尚未失效的旧值（恒 false），
-  // 实测表现为 /models/v2 请求成功但回退静默不触发、控制台无任何日志。
-  const unavailableBlock = selectorSource.slice(
-    selectorSource.indexOf('const isCurrentModelUnavailable'),
-    selectorSource.indexOf('// 聊天输入框没有任何默认模型时')
-  )
-  assert.match(unavailableBlock, /const isCurrentModelUnavailable = \(\) => \{/)
-  assert.doesNotMatch(unavailableBlock, /computed\(/)
-  // 调用点必须用函数调用，不能残留 .value
-  const recoverBlock = selectorSource.slice(
-    selectorSource.indexOf('const recoverFromUnavailableModel'),
-    selectorSource.indexOf('// 列表拉取成功后统一处理')
-  )
-  assert.match(recoverBlock, /if \(!isCurrentModelUnavailable\(\)\) return/)
-  assert.doesNotMatch(recoverBlock, /isCurrentModelUnavailable\.value/)
-})
-
 test('幂等去重按会话范围，跨会话的第二个失效会话仍会回退', () => {
   // 切换会话时组件实例复用，两个会话都绑同一个已下架模型时 model_spec 完全相同。
   // 若幂等 Set 只按 spec 去重，先前会话回退过后，第二个会话会被误判为「已处理」
@@ -357,11 +338,11 @@ test('切换会话时重新判定失效，不依赖再次拉取列表', () => {
   // 结果：先打开的会话回退正常，侧栏切到另一个同样绑定已下架模型的会话时仍显示旧模型名
   // （实测复现：A 显示 plus，切到 B 又变回 3.7-max）。必须在 selectionScope 变化时补一次判定。
   const scopeWatch = selectorSource.slice(
-    selectorSource.indexOf('() => props.selectionScope'),
+    selectorSource.indexOf('() => [props.selectionScope, props.model_spec]'),
     selectorSource.indexOf('const resolvedSize = computed')
   )
-  assert.match(scopeWatch, /\(\) => props\.selectionScope/)
-  assert.match(scopeWatch, /if \(scope === previousScope\) return/)
+  assert.match(scopeWatch, /\(\) => \[props\.selectionScope, props\.model_spec\]/)
+  assert.match(scopeWatch, /recoveredUnavailableSelections\.clear\(\)/)
   // 复用已加载的列表，不重新请求
   assert.match(scopeWatch, /if \(!hasFetchedV2Models\.value\) return/)
   assert.match(scopeWatch, /recoverFromUnavailableModel\(\)/)

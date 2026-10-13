@@ -89,7 +89,8 @@ async def test_office_tool_passes_execution_filters_and_parses_word(monkeypatch,
         expected = ("中文正文 DOC-ROUNDTRIP-2026", "42")
     path = f"{_runtime().context.workdir_path}/uploads/report.{extension}"
     files = _patch_sandbox_backend(monkeypatch, {path: source_bytes})
-    tools = {tool.name: tool for tool in ImageInputCompatibilityMiddleware().tools}
+    tools = {ocr_parse_file.name: ocr_parse_file}
+    assert getattr(ImageInputCompatibilityMiddleware(), "tools", []) == []
     assert "ocr_parse_file" in tools
     assert "旧 DOC 由后端自动转换后解析，可直接传入原件" in tools["ocr_parse_file"].description
     filesystem = create_agent_filesystem_middleware(backend=SimpleNamespace())

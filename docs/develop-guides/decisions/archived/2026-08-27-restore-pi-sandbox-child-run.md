@@ -39,7 +39,7 @@ PI JSONL 使用独立的 32 MiB 总流上限，单事件仍限制为 16 KiB；�
 - LangGraph 拥有对话和工具编排，PI Agent 唯一拥有用户沙箱任务执行，不保留双执行路径。
 - PI child 与父 Run 共享沙箱生命周期；child 结束或失败不能释放父实例，只清理自己的确定性输出目录。
 - 模型凭据只经沙箱临时文件传入 runner，并在解析前删除；Project outputs 与日志不保存凭据。
-- `run_type=sandbox` 约束在 business schema v3 引入；当前 v1、v2、v3 部署必须按[数据库 Schema 迁移 Owner](../implemented/2026-08-24-versioned-schema-migration-owner.md)由唯一 storage migrator 升级至 v4，API 和 worker 在版本不匹配时 fail-closed。
+- `run_type=sandbox` 约束在 business schema v3 引入；当前 v1、v2、v3 部署必须按[数据库 Schema 迁移 Owner](0.7.3/05-storage-workdir/2026-08-24-versioned-schema-migration-owner.md)由唯一 storage migrator 升级至 v4，API 和 worker 在版本不匹配时 fail-closed。
 - 一次纯文本模型节点最多产生四次 provider 请求；超过该上限的任务以失败收敛，避免无限续写和费用失控。
 - PI runner 的一次最终回复同样最多产生四次模型请求；final ACK 与取消并发时以已提交结果为准。
 - PI 工具参数与结果事件单项限制为 16 KiB；完整产物继续由既有 outputs/ref 契约承载，不把大输出塞入 Redis 事件。

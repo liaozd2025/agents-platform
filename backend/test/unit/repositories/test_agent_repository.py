@@ -4,14 +4,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from yuxi.agents.buildin.chatbot.context import ChatBotContext
 
+from yuxi.agents.presets.subagents.general_purpose import PRESET as GENERAL_PURPOSE
 from yuxi.repositories.agent_repository import (
     AgentRepository,
     DEFAULT_AGENT_DESCRIPTION,
     DEFAULT_SHARE_CONFIG,
-    GENERAL_PURPOSE_AGENT_DESCRIPTION,
-    GENERAL_PURPOSE_AGENT_NAME,
-    GENERAL_PURPOSE_AGENT_SLUG,
     SUB_AGENT_BACKEND_ID,
     merge_agent_config_json,
     user_can_access_agent,
@@ -117,13 +116,14 @@ def test_merge_agent_config_json_applies_visible_edits_and_preserves_hidden_refe
     assert merged["context"]["skills"] == ["hidden-a", "visible-b", "hidden-b", "visible-c"]
 
 
-@pytest.mark.parametrize("strategy", [None, []])
+@pytest.mark.parametrize("strategy", ["all", []])
 def test_merge_agent_config_json_replaces_resource_list_for_explicit_strategy_switch(strategy):
-    """显式空列表或 null 整体切换资源策略。"""
+    """显式空列表或 all 整体切换资源策略。"""
     merged = merge_agent_config_json(
         {"context": {"skills": ["visible", "hidden"], "subagents": ["visible-subagent", "hidden-subagent"]}},
         {"context": {"skills": strategy, "subagents": strategy}},
         resource_access={"skills": {"visible"}, "subagents": {"visible-subagent"}},
+        context_schema=ChatBotContext,
     )
 
     assert merged["context"]["skills"] == strategy
@@ -213,7 +213,7 @@ async def test_ensure_default_agent_backfills_missing_description(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ensure_general_purpose_subagent_creates_empty_config_subagent(monkeypatch):
+async def test_ensure_preset_creates_empty_config_subagent(monkeypatch):
     db = FakeDb()
     repo = AgentRepository(db)
 
@@ -222,11 +222,11 @@ async def test_ensure_general_purpose_subagent_creates_empty_config_subagent(mon
 
     monkeypatch.setattr(repo, "get_by_slug", get_by_slug)
 
-    agent = await repo.ensure_general_purpose_subagent(created_by="system")
+    agent = await repo.ensure_preset(GENERAL_PURPOSE, created_by="system")
 
-    assert agent.slug == GENERAL_PURPOSE_AGENT_SLUG
-    assert agent.name == GENERAL_PURPOSE_AGENT_NAME
-    assert agent.description == GENERAL_PURPOSE_AGENT_DESCRIPTION
+    assert agent.slug == GENERAL_PURPOSE.slug
+    assert agent.name == GENERAL_PURPOSE.name
+    assert agent.description == GENERAL_PURPOSE.description
     assert agent.backend_id == SUB_AGENT_BACKEND_ID
     assert agent.is_subagent is True
     assert agent.is_default is False
@@ -239,17 +239,17 @@ async def test_ensure_general_purpose_subagent_creates_empty_config_subagent(mon
 
 
 @pytest.mark.asyncio
-async def test_ensure_general_purpose_subagent_is_idempotent(monkeypatch):
+async def test_ensure_preset_is_idempotent(monkeypatch):
     db = FakeDb()
     repo = AgentRepository(db)
-    existing = SimpleNamespace(slug=GENERAL_PURPOSE_AGENT_SLUG, config_json={"context": {"model": "custom:model"}})
+    existing = SimpleNamespace(slug=GENERAL_PURPOSE.slug, config_json={"context": {"model": "custom:model"}})
 
     async def get_by_slug(_slug):
         return existing
 
     monkeypatch.setattr(repo, "get_by_slug", get_by_slug)
 
-    agent = await repo.ensure_general_purpose_subagent()
+    agent = await repo.ensure_preset(GENERAL_PURPOSE)
 
     assert agent is existing
     assert db.added is None
@@ -407,3 +407,32 @@ async def test_normal_user_can_update_agent_with_equivalent_v2_share_config():
         "department_ids": [],
         "user_uids": ["manager"],
     }
+
+
+@pytest.mark.parametrize("field", ["tools", "knowledges", "skills", "subagents", "mcps", "preload_skills"])
+@pytest.mark.parametrize("invalid", [None, "full", ["ok", 1], [""], {"mode": "all"}])
+def test_resource_write_rejects_invalid_selection(field, invalid):
+    """替代写入路径同样拒绝非法资源配置。"""
+    with pytest.raises(ValueError, match=field):
+        merge_agent_config_json({}, {"context": {field: invalid}}, resource_access={}, context_schema=ChatBotContext)
+
+
+def test_all_selection_is_not_a_previous_reference_list():
+    """all 不授予新增不可见引用的权限。"""
+    with pytest.raises(ValueError, match="无权新增"):
+        merge_agent_config_json(
+            {"context": {"skills": "all"}}, {"context": {"skills": ["a"]}}, resource_access={"skills": set()}
+        )
+    merged = merge_agent_config_json(
+        {"context": {"skills": "all", "tools": "all"}},
+        {"context": {"skills": ["a"]}},
+        resource_access={"skills": {"a"}},
+    )
+    assert merged == {"context": {"skills": ["a"], "tools": "all"}}
+
+
+@pytest.mark.parametrize("field", ["mcps", "preload_skills"])
+def test_opt_in_resource_selection_preserves_all_intent(field):
+    """默认关闭的资源同样可显式选择全部，且不展开持久化。"""
+    merged = merge_agent_config_json({}, {"context": {field: "all"}}, resource_access={})
+    assert merged == {"context": {field: "all"}}

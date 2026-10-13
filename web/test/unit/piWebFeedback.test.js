@@ -242,9 +242,9 @@ test('缺失上报、错误 Run 或线程及父 checkpoint 用量均不能伪装
   }
 })
 
-test('子线程组件按 state 指定 Run 调用 API 并显示本次用量，切线程时丢弃旧请求', async () => {
+test('子线程组件按历史指定 Run 调用 API 并显示本次用量，切线程时丢弃旧请求', async () => {
   let view
-  const props = { threadId: 'child-thread', active: false }
+  const props = { threadId: 'child-thread', active: true }
   await renderToString(
     createSSRApp({
       setup() {
@@ -260,7 +260,7 @@ test('子线程组件按 state 指定 Run 调用 API 并显示本次用量，切
     subagent_run: { run_id: `${threadId}:run`, status: 'completed' },
     token_usage: { thread: { ...reportedUsage, total: { total_tokens: 99999 } } }
   })
-  agentApi.getAgentHistory = async (threadId) => ({ history: [{ type: 'ai', content: threadId }] })
+  agentApi.getAgentHistory = async (threadId) => ({ runs: [{ run_id: `${threadId}:run`, status: 'completed' }], history: [{ type: 'ai', content: threadId }] })
   agentApi.getAgentRun = async (runId) => {
     requestedRuns.push(runId)
     return {
@@ -284,7 +284,7 @@ test('子线程组件按 state 指定 Run 调用 API 并显示本次用量，切
         ? new Promise((resolve) => {
             resolveOldHistory = resolve
           })
-        : Promise.resolve({ history: [{ type: 'ai', content: threadId }] })
+        : Promise.resolve({ runs: [{ run_id: `${threadId}:run`, status: 'completed' }], history: [{ type: 'ai', content: threadId }] })
     const oldLoad = view.loadThread()
     await Promise.resolve()
     props.threadId = 'next-thread'
@@ -299,13 +299,13 @@ test('子线程组件按 state 指定 Run 调用 API 并显示本次用量，切
   }
 })
 
-test('Run 用量接口失败时保留历史并继续订阅 state 确认的当前 Run', async () => {
+test('Run 用量接口失败时保留历史并继续订阅 历史确认的当前 Run', async () => {
   let view
   await renderToString(
     createSSRApp({
       setup() {
         view = SubagentThreadView.setup(
-          { threadId: 'child-thread', active: false },
+          { threadId: 'child-thread', active: true },
           { expose: () => {} }
         )
         return () => null
@@ -319,6 +319,7 @@ test('Run 用量接口失败时保留历史并继续订阅 state 确认的当前
     subagent_run: { run_id: 'current-child-run', status: 'running' }
   })
   agentApi.getAgentHistory = async () => ({
+    runs: [{ run_id: 'current-child-run', status: 'running' }],
     history: [{ type: 'ai', content: '此前任务的真实结果', run_id: 'previous-child-run' }]
   })
   agentApi.getAgentRun = async (runId) => {

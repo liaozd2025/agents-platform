@@ -141,6 +141,8 @@ async def list_evaluation_datasets(
         service = EvaluationService()
         datasets = await service.list_datasets(kb_id)
         return {"message": "success", "data": datasets}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"获取评估数据集列表失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取评估数据集列表失败: {str(e)}")
@@ -194,6 +196,8 @@ async def download_evaluation_dataset(
         if "not found" in str(e).lower():
             raise HTTPException(status_code=404, detail=str(e))
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"导出评估数据集失败: {e}")
         raise HTTPException(status_code=500, detail=f"导出评估数据集失败: {str(e)}")
@@ -213,6 +217,8 @@ async def delete_evaluation_dataset(
         if "not found" in str(e).lower():
             raise HTTPException(status_code=404, detail=str(e))
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"删除评估数据集失败: {e}")
         raise HTTPException(status_code=500, detail=f"删除评估数据集失败: {str(e)}")
@@ -242,6 +248,8 @@ async def generate_evaluation_dataset(
         return {"message": "success", "data": result}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"生成评估数据集失败: {e}")
         raise HTTPException(status_code=500, detail=f"生成评估数据集失败: {str(e)}")
@@ -262,6 +270,8 @@ async def resume_evaluation_dataset(
         return {"message": "success", "data": result}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"恢复评估数据集生成失败: {e}")
         raise HTTPException(status_code=500, detail=f"恢复评估数据集生成失败: {str(e)}")
@@ -288,6 +298,8 @@ async def run_evaluation(
         if "not found" in str(e).lower():
             raise HTTPException(status_code=404, detail=str(e))
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"启动评估失败: {e}")
         raise HTTPException(status_code=500, detail=f"启动评估失败: {str(e)}")
@@ -303,6 +315,8 @@ async def list_evaluation_runs(
         service = EvaluationService()
         runs = await service.list_runs(kb_id)
         return {"message": "success", "data": runs}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"获取评估运行历史失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取评估运行历史失败: {str(e)}")
@@ -362,6 +376,8 @@ async def delete_evaluation_run(
         if "not found" in str(e).lower():
             raise HTTPException(status_code=404, detail=str(e))
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"删除评估运行失败: {e}")
         raise HTTPException(status_code=500, detail=f"删除评估运行失败: {str(e)}")

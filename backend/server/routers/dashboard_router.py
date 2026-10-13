@@ -98,7 +98,8 @@ class ConversationListItem(BaseModel):
     run_status: str | None = None
     is_pinned: bool = False
     message_count: int
-    total_tokens: int = 0
+    total_tokens: int | None = None
+    token_usage_complete: bool = False
     created_at: str
     updated_at: str
 
@@ -151,7 +152,8 @@ class ConversationDetailResponse(BaseModel):
     message_count: int
     created_at: str
     updated_at: str
-    total_tokens: int
+    total_tokens: int | None
+    token_usage_complete: bool = False
     messages: list[dict]
 
 

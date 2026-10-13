@@ -8,8 +8,6 @@ from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, Mod
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, merge_message_runs
 from langchain_openai import ChatOpenAI
 
-from yuxi.agents.toolkits.buildin.tools import ocr_parse_file
-
 _TOOL_IMAGE_USER_TEXT = "Images returned by read_file are attached below. Inspect them when answering."
 _INVALID_TOOL_CALL_TEXT = (
     "A previous tool call could not be parsed and was not executed. "
@@ -34,9 +32,12 @@ _CONTINUE_TRUNCATED_RESPONSE = (
 
 
 class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
-    """Bridge OpenAI tool images and translate explicit image capability errors."""
+    """Bridge OpenAI tool images and translate explicit image capability errors.
 
-    tools = [ocr_parse_file]
+    注意：不得通过 `tools` 类属性声明 OCR 工具——create_agent 会把中间件声明的
+    tools 无条件合并进模型工具集，绕过智能体配置中的工具开关。OCR fallback 的
+    可用性以当前请求工具集中是否启用 ocr_parse_file 为准。
+    """
 
     def wrap_model_call(
         self,
@@ -50,7 +51,7 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
             return _continue_sync_model_response(request, handler)
         except Exception as exc:  # noqa: BLE001
             if _has_image(request.messages) and _is_image_input_rejection(exc):
-                return _ocr_fallback_response(image_paths)
+                return _ocr_fallback_response(image_paths, enabled=_ocr_tool_enabled(request))
             raise
 
     async def awrap_model_call(
@@ -65,7 +66,7 @@ class ImageInputCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
             return await _continue_async_model_response(request, handler)
         except Exception as exc:  # noqa: BLE001
             if _has_image(request.messages) and _is_image_input_rejection(exc):
-                return _ocr_fallback_response(image_paths)
+                return _ocr_fallback_response(image_paths, enabled=_ocr_tool_enabled(request))
             raise
 
 
@@ -298,7 +299,21 @@ def _read_file_image_paths(messages: list[Any]) -> list[str]:
     return paths
 
 
-def _ocr_fallback_response(image_paths: list[str]) -> ModelResponse:
+def _ocr_tool_enabled(request: ModelRequest) -> bool:
+    """当前请求工具集中启用了 ocr_parse_file 时才允许 OCR fallback。"""
+    return any(getattr(tool, "name", None) == "ocr_parse_file" for tool in (request.tools or []))
+
+
+def _ocr_fallback_response(image_paths: list[str], *, enabled: bool) -> ModelResponse:
+    if not enabled:
+        return ModelResponse(
+            result=[
+                AIMessage(
+                    content="当前模型不支持图片输入，且 OCR 解析文件工具已在智能体配置中禁用，"
+                    "请启用该工具或更换支持图片输入的模型。"
+                )
+            ]
+        )
     if not image_paths:
         return ModelResponse(result=[AIMessage(content="当前模型无法读取图片，且没有可供 OCR 工具解析的文件路径。")])
 

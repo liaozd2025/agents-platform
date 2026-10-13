@@ -29,7 +29,7 @@
 </template>
 
 <script setup>
-import { formatEmptyRunStatus } from '@/utils/conversationProcessGrouping'
+import { formatEmptyRunStatus, groupConversationContinuations } from '@/utils/conversationProcessGrouping'
 import { computed, ref, watch } from 'vue'
 import { sliceMessageRows } from '@/utils/messageWindow'
 import AgentMessageComponent from '@/components/AgentMessageComponent.vue'
@@ -61,7 +61,7 @@ const historyConversations = computed(() =>
   MessageProcessor.convertServerHistoryToMessages(props.messages, props.runs)
 )
 
-const conversations = computed(() => {
+const runConversations = computed(() => {
   if (!props.ongoingMessages.length) return historyConversations.value
   const liveRunId = props.ongoingMessages.find((message) => message.run_id)?.run_id
   const liveGroup = { messages: props.ongoingMessages, status: 'streaming' }
@@ -72,6 +72,8 @@ const conversations = computed(() => {
   }
   return [...historyConversations.value, liveGroup]
 })
+
+const conversations = computed(() => groupConversationContinuations(runConversations.value))
 
 const visibleMessageCount = ref(20)
 watch(

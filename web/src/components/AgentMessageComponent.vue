@@ -1,14 +1,11 @@
 <template>
-  <div v-if="message.type === 'human' && message.image_content" class="message-image">
+  <div v-if="message.type === 'human' && messageImages.length" class="message-image">
     <img
-      :src="`data:${messageImageMimeType};base64,${message.image_content}`"
+      v-for="(image, index) in messageImages"
+      :key="index"
+      :src="`data:${image.mimeType};base64,${image.content}`"
       alt="用户上传的图片"
-      @click="
-        openImagePreview(
-          `data:${messageImageMimeType};base64,${message.image_content}`,
-          '用户上传的图片'
-        )
-      "
+      @click="openImagePreview(`data:${image.mimeType};base64,${image.content}`, '用户上传的图片')"
     />
   </div>
   <div
@@ -81,7 +78,6 @@
           :message="message"
           :show-refs="showRefs"
           :is-latest-message="isLatestMessage"
-          :sources="messageSources"
           @retry="emit('retry')"
           @openRefs="emit('openRefs', $event)"
         />
@@ -140,8 +136,6 @@ import { Check, Copy, X } from '@lucide/vue'
 import ToolCallsGroupComponent from '@/components/ToolCallsGroupComponent.vue'
 import MarkdownPreview from '@/components/common/MarkdownPreview.vue'
 import MentionTextRenderer from '@/components/common/MentionTextRenderer.vue'
-import { useAgentStore } from '@/stores/agent'
-import { storeToRefs } from 'pinia'
 import { getMessageCitationSources } from '@/utils/answerCitations.js'
 import { MessageProcessor } from '@/utils/messageProcessor'
 import { inferImageMimeTypeFromBase64, normalizeAttachmentPreviews } from '@/utils/file_utils'
@@ -289,10 +283,6 @@ const getErrorMessage = computed(() => {
   }
 })
 
-// 引入智能体 store
-const agentStore = useAgentStore()
-const { availableKnowledgeBases } = storeToRefs(agentStore)
-
 const messageAttachments = computed(() =>
   normalizeAttachmentPreviews(props.message.extra_metadata?.attachments)
 )
@@ -303,20 +293,20 @@ const openAttachmentPreview = (attachment) => {
   if (!attachment?.path) return
   emit('open-attachment', { path: attachment.path, name: attachment.name })
 }
-const messageImageMimeType = computed(
-  () => inferImageMimeTypeFromBase64(props.message.image_content) || 'image/jpeg'
-)
+// 后端投影的 image_contents 是权威；更早的响应可能只有单值 image_content，兜底成单元素。
+const messageImages = computed(() => {
+  const contents = props.message.image_contents?.length
+    ? props.message.image_contents
+    : [props.message.image_content].filter(Boolean)
+  return contents.map((content) => ({
+    content,
+    mimeType: inferImageMimeTypeFromBase64(content) || 'image/jpeg'
+  }))
+})
 
 const mentionDisplayLabels = computed(() => buildMentionDisplayLabels(props.mention || {}))
 
 const citationSources = computed(() => getMessageCitationSources(props.message))
-
-const messageSources = computed(() => {
-  if (props.message.type === 'ai') {
-    return MessageProcessor.extractSourcesFromMessage(props.message, availableKnowledgeBases.value)
-  }
-  return { knowledgeChunks: [], webSources: [] }
-})
 
 const validToolCalls = computed(() => enrichTaskToolCalls(props.message.tool_calls))
 
@@ -338,7 +328,7 @@ const parsedData = computed(() => {
   user-select: text;
   word-break: break-word;
   word-wrap: break-word;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 24px;
   box-sizing: border-box;
   color: var(--gray-10000);
@@ -612,17 +602,20 @@ const parsedData = computed(() => {
 
 // 多模态消息样式
 .message-image {
-  border-radius: 12px;
-  overflow: hidden;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: flex-start;
+  gap: 6px;
   margin-left: auto;
-  /* max-height: 200px; */
-  border: 1px solid rgba(255, 255, 255, 0.2);
 
   img {
     max-width: 100%;
     max-height: 200px;
     object-fit: contain;
     cursor: pointer;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
   }
 }
 

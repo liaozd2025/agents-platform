@@ -118,11 +118,11 @@ def _render_agent_detail(data: dict, console: Console, *, as_json: bool) -> None
     details.add_row("Model", _text(context.get("model"), default="系统默认"))
     details.add_row("Skills", _selection(context.get("skills")))
     details.add_row("Tools", _selection(context.get("tools")))
-    details.add_row("MCP servers", _selection(context.get("mcps")))
+    details.add_row("MCP servers", _selection(context.get("mcps") or []))
     details.add_row("Knowledge bases", _selection(context.get("knowledges")))
     details.add_row(
         "Subagents",
-        _selection(context.get("subagents"), empty_means_default=True),
+        _selection(context.get("subagents")),
     )
     console.print(details)
 
@@ -149,10 +149,12 @@ def _render_agent_detail(data: dict, console: Console, *, as_json: bool) -> None
         _print_json({"context": other_context, **other_config}, console)
 
 
-def _selection(value: Any, *, empty_means_default: bool = False) -> Text:
+def _selection(value: Any) -> Text:
     """区分默认资源范围、显式空列表与具体选择。"""
-    if value is None or (empty_means_default and value == []):
-        return Text("默认（全部可用）")
+    if value == "all":
+        return Text("全部可用（含新增）")
+    if value is None:
+        return Text("默认（由服务端决定）")
     if isinstance(value, list):
         value = ", ".join(str(item) for item in value) if value else "无"
     return Text(_safe_terminal_text(str(value)))

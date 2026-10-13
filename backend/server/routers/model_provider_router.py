@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.utils.auth_middleware import get_db, get_required_user, require_permission
@@ -58,6 +58,7 @@ class ModelProviderPayload(BaseModel):
     extra_json: dict[str, Any] | None = Field(None, description="扩展配置")
     is_enabled: bool | None = Field(None, description="是否启用")
     is_builtin: bool | None = Field(None, description="是否内置")
+    include_user_uid: StrictBool | None = Field(None, description="聊天模型请求是否注入带 HMAC 签名的用户 UID 头")
 
 
 @model_providers.get("")
@@ -93,6 +94,8 @@ async def create_provider(
         return {"success": True, "data": provider.to_dict()}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"创建模型供应商失败: {e}")
         raise HTTPException(status_code=500, detail="创建模型供应商失败")
@@ -186,6 +189,8 @@ async def get_remote_models(
         if e.response.status_code == 401:
             raise HTTPException(status_code=502, detail="远端 API 认证失败，请检查 API Key 配置")
         raise HTTPException(status_code=e.response.status_code, detail=f"Models 请求失败: {detail}")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"拉取远端模型失败 {provider_id}: {e}")
         raise HTTPException(status_code=400, detail=f"拉取远端模型失败: {e}")
@@ -250,6 +255,8 @@ async def get_model_status_by_spec(
     try:
         result = await test_model_status_by_spec(spec)
         return {"success": True, "data": result}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"测试模型状态失败 {spec}: {e}")
         return {"success": False, "data": {"spec": spec, "status": "error", "message": str(e)}}

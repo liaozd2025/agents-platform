@@ -39,7 +39,7 @@
       <input
         ref="folderNameInput"
         v-model="folderName"
-        maxlength="255"
+        :maxlength="FOLDER_NAME_MAX_LENGTH"
         placeholder="文件夹名称"
         aria-label="文件夹名称"
         :disabled="creating"
@@ -130,13 +130,16 @@ const props = defineProps({
   },
   active: { type: Boolean, default: true },
   disabled: { type: Boolean, default: false },
+  suggestedFolderName: { type: String, default: '' },
   includeUnboundProjectDirs: { type: Boolean, default: false },
   unselectableDirectories: { type: Array, default: () => ['/'] },
   isFileSelectable: { type: Function, default: () => true },
   // 目录展示名解析器：入参为目录路径，返回 { label, hint }；返回空表示沿用服务端原始目录名。
   resolveDirectoryLabel: { type: Function, default: null }
 })
-const emit = defineEmits(['update:modelValue', 'loading-change'])
+const emit = defineEmits(['update:modelValue', 'loading-change', 'folder-created'])
+
+const FOLDER_NAME_MAX_LENGTH = 255
 
 const entries = ref([])
 const currentPath = ref('/')
@@ -245,7 +248,8 @@ const toggleFile = (path, checked) => {
 }
 
 const startCreatingFolder = async () => {
-  folderName.value = ''
+  // 打开新建行时用外部建议名预填；创建成功后由 folder-created 让 consumer 反向补齐，两个方向互补。
+  folderName.value = props.suggestedFolderName.trim().slice(0, FOLDER_NAME_MAX_LENGTH)
   creatingFolder.value = true
   await nextTick()
   folderNameInput.value?.focus()
@@ -271,6 +275,7 @@ const createFolder = async () => {
     } else {
       await loadEntries(currentPath.value)
     }
+    emit('folder-created', { name, path: createdPath || '' })
     message.success('文件夹已创建')
   } catch (cause) {
     message.error(getErrorMessage(cause, '文件夹创建失败'))

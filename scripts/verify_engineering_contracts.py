@@ -66,6 +66,7 @@ WORKSPACE_HOST_PATH_EXPORTS = frozenset(
         "user_workdir_host_dir",
     }
 )
+PERSONAL_SKILL_WORKSPACE_OWNER = Path("backend/package/yuxi/services/skills/personal.py")
 DIRECT_WEB_API_LITERAL = re.compile(r"(?P<quote>['\"`])/api(?:[/ ?]|(?P=quote))")
 AGENTS_FILE_BUDGETS = {
     "AGENTS.md": 5000,
@@ -160,7 +161,10 @@ WORKFLOW_CONTRACTS = (
             "docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_agent_run_lease.py -q",
             'docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_agent_run_result_causality.py -q',
             'docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_chat_router.py::test_thread_message_audits_return_persisted_facts_without_leaking_into_history -q --setup-show -o faulthandler_timeout=60',
-            "docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api uv run --no-sync --no-dev pytest test/e2e/test_deterministic_agent_path_e2e.py -q",
+            'docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/api/test_chat_router.py::test_thread_artifact_uses_image_signature_for_content_type -q',
+            "docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api uv run --no-sync --no-dev pytest test/e2e/test_deterministic_agent_path_e2e.py -q -m e2e_smoke --durations=10",
+            "docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api uv run --no-sync --no-dev pytest test/e2e/test_deterministic_agent_path_e2e.py -q -m e2e_lifecycle --durations=10",
+            "docker compose exec -T -e E2E_USERNAME -e E2E_PASSWORD api uv run --no-sync --no-dev pytest test/e2e/test_deterministic_agent_path_e2e.py -q -m e2e_boundaries --durations=10",
             'docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/services/test_identity_admin_service.py test/integration/services/test_api_key_schema_migration.py test/integration/services/test_api_key_user_lifecycle.py test/integration/api/test_apikey_router.py -q',
             'docker compose exec -T -e TEST_USERNAME="$E2E_USERNAME" -e TEST_PASSWORD="$E2E_PASSWORD" api uv run --no-sync --no-dev pytest test/integration/services/test_workdir_user_workspace.py test/integration/services/test_user_skill_projection.py test/integration/api/test_skill_artifact_authorization.py -q',
             "docker compose exec -T api uv run --no-sync --no-dev pytest test/integration/services/test_project_workdir_provisioner.py -q",
@@ -176,6 +180,9 @@ WORKFLOW_CONTRACTS = (
             "web/**",
             "packages/yuxi-cli/**",
             "docker/**",
+            "scripts/ci_prepare_system_tests_env.sh",
+            "scripts/ci_build_topology_images.sh",
+            "scripts/migrate-storage.sh",
             ".github/workflows/system-tests.yml",
         ),
     ),
@@ -801,7 +808,7 @@ def _validate_decisions(root: Path, errors: list[str]) -> list[dict[str, str]]:
                         )
             projection.append(
                 {
-                    "path": str(relative),
+                    "path": relative.as_posix(),
                     "status": status or "missing",
                     "type": decision_type or "missing",
                     "owner": owner or "missing",
@@ -822,7 +829,7 @@ def _validate_postmortems(root: Path, errors: list[str]) -> list[str]:
         if not path.is_file():
             errors.append(f"缺少 postmortem 入口或模板：{path.relative_to(root)}")
             continue
-        checked.append(str(path.relative_to(root)))
+        checked.append(path.relative_to(root).as_posix())
 
     if template.is_file():
         sections = _decision_sections(
@@ -985,6 +992,8 @@ def _validate_workspace_host_path_boundary(root: Path, errors: list[str]) -> int
                             alias.name for alias in node.names
                         )
                     )
+                    if relative == PERSONAL_SKILL_WORKSPACE_OWNER:
+                        forbidden.discard("user_workspace_dir")
                 elif isinstance(node, ast.ImportFrom) and node.module == "yuxi.config":
                     if any(alias.name == "get_user_data_dir" for alias in node.names):
                         forbidden.add("get_user_data_dir")

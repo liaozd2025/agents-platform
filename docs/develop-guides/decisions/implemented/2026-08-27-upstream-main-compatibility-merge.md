@@ -25,7 +25,7 @@ PI 执行相关部分由 [PI 退役决策](../implemented/2026-09-18-retire-pi-e
 - PI Local tracer 使用 attempt 独立 Workdir 和临时 Skill 投影；绑定 Workdir 的 Sandbox 命令显式使用严格 `exec_dir`，不依赖远程 shell 继承容器 `working_dir`；Python Manifest 与 Runner 的 Skill 摘要统一使用确定性 Unicode 路径顺序，不依赖运行环境 locale；创建失败、取消和已知启动失败在实例确认释放后清理，final ACK 与 `execution_unknown` 保留 outputs，避免删除已被持久事件引用的文件；释放失败由 attempt 持久化并由 worker 周期重试。
 - 用户分页采用官方 `/users/page` 响应 envelope，查询仍由产品管理域 SQL 限制；越出管理域保持 404。
 - 品牌、OA 精确部门匹配和产品全屏设置入口保持产品行为，不回退到官方默认文案、自动建部门或旧设置弹窗。
-- RBAC、组织快照和官方业务表结构统一归 business schema；当前版本与受支持升级入口由[数据库 Schema 迁移 Owner](./2026-08-24-versioned-schema-migration-owner.md)维护。
+- RBAC、组织快照和官方业务表结构统一归 business schema；当前版本与受支持升级入口由[数据库 Schema 迁移 Owner](../archived/0.7.3/05-storage-workdir/2026-08-24-versioned-schema-migration-owner.md)维护。
 - 未记录 schema version 的产品数据库可能缺少官方 `creation_request_id`；v0.7.1 Workdir cutover 在 ORM 重写前幂等补列，唯一索引由后续 business schema 收敛统一创建。
 
 ## 替代方案

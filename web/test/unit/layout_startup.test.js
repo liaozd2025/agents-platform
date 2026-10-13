@@ -7,7 +7,7 @@ import { createServer } from 'vite'
 
 test('布局导航不等待品牌或知识库，卸载后清理状态同步计时器', async (t) => {
   globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} }
-  globalThis.window = { addEventListener() {}, removeEventListener() {} }
+  globalThis.window = { location: { pathname: "/" }, addEventListener() {}, removeEventListener() {} }
   const server = await createServer({
     server: { middlewareMode: true, hmr: false },
     appType: 'custom'

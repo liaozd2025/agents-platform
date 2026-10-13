@@ -260,7 +260,7 @@ async def read_saved_answer(client, headers, run, thread_id):
     return row["content"], sources, history.json()["history"]
 
 
-@pytest.mark.parametrize("mode", ["task", "async", "resume"])
+@pytest.mark.parametrize("mode", ["async", "resume"])
 async def test_child_citations_survive_history_resume_and_next_run(e2e_client, e2e_headers, citation_environment, mode):
     """子编号冲突、同名文件、仅链接及下一 Run 均不得丢原文或串源。"""
     case = citation_environment
@@ -310,21 +310,20 @@ async def test_child_citations_survive_history_resume_and_next_run(e2e_client, e
                 assert len(child_sources) == 1 and child_sources[0]["source"] in expected_sources
         finally:
             await conn.close()
-        if mode == "task":
-            calls = [
-                call
-                for message in history
-                if message.get("run_id") == source_run_id
-                for call in message.get("tool_calls", [])
-                if call["name"] == "task"
-            ]
-            assert len(calls) == len(selected), calls
-            for call in calls:
-                result = call["tool_call_result"]
-                child_sources = (result.get("artifact") or {}).get("citation_sources") or (
-                    call.get("subagent_run") or {}
-                ).get("citation_sources")
-                assert child_sources and child_sources[0]["source"] in expected_sources, call
+        calls = [
+            call
+            for message in history
+            if message.get("run_id") == source_run_id
+            for call in message.get("tool_calls", [])
+            if call["name"] == "subagent_await"
+        ]
+        assert len(calls) == len(selected), calls
+        for call in calls:
+            result = call["tool_call_result"]
+            child_sources = (result.get("artifact") or {}).get("citation_sources") or (
+                call.get("subagent_run") or {}
+            ).get("citation_sources")
+            assert child_sources and child_sources[0]["source"] in expected_sources, call
 
 
 async def test_parent_only_cites_adopted_child_evidence(e2e_client, e2e_headers, citation_environment):
@@ -332,7 +331,7 @@ async def test_parent_only_cites_adopted_child_evidence(e2e_client, e2e_headers,
     case = citation_environment
     file_ids = list(case["files"])[:2]
     run, source_run_id, _ = await run_citation_round(
-        e2e_client, e2e_headers, case, file_ids, "task", adopted_file_ids=file_ids[:1]
+        e2e_client, e2e_headers, case, file_ids, "async", adopted_file_ids=file_ids[:1]
     )
     content, sources, _ = await read_saved_answer(e2e_client, e2e_headers, run, case["thread_id"])
     source_a, source_b = (f"kb://{case['kb_id']}/{file_id}" for file_id in file_ids)
