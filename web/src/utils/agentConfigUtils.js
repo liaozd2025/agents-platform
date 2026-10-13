@@ -1,18 +1,3 @@
-export const DEFAULT_ALL_AGENT_RESOURCE_KINDS = Object.freeze([
-  'tools',
-  'knowledges',
-  'mcps',
-  'skills',
-  'subagents'
-])
-
-export const MENTION_AGENT_RESOURCE_KINDS = Object.freeze([
-  'knowledges',
-  'mcps',
-  'skills',
-  'subagents'
-])
-
 /** 统一智能体身份字段，按 agent_id、slug、id 顺序选择规范 ID。 */
 export const normalizeAgent = (agent) => {
   const agentId = agent?.agent_id || agent?.slug || agent?.id
@@ -26,11 +11,6 @@ export const normalizeAgentBackendOption = (backend) => ({
   label: backend.name || backend.backend_id,
   value: backend.backend_id
 })
-
-export const isDefaultAllAgentResourceKind = (kind) =>
-  DEFAULT_ALL_AGENT_RESOURCE_KINDS.includes(kind)
-
-export const isMentionAgentResourceKind = (kind) => MENTION_AGENT_RESOURCE_KINDS.includes(kind)
 
 export const getAgentConfigOptions = (item) => (Array.isArray(item?.options) ? item.options : [])
 
@@ -69,15 +49,29 @@ export const mergeVisibleAgentResourceSelection = (current, available, selected)
   return [...retained, ...selected.filter((value) => !retainedKeys.has(String(value)))]
 }
 
-/** 按各资源的空值契约投影可见选择，子智能体空列表表示使用全部。 */
-export const getVisibleAgentResourceSelection = (current, kind, available) => {
-  if (
-    isDefaultAllAgentResourceKind(kind) &&
-    (current === null || (kind === 'subagents' && Array.isArray(current) && current.length === 0))
-  ) {
-    return [...available]
-  }
+/** 全部模式包含后续新增资源，省略字段沿用默认值。 */
+export const isAllAgentResourceSelection = (current, item) =>
+  current === 'all' || (current === undefined && item?.default === 'all')
+
+export const supportsAllAgentResources = (item) => item?.supports_all === true
+
+/** 将配置意图投影为当前可见选择，空列表始终不选择。 */
+export const getVisibleAgentResourceSelection = (current, item, available) => {
+  if (current === undefined) current = item?.default
+  if (isAllAgentResourceSelection(current, item)) return [...available]
   if (!Array.isArray(current)) return []
   const visible = new Set(available.map(String))
   return current.filter((value) => visible.has(String(value)))
+}
+
+/** 预加载候选项受当前 Agent 的 Skill 选择约束。 */
+export const getAgentResourceSelectionOptions = (field, item, config, configItems) => {
+  const options = getAgentConfigOptions(item)
+  if (field !== 'preload_skills') return options
+
+  const availableSkills = getAgentConfigOptions(configItems.skills).map(getAgentConfigOptionValue)
+  const enabled = new Set(
+    getVisibleAgentResourceSelection(config.skills, configItems.skills, availableSkills)
+  )
+  return options.filter((option) => enabled.has(getAgentConfigOptionValue(option)))
 }

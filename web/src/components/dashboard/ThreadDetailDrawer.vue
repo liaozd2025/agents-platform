@@ -52,8 +52,11 @@
           </div>
           <div class="meta-item">
             <span class="meta-label">Token 消耗</span>
-            <span class="meta-value font-semibold text-primary">
-              {{ (detail.total_tokens || 0).toLocaleString() }}
+            <span
+              class="meta-value font-semibold text-primary"
+              title="累计已记录的运行用量；≥ 表示部分运行或模型未返回用量"
+            >
+              {{ formatTokenUsage(detail) }}
             </span>
           </div>
           <div class="meta-item">
@@ -184,6 +187,7 @@
 </template>
 
 <script setup>
+import { formatTokenUsage } from '@/utils/dashboard'
 import { ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { User, Bot, Wrench, Cpu } from '@lucide/vue'

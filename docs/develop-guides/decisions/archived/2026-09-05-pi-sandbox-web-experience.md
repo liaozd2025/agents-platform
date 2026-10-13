@@ -18,7 +18,7 @@ PI 在 Project cwd 工作，通过 `submit_artifact` 登记本 attempt 交付，
 
 正文和累计工具快照合并进入 Redis SSE，不逐 token 重写 PostgreSQL。根 Request 队列拥有引导唯一消费权；Runner 经固定注释输入和 ACK，在完整工具批次后让位。PI 派生镜像修正基础 `/shell/write` 的 PTY 输入行为，启动 inspector 同时拒绝没有该修补的预构建镜像。
 
-provisioner 强制可配置资源与容量，默认按外部模型 API、64GB 单机设置初始预算。满额创建有界等待；策略不匹配拒绝复用，保留活动实例。具体参数与操作由[沙盒配置](../../../agents/sandbox-architecture.md)拥有，运行语义见[沙盒机制](../../../mechanisms/sandbox.md)。
+provisioner 强制可配置资源与容量，默认按外部模型 API、64GB 单机设置初始预算。满额创建有界等待；策略不匹配拒绝复用，保留活动实例。具体参数与操作由[沙盒配置](../../../advanced/sandbox-operations.md)拥有，运行语义见[沙盒机制](../../../mechanisms/sandbox.md)。
 
 ## 替代方案
 

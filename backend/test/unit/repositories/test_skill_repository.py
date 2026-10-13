@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from yuxi.agents.skills.repository import SkillRepository
+from yuxi.repositories.skill_repository import SkillRepository
 
 pytestmark = pytest.mark.unit
 
@@ -33,7 +33,7 @@ async def test_builtin_skill_creation_does_not_resolve_system_as_user(monkeypatc
             "organization_snapshot_inferred": False,
         }
 
-    monkeypatch.setattr("yuxi.agents.skills.repository.get_user_organization_snapshot", snapshot)
+    monkeypatch.setattr("yuxi.repositories.skill_repository.get_user_organization_snapshot", snapshot)
     repository = SkillRepository(_FakeDb())
     skill = await repository.create(
         slug="builtin-test",
@@ -54,7 +54,7 @@ async def test_builtin_skill_creation_does_not_resolve_system_as_user(monkeypatc
 @pytest.mark.asyncio
 async def test_skill_repository_flushes_without_committing(monkeypatch) -> None:
     monkeypatch.setattr(
-        "yuxi.agents.skills.repository.get_user_organization_snapshot",
+        "yuxi.repositories.skill_repository.get_user_organization_snapshot",
         AsyncMock(
             return_value={
                 "organization_id_snapshot": 1,

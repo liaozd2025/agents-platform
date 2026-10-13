@@ -14,7 +14,9 @@
 
 主智能体在运行配置的“子智能体”字段中选择允许调用的对象：
 
-- 未配置或保存空列表时，使用当前用户可见的全部子智能体；
+- 未配置时默认仅选择通用任务（`["general-purpose"]`），运行时仍按当前用户权限过滤；
+- 显式选择 `"all"` 时，每次运行选择当前用户可见的全部子智能体；
+- 保存空列表 `[]` 时不启用子智能体；
 - 显式选择后，只允许调用所选项；
 - 每个子智能体使用自己的 `config_json.context`，不会继承主智能体的模型或工具选择；
 - 用户权限变化后，新运行会重新计算可见范围。
@@ -23,9 +25,9 @@
 
 主智能体通过工具调用子智能体，不要通过 Shell、`curl` 或 HTTP API 间接调用。
 
-### 同步任务：`task`
+### 派发任务：`subagent_start`
 
-`task` 适合主智能体需要立即拿到结果的短任务。它会等待子智能体运行结束，再把最终文本返回给主智能体。
+所有子任务通过 `subagent_start` 派发，立即返回 `run_id`、`thread_id` 和访问链接。需要结果时调用 `subagent_await(run_id)`；即使短任务也先派发再等待。多个独立任务先全部派发，再按需等待。
 
 工具参数：
 
@@ -39,9 +41,9 @@
 
 首次调用不需要 `thread_id`。如果要继续之前的子任务，把上一次结果中的子智能体线程 ID 传回去。
 
-### 异步任务：生命周期工具
+### 查询、等待与取消
 
-长任务或可以并行的任务使用异步工具：
+生命周期工具统一按 Run 工作：
 
 | 工具 | 作用 |
 | --- | --- |
@@ -68,7 +70,7 @@
 
 父子智能体看到的是同一份 Workdir 文件字节，不会通过 checkpoint 复制或合并文件。child thread 只隔离 LangGraph 上下文；它不是文件系统隔离边界。并发写同一路径仍按真实 POSIX 文件结果处理。
 
-子智能体可以使用自己配置的文件工具和知识库范围，但所有资源访问仍以发起用户的后端权限为最终边界。`present_artifacts`、`ask_user_question`、`install_skill` 等不适合子智能体直接使用的工具会被过滤。
+子智能体可以使用自己配置的文件工具和知识库范围，但所有资源访问仍以发起用户的后端权限为最终边界。`present_artifacts`、`ask_user_question`、`install_skill` 等不适合子智能体直接使用的工具会被过滤；禁用状态不只在模型可见性上生效——即使模型显式传回被禁用的工具调用，执行层也会返回绑定原调用的错误结果，不会执行该工具。
 
 ## API 和数据模型
 
@@ -79,10 +81,16 @@
 - 创建或更新 `SubAgentBackend` 时，后端会校验 `is_subagent=true`；
 - 详情、更新和删除复用同一套 Agent 权限检查。
 
-运行时，主智能体的 `subagents` 会先收敛为当前用户可见的允许列表。列表非空时挂载 task middleware；子智能体自身不会挂载这一中间件。
+运行时，主智能体的 `subagents` 会先收敛为当前用户可见的允许列表。列表非空时挂载子智能体 middleware；子智能体自身不会挂载这一中间件。
 
 ## 查看结果
 
-子智能体的 `run_id`、状态、child thread 和产物会显示在主对话的状态面板中。运行中的子智能体通过对应事件流展示进度，完成后从持久化消息读取最终结果。Redis 原始事件只供运行基础设施和前端订阅，不作为主智能体的工具结果。
+父 state 的 `subagent_runs` 保存子任务身份，页面加载时通过数据库父子关系补齐尚未进入 checkpoint 的记录。状态面板独立订阅各子 Run 的事件流，并从 Run 接口读取当前状态；父 graph 在 `subagent_await` 中等待时，先完成的子任务立即更新。切换会话会关闭订阅，重新打开时回读状态；完成后从持久化消息读取最终结果。Redis 原始事件只供运行基础设施和前端订阅，不作为主智能体的工具结果。
+
+前端最多同时订阅三个子 Run，其余活跃子 Run 每两秒查询状态，避免 HTTP/1.1 的同源连接被长连接占满；连接无事件时每十五秒核对持久状态，断线或查询失败显示重连提示。
+
+## 从 task 工具迁移
+
+历史 `task` 消息仍可查看，新模型不再获得该工具。升级前完成或取消旧版本的活跃 Run，并在智能体管理中将已保存的深度研究 Agent 及自定义提示词中的 `task` 指令改为先 `subagent_start`、再 `subagent_await`；已有配置不会被新的默认提示词覆盖。历史 checkpoint 中尚未执行的 `task` 调用会明确返回未知工具错误，不会被自动重放为新的子任务。父 Run 终态仍按原有策略取消活跃后代，派发与等待分离不改变此边界。
 
 实现入口见 [子智能体 middleware](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/agents/middlewares/subagent_task.py)、[SubAgentBackend](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/agents/buildin/subagent/graph.py) 和 [AgentRun 服务](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/services/agent_run_service.py)。

@@ -63,7 +63,7 @@ def test_agent_manage_combines_function_permission_and_resource_scope(monkeypatc
 
     backend = SimpleNamespace(context_schema=BaseContext)
     monkeypatch.setattr(agent_router, "AgentRepository", FakeRepository)
-    monkeypatch.setattr(agent_router.agent_manager, "get_agent", lambda _backend_id: backend)
+    monkeypatch.setattr(agent_router, "get_agent_backend", lambda _backend_id: backend)
 
     app = FastAPI()
     app.include_router(agent_router.agent_router)

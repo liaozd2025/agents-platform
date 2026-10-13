@@ -9,6 +9,7 @@
           :embed-mode="embedMode"
           :embed-display-mode="embedDisplayMode"
           :initial-project-id="routeDraftProjectId"
+          :is-new-conversation="!getRouteThreadId()"
           @thread-change="handleThreadChange"
           @request-fullscreen="requestEmbedFullscreen"
         >
@@ -71,100 +72,98 @@
             </div>
           </template>
           <template #input-actions-left="{ hasActiveThread, isCreatingThread }">
-            <a-dropdown
+            <ActionDropdown
+              upward
               v-if="selectedAgentId"
               v-model:open="agentDropdownOpen"
-              :trigger="['click']"
-              placement="topLeft"
-              overlay-class-name="config-dropdown-overlay"
+              v-model:search="agentSearchKeyword"
+              search-placeholder="搜索智能体"
+              :disabled="isCreatingThread"
             >
+              <template #trigger>
+                <ActionTrigger
+                  :label="currentAgentLabel"
+                  :open="agentDropdownOpen"
+                  :disabled="isCreatingThread"
+                  collapse-label
+                >
+                  <template #icon>
+                    <FallbackAvatar
+                      v-if="currentAgentOption"
+                      :src="currentAgentOption.icon"
+                      :default-src="currentAgentOption.defaultIcon"
+                      :name="currentAgentOption.label"
+                      :seed="currentAgentOption.value || currentAgentOption.label"
+                      kind="agent"
+                      :size="20"
+                      shape="rounded"
+                      alt=""
+                    />
+                  </template>
+                </ActionTrigger>
+              </template>
+              <div v-if="!filteredAgentOptions.length" class="agent-switch-empty" role="status">
+                暂无匹配智能体
+              </div>
               <button
-                ref="agentDropdownTriggerRef"
+                v-for="agent in filteredAgentOptions"
+                :key="agent.value"
                 type="button"
-                class="input-action-btn config-dropdown-trigger"
-                :class="{ disabled: isLoadingConfig || isCreatingThread }"
-                :disabled="isCreatingThread"
-                :aria-label="currentAgentLabel"
+                class="config-dropdown-item"
+                :class="{
+                  selected: agent.value === selectedAgentId,
+                  disabled: hasActiveThread && agent.value !== selectedAgentId
+                }"
+                @click="handleAgentSwitch(agent.value, hasActiveThread, isCreatingThread)"
               >
                 <FallbackAvatar
-                  v-if="currentAgentOption"
-                  class="config-dropdown-compact-icon"
-                  :src="currentAgentOption.icon"
-                  :default-src="currentAgentOption.defaultIcon"
-                  :name="currentAgentOption.label"
-                  :seed="currentAgentOption.value || currentAgentOption.label"
+                  class="config-dropdown-item-icon-image"
+                  :src="agent.icon"
+                  :default-src="agent.defaultIcon"
+                  :name="agent.label"
+                  :seed="agent.value || agent.label"
                   kind="agent"
-                  :size="20"
+                  :size="24"
                   shape="rounded"
-                  alt=""
+                  :alt="`${agent.label}图标`"
                 />
-                <span class="hide-text config-dropdown-text">{{ currentAgentLabel }}</span>
-                <ChevronDown size="15" class="config-dropdown-chevron" />
+                <span class="config-dropdown-item-label" :title="agent.label">{{
+                  agent.label
+                }}</span>
+                <span v-if="agent.isBuiltin" class="config-dropdown-item-badge">内置</span>
+                <Check
+                  v-if="agent.value === selectedAgentId"
+                  :size="14"
+                  class="config-dropdown-item-check"
+                />
               </button>
+              <template #footer>
+                <div v-if="hasActiveThread" class="config-dropdown-hint">
+                  当前对话已绑定智能体，新对话可切换。
+                </div>
 
-              <template #overlay>
-                <div ref="agentDropdownPanelRef" class="config-dropdown-panel">
+                <div class="config-dropdown-divider"></div>
+
+                <div v-if="userStore.hasPermission('agent:manage')" class="config-dropdown-actions">
                   <button
-                    v-for="agent in agentQuickSwitchOptions"
-                    :key="agent.value"
                     type="button"
-                    class="config-dropdown-item"
-                    :class="{
-                      selected: agent.value === selectedAgentId,
-                      disabled: hasActiveThread && agent.value !== selectedAgentId
-                    }"
-                    @click="handleAgentSwitch(agent.value, hasActiveThread, isCreatingThread)"
+                    class="config-dropdown-item action-item"
+                    @click="openAgentManagement"
                   >
-                    <FallbackAvatar
-                      class="config-dropdown-item-icon-image"
-                      :src="agent.icon"
-                      :default-src="agent.defaultIcon"
-                      :name="agent.label"
-                      :seed="agent.value || agent.label"
-                      kind="agent"
-                      :size="24"
-                      shape="rounded"
-                      :alt="`${agent.label}图标`"
-                    />
-                    <span class="config-dropdown-item-label">{{ agent.label }}</span>
-                    <span v-if="agent.isBuiltin" class="config-dropdown-item-badge">内置</span>
-                    <Check
-                      v-if="agent.value === selectedAgentId"
-                      :size="14"
-                      class="config-dropdown-item-check"
-                    />
+                    <Settings2 :size="15" class="config-dropdown-item-icon" />
+                    <span class="config-dropdown-item-label">编辑智能体</span>
                   </button>
-
-                  <div v-if="hasActiveThread" class="config-dropdown-hint">
-                    当前对话已绑定智能体，新对话可切换。
-                  </div>
-
-                  <div class="config-dropdown-divider"></div>
-
-                  <div
-                    v-if="userStore.hasPermission('agent:manage')"
-                    class="config-dropdown-actions"
+                  <button
+                    type="button"
+                    class="config-dropdown-item action-item"
+                    @click="openCreateAgent"
                   >
-                    <button
-                      type="button"
-                      class="config-dropdown-item action-item"
-                      @click="openAgentManagement"
-                    >
-                      <Settings2 :size="15" class="config-dropdown-item-icon" />
-                      <span class="config-dropdown-item-label">编辑智能体</span>
-                    </button>
-                    <button
-                      type="button"
-                      class="config-dropdown-item action-item"
-                      @click="openCreateAgent"
-                    >
-                      <Plus :size="15" class="config-dropdown-item-icon" />
-                      <span class="config-dropdown-item-label">新建智能体</span>
-                    </button>
-                  </div>
+                    <Plus :size="15" class="config-dropdown-item-icon" />
+                    <span class="config-dropdown-item-label">新建智能体</span>
+                  </button>
                 </div>
               </template>
-            </a-dropdown>
+            </ActionDropdown>
           </template>
         </AgentChatComponent>
       </div>
@@ -202,7 +201,6 @@ import { computed, inject, nextTick, ref, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
 import {
   Settings2,
-  ChevronDown,
   Check,
   History,
   Maximize2,
@@ -214,7 +212,8 @@ import {
 import { useRoute, useRouter } from 'vue-router'
 import { agentApi } from '@/apis/agent_api'
 import { useEmbedContext } from '@/composables/useEmbedMode'
-import { useOutsidePointerdown } from '@/composables/useOutsidePointerdown'
+import ActionDropdown from '@/components/common/ActionDropdown.vue'
+import ActionTrigger from '@/components/common/ActionTrigger.vue'
 import AgentChatComponent from '@/components/AgentChatComponent.vue'
 import AgentEditModal from '@/components/model-management/AgentEditModal.vue'
 import ConversationNavSection from '@/components/ConversationNavSection.vue'
@@ -428,9 +427,15 @@ const currentAgentLabel = computed(() => {
   return currentAgentOption.value?.label || '智能体'
 })
 
+const agentSearchKeyword = ref('')
+const filteredAgentOptions = computed(() => {
+  const keyword = agentSearchKeyword.value.trim().toLocaleLowerCase()
+  return agentQuickSwitchOptions.value.filter((agent) =>
+    agent.label.toLocaleLowerCase().includes(keyword)
+  )
+})
+
 const agentDropdownOpen = ref(false)
-const agentDropdownTriggerRef = ref(null)
-const agentDropdownPanelRef = ref(null)
 const agentBackendOptions = ref([])
 const agentBackendsLoaded = ref(false)
 
@@ -500,10 +505,16 @@ const handleCreateNewChat = async () => {
   await router.replace({ name: 'EmbedAgent' })
 }
 
-useOutsidePointerdown(agentDropdownOpen, [agentDropdownTriggerRef, agentDropdownPanelRef])
 </script>
 
 <style lang="less" scoped>
+.agent-switch-empty {
+  padding: 20px 8px;
+  color: var(--gray-500);
+  text-align: center;
+  font-size: 13px;
+}
+
 .agent-view {
   display: flex;
   flex-direction: column;

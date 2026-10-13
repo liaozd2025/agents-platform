@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from yuxi.agents.skills.repository import SkillRepository
+from yuxi.repositories.skill_repository import SkillRepository
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.conversation_repository import ConversationRepository
 from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
@@ -669,3 +669,73 @@ async def test_resource_stats_separate_creation_snapshot_from_shared_visibility(
     assert a_after["knowledge_bases"]["contains_inferred_data"] is True
     assert a_knowledge.json()["total_databases"] == a_before["knowledge_bases"]["shared_visible_count"] + 1
     assert b_knowledge.json()["total_databases"] == b_before["knowledge_bases"]["shared_visible_count"] + 2
+
+
+async def test_dashboard_http_reads_run_token_totals(test_client, admin_headers):
+    """真实 HTTP 返回 PostgreSQL 同会话 Run 用量和缺失标记。"""
+    from sqlalchemy import select
+    from yuxi.storage.postgres.models_business import AgentRun, ConversationStats
+
+    default_agent = await test_client.get("/api/agent/default", headers=admin_headers)
+    assert default_agent.status_code == 200
+    agent = default_agent.json()["agent"]
+    agent_id = str(agent.get("slug") or agent["agent_id"])
+    marker = f"dashboard-usage-{uuid.uuid4().hex[:10]}"
+    response = await test_client.post(
+        "/api/chat/thread",
+        headers=admin_headers,
+        json={
+            "agent_id": agent_id,
+            "title": make_test_conversation_title(marker),
+            "metadata": make_test_conversation_metadata(marker),
+        },
+    )
+    assert response.status_code == 200
+    thread_id = str(response.json().get("thread_id") or response.json()["id"])
+    engine = create_async_engine(os.environ["POSTGRES_URL"])
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as db:
+            conversation = (
+                await db.execute(select(Conversation).where(Conversation.thread_id == thread_id))
+            ).scalar_one()
+            await db.execute(
+                update(ConversationStats)
+                .where(ConversationStats.conversation_id == conversation.id)
+                .values(total_tokens=9999)
+            )
+            for index, usage in enumerate(
+                [
+                    {"total": {"total_tokens": 120}, "complete": True, "usage_reported_call_count": 1},
+                    {"total": {"total_tokens": 80}, "complete": True, "usage_reported_call_count": 1},
+                ]
+            ):
+                db.add(
+                    AgentRun(
+                        id=f"{marker}-{index}",
+                        request_id=f"{marker}-request-{index}",
+                        conversation_id=conversation.id,
+                        conversation_thread_id=thread_id,
+                        runtime_scope_id=thread_id,
+                        uid=conversation.uid,
+                        agent_slug=agent_id,
+                        status="completed",
+                        token_usage=usage,
+                    )
+                )
+            await db.commit()
+            for expected, complete in [(200, True), (120, False), (None, False)]:
+                listing = await test_client.get(
+                    "/api/dashboard/conversations", headers=admin_headers, params={"search": marker}
+                )
+                detail = await test_client.get(f"/api/dashboard/conversations/{thread_id}", headers=admin_headers)
+                assert listing.status_code == detail.status_code == 200
+                item = listing.json()["items"][0]
+                assert item["status"] == "active"
+                assert item["total_tokens"] == detail.json()["total_tokens"] == expected
+                assert item["token_usage_complete"] is complete
+                assert detail.json()["token_usage_complete"] is complete
+                run_id = f"{marker}-{1 if expected == 200 else 0}"
+                await db.execute(update(AgentRun).where(AgentRun.id == run_id).values(token_usage={"available": False}))
+                await db.commit()
+    finally:
+        await engine.dispose()

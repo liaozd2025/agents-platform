@@ -46,6 +46,13 @@ x-api-worker-env: &api-worker-env
   NO_PROXY: localhost,127.0.0.1,milvus,graph,minio,etcd,mineru,paddlex,sandbox-provisioner,api.siliconflow.cn
   no_proxy: localhost,127.0.0.1,milvus,graph,minio,etcd,mineru,paddlex,sandbox-provisioner,api.siliconflow.cn
 
+# 长驻服务的容器日志轮转上界，防止 docker json.log 无限增长占满磁盘。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   api:
     build:
@@ -78,7 +85,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env
+      - ${YUXI_ENV_FILE:-.env}
     # region api_envs
     environment:
       <<: *api-worker-env
@@ -143,7 +150,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env
+      - ${YUXI_ENV_FILE:-.env}
     environment:
       <<: *api-worker-env
       YUXI_RUNTIME_DIR: /app/runtime/worker
@@ -159,7 +166,7 @@ services:
     command: []
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "uv run --no-sync --no-dev arq --check server.worker_main.WorkerSettings"]
+      test: ["CMD", "python", "-m", "yuxi.services.worker_health"]
       interval: 10s
       timeout: 10s
       retries: 6
@@ -200,7 +207,7 @@ services:
     networks:
       - app-network
     env_file:
-      - .env
+      - ${YUXI_ENV_FILE:-.env}
     environment:
       <<: *api-worker-env
       YUXI_RUNTIME_DIR: /app/runtime/storage-migrator
@@ -225,12 +232,14 @@ services:
         source: ${YUXI_STATE_DIR:-./docker/volumes}/yuxi/skill-projections
         target: /app/skill-projections
       - ./docker/sandbox_provisioner/app.py:/app/app.py:ro
-      - ./docker/sandbox_provisioner/sandbox.env:/app/sandbox.env:ro
+      - ${SANDBOX_ENV_FILE:-./docker/sandbox_provisioner/sandbox.env}:/app/sandbox.env:ro
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "127.0.0.1:${YUXI_SANDBOX_PORT:-8002}:8002"
     networks:
-      - app-network
+      app-network:
+        # 动态接入沙盒网络时保留管理端口的默认路由。
+        gw_priority: 1
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -322,7 +331,7 @@ services:
         target: /data
       - type: bind
         source: ${YUXI_STATE_DIR:-./docker/volumes}/neo4j/logs
-        target: /var/lib/neo4j/logs
+        target: /logs
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u ${NEO4J_USERNAME:-neo4j} -p ${NEO4J_PASSWORD:-0123456789} 'RETURN 1;' >/dev/null || exit 1"]
       interval: 20s
@@ -341,6 +350,7 @@ services:
 
   etcd:
     image: quay.io/coreos/etcd:v3.5.5
+    logging: *default-logging
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
       - ETCD_AUTO_COMPACTION_RETENTION=1000
@@ -362,18 +372,21 @@ services:
     restart: unless-stopped
 
   minio:
-    image: quay.io/minio/minio:RELEASE.2023-03-20T20-16-18Z@sha256:6d770d7f255cda1f18d841ffc4365cb7e0d237f6af6a15fcdb587480cd7c3b93
+    build:
+      context: ./docker/minio
+      dockerfile: Dockerfile
+    image: ${COMPOSE_PROJECT_NAME:-yuxi}-minio:RELEASE.2023-03-20T20-16-18Z
     environment:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
     volumes:
       - type: bind
         source: ${YUXI_STATE_DIR:-./docker/volumes}/milvus/minio
-        target: /minio_data
+        target: /data
       - type: bind
         source: ${YUXI_STATE_DIR:-./docker/volumes}/milvus/minio_config
         target: /root/.minio
-    command: minio server /minio_data --address 0.0.0.0:9000 --console-address 0.0.0.0:9001
+    command: minio server /data --address 0.0.0.0:9000 --console-address 0.0.0.0:9001
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 60s
@@ -390,6 +403,12 @@ services:
   milvus:
     image: milvusdb/milvus:v2.5.6
     command: ["milvus", "run", "standalone"]
+    # v2.5.6 不读取 MILVUS_LOG_LEVEL；日志级别只能由镜像内 milvus.yaml 拥有，
+    # 这里只对 stdout/stderr 轮转封顶。内存随知识库数据量线性增长，不设 mem_limit：
+    # 硬上界终会被合法增长击穿，击穿模式是 OOM→重启→重加载→再 OOM 的循环。
+    # cpus 上限同时让内置 maxprocs 按 cgroup quota 收敛 GOMAXPROCS。
+    logging: *default-logging
+    cpus: ${YUXI_MILVUS_CPUS:-2}
     security_opt:
       - seccomp:unconfined
     environment:
@@ -397,7 +416,6 @@ services:
       MINIO_ADDRESS: minio:9000
       MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
-      MILVUS_LOG_LEVEL: error
     volumes:
       - type: bind
         source: ${YUXI_STATE_DIR:-./docker/volumes}/milvus/milvus
@@ -471,7 +489,7 @@ services:
     profiles:
       - all
     env_file:
-      - .env
+      - ${YUXI_ENV_FILE:-.env}
     ports:
       - "127.0.0.1:${YUXI_MINERU_PORT:-30001}:30001"
     environment:

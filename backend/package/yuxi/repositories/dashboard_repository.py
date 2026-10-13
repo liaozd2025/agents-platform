@@ -21,7 +21,7 @@ from yuxi.storage.postgres.models_business import (
     ToolCall,
     User,
 )
-from yuxi.utils.datetime_utils import UTC, ensure_shanghai, shanghai_now, utc_now
+from yuxi.utils.datetime_utils import UTC, ensure_shanghai, format_utc_datetime, shanghai_now, utc_now
 
 
 def _latest_run_status_query() -> Any:
@@ -64,6 +64,46 @@ class DashboardRepository:
         if bind is not None and bind.dialect.name == "sqlite":
             return func.date(column, "+8 hours")
         return func.date(column + text("INTERVAL '8 hours'"))
+
+    @staticmethod
+    def _conversation_token_totals(conversation_ids: list[int] | None = None):
+        """按会话汇总 Run 实测用量，保留缺失标记和无 Run 历史汇总。"""
+        reported = AgentRun.token_usage["usage_reported_call_count"].as_integer() > 0
+        complete = AgentRun.token_usage["complete"].as_boolean().is_(True)
+        value = AgentRun.token_usage["total"]["total_tokens"].as_integer()
+        run_totals = (
+            select(
+                AgentRun.conversation_id,
+                func.sum(case((reported | complete, value), else_=None)).label("total_tokens"),
+                func.min(case((complete & value.isnot(None), 1), else_=0)).label("complete"),
+            )
+            .where(AgentRun.conversation_id.in_(conversation_ids) if conversation_ids is not None else True)
+            .group_by(AgentRun.conversation_id)
+            .subquery()
+        )
+        has_runs = run_totals.c.conversation_id.isnot(None)
+        legacy_tokens = func.nullif(ConversationStats.total_tokens, 0)
+        return (
+            select(
+                Conversation.id.label("conversation_id"),
+                case((has_runs, run_totals.c.total_tokens), else_=legacy_tokens).label("total_tokens"),
+                case((has_runs, run_totals.c.complete == 1), else_=legacy_tokens.isnot(None)).label("complete"),
+            )
+            .where(Conversation.id.in_(conversation_ids) if conversation_ids is not None else True)
+            .outerjoin(run_totals, Conversation.id == run_totals.c.conversation_id)
+            .outerjoin(ConversationStats, Conversation.id == ConversationStats.conversation_id)
+            .subquery()
+        )
+
+    async def get_conversation_token_usage(self, conversation_id: int) -> dict[str, Any]:
+        """读取与会话列表一致的实测 Token 汇总。"""
+        totals = self._conversation_token_totals([conversation_id])
+        row = (
+            await self.db_session.execute(
+                select(totals.c.total_tokens, totals.c.complete).where(totals.c.conversation_id == conversation_id)
+            )
+        ).one()
+        return {"total_tokens": row.total_tokens, "token_usage_complete": bool(row.complete)}
 
     async def list_conversations(
         self,
@@ -119,6 +159,10 @@ class DashboardRepository:
             )
         ).all()
 
+        token_totals = self._conversation_token_totals([conversation.id for conversation, _, _, _ in rows])
+        usage_by_conversation = {
+            row.conversation_id: row for row in (await self.db_session.execute(select(token_totals))).all()
+        }
         agent_slugs = {conversation.agent_id for conversation, _, _, _ in rows if conversation.agent_id}
         agents_by_slug: dict[str, Agent] = {}
         if agent_slugs:
@@ -127,6 +171,7 @@ class DashboardRepository:
 
         items = []
         for conversation, stats, user, run_status in rows:
+            usage = usage_by_conversation[conversation.id]
             agent = agents_by_slug.get(conversation.agent_id)
             items.append(
                 {
@@ -145,9 +190,10 @@ class DashboardRepository:
                     "run_status": run_status,
                     "is_pinned": bool(conversation.is_pinned),
                     "message_count": stats.message_count if stats else 0,
-                    "total_tokens": stats.total_tokens if stats else 0,
-                    "created_at": conversation.created_at.isoformat() if conversation.created_at else "",
-                    "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else "",
+                    "total_tokens": usage.total_tokens,
+                    "token_usage_complete": bool(usage.complete),
+                    "created_at": format_utc_datetime(conversation.created_at) or "",
+                    "updated_at": format_utc_datetime(conversation.updated_at) or "",
                 }
             )
         return {
@@ -818,10 +864,13 @@ class DashboardRepository:
         )
         message_summary_row = message_summary_result.one()
 
+        token_totals = self._conversation_token_totals()
         tokens_query = (
-            select(func.coalesce(func.sum(ConversationStats.total_tokens), 0))
-            .select_from(ConversationStats)
-            .join(Conversation, ConversationStats.conversation_id == Conversation.id)
+            select(func.coalesce(func.sum(token_totals.c.total_tokens), 0))
+            .select_from(token_totals)
+            .join(Conversation, token_totals.c.conversation_id == Conversation.id)
+            .join(User, Conversation.uid == User.uid)
+            .join(Agent, Conversation.agent_id == Agent.slug)
             .where(*conversation_filters)
         )
         total_tokens = int((await self.db_session.execute(tokens_query)).scalar() or 0)
@@ -946,9 +995,10 @@ class DashboardRepository:
                 Conversation.agent_id,
                 func.count(Conversation.id).label("thread_count"),
                 func.coalesce(func.sum(ConversationStats.message_count), 0).label("message_count"),
-                func.coalesce(func.sum(ConversationStats.total_tokens), 0).label("token_count"),
+                func.coalesce(func.sum(token_totals.c.total_tokens), 0).label("token_count"),
             )
             .select_from(Conversation)
+            .join(token_totals, Conversation.id == token_totals.c.conversation_id)
             .outerjoin(ConversationStats, Conversation.id == ConversationStats.conversation_id)
             .where(*conversation_filters)
             .group_by(Conversation.agent_id)
@@ -1004,7 +1054,7 @@ class DashboardRepository:
                 "avatar": normalize_public_minio_url(row.avatar) if row.avatar else None,
                 "thread_count": int(row.thread_count or 0),
                 "message_count": int(row.message_count or 0),
-                "last_active_at": row.last_active_at.isoformat() if row.last_active_at else None,
+                "last_active_at": format_utc_datetime(row.last_active_at),
             }
             for row in user_rows
         ]
