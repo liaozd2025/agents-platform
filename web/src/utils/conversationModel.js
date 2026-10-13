@@ -74,3 +74,59 @@ export const writeChatModelPreference = (spec, storage) => {
  */
 export const resolveConversationModel = ({ selectedModel, conversationModel, savedModel }) =>
   selectedModel || conversationModel || savedModel || ''
+
+/**
+ * 从模型 spec 中取出用于展示的模型名。
+ * spec 形如 `供应商:模型名`（模型名本身可含 `/`，如 `siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash`），
+ * 只切掉第一个冒号及其之前的供应商段，保留模型名中的斜杠。
+ * @param {string} spec 模型 spec
+ * @returns {string} 模型名；无冒号时原样返回
+ */
+export const extractModelName = (spec) => {
+  if (!spec) return ''
+
+  const separatorIndex = spec.indexOf(':')
+  return separatorIndex >= 0 ? spec.slice(separatorIndex + 1) : spec
+}
+
+/**
+ * 收集模型列表接口返回的全部 spec。
+ * @param {Object} v2Models 以供应商 id 为键、值为 { models: [...] } 的对象
+ * @returns {string[]} 全部模型 spec；结构异常时返回空数组
+ */
+const collectAvailableSpecs = (v2Models) => {
+  if (!v2Models || typeof v2Models !== 'object') return []
+
+  return Object.values(v2Models).flatMap((providerData) => {
+    const models = providerData && providerData.models
+    return Array.isArray(models) ? models.map((model) => model && model.spec).filter(Boolean) : []
+  })
+}
+
+/**
+ * 判断某个模型 spec 是否仍出现在模型列表接口的返回中。
+ *
+ * 用于识别「模型已被供应商下架」：此时页面仍会展示该模型名，但后端会在发送时
+ * 以 422 拒绝请求，必须提前发现而不是让用户撞上错误。
+ *
+ * @param {Object} v2Models 以供应商 id 为键、值为 { models: [...] } 的对象
+ * @param {string} spec 待校验的模型 spec
+ * @returns {boolean} spec 非空且仍在可用列表中返回 true；spec 为空返回 false
+ */
+export const isModelSpecAvailable = (v2Models, spec) => {
+  if (!spec) return false
+
+  return collectAvailableSpecs(v2Models).includes(spec)
+}
+
+/**
+ * 选择模型失效时的兜底 spec。
+ *
+ * 优先级：列表首项（与 ModelSelectorComponent 的兜底首项语义保持一致）→ 空字符串。
+ * 返回空字符串表示列表里没有任何可用模型，调用方应保持原状而不是替换成非法值。
+ *
+ * @param {Object} v2Models 以供应商 id 为键、值为 { models: [...] } 的对象
+ * @returns {string} 兜底模型 spec；无可用模型时为空字符串
+ */
+export const resolveFallbackModelSpec = (v2Models) =>
+  collectAvailableSpecs(v2Models)[0] || ''

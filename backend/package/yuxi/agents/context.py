@@ -5,6 +5,8 @@ import uuid
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Any, Literal, get_origin, get_type_hints
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from yuxi.agents.tool_approval import DEFAULT_TOOL_APPROVAL_MODE
 from yuxi.config.options import system_options
 from yuxi.utils.logging_config import logger
@@ -558,8 +560,12 @@ async def prepare_agent_runtime_context(
             logger.exception("用户资料同步失败，沿用工作区内容：uid={}，thread_id={}", uid, context.thread_id)
         context.system_prompt_is_custom = is_custom_system_prompt(context.system_prompt)
         await _append_workspace_agent_prompt(context)
-        if not str(getattr(context, "model", "") or "").strip():
-            setattr(context, "model", (await system_options.get(db))["default_model"])
+        if not _is_model_spec_resolvable(getattr(context, "model", "")):
+            if context.run_id and str(context.model or "").strip():
+                raise ValueError(f"运行绑定的聊天模型已不可用: {context.model}")
+            fallback_spec = await resolve_available_default_chat_model(db)
+            if fallback_spec:
+                setattr(context, "model", fallback_spec)
         user = await UserRepository().get_by_uid_with_db(db, uid)
         if user is None:
             for field_name in resource_fields:
@@ -589,6 +595,49 @@ async def prepare_agent_runtime_context(
     context._runtime_prepared = True
 
     return context
+
+
+def _is_model_spec_resolvable(model_spec: Any) -> bool:
+    """判断模型 spec 当前是否还能被解析为可用的对话模型。
+
+    空值与「供应商已下架」都视为不可解析：模型下架后模型缓存中不再有该 spec，
+    继续沿用会让下游 load_chat_model 抛 Unknown model spec。
+    非 chat 类型（embedding / rerank）同样视为不可解析——放进对话上下文没有意义。
+    """
+    spec = str(model_spec or "").strip()
+    if not spec:
+        return False
+
+    from yuxi.models.providers.cache import model_cache
+
+    info = model_cache.get_model_info(spec)
+    return info is not None and getattr(info, "model_type", None) == "chat"
+
+
+async def resolve_available_default_chat_model(db: AsyncSession | None = None) -> str:
+    """取一个当前确实可用的对话模型 spec。
+
+    优先使用系统配置的默认对话模型；当它本身已被供应商下架时，退回到可用列表首项，
+    保证运行时上下文总能拿到一个能解析的模型。全部不可用时返回空字符串，由调用方决定
+    失败方式（不静默塞入非法值）。
+    """
+    from yuxi.models.providers.cache import model_cache
+
+    configured = str((await system_options.get(db))["default_model"] or "").strip()
+    if _is_model_spec_resolvable(configured):
+        return configured
+
+    if configured:
+        logger.warning(f"系统默认对话模型 {configured} 已不可用，回落到可用模型列表首项")
+
+    for info in model_cache.get_all_specs("chat"):
+        spec = getattr(info, "spec", "") or ""
+        if spec:
+            logger.warning(f"改用可用对话模型 {spec} 作为运行时默认模型")
+            return spec
+
+    logger.error("没有可用的对话模型，运行时上下文将缺少模型设置")
+    return ""
 
 
 def validate_resource_selection(field_name: str, value: Any) -> ResourceSelection:

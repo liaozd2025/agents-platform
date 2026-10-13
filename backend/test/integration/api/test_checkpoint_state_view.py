@@ -25,7 +25,7 @@ class DisplayState(TypedDict):
 
 
 async def test_state_view_reads_postgres_snapshot_and_rejects_other_users(test_client, admin_headers, standard_user):
-    """无模型配置也可读快照，未知、删除和其他用户线程均拒绝读取。"""
+    """绑定已下架模型也可读快照，未知、删除和其他用户线程均拒绝读取。"""
     slug = f"pytest-checkpoint-{uuid.uuid4().hex[:8]}"
     created = await test_client.post(
         "/api/agent",
@@ -42,7 +42,8 @@ async def test_state_view_reads_postgres_snapshot_and_rejects_other_users(test_c
                 json={
                     "agent_id": slug,
                     "title": make_test_conversation_title("checkpoint"),
-                    "metadata": make_test_conversation_metadata("checkpoint"),
+                    "metadata": make_test_conversation_metadata("checkpoint")
+                    | {"model_spec": "removed-provider:removed-model"},
                 },
                 headers=admin_headers,
             )
@@ -74,9 +75,10 @@ async def test_state_view_reads_postgres_snapshot_and_rejects_other_users(test_c
 
             response = await test_client.get(url, params={"include_messages": "true"}, headers=admin_headers)
             assert response.status_code == 200, response.text
+            # 子 Run 面板以持久 Run 为准，不能采用 checkpoint 中的旧列表。
             assert response.json()["agent_state"] == {
                 key: value for key, value in payload.items() if key != "messages"
-            } | {"files": {}}
+            } | {"files": {}, "subagent_runs": []}, response.json()
             assert response.json()["messages"][0]["content"] == "persisted checkpoint message"
             assert "interrupt" not in response.json()
             assert (await test_client.get(url)).status_code == 401

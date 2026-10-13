@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createServer } from 'vite'
-import { createSSRApp, h } from 'vue'
+import { createRenderer, createSSRApp, h, nextTick, reactive, ssrContextKey } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 
 /** 提供可控的慢请求，验证真实组件的可观察状态。 */
@@ -130,6 +130,75 @@ test('模型弹层的加载、关闭和失败重试', async (t) => {
         disabled.handleOpenChange(true)
         assert.equal(disabled.dropdownOpen.value, false)
         assert.equal(disabled.loadingV2Models.value, false)
+      }
+    })
+    await t.test('异步会话模型、跨会话及再次打开同一会话均恢复，重复目录不重复通知', async () => {
+      const props = reactive({
+        disabled: false,
+        size: 'nano',
+        model_spec: 'fixture:chat',
+        modelType: 'chat',
+        selectionScope: 'A',
+        fallbackWhenUnavailable: true
+      })
+      const events = []
+      let component
+      const renderer = createRenderer({
+        createElement: () => ({}),
+        createText: () => ({}),
+        createComment: () => ({}),
+        insert() {},
+        remove() {},
+        setText() {},
+        setElementText() {},
+        patchProp() {},
+        parentNode: () => null,
+        nextSibling: () => null
+      })
+      request = deferred()
+      globalThis.__modelSelectorCatalog = deferred()
+      const app = renderer.createApp({
+        setup() {
+          component = ModelSelector.setup(props, {
+            expose() {},
+            emit: (...event) => events.push(event)
+          })
+          return () => h('div')
+        }
+      })
+      app.provide(ssrContextKey, { modules: new Set() })
+      app.mount({})
+      try {
+        request.resolve({ success: true, data: models })
+        await component.fetchV2Models()
+        assert.deepEqual(events, [])
+        props.model_spec = 'fixture:removed'
+        await nextTick()
+        assert.deepEqual(events, [
+          [
+            'select-model',
+            'fixture:chat',
+            { autoSelected: true, unavailableSpec: 'fixture:removed' }
+          ]
+        ])
+        request = deferred()
+        const refreshed = component.fetchV2Models()
+        request.resolve({ success: true, data: models })
+        await refreshed
+        assert.equal(events.length, 1)
+        props.selectionScope = 'B'
+        await nextTick()
+        assert.equal(events.length, 2)
+        props.selectionScope = 'A'
+        await nextTick()
+        assert.equal(events.length, 3)
+        props.model_spec = 'fixture:chat'
+        await nextTick()
+        props.model_spec = 'fixture:removed'
+        await nextTick()
+        assert.equal(events.length, 4)
+      } finally {
+        app.unmount()
       }
     })
     await t.test('表单包装器保留 update:value 与 change 的选择结果', async () => {

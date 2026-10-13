@@ -184,6 +184,11 @@ import { Eye, RefreshCw, X, Check } from '@lucide/vue'
 import { useModelStatus } from '@/composables/useModelStatus'
 import { useUserStore } from '@/stores/user'
 import { loadModelMetadataCatalog, resolveModelDisplayMetadata } from '@/utils/modelMetadata'
+import {
+  extractModelName,
+  isModelSpecAvailable,
+  resolveFallbackModelSpec
+} from '@/utils/conversationModel'
 
 const props = defineProps({
   modelType: {
@@ -221,6 +226,22 @@ const props = defineProps({
   autoSelectFirst: {
     type: Boolean,
     default: false
+  },
+  // 当前模型已从供应商下架时，是否自动改选为列表首项。
+  // 与 autoSelectFirst 分开控制：autoSelectFirst 表达「没有选择时兜底首项」，
+  // 而本项表达「已有选择但该选择已失效时兜底首项」。聊天页两者都需要，
+  // 设置页两者都不需要（失效配置必须原样展示，管理员才能看出问题）。
+  fallbackWhenUnavailable: {
+    type: Boolean,
+    default: false
+  },
+  // 当前选择的会话维度标识（如 thread id）。
+  // 切换会话时 model_spec 可能完全相同（两个会话都绑同一个已下架模型），
+  // 仅靠 model_spec 无法区分「换了个会话」与「列表重复拉取」，
+  // 因此失效回退的幂等去重必须以此为范围，否则第二个失效会话不会回退。
+  selectionScope: {
+    type: String,
+    default: ''
   }
 })
 
@@ -239,6 +260,9 @@ const modelMetadataBySpec = ref({})
 const modelMetadataNoticeDismissed = ref(
   localStorage.getItem(MODEL_METADATA_NOTICE_DISMISSED_KEY) === 'true'
 )
+// 模型列表是否已成功拉取过至少一次。用于区分「列表还没加载」与「模型确实不在列表里」，
+// 前者不能判定为失效，否则首屏竞态会把用户刚选的模型误换成别的模型。
+const hasFetchedV2Models = ref(false)
 let fetchV2ModelsPromise = null
 
 const dismissModelMetadataNotice = () => {
@@ -298,6 +322,8 @@ const fetchV2Models = async () => {
       const response = await modelProviderApi.getV2Models(props.modelType)
       if (!response.success) throw new Error('模型目录请求失败')
       v2Models.value = response.data || {}
+      hasFetchedV2Models.value = true
+      applyModelListSideEffects()
       if (props.modelType === 'embedding') {
         const models = Object.values(v2Models.value).flatMap((provider) => provider.models || [])
         void checkV2Statuses(models)
@@ -336,6 +362,18 @@ const buildModelMetadataBySpec = (modelsByProvider, providers) => {
 
 const getModelInfo = (model) => modelMetadataBySpec.value[model.spec] || {}
 
+// 只有目录成功加载后，才能根据当前选择判断模型是否下架。
+const isCurrentModelUnavailable = () => {
+  if (!props.model_spec) return false
+  // 只用 hasFetchedV2Models 作为「列表已就绪」的唯一判据，不能再加请求进行中的标记兜底：
+  // 判定发生在 fetchV2Models 的成功回调里，而该标记要到 finally 块才复位，
+  // 回调执行期间它仍为真，会把本该成立的失效判定挡掉（实测表现为回退静默不触发）。
+  // 列表加载失败时 hasFetchedV2Models 不会置位，因此网络抖动不会被误判成模型下架。
+  if (!hasFetchedV2Models.value) return false
+
+  return !isModelSpecAvailable(v2Models.value, props.model_spec)
+}
+
 // 聊天输入框没有任何默认模型时，使用接口返回的第一个可用模型。
 // 该行为由调用方显式开启，避免影响设置页等需要用户手动选择的场景。
 // 兜底选择带 autoSelected 标记：调用方据此区分「用户手动选择」与「系统兜底」，
@@ -355,10 +393,63 @@ const selectFirstModelIfNeeded = () => {
   emit('select-model', firstModel.spec, { autoSelected: true })
 }
 
-const initializeDefaultModel = async () => {
-  if (!props.autoSelectFirst || props.disabled) return
-  await fetchV2Models()
+// 已经为「某个失效 spec」触发过回退的记录：防止列表重复拉取（如刷新缓存、展开下拉）
+// 导致对同一个失效模型反复 emit，把用户的选择来回抖动。
+//
+// 键必须是「会话范围 + 失效 spec」而不是只用 spec：切换会话时组件实例会被复用，
+// 若只按 spec 去重，先前会话已回退过 alibaba-cn:qwen3.7-max 后，切到另一个同样绑定
+// 该失效模型的会话会被误判为「已处理」而不再回退，界面重新显示已下架的模型名。
+const recoveredUnavailableSelections = new Set()
+
+// 选中的模型已被供应商下架时的自动回退。
+//
+// 背景：模型从供应商 enabled_models 移除后，/models/v2 不再返回它，但本地偏好与会话
+// metadata.model_spec 仍指向该 spec，页面会照常显示模型名，直到发送时被后端以 422 拒绝。
+// 这里在拿到权威列表后立刻改选可用模型并带 unavailable 标记，让调用方能提示用户。
+//
+// 仅对显式开启 fallbackWhenUnavailable 的调用方生效（当前只有聊天输入框）：
+// 设置页必须原样展示管理员配置的模型，否则失效配置会被静默改写，管理员反而看不出
+// 自己配的模型已下架。autoSelected 标记同时避免把兜底结果固化成用户偏好。
+const recoverFromUnavailableModel = () => {
+  if (!props.fallbackWhenUnavailable || props.disabled) return
+  if (!isCurrentModelUnavailable()) return
+
+  const unavailableSpec = props.model_spec
+  // 幂等键带上会话范围：同一个失效模型在不同会话上要各回退一次，
+  // 只有在同一会话内重复拉列表才跳过。
+  const scope = `${props.selectionScope}::${unavailableSpec}`
+  if (recoveredUnavailableSelections.has(scope)) return
+
+  const fallbackSpec = resolveFallbackModelSpec(v2Models.value)
+  if (!fallbackSpec) {
+    // 列表里一个可用模型都没有：保持原状，避免替换成非法值
+    console.warn(`[模型选择] 模型 ${unavailableSpec} 已不可用，且没有可用模型可回退`)
+    return
+  }
+
+  recoveredUnavailableSelections.add(scope)
+  console.warn(`[模型选择] 模型 ${unavailableSpec} 已不可用，自动切换到 ${fallbackSpec}`)
+  emit('select-model', fallbackSpec, { autoSelected: true, unavailableSpec })
+}
+
+// 列表拉取成功后统一处理两件事：空选择兜底首项、失效模型回退。
+// 放在 fetchV2Models 的成功回调里，因为这是唯一同时持有「当前 spec」与「权威可用列表」的位置。
+const applyModelListSideEffects = () => {
   selectFirstModelIfNeeded()
+  recoverFromUnavailableModel()
+}
+
+const initializeDefaultModel = async () => {
+  // 两个开关任一开启都需要拉取列表：
+  // - autoSelectFirst：没有选择时要兜底首项；
+  // - fallbackWhenUnavailable：已有选择可能已失效，需要权威列表才能判定。
+  // 注意聊天页传的是 auto-select-first="!currentModelSpec"，偏好失效时该值为 false，
+  // 若只认 autoSelectFirst 就永远拉不到列表，失效回退形同虚设。
+  if (props.disabled) return
+  if (!props.autoSelectFirst && !props.fallbackWhenUnavailable) return
+  // 副作用（空选择兜底 + 失效模型回退）已在 fetchV2Models 成功回调内统一触发，
+  // 此处不重复调用，避免并发去重导致的二次 emit。
+  await fetchV2Models()
 }
 
 /** 先展开再加载，关闭后完成请求不会重新打开弹层。 */
@@ -398,6 +489,16 @@ watch(
   }
 )
 
+// 线程 metadata 可能晚于会话 id 到达；两者变化均重新校验当前选择。
+watch(
+  () => [props.selectionScope, props.model_spec],
+  () => {
+    recoveredUnavailableSelections.clear()
+    if (!hasFetchedV2Models.value) return
+    recoverFromUnavailableModel()
+  }
+)
+
 const resolvedSize = computed(() => props.size || 'small')
 const modelSelectClasses = computed(() => ({
   'model-select--nano': resolvedSize.value === 'nano',
@@ -410,11 +511,6 @@ const buttonSize = computed(() => {
   if (resolvedSize.value === 'middle') return 'middle'
   return 'small'
 })
-
-const extractModelName = (spec) => {
-  const separatorIndex = spec.indexOf(':')
-  return separatorIndex >= 0 ? spec.slice(separatorIndex + 1) : spec
-}
 
 const displayModelText = computed(() => {
   const spec = props.model_spec
@@ -482,14 +578,16 @@ const handleSelectV2Model = (spec) => {
 }
 
 watch(
-  () => [props.autoSelectFirst, props.disabled],
-  ([autoSelectFirst, disabled], previousState) => {
-    const [previousAutoSelectFirst, previousDisabled] = previousState || []
-    if (
-      autoSelectFirst &&
+  () => [props.autoSelectFirst, props.fallbackWhenUnavailable, props.disabled],
+  ([autoSelectFirst, fallbackWhenUnavailable, disabled], previousState) => {
+    const [previousAutoSelectFirst, previousFallback, previousDisabled] = previousState || []
+    // 任一开关从关变为开时拉一次列表：既覆盖首屏 immediate（previousState 为 undefined），
+    // 也覆盖后续切换。偏好失效时 autoSelectFirst 为 false，只有 fallbackWhenUnavailable 能触发。
+    const needsList =
       !disabled &&
-      (!previousAutoSelectFirst || previousDisabled)
-    ) {
+      (autoSelectFirst || fallbackWhenUnavailable) &&
+      (!previousAutoSelectFirst || !previousFallback || previousDisabled)
+    if (needsList) {
       void initializeDefaultModel()
     }
   },

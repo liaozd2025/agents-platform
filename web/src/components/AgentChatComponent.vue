@@ -380,6 +380,8 @@
                           upward
                           :model_spec="currentModelSpec"
                           :auto-select-first="!currentModelSpec"
+                          :selection-scope="currentChatId || DRAFT_MODEL_KEY"
+                          fallback-when-unavailable
                           size="nano"
                           display-name="mini"
                           placeholder="选择模型"
@@ -1007,6 +1009,7 @@ import { enrichTaskToolCalls, parseToolCallArgs } from '@/components/ToolCalling
 import { getConversationDisplayItems } from '@/utils/messageGrouping'
 import {
   clearChatModelPreference,
+  extractModelName,
   readChatModelPreference,
   resolveConversationModel,
   writeChatModelPreference
@@ -1592,6 +1595,12 @@ const currentModelSpec = computed(
 // 选择器兜底选中的首项带 autoSelected 标记，不写偏好，保留「用户从未选择过」的状态。
 const handleModelSelect = (spec, options = {}) => {
   if (typeof spec !== 'string') return
+
+  // 选择器发现原模型已被供应商下架并自动改选：提示一次，让用户知道模型发生过变化。
+  // 提示里带上失效模型名，便于用户判断是否需要重新挑选接近的替代模型。
+  if (options.unavailableSpec) {
+    message.warning(`原模型 ${extractModelName(options.unavailableSpec)} 已不可用，已自动切换为 ${extractModelName(spec)}`)
+  }
 
   if (spec) {
     selectedModelByThread[currentChatId.value || DRAFT_MODEL_KEY] = spec
