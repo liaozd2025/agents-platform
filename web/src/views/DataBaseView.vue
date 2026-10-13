@@ -229,7 +229,8 @@ const cardSubtitle = (database) => {
     parts.push(formatCreatedTime(database.created_at))
   }
   if (!kbUtils.isReadOnlyDatabase(database)) {
-    parts.push(`${database.row_count || 0} 文件`)
+    // 只统计真实文件，不含虚拟文件夹，与知识库详情页口径一致
+    parts.push(`${Number(database.stats?.file_count ?? database.row_count) || 0} 文件`)
   }
   return parts.join(' · ')
 }
