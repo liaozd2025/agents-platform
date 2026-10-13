@@ -48,6 +48,8 @@ async def get_graphs(
                 }
             )
         return {"success": True, "data": graphs}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"Failed to list graphs: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list graphs: {str(e)}")

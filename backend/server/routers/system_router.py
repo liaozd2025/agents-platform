@@ -199,6 +199,8 @@ async def get_system_logs(
 
         log = "".join(lines)
         return {"log": log, "message": "success", "log_file": LOG_FILE, "scope": "api"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"获取系统日志失败: {e}")
         raise HTTPException(status_code=500, detail=f"获取系统日志失败: {str(e)}")
@@ -232,6 +234,8 @@ async def load_info_config():
 
         return config
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to load info config: {e}")
         return {}
@@ -243,6 +247,8 @@ async def get_info_config():
     try:
         config = await load_info_config()
         return {"success": True, "data": config}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"获取信息配置失败: {e}")
         raise HTTPException(status_code=500, detail="获取信息配置失败")
@@ -256,6 +262,8 @@ async def reload_info_config(
     try:
         config = await load_info_config()
         return {"success": True, "message": "配置重新加载成功", "data": config}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"重新加载信息配置失败: {e}")
         raise HTTPException(status_code=500, detail="重新加载信息配置失败")

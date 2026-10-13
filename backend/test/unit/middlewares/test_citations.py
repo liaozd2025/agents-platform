@@ -14,7 +14,7 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command, interrupt
 from yuxi.agents.middlewares.citations import CitationMiddleware, knowledge_citation_sources, merge_citation_sources
-from yuxi.agents.middlewares.subagent_task import _json_tool_command, _task_result_response
+from yuxi.agents.middlewares.subagent_task import _json_tool_command
 
 
 def test_sources_keep_originals_and_do_not_invent_file_identity():
@@ -60,19 +60,19 @@ def test_sources_keep_originals_and_do_not_invent_file_identity():
     assert CitationMiddleware()._capture("web_search", error) is error
 
 
-def test_task_and_async_results_transfer_sources_without_reusing_local_numbers():
+@pytest.mark.parametrize("tool_name", ["subagent_status", "subagent_await"])
+def test_async_results_transfer_sources_without_reusing_local_numbers(tool_name):
     source = knowledge_citation_sources([{"kb_id": "kb", "file_id": "a", "content": "原文 A"}])[0]
     result = {"output": '<cite source="kb://kb/a" type="file">1</cite>', "citation_sources": [source]}
     run = {"run_id": "child", "child_thread_id": "thread"}
     commands = [
-        _task_result_response(result, "call", run),
         _json_tool_command({"result": result}, "call", subagent_run=run),
     ]
     for command in commands:
         assert command.update["messages"][0].artifact["citation_sources"] == [source]
-        captured = CitationMiddleware()._capture("task", command)
+        captured = CitationMiddleware()._capture(tool_name, command)
         assert captured.update["citation_sources"] == [source]
-    assert json.loads(commands[1].update["messages"][0].content)["citation_sources"] == [source]
+    assert json.loads(commands[0].update["messages"][0].content)["citation_sources"] == [source]
 
 
 class _CitationModel(BaseChatModel):

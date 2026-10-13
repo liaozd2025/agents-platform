@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 
@@ -227,7 +228,10 @@ async def test_merge_migration_retries_knowledge_after_business_commit(
             monkeypatch.setattr(storage_migration, "pg_manager", manager)
             await storage_migration.main()
         manager = _scoped_manager(engine)
-        assert await manager.get_schema_versions() == {"business": 9, "knowledge": 3}
+        assert await manager.get_schema_versions() == {
+            "business": BUSINESS_SCHEMA_VERSION,
+            "knowledge": KNOWLEDGE_SCHEMA_VERSION,
+        }
         async with manager.get_async_session_context() as db:
             rows = dict((await db.execute(text("SELECT kb_id, share_config FROM knowledge_bases"))).all())
             assert rows["legacy"] == {"version": 2, "read_scope": legacy, "manage_scope": legacy}
@@ -290,6 +294,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             # v0.7.2 tag 没有这些字段，不能用当前 ORM 预建它们来证明迁移。
             for column in ("prepared_at", "first_output_at", "first_model_request_at"):
                 await connection.execute(text(f"ALTER TABLE agent_runs DROP COLUMN {column}"))
+            await connection.execute(text("ALTER TABLE model_providers DROP COLUMN include_user_uid"))
             await connection.execute(text("ALTER TABLE agent_runs ADD COLUMN last_event_id VARCHAR(64)"))
             await connection.execute(text("DROP TABLE scheduled_agent_runs"))
             await connection.execute(text("DROP TABLE scheduled_agent_jobs"))
@@ -323,6 +328,17 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
                         text(
                             "SELECT column_name FROM information_schema.columns "
                             "WHERE table_schema = :schema AND table_name = 'agent_runs'"
+                        ),
+                        {"schema": schema},
+                    )
+                ).scalars()
+            )
+            provider_columns = set(
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_schema = :schema AND table_name = 'model_providers'"
                         ),
                         {"schema": schema},
                     )
@@ -405,6 +421,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "timeout_seconds",
         } <= task_columns
         assert {"prepared_at", "first_output_at", "first_model_request_at"} <= run_columns
+        assert {"include_user_uid"} <= provider_columns
         assert "last_event_id" not in run_columns
         assert tuple(row) == ("running", None, 0, 0)
         assert scheduled_tables == {"scheduled_agent_jobs", "scheduled_agent_runs"}
@@ -429,7 +446,7 @@ async def test_v072_business_converges_current_schema_idempotently() -> None:
             "ix_scheduled_agent_runs_job_created",
             "ix_scheduled_agent_runs_dispatching",
         }.issubset(scheduled_indexes)
-        assert BUSINESS_SCHEMA_VERSION == 9
+        assert BUSINESS_SCHEMA_VERSION == 10
     finally:
         await _drop_isolated_schema(schema, admin_engine, scoped_engine)
 
@@ -880,3 +897,84 @@ async def test_checkpoint_setup_writes_on_its_lock_connection(monkeypatch) -> No
             await asyncio.gather(task, return_exceptions=True)
         await pool.close()
         await _drop_isolated_schema(schema, admin, engine)
+
+
+@pytest.mark.parametrize("starting_version", [8, 9])
+@pytest.mark.parametrize("column_type", ["json", "jsonb"])
+@pytest.mark.parametrize("fail_version_write", [False, True])
+async def test_resource_selection_migration_is_atomic_and_does_not_repeat(
+    fail_version_write, column_type, starting_version
+):
+    """真实 PostgreSQL 保留旧配置语义，版本失败回滚且重试不改新空数组。"""
+    schema, admin_engine, engine, manager = await _create_isolated_manager("resource_selection")
+    try:
+        await manager.create_schema_version_table()
+        await manager.record_schema_version("business", starting_version)
+        async with engine.begin() as conn:
+            await conn.execute(text(f"CREATE TABLE agents (id integer PRIMARY KEY, config_json {column_type})"))
+            await conn.execute(
+                text("INSERT INTO agents (id, config_json) VALUES (:id, CAST(:config AS jsonb))"),
+                [
+                    {"id": index, "config": json.dumps(config)}
+                    for index, config in enumerate(
+                        [
+                            {
+                                "context": {
+                                    "tools": None,
+                                    "knowledges": None,
+                                    "skills": None,
+                                    "subagents": [],
+                                    "mcps": None,
+                                    "preload_skills": None,
+                                },
+                                "extra": 42,
+                            },
+                            {"context": {"tools": [], "skills": ["fixed"], "subagents": ["fixed"]}},
+                            {"context": {}},
+                            {"context": {"subagents": None}},
+                        ],
+                        start=1,
+                    )
+                ],
+            )
+            if fail_version_write:
+                await conn.execute(
+                    text("ALTER TABLE yuxi_schema_migrations ADD CONSTRAINT reject_v9 CHECK (version < 10)")
+                )
+        if fail_version_write:
+            from sqlalchemy.exc import IntegrityError
+
+            with pytest.raises(IntegrityError):
+                await manager.upgrade_agent_resource_selection()
+            async with engine.connect() as conn:
+                old = await conn.scalar(text("SELECT config_json FROM agents WHERE id = 1"))
+            assert old["context"]["subagents"] == []
+            assert old["context"]["tools"] is None
+            assert await manager.get_schema_versions() == {"business": starting_version}
+            return
+        await manager.upgrade_agent_resource_selection()
+        async with engine.begin() as conn:
+            rows = dict((await conn.execute(text("SELECT id, config_json FROM agents"))).all())
+            assert rows[1] == {
+                "context": {
+                    "tools": "all",
+                    "knowledges": "all",
+                    "skills": "all",
+                    "subagents": "all",
+                    "mcps": [],
+                    "preload_skills": [],
+                },
+                "extra": 42,
+            }
+            assert rows[2] == {"context": {"tools": [], "skills": ["fixed"], "subagents": ["fixed"]}}
+            assert rows[3] == {"context": {}}
+            assert rows[4] == {"context": {"subagents": "all"}}
+            await conn.execute(text("""UPDATE agents SET config_json = '{"context":{"subagents":[]}}' WHERE id = 1"""))
+        await manager.upgrade_agent_resource_selection()
+        async with engine.connect() as conn:
+            assert await conn.scalar(text("SELECT config_json FROM agents WHERE id = 1")) == {
+                "context": {"subagents": []}
+            }
+        assert await manager.get_schema_versions() == {"business": BUSINESS_SCHEMA_VERSION}
+    finally:
+        await _drop_isolated_schema(schema, admin_engine, engine)

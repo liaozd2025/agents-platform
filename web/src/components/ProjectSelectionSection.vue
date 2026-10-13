@@ -1,150 +1,139 @@
 <template>
   <section class="project-selection" :aria-label="ariaLabel">
-    <a-dropdown
-      v-model:open="dropdownOpen"
-      :trigger="['click']"
-      placement="topLeft"
-      overlay-class-name="project-selection-overlay"
-    >
-      <button
-        type="button"
-        class="project-trigger"
-        :class="{ active: dropdownOpen }"
-        :disabled="disabled"
-        aria-haspopup="menu"
-        :aria-expanded="dropdownOpen"
-      >
-        <FolderClosed :size="15" class="project-trigger-icon" />
-        <span class="project-trigger-label" :title="currentProjectHint">{{
-          currentProjectLabel
-        }}</span>
-      </button>
+    <ActionDropdown :upward="upward" v-model:open="dropdownOpen" :disabled="disabled" :width="300">
+      <template #trigger>
+        <ActionTrigger
+          :label="currentProjectLabel"
+          :title="currentProjectHint"
+          :open="dropdownOpen"
+          :disabled="disabled"
+        >
+          <template #icon><FolderClosed :size="15" /></template>
+        </ActionTrigger>
+      </template>
+      <div class="project-dropdown-panel">
+        <template v-if="dropdownView === 'projects'">
+          <label class="project-search">
+            <Search :size="14" aria-hidden="true" />
+            <input
+              ref="projectSearchInput"
+              v-model="projectQuery"
+              type="search"
+              placeholder="搜索项目"
+              aria-label="搜索项目"
+            />
+          </label>
 
-      <template #overlay>
-        <div class="project-dropdown-panel">
-          <template v-if="dropdownView === 'projects'">
+          <div class="project-option-list" aria-label="选择项目">
+            <div v-if="loadingProjects" class="project-loading">
+              <a-spin />
+            </div>
+            <template v-else>
+              <button
+                v-if="allowAuto"
+                type="button"
+                class="project-option"
+                :class="{ selected: !modelValue || modelValue === AUTO_PROJECT_ID }"
+                :aria-pressed="!modelValue || modelValue === AUTO_PROJECT_ID"
+                @click="selectProject(AUTO_PROJECT_ID)"
+              >
+                <span class="project-option-icon"><FolderX :size="15" /></span>
+                <span class="project-option-body">
+                  <strong>不使用项目</strong>
+                </span>
+                <Check
+                  v-if="!modelValue || modelValue === AUTO_PROJECT_ID"
+                  :size="14"
+                  class="project-option-check"
+                />
+              </button>
+
+              <button
+                v-for="project in filteredProjects"
+                :key="project.id"
+                type="button"
+                class="project-option"
+                :class="{ selected: modelValue === project.id }"
+                :aria-pressed="modelValue === project.id"
+                @click="selectProject(project.id)"
+              >
+                <span class="project-option-icon"><FolderClosed :size="15" /></span>
+                <span class="project-option-body">
+                  <strong :title="project.name">{{ project.name }}</strong>
+                </span>
+                <Check v-if="modelValue === project.id" :size="14" class="project-option-check" />
+              </button>
+
+              <div v-if="!filteredProjects.length" class="project-empty">
+                {{ projectQuery ? '没有匹配的项目' : '暂无已有项目' }}
+              </div>
+            </template>
+          </div>
+
+          <div v-if="projectsError" class="project-error" role="alert">
+            <span>{{ projectsError }}</span>
+            <button type="button" @click="loadProjects">重新加载</button>
+          </div>
+
+          <div class="project-dropdown-actions">
+            <button type="button" @click="openCreateModal()">
+              <FolderPlus :size="14" />
+              <span>新建项目</span>
+            </button>
+            <button type="button" @click="openHistoryView">
+              <History :size="14" />
+              <span>从历史对话添加</span>
+              <ChevronRight :size="14" class="project-action-chevron" />
+            </button>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="history-search-row">
+            <button type="button" aria-label="返回项目列表" @click="closeHistoryView">
+              <ArrowLeft :size="15" />
+            </button>
             <label class="project-search">
               <Search :size="14" aria-hidden="true" />
               <input
-                ref="projectSearchInput"
-                v-model="projectQuery"
+                ref="historySearchInput"
+                v-model="historyQuery"
                 type="search"
-                placeholder="搜索项目"
-                aria-label="搜索项目"
+                placeholder="搜索历史对话"
+                aria-label="搜索历史对话"
+                @input="handleHistorySearchChange"
               />
             </label>
-
-            <div class="project-option-list" aria-label="选择项目">
-              <div v-if="loadingProjects" class="project-loading">
-                <a-spin />
+          </div>
+          <div class="history-option-list" aria-label="选择历史对话">
+            <div v-if="loadingHistory" class="history-loading">
+              <a-spin />
+            </div>
+            <template v-else>
+              <button
+                v-for="candidate in historyCandidates"
+                :key="candidate.thread_id"
+                type="button"
+                class="history-option"
+                @click="selectHistoryDirectory(candidate)"
+              >
+                <MessageSquare :size="14" class="history-option-icon" />
+                <span :title="candidate.title">{{ candidate.title || '未命名对话' }}</span>
+                <time
+                  v-if="formatRelativeTime(candidate.updated_at)"
+                  :datetime="candidate.updated_at"
+                >
+                  {{ formatRelativeTime(candidate.updated_at) }}
+                </time>
+              </button>
+              <div v-if="!historyCandidates.length" class="history-empty">
+                {{ historyError || '没有可添加的历史对话' }}
               </div>
-              <template v-else>
-                <button
-                  v-if="allowAuto"
-                  type="button"
-                  class="project-option"
-                  :class="{ selected: !modelValue || modelValue === AUTO_PROJECT_ID }"
-                  :aria-pressed="!modelValue || modelValue === AUTO_PROJECT_ID"
-                  @click="selectProject(AUTO_PROJECT_ID)"
-                >
-                  <span class="project-option-icon"><FolderX :size="15" /></span>
-                  <span class="project-option-body">
-                    <strong>不使用项目</strong>
-                  </span>
-                  <Check
-                    v-if="!modelValue || modelValue === AUTO_PROJECT_ID"
-                    :size="14"
-                    class="project-option-check"
-                  />
-                </button>
-
-                <button
-                  v-for="project in filteredProjects"
-                  :key="project.id"
-                  type="button"
-                  class="project-option"
-                  :class="{ selected: modelValue === project.id }"
-                  :aria-pressed="modelValue === project.id"
-                  @click="selectProject(project.id)"
-                >
-                  <span class="project-option-icon"><FolderClosed :size="15" /></span>
-                  <span class="project-option-body">
-                    <strong :title="project.name">{{ project.name }}</strong>
-                  </span>
-                  <Check v-if="modelValue === project.id" :size="14" class="project-option-check" />
-                </button>
-
-                <div v-if="!filteredProjects.length" class="project-empty">
-                  {{ projectQuery ? '没有匹配的项目' : '暂无已有项目' }}
-                </div>
-              </template>
-            </div>
-
-            <div v-if="projectsError" class="project-error" role="alert">
-              <span>{{ projectsError }}</span>
-              <button type="button" @click="loadProjects">重新加载</button>
-            </div>
-
-            <div class="project-dropdown-actions">
-              <button type="button" @click="openCreateModal()">
-                <FolderPlus :size="14" />
-                <span>新建项目</span>
-              </button>
-              <button type="button" @click="openHistoryView">
-                <History :size="14" />
-                <span>从历史对话添加</span>
-                <ChevronRight :size="14" class="project-action-chevron" />
-              </button>
-            </div>
-          </template>
-
-          <template v-else>
-            <div class="history-search-row">
-              <button type="button" aria-label="返回项目列表" @click="closeHistoryView">
-                <ArrowLeft :size="15" />
-              </button>
-              <label class="project-search">
-                <Search :size="14" aria-hidden="true" />
-                <input
-                  ref="historySearchInput"
-                  v-model="historyQuery"
-                  type="search"
-                  placeholder="搜索历史对话"
-                  aria-label="搜索历史对话"
-                  @input="handleHistorySearchChange"
-                />
-              </label>
-            </div>
-            <div class="history-option-list" aria-label="选择历史对话">
-              <div v-if="loadingHistory" class="history-loading">
-                <a-spin />
-              </div>
-              <template v-else>
-                <button
-                  v-for="candidate in historyCandidates"
-                  :key="candidate.thread_id"
-                  type="button"
-                  class="history-option"
-                  @click="selectHistoryDirectory(candidate)"
-                >
-                  <MessageSquare :size="14" class="history-option-icon" />
-                  <span :title="candidate.title">{{ candidate.title || '未命名对话' }}</span>
-                  <time
-                    v-if="formatRelativeTime(candidate.updated_at)"
-                    :datetime="candidate.updated_at"
-                  >
-                    {{ formatRelativeTime(candidate.updated_at) }}
-                  </time>
-                </button>
-                <div v-if="!historyCandidates.length" class="history-empty">
-                  {{ historyError || '没有可添加的历史对话' }}
-                </div>
-              </template>
-            </div>
-          </template>
-        </div>
-      </template>
-    </a-dropdown>
+            </template>
+          </div>
+        </template>
+      </div>
+    </ActionDropdown>
   </section>
 
   <a-modal
@@ -162,7 +151,7 @@
         <span>项目名称</span>
         <a-input
           v-model:value="projectName"
-          :maxlength="100"
+          :maxlength="PROJECT_NAME_MAX_LENGTH"
           autofocus
           placeholder="例如：产品发布计划"
           @press-enter="canCreateProject && handleCreateProject()"
@@ -175,8 +164,10 @@
           v-model="linkedPath"
           :active="createModalOpen"
           :disabled="creatingProject"
+          :suggested-folder-name="projectName"
           include-unbound-project-dirs
           :resolve-directory-label="projectsStore.resolveDirectoryLabel"
+          @folder-created="handleFolderCreated"
         />
       </div>
     </div>
@@ -184,6 +175,8 @@
 </template>
 
 <script setup>
+import ActionDropdown from '@/components/common/ActionDropdown.vue'
+import ActionTrigger from '@/components/common/ActionTrigger.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { storeToRefs } from 'pinia'
@@ -201,9 +194,16 @@ import {
 import { projectApi } from '@/apis/project_api'
 import WorkspacePathPicker from '@/components/WorkspacePathPicker.vue'
 import { useProjectsStore } from '@/stores/projects'
-import { AUTO_PROJECT_ID, filterProjects, formatRelativeTime } from '@/utils/projectSelection'
+import {
+  AUTO_PROJECT_ID,
+  PROJECT_NAME_MAX_LENGTH,
+  filterProjects,
+  fillProjectNameFromFolder,
+  formatRelativeTime
+} from '@/utils/projectSelection'
 
 const props = defineProps({
+  upward: { type: Boolean, default: false },
   modelValue: { type: String, default: AUTO_PROJECT_ID },
   disabled: { type: Boolean, default: false },
   allowAuto: { type: Boolean, default: true },
@@ -308,6 +308,11 @@ const handleCreateProject = async () => {
   }
 }
 
+/** 文件夹创建成功后与项目名称互补：名称为空时用文件夹名补齐，已有输入保持不变。 */
+const handleFolderCreated = ({ name } = {}) => {
+  projectName.value = fillProjectNameFromFolder(projectName.value, name)
+}
+
 const openHistoryView = () => {
   dropdownView.value = 'history'
   historyQuery.value = ''
@@ -372,7 +377,7 @@ watch(dropdownView, (view) => {
   projectSearchFocusTimer = setTimeout(() => target.value?.focus(), 120)
 })
 onMounted(() => {
-  if (props.eagerLoad) void loadProjects()
+  if (props.eagerLoad && !projectsStore.hasLoaded && !loadingProjects.value) void loadProjects()
 })
 onUnmounted(() => {
   if (historySearchTimer) clearTimeout(historySearchTimer)
@@ -387,69 +392,8 @@ onUnmounted(() => {
   text-align: left;
 }
 
-.project-trigger {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  max-width: min(280px, calc(100vw - 64px));
-  height: 28px;
-  padding: 0 6px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--gray-600);
-  cursor: pointer;
-  text-align: left;
-  transition:
-    background-color 0.15s ease,
-    color 0.15s ease;
-}
-
-.project-trigger:hover:not(:disabled),
-.project-trigger.active:not(:disabled) {
-  background: var(--gray-100);
-  color: var(--gray-900);
-}
-
-.project-trigger:focus-visible {
-  outline: 2px solid var(--main-color);
-  outline-offset: 2px;
-}
-
-.project-trigger:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-
-.project-trigger-icon {
-  flex-shrink: 0;
-  color: var(--gray-500);
-  transition: color 0.15s ease;
-}
-
-.project-trigger:hover:not(:disabled) .project-trigger-icon,
-.project-trigger.active:not(:disabled) .project-trigger-icon {
-  color: var(--gray-800);
-}
-
-.project-trigger-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  font-size: 13px;
-  font-weight: 400;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .project-dropdown-panel {
-  width: min(300px, calc(100vw - 24px));
-  overflow: hidden;
-  border: 1px solid var(--gray-150);
-  border-radius: 10px;
-  background: var(--gray-0);
-  box-shadow: 0 8px 24px var(--shadow-4);
+  min-width: 0;
 }
 
 .project-search {
@@ -746,12 +690,6 @@ onUnmounted(() => {
 }
 
 @media (max-width: 768px) {
-  .project-trigger {
-    max-width: calc(100vw - 72px);
-  }
-}
-
-@media (max-width: 520px) {
   .project-dropdown-panel {
     width: min(270px, calc(100vw - 105px));
   }

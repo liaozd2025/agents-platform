@@ -1,4 +1,16 @@
 export const AUTO_PROJECT_ID = '__auto__'
+export const PROJECT_NAME_MAX_LENGTH = 100
+
+/**
+ * 新建文件夹成功后补齐项目名称：项目名称为空时用文件夹名填充，
+ * 已有输入保持用户原值不被覆盖，与“文件夹名预填项目名称”方向互补。
+ */
+export const fillProjectNameFromFolder = (projectName, folderName) => {
+  const current = typeof projectName === 'string' ? projectName : ''
+  const folder = typeof folderName === 'string' ? folderName.trim() : ''
+  if (current.trim() || !folder) return current
+  return folder.slice(0, PROJECT_NAME_MAX_LENGTH)
+}
 
 // 服务端托管的会话目录名就是 Project 的 uuid（implicit Project 没有名字），
 // 直接展示 uuid 会让用户以为是乱码，因此前端统一兜底成可读文案。

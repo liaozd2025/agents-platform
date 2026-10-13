@@ -71,7 +71,8 @@ export const agentApi = {
    * @returns {Promise} - 历史消息
    */
   // 线程阅读快照：{ thread, runs, history }，消息通过 run_id 关联运行。
-  getAgentHistory: (threadId) => apiGet(`/api/chat/thread/${threadId}/history`),
+  getAgentHistory: (threadId, options = {}) =>
+    apiGet(`/api/chat/thread/${threadId}/history`, options),
 
   /**
    * 获取会话内持久化的 Model/Tool 生命周期审计
@@ -206,7 +207,7 @@ export const agentApi = {
    * @param {string} runId - run ID
    * @returns {Promise<Object>}
    */
-  getAgentRun: (runId) => apiGet(`/api/agent/runs/${runId}`),
+  getAgentRun: (runId, options = {}) => apiGet(`/api/agent/runs/${runId}`, options),
 
   /**
    * 获取 Run 对应的 Langfuse 精确跳转地址

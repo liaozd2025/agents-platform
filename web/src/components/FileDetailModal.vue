@@ -889,8 +889,8 @@ onBeforeUnmount(resetLocalState)
   align-items: center;
   padding: 8px 12px;
 
-  svg {
-    margin-right: 8px;
-  }
+  // svg {
+  //   margin-right: 8px;
+  // }
 }
 </style>

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from yuxi.agents.buildin import agent_manager
+from yuxi.agents.buildin import AgentBackendNotFoundError, get_agent_backend, list_agent_backend_info
 from yuxi.agents.context import filter_agent_config_for_management
 from yuxi.permissions.authorization import AuthorizationContext
 from yuxi.repositories.agent_repository import (
@@ -28,7 +28,7 @@ from yuxi.services.agent_request_queue_service import (
 from yuxi.services.agent_config_service import prepare_agent_config_write
 from yuxi.services.agent_run_service import (
     cancel_agent_run_view,
-    create_agent_run_view,
+    create_resume_run_view,
     get_active_run_by_thread,
     get_agent_run_langfuse_link,
     get_agent_run_result,
@@ -36,7 +36,7 @@ from yuxi.services.agent_run_service import (
     stream_agent_run_events,
 )
 from yuxi.services.input_message_service import build_chat_input_message
-from yuxi.services.run_submission_service import RunOrigin, RunSubmissionCommand, submit_run_command
+from yuxi.services.agent_request_service import RunOrigin, AgentRequestInput, submit_agent_request
 from yuxi.services.user_role_service import has_active_role
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.storage.postgres.models_business import User
@@ -85,7 +85,9 @@ class AgentRunCreate(BaseModel):
     agent_slug: str = Field(..., description="智能体 slug")
     thread_id: str = Field(..., description="会话线程 ID")
     meta: dict = Field(default_factory=dict, description="可选，请求追踪信息，例如 request_id")
-    image_content: str | None = Field(None, description="可选，base64 图片内容")
+    image_content: str | list[str] | None = Field(
+        None, description="可选，base64 图片内容：单张传字符串，多张传数组（最多 10 张）"
+    )
     model_spec: str | None = Field(None, description="可选，对话级模型覆盖，优先级高于智能体配置")
     tool_approval_mode: str | None = Field(None, description="可选，本次运行的工具审批模式覆盖")
     executor: Literal["langgraph"] = Field("langgraph", description="兼容旧客户端，仅支持 LangGraph")
@@ -97,17 +99,9 @@ class AgentRunCreate(BaseModel):
     )
 
 
-def _backend_info(info: dict) -> dict:
-    data = dict(info)
-    data["backend_id"] = data.pop("id", None)
-    data["type"] = "agent_backend"
-    return data
-
-
 def _filter_agent_config_json(backend_id: str, config_json: dict | None, can_manage: bool) -> dict:
-    backend = agent_manager.get_agent(backend_id)
-    context_schema = backend.context_schema if backend else None
-    return filter_agent_config_for_management(config_json or {}, can_manage, context_schema=context_schema)
+    backend = get_agent_backend(backend_id)
+    return filter_agent_config_for_management(config_json or {}, can_manage, context_schema=backend.context_schema)
 
 
 def _can_manage_agent(authorization: AuthorizationContext, item) -> bool:
@@ -128,14 +122,15 @@ async def _serialize_agent(
 ) -> dict:
     user = authorization.user
     can_manage = _can_manage_agent(authorization, item)
-    data = await repo.serialize(
-        item,
-        user=user,
-        can_manage=can_manage,
-        include_configurable_items=include_configurable_items,
-        backend_info_cache=backend_info_cache,
-    )
-    data["config_json"] = _filter_agent_config_json(item.backend_id, data.get("config_json"), can_manage)
+    try:
+        data = await repo.serialize(
+            item, user=user, can_manage=can_manage,
+            include_configurable_items=include_configurable_items,
+            backend_info_cache=backend_info_cache,
+        )
+        data["config_json"] = _filter_agent_config_json(item.backend_id, data.get("config_json"), can_manage)
+    except AgentBackendNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return data
 
 
@@ -143,20 +138,22 @@ async def _serialize_agent(
 async def list_agent_backends(
     authorization: AuthorizationContext = Depends(require_permission("agent:manage")),
 ):
-    infos = await agent_manager.get_agents_info(include_configurable_items=False)
-    return {"backends": [_backend_info(info) for info in infos]}
+    infos = await list_agent_backend_info()
+    return {"backends": [{**info, "type": "agent_backend"} for info in infos]}
 
 
 @agent_router.get("/backends/{backend_id}")
-async def get_agent_backend(
+async def get_agent_backend_detail(
     backend_id: str,
     authorization: AuthorizationContext = Depends(require_permission("agent:manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    backend = agent_manager.get_agent(backend_id)
-    if not backend:
-        raise HTTPException(status_code=404, detail=f"智能体后端 {backend_id} 不存在")
-    return _backend_info(await backend.get_info(can_manage=True, db=db, user=authorization.user))
+    try:
+        backend = get_agent_backend(backend_id)
+    except AgentBackendNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    info = await backend.get_info(can_manage=True, db=db, user=authorization.user)
+    return {**info, "backend_id": backend_id, "type": "agent_backend"}
 
 
 @agent_router.get("")
@@ -196,9 +193,10 @@ async def create_agent(
     db: AsyncSession = Depends(get_db),
 ):
     current_user = authorization.user
-    backend = agent_manager.get_agent(payload.backend_id)
-    if not backend:
-        raise HTTPException(status_code=404, detail=f"智能体后端 {payload.backend_id} 不存在")
+    try:
+        backend = get_agent_backend(payload.backend_id)
+    except AgentBackendNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     if payload.set_default:
         raise HTTPException(status_code=422, detail="默认智能体已固定为内置智能助手")
 
@@ -261,6 +259,7 @@ async def update_agent(
         raise HTTPException(status_code=404, detail="智能体不存在")
 
     try:
+        backend = get_agent_backend(item.backend_id)
         fields_set = payload.model_fields_set
         if "description" in fields_set and payload.description is None:
             item.description = None
@@ -270,10 +269,9 @@ async def update_agent(
         config_json = None
         config_resource_access = None
         if payload.config_json is not None:
-            backend = agent_manager.get_agent(item.backend_id)
             config_json, config_resource_access = await prepare_agent_config_write(
                 payload.config_json,
-                context_schema=backend.context_schema if backend else None,
+                context_schema=backend.context_schema,
                 db=db,
                 user=current_user,
             )
@@ -290,6 +288,8 @@ async def update_agent(
             is_subagent=payload.is_subagent,
             updated_by=str(current_user.uid),
         )
+    except AgentBackendNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"agent": await _serialize_agent(repo, updated, authorization, include_configurable_items=True)}
@@ -344,16 +344,10 @@ async def create_agent_run(
     if payload.resume is not None:
         if payload.queue_policy != "enqueue":
             raise HTTPException(status_code=422, detail="queue_policy 仅支持普通 Chat 请求")
-        input_message = None
-        if payload.query:
-            input_message = build_chat_input_message(payload.query, payload.image_content)
-        return await create_agent_run_view(
-            input_message=input_message,
+        return await create_resume_run_view(
             agent_slug=payload.agent_slug,
             thread_id=payload.thread_id,
             meta=dict(payload.meta or {}),
-            model_spec=payload.model_spec,
-            tool_approval_mode=payload.tool_approval_mode,
             current_uid=str(current_user.uid),
             db=db,
             resume=payload.resume,
@@ -365,10 +359,13 @@ async def create_agent_run(
     request_id = meta.get("request_id") or str(uuid.uuid4())
     meta["request_id"] = request_id
 
-    input_message = build_chat_input_message(payload.query or "", payload.image_content)
+    try:
+        input_message = build_chat_input_message(payload.query or "", payload.image_content)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    return await submit_run_command(
-        command=RunSubmissionCommand(
+    return await submit_agent_request(
+        request_input=AgentRequestInput(
             agent_slug=payload.agent_slug,
             thread_id=payload.thread_id,
             request_id=request_id,
@@ -447,14 +444,7 @@ async def steer_request(
 ):
     result = await steer_queued_request(request_id=request_id, current_uid=str(current_user.uid), db=db)
     await db.commit()
-    return {
-        "request_id": result.request_id,
-        "thread_id": result.thread_id,
-        "status": result.status,
-        "queue_policy": result.queue_policy,
-        "queue_position": result.queue_position,
-        "request_events_url": f"/api/agent/requests/{result.request_id}/events",
-    }
+    return result
 
 
 @agent_router.get("/requests/{request_id}/events")

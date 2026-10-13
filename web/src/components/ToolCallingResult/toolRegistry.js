@@ -162,14 +162,14 @@ export const isSubagentToolCall = (toolCall) => SUBAGENT_TOOL_IDS.includes(getTo
 /** 工具快照不是完成事实；优先保留子 Run 的明确终态。 */
 export const getToolCallStatus = (toolCall) => {
   const parsed = parseToolCallResult(toolCall)
+  const parsedStatus = parsed?.status
+  if ([toolCall?.status, toolCall?.tool_call_result?.status, parsedStatus].some((status) => status === 'error' || status === 'failed')) return 'error'
   const run = toolCall?.subagent_run || (isSubagentToolCall(toolCall)
     ? { status: parsed?.run_status || parsed?.active_run_status }
     : null)
   if (run?.status === 'failed') return 'error'
   if (['cancelled', 'interrupted'].includes(run?.status)) return run.status
   if (run?.status === 'completed') return run.stop_reason === 'steer' ? 'steered' : 'completed'
-  const parsedStatus = parseToolCallResult(toolCall)?.status
-  if ([toolCall?.status, toolCall?.tool_call_result?.status, parsedStatus].some((status) => status === 'error' || status === 'failed')) return 'error'
   const status = toolCall?.tool_call_result?.status || toolCall?.status
   if (status === 'error' || status === 'failed') return 'error'
   if (['running', 'pending', 'cancel_requested'].includes(status)) return 'running'
@@ -202,10 +202,10 @@ export const getSubagentRunStatus = (toolCall) => {
   if (getToolCallStatus(toolCall) === 'error') return 'error'
   const result = parseToolCallResult(toolCall)
   return (
+    toolCall?.subagent_run?.status ||
     result?.run_status ||
     result?.active_run_status ||
     result?.status ||
-    toolCall?.subagent_run?.status ||
     ''
   )
 }
@@ -231,6 +231,7 @@ export const enrichSubagentToolCall = (
   const subagentRun =
     (toolCall.id ? subagentRunById?.get?.(String(toolCall.id)) : null) ||
     (result?.run_id ? subagentRunById?.get?.(String(result.run_id)) : null) ||
+    (args.run_id ? subagentRunById?.get?.(String(args.run_id)) : null) ||
     (args.thread_id ? subagentRunByThreadId?.get?.(String(args.thread_id)) : null) ||
     (result?.thread_id ? subagentRunByThreadId?.get?.(String(result.thread_id)) : null)
   const subagentOption = args.subagent_slug

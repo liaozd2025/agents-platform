@@ -348,6 +348,26 @@ export function useAgentRunStream({
     }
     const touchedThreadIds = new Set([threadId])
     let sawTerminalEvent = false
+    // 无事件看门狗: SSE 连接悬挂(断线窗口错过 end 事件且连接未关闭)时,
+    // 主动查询 run 终态并收尾,避免 loading 永转
+    let lastEventAt = Date.now()
+    const idleWatchdog = setInterval(async () => {
+      if (sawTerminalEvent || ts.activeRunId !== runId) {
+        clearInterval(idleWatchdog)
+        return
+      }
+      if (Date.now() - lastEventAt < 45000) return
+      try {
+        const runRes = await agentApi.getAgentRun(runId)
+        const st = runRes?.run?.status
+        if (st && RUN_TERMINAL_STATUSES.has(st)) {
+          clearInterval(idleWatchdog)
+          finalizeRunStream(threadId, runId, touchedThreadIds, { status: st })
+        }
+      } catch {
+        // 查询失败忽略,下轮再看
+      }
+    }, 30000)
 
     try {
       const response = await agentApi.streamAgentRunEvents(runId, ts.runLastSeq, {
@@ -359,6 +379,7 @@ export function useAgentRunStream({
 
       await processRunSseResponse(response, (event, data, eventId) => {
         if (!data || ts.activeRunId !== runId) return
+        lastEventAt = Date.now()
 
         if (eventId) {
           const incomingSeq = normalizeRunSeq(eventId)
@@ -456,6 +477,7 @@ export function useAgentRunStream({
         scheduleRunReconnect(threadId, runId)
       }
     } finally {
+      clearInterval(idleWatchdog)
       if (ts.runStreamAbortController === runController) {
         ts.runStreamAbortController = null
       }

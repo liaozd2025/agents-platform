@@ -2,7 +2,7 @@ from typing import Any
 
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware
+from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
@@ -16,11 +16,12 @@ from yuxi.agents.buildin.chatbot.prompt import TODO_MID_PROMPT, build_prompt_wit
 from yuxi.agents.buildin.subagent.context import SubAgentContext
 from yuxi.agents.context import (
     DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS,
-    prepare_agent_runtime_context,
 )
 from yuxi.agents.middlewares import (
     ImageInputCompatibilityMiddleware,
+    NetworkRetryMiddleware,
     TokenUsageMiddleware,
+    ToolErrorGuardMiddleware,
     create_summary_middleware_from_context,
 )
 from yuxi.agents.middlewares.citations import CitationMiddleware
@@ -95,6 +96,8 @@ async def _build_middlewares(context, backend, tool_approval_mode: str):
     # tool_approval_mode is normalized once by the caller (get_graph / SubAgentBackend.get_graph).
 
     return [
+        # 子 Agent 的工具异常也在最外层隔离，避免打断父对话。
+        ToolErrorGuardMiddleware(),
         create_agent_filesystem_middleware(
             getattr(context, "tool_token_limit", DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS) * 1024,
             backend=backend,
@@ -105,7 +108,7 @@ async def _build_middlewares(context, backend, tool_approval_mode: str):
         TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
         PatchToolCallsMiddleware(),
         _SubAgentToolFilterMiddleware(tool_approval_mode),
-        ModelRetryMiddleware(on_failure="error"),
+        NetworkRetryMiddleware(),
         ImageInputCompatibilityMiddleware(),
         TokenUsageMiddleware(),
         CitationMiddleware(),
@@ -114,7 +117,7 @@ async def _build_middlewares(context, backend, tool_approval_mode: str):
 
 class SubAgentBackend(BaseAgent):
     name = "子智能体"
-    description = "用于被主智能体通过 task 工具调用的专用智能体后端。"
+    description = "用于被主智能体通过 subagent_start 工具调用的专用智能体后端。"
     capabilities = ["file_upload", "files"]
     context_schema = SubAgentContext
 
@@ -140,11 +143,10 @@ class SubAgentBackend(BaseAgent):
             ]
         return info
 
-    async def get_graph(self, context=None, **kwargs):
-        context = await prepare_agent_runtime_context(
-            context or self.context_schema(),
-            context_schema=self.context_schema,
-        )
+    async def get_graph(self, *, context, **kwargs):
+        """从显式准备的 Context 构建执行图。"""
+        if not getattr(context, "_runtime_prepared", False):
+            raise ValueError("构图需要已准备的 Context")
         await sync_agent_context_skills(context)
         model_spec = resolve_chat_model_spec(context.model)
         tool_approval_mode = normalize_tool_approval_mode(
@@ -154,7 +156,11 @@ class SubAgentBackend(BaseAgent):
         backend = create_agent_composite_backend(context)
 
         return create_agent(
-            model=load_chat_model(fully_specified_name=model_spec, session_id=context.thread_id),
+            model=load_chat_model(
+                fully_specified_name=model_spec,
+                session_id=context.thread_id,
+                uid=context.uid,
+            ),
             tools=_filter_disabled_tools(await resolve_configured_runtime_tools(context), disabled_tools),
             system_prompt=build_prompt_with_context(context),
             middleware=await _build_middlewares(context, backend, tool_approval_mode),

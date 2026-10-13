@@ -141,7 +141,7 @@ def install(probe, app=None):
         return
     _installed = True
     modules = (
-        "yuxi.services.run_submission_service",
+        "yuxi.services.agent_request_service",
         "yuxi.services.agent_request_queue_service",
         "yuxi.services.agent_run_manifest_service",
         "yuxi.services.workdir_service",
@@ -149,7 +149,7 @@ def install(probe, app=None):
         "yuxi.services.run_queue_service",
         "yuxi.agents.context",
         "yuxi.agents.skills.runtime",
-        "yuxi.agents.skills.service",
+        "yuxi.services.skills.shared",
         "yuxi.agents.backends.composite",
         "yuxi.agents.buildin.chatbot.graph",
         "server.utils.auth_middleware",

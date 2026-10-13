@@ -236,6 +236,7 @@ const emit = defineEmits(['update:activeKey'])
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 :deep(.extension-detail-back:hover),
@@ -260,6 +261,24 @@ const emit = defineEmits(['update:activeKey'])
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+:deep(.extension-detail-actions .ant-space) {
+  column-gap: 4px !important;
+}
+
+:deep(.extension-detail-actions .extension-detail-action) {
+  min-width: 32px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  color: var(--gray-800);
+  font-size: 13px;
+}
+
+:deep(.extension-detail-actions .extension-detail-action:not(.ant-btn-dangerous):hover) {
+  background: var(--gray-50);
+  color: var(--gray-900);
 }
 
 :deep(.extension-detail-view) {
@@ -327,6 +346,17 @@ const emit = defineEmits(['update:activeKey'])
   background: transparent;
 }
 
+@media (max-width: 1200px) {
+  :deep(.extension-detail-actions .extension-detail-action) {
+    width: 32px;
+    padding: 0;
+  }
+
+  :deep(.extension-detail-actions .extension-detail-action span) {
+    display: none;
+  }
+}
+
 @media (max-width: 900px) {
   :deep(.extension-detail-tabs > .ant-tabs-nav .ant-tabs-tab) {
     width: 30px;
@@ -340,15 +370,6 @@ const emit = defineEmits(['update:activeKey'])
   }
 
   .extension-detail-tab-label {
-    display: none;
-  }
-
-  :deep(.extension-detail-actions .extension-panel-action) {
-    width: 30px;
-    padding: 0;
-  }
-
-  :deep(.extension-detail-actions .extension-panel-action span) {
     display: none;
   }
 }

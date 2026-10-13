@@ -26,7 +26,7 @@ def test_model_timeout_rejects_non_numeric(raw_timeout) -> None:
 
     extractor = LLMGraphExtractor({"model_spec": "test/model", "model_timeout": raw_timeout})
 
-    with pytest.raises(ValueError, match="model_timeout 必须是数字"):
+    with pytest.raises(ValueError, match="timeout_seconds 必须是数字"):
         extractor.validate_options()
 
 
@@ -36,7 +36,7 @@ def test_model_timeout_rejects_non_positive(raw_timeout) -> None:
 
     extractor = LLMGraphExtractor({"model_spec": "test/model", "model_timeout": raw_timeout})
 
-    with pytest.raises(ValueError, match="model_timeout 必须大于 0"):
+    with pytest.raises(ValueError, match="timeout_seconds 必须大于 0"):
         extractor.validate_options()
 
 

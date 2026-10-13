@@ -42,6 +42,9 @@ async def test_storage_migration_reads_legacy_schema_before_cutover(monkeypatch)
         schema_migration_lock=lambda: _async_context(calls, "schema_lock"),
         create_schema_version_table=lambda: _record(calls, "create_schema_version_table"),
         get_schema_versions=lambda: _async_value({}),
+        upgrade_agent_resource_selection=lambda: _record(
+            calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
+        ),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create_business_tables"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge_tables"),
@@ -112,6 +115,9 @@ async def test_storage_migration_rejects_v071_schema_without_quiescence_proof(mo
         schema_migration_lock=lambda: _async_context(calls, "schema_lock"),
         create_schema_version_table=lambda: _record(calls, "create_schema_version_table"),
         get_schema_versions=lambda: _async_value({}),
+        upgrade_agent_resource_selection=lambda: _record(
+            calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
+        ),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
@@ -168,6 +174,9 @@ async def test_schema_ddl_only_runs_for_supported_business_upgrade(
                 "business": business_version,
                 "knowledge": storage_migration.KNOWLEDGE_SCHEMA_VERSION,
             }
+        ),
+        upgrade_agent_resource_selection=lambda: _record(
+            calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
         ),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create_business"),
@@ -248,7 +257,8 @@ async def test_main_rejects_unsupported_business_schema_before_ddl(monkeypatch, 
 
 
 @pytest.mark.asyncio
-async def test_main_v2_business_schema_is_converged_and_versioned_as_current(monkeypatch):
+@pytest.mark.parametrize("business_version", [2, 7, 8])
+async def test_supported_legacy_business_schema_is_converged_and_versioned_as_current(monkeypatch, business_version):
     calls: list[str] = []
     sessions = [_Session() for _ in range(5)]
 
@@ -261,7 +271,10 @@ async def test_main_v2_business_schema_is_converged_and_versioned_as_current(mon
         schema_migration_lock=lambda: _async_context(calls, "schema_lock"),
         create_schema_version_table=lambda: _record(calls, "create_schema_version_table"),
         get_schema_versions=lambda: _async_value(
-            {"business": 2, "knowledge": storage_migration.KNOWLEDGE_SCHEMA_VERSION}
+            {"business": business_version, "knowledge": storage_migration.KNOWLEDGE_SCHEMA_VERSION}
+        ),
+        upgrade_agent_resource_selection=lambda: _record(
+            calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
         ),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create_business"),
@@ -292,7 +305,7 @@ async def test_main_v2_business_schema_is_converged_and_versioned_as_current(mon
 
     await storage_migration.main()
 
-    assert "business_schema" in calls
+    assert ("business_schema" in calls) is (business_version in {2, 7, 8, 9})
     assert f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}" in calls
     assert {"create_business", "checkpoint", "knowledge_schema"}.isdisjoint(calls)
 
@@ -314,6 +327,9 @@ async def test_failed_business_migration_does_not_record_version(monkeypatch):
         schema_migration_lock=lambda: _async_context(calls, "schema_lock"),
         create_schema_version_table=lambda: _record(calls, "create_schema_version_table"),
         get_schema_versions=lambda: _async_value({}),
+        upgrade_agent_resource_selection=lambda: _record(
+            calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
+        ),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create_business"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
@@ -356,6 +372,9 @@ async def test_current_schema_does_not_rewrite_workdir_data(monkeypatch):
         schema_migration_lock=lambda: _async_context(calls, "schema_lock"),
         create_schema_version_table=lambda: _record(calls, "create_schema_version_table"),
         get_schema_versions=lambda: _async_value({}),
+        upgrade_agent_resource_selection=lambda: _record(
+            calls, f"version:business:{storage_migration.BUSINESS_SCHEMA_VERSION}"
+        ),
         record_schema_version=lambda domain, version: _record(calls, f"version:{domain}:{version}"),
         create_business_tables=lambda: _record(calls, "create"),
         create_knowledge_tables=lambda: _record(calls, "create_knowledge"),
