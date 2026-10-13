@@ -14,11 +14,9 @@ from datetime import datetime
 from arq.worker import RetryJob, func
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError
-from yuxi.agents.backends.paths import runtime_workdir_path
 from yuxi.agents.backends.sandbox.provider import get_sandbox_provider
 from yuxi.agents.callbacks.model_request_timing import FirstModelRequestRecorder
 from yuxi.agents.mcp.service import ensure_builtin_mcp_servers_in_db
-from yuxi.agents.skills.service import init_builtin_skills
 from yuxi.config import get_int_env
 from yuxi.repositories.agent_run_repository import TERMINAL_RUN_STATUSES, AgentRunRepository
 from yuxi.repositories.user_repository import UserRepository
@@ -26,13 +24,15 @@ from yuxi.services.agent_request_queue_service import (
     dispatch_next_request,
     recover_pending_dispatches,
 )
-from yuxi.services.agent_run_manifest_service import build_run_manifest_result, compute_manifest_fingerprint
+from yuxi.services.agent_run_manifest_service import (
+    PreparedRunExecution,
+    compute_manifest_fingerprint,
+    prepare_run_execution,
+)
 from yuxi.services.chat_service import get_agent_state_view, stream_agent_chat, stream_agent_resume
 from yuxi.services.input_message_service import restore_chat_input_message
 from yuxi.services.run_queue_service import (
     RUN_RECONCILIATION_SECONDS,
-    WORKER_HEALTH_INTERVAL_SECONDS,
-    WORKER_HEALTH_KEY,
     WORKER_RECONCILIATION_HEALTH_KEY,
     WORKER_RECONCILIATION_HEALTH_TTL_SECONDS,
     append_run_stream_event,
@@ -45,6 +45,7 @@ from yuxi.services.scheduled_agent_service import (
     claim_and_dispatch_due_jobs,
     recover_scheduled_dispatches,
 )
+from yuxi.services.skills.shared import init_builtin_skills
 from yuxi.services.task_queue_service import (
     TASK_RECONCILIATION_HEALTH_KEY,
     TASK_RECONCILIATION_HEALTH_TTL_SECONDS,
@@ -57,8 +58,9 @@ from yuxi.services.workdir_service import (
     resolve_authorized_workdir,
     resolve_conversation_workdir_path,
 )
+from yuxi.services.worker_health import WORKER_HEALTH_INTERVAL_SECONDS, WORKER_HEALTH_KEY
 from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import AgentRun, Conversation, Message
+from yuxi.storage.postgres.models_business import AgentRun, Conversation, Message, User
 from yuxi.storage.redis import get_arq_redis_settings
 from yuxi.utils.auth_utils import AuthUtils
 from yuxi.utils.datetime_utils import utc_now_naive
@@ -523,10 +525,22 @@ def _require_persisted_manifest_match(persisted_run: AgentRun | None, *, recorde
         raise RuntimeError("运行资产已在重试前变化，与已固化 manifest 不一致")
 
 
-async def persist_run_manifest(*, run: AgentRun, user, worker_id: str) -> dict:
-    """在执行上下文构造前固化运行清单与指纹；固化失败由调用方显式失败。"""
+async def prepare_and_record_run_execution(
+    *,
+    run: AgentRun,
+    user: User,
+    worker_id: str,
+    workdir_binding: AuthorizedWorkdir,
+) -> PreparedRunExecution:
+    """在构图执行前固化运行清单与指纹；准备和固化失败由调用方收尾。"""
     async with pg_manager.get_async_session_context() as db:
-        result = await build_run_manifest_result(run=run, user=user, db=db)
+        result = await prepare_run_execution(
+            run=run,
+            user=user,
+            db=db,
+            worker_id=worker_id,
+            workdir_binding=workdir_binding,
+        )
         fingerprint = compute_manifest_fingerprint(result.manifest)
         persisted_run, recorded = await AgentRunRepository(db).record_run_manifest(
             run.id,
@@ -535,10 +549,7 @@ async def persist_run_manifest(*, run: AgentRun, user, worker_id: str) -> dict:
             worker_id=worker_id,
         )
         _require_persisted_manifest_match(persisted_run, recorded=recorded, fingerprint=fingerprint)
-        return {
-            "normalized_context": result.normalized_context,
-            "skill_runtime_snapshot": result.skill_runtime_snapshot,
-        }
+        return result
 
 
 async def _record_run_timing_best_effort(
@@ -1066,10 +1077,18 @@ async def process_agent_run(ctx, run_id: str):
                 )
                 return
 
-        # 运行清单必须在真正构造执行上下文前固化；固化失败时执行不得开始。
+        await run_ctx.start()
+        # 准备配置期间也续租；manifest 提交成功前不得开始构图执行。
         try:
-            execution_snapshot = await persist_run_manifest(run=run, user=user, worker_id=worker_id)
+            prepared_execution = await prepare_and_record_run_execution(
+                run=run,
+                user=user,
+                worker_id=worker_id,
+                workdir_binding=workdir_binding,
+            )
         except Exception as manifest_error:
+            if await _is_cancel_requested(run_id):
+                raise asyncio.CancelledError(f"run {run_id} cancelled during preparation")
             logger.error(f"Failed to persist AgentRun manifest: run={run_id}", exc_info=True)
             transition = await mark_run_terminal(
                 run_id,
@@ -1086,6 +1105,7 @@ async def process_agent_run(ctx, run_id: str):
         if await _is_cancel_requested(run_id):
             raise asyncio.CancelledError(f"run {run_id} cancelled after manifest recorded")
 
+        context = prepared_execution.context
         meta = {
             "run_id": run_id,
             "request_id": request_id,
@@ -1094,17 +1114,17 @@ async def process_agent_run(ctx, run_id: str):
             "uid": user.uid,
             "has_image": bool(image_content),
             "attachment_file_ids": input_metadata.get("attachment_file_ids") or [],
-            "model_spec": payload.get("model_spec"),
-            "tool_approval_mode": payload.get("tool_approval_mode"),
+            "model_spec": context.model,
+            "tool_approval_mode": context.tool_approval_mode,
             "run_type": run_type,
             "created_by_run_id": run.created_by_run_id,
             "worker_id": worker_id,
-            "runtime_scope_id": str(getattr(run, "runtime_scope_id", None) or thread_id),
-            "workdir_relative_path": workdir_binding.workdir_path,
-            "workdir_path": runtime_workdir_path(workdir_binding.workdir_path),
+            "runtime_scope_id": context.runtime_scope_id,
+            "workdir_relative_path": context.workdir_relative_path,
+            "workdir_path": context.workdir_path,
         }
         if run_type == "subagent":
-            meta["parent_thread_id"] = runtime.get("parent_thread_id")
+            meta["parent_thread_id"] = context.parent_thread_id
         if input_metadata.get("source"):
             meta["source"] = input_metadata.get("source")
         if isinstance(input_metadata.get("agent_invocation_meta"), dict):
@@ -1148,7 +1168,7 @@ async def process_agent_run(ctx, run_id: str):
                     meta=meta,
                     current_user=user,
                     db=db,
-                    execution_snapshot=execution_snapshot,
+                    prepared_execution=prepared_execution,
                     on_prepared=record_prepared,
                     model_request_recorder=model_request_recorder,
                 )
@@ -1160,8 +1180,7 @@ async def process_agent_run(ctx, run_id: str):
                     input_message=normalized_input_message,
                     current_user=user,
                     db=db,
-                    save_user_message=False,
-                    execution_snapshot=execution_snapshot,
+                    prepared_execution=prepared_execution,
                     on_prepared=record_prepared,
                     model_request_recorder=model_request_recorder,
                 )

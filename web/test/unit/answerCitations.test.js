@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createMarkdownRenderer } from '../../src/utils/markdown_preview.js'
+import { createMarkdownRenderer, getReferencedCitationSources } from '../../src/utils/markdown_preview.js'
 import {
   getMessageCitationSources,
   getToolCitationSources,
@@ -26,6 +26,37 @@ const sourceB = {
   file_id: 'file-2',
   excerpts: [{ text: '原文乙' }]
 }
+
+test('来源面板只列正文引用，混合网页和文件按正文顺序统一编号', () => {
+  const web = { source: 'https://example.com/article', title: '网页', excerpts: [] }
+  const message = {
+    content: `甲<cite source="${sourceB.source}">24</cite>。网页<cite source="${web.source}">9</cite>。再引用<cite source="${sourceB.source}">24</cite>。`,
+    extra_metadata: { citation_sources: [sourceA, web, sourceB] }
+  }
+  const before = JSON.stringify(message)
+  const sources = getReferencedCitationSources(message)
+  assert.deepEqual(sources.map(({ source, number }) => [source, number]), [[sourceB.source, 1], [web.source, 2]])
+  assert.deepEqual(sources[0].excerpts, sourceB.excerpts)
+  assert.deepEqual([...renderer.render(message.content).matchAll(/data-citation-source="([^"]+)"/g)].map(m => m[1]), [sources[0].source, sources[1].source, sources[0].source])
+  assert.equal(JSON.stringify(message), before)
+})
+
+test('来源编号忽略代码中的引用，未绑定来源不进入面板，无引用不展示候选', () => {
+  const cite = `<cite source="${sourceA.source}">8</cite>`
+  const message = { content: '`' + cite + '`\n\n```html\n' + cite + '\n```\n\n正文<cite source="kb://missing/file">9</cite>。' + cite, extra_metadata: { citation_sources: [sourceA, sourceB] } }
+  const sources = getReferencedCitationSources(message)
+  assert.deepEqual(sources.map(s => [s.source, s.number]), [[sourceA.source, 2]])
+  assert.deepEqual(getReferencedCitationSources({ ...message, content: '没有正文引用' }), [])
+})
+
+test('来源解析与助手正文一致，先去除首尾空白', () => {
+  const message = {
+    content: `    <cite source="${sourceA.source}">8</cite>\n`,
+    extra_metadata: { citation_sources: [sourceA] }
+  }
+  assert.match(renderer.render(message.content.trim()), /查看引用 1 原文/)
+  assert.deepEqual(getReferencedCitationSources(message).map(s => s.source), [sourceA.source])
+})
 
 test('两个子任务局部编号均为 1，主正文统一编号，重复来源复用编号', () => {
   const input =

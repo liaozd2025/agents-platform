@@ -4,6 +4,8 @@ import re
 from typing import Any
 from urllib.parse import quote, urlencode
 
+from yuxi.knowledge.utils import strip_nul_characters
+
 OA_ARTICLE_BASE_URL = "https://hnjiudian.cn/web/index.html#/corporate-culture/view-page"
 _ARTICLE_METADATA_PATTERN = re.compile(
     r"^\s*(task_id|taskid|oa_id|title|author|author_name|type_name|publish_time|publish_date)"
@@ -14,8 +16,8 @@ _ARTICLE_METADATA_PATTERN = re.compile(
 
 def build_knowledge_source_reference(content: str, *, fallback_title: str = "") -> dict[str, Any]:
     """从文章头部注释构造面向前端的知识库来源。"""
-    fields = _parse_article_metadata(content)
-    title = fields.get("title") or fallback_title
+    fields = _parse_article_metadata(strip_nul_characters(content))
+    title = fields.get("title") or strip_nul_characters(fallback_title)
     task_id = _normalize_task_id(fields.get("task_id") or fields.get("taskid") or fields.get("oa_id"))
     source_ref: dict[str, Any] = {
         "source_type": "knowledge_base",
@@ -70,7 +72,7 @@ async def attach_knowledge_source_references(manager: Any, kb_id: str, kb_name: 
             source_ref["kb_name"] = kb_name
             source_refs[file_id] = source_ref
         metadata["source_ref"] = source_ref
-    return result
+    return strip_nul_characters(result)
 
 
 def _parse_article_metadata(content: str) -> dict[str, str]:

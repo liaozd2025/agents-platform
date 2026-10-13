@@ -33,7 +33,7 @@ def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-BUSINESS_SCHEMA_VERSION = 9
+BUSINESS_SCHEMA_VERSION = 10
 KNOWLEDGE_SCHEMA_VERSION = 3
 SCHEMA_VERSION_TABLE = "yuxi_schema_migrations"
 AGENT_RUN_LEASE_SCHEMA_STATEMENTS = (
@@ -545,6 +545,39 @@ class PostgresManager(metaclass=SingletonMeta):
                 return {}
             rows = await conn.execute(text(f"SELECT domain, version FROM {SCHEMA_VERSION_TABLE}"))
             return {str(row.domain): int(row.version) for row in rows}
+
+    async def upgrade_agent_resource_selection(self) -> None:
+        """原子迁移旧资源选择并记录版本，重试时保留新协议的空数组。"""
+        self._check_initialized()
+        async with self._schema_transaction() as conn:
+            version = await conn.scalar(
+                text(f"SELECT version FROM {SCHEMA_VERSION_TABLE} WHERE domain = 'business' FOR UPDATE")
+            )
+            if version == BUSINESS_SCHEMA_VERSION:
+                return
+            if version not in (None, 1, 2, 3, 4, 5, 7, 8, 9):
+                raise RuntimeError(f"Unsupported business schema version: {version}")
+            for name in ("tools", "knowledges", "skills", "subagents", "mcps", "preload_skills"):
+                replacement = '"all"' if name in {"tools", "knowledges", "skills", "subagents"} else "[]"
+                await conn.execute(
+                    text("""
+                        UPDATE agents
+                        SET config_json = jsonb_set(
+                            config_json::jsonb, ARRAY['context', :name], CAST(:replacement AS jsonb)
+                        )
+                        WHERE config_json::jsonb -> 'context' -> :name = 'null'::jsonb
+                           OR (:name = 'subagents' AND config_json::jsonb -> 'context' -> :name = '[]'::jsonb)
+                    """),
+                    {"name": name, "replacement": replacement},
+                )
+            await conn.execute(
+                text(f"""
+                    INSERT INTO {SCHEMA_VERSION_TABLE} (domain, version, applied_at)
+                    VALUES ('business', {BUSINESS_SCHEMA_VERSION}, CURRENT_TIMESTAMP)
+                    ON CONFLICT (domain) DO UPDATE
+                    SET version = {BUSINESS_SCHEMA_VERSION}, applied_at = EXCLUDED.applied_at
+                """)
+            )
 
     async def record_schema_version(self, domain: str, version: int) -> None:
         """在对应域迁移完整成功后记录当前版本。"""
@@ -1376,6 +1409,7 @@ class PostgresManager(metaclass=SingletonMeta):
                 extra_json JSONB,
                 is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+                include_user_uid BOOLEAN NOT NULL DEFAULT FALSE,
                 created_by VARCHAR(100),
                 updated_by VARCHAR(100),
                 created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -1396,6 +1430,10 @@ class PostgresManager(metaclass=SingletonMeta):
             )
             """,
             *WORKDIR_PATH_SCHEMA_STATEMENTS,
+            (
+                "ALTER TABLE IF EXISTS model_providers ADD COLUMN IF NOT EXISTS "
+                "include_user_uid BOOLEAN NOT NULL DEFAULT FALSE"
+            ),
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS agent_slug VARCHAR(64)",
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS conversation_thread_id VARCHAR(64)",
             "ALTER TABLE IF EXISTS agent_runs ADD COLUMN IF NOT EXISTS created_by_run_id VARCHAR(64)",

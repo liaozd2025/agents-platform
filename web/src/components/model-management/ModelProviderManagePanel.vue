@@ -59,6 +59,8 @@ const REQUEST_BODY_OVERRIDES_PLACEHOLDER = '{\n  "enable_thinking": false\n}'
 // Provider form state
 const showProviderModal = ref(false)
 const editingProviderId = ref(null) // null = creating, string = editing
+const originalProviderEnabled = ref(null)
+const originalProviderFields = ref('')
 const providerForm = reactive({
   provider_id: '',
   display_name: '',
@@ -74,9 +76,14 @@ const providerForm = reactive({
   api_key: '',
   capabilities: ['chat'],
   is_enabled: true,
+  include_user_uid: false,
   headers_text: '{}',
   extra_text: '{}'
 })
+// 启用状态由标题栏独立保存，不计入其他字段的未保存判断。
+const hasUnsavedProviderFields = computed(
+  () => JSON.stringify({ ...providerForm, is_enabled: null }) !== originalProviderFields.value
+)
 
 // Model form state
 const showModelModal = ref(false)
@@ -308,10 +315,16 @@ const loadProviders = async () => {
   }
 }
 
+function getUserUidHeaderDisplay(provider) {
+  if (!provider.include_user_uid) return '关闭'
+  return 'x-yuxi-uid（签名）'
+}
+
 function getProviderInfo(provider) {
   return [
     { label: 'Base URL', value: provider.base_url || '-' },
-    { label: '能力', value: provider.capabilities?.join(', ') || 'chat' }
+    { label: '能力', value: provider.capabilities?.join(', ') || 'chat' },
+    { label: '请求用户 ID', value: getUserUidHeaderDisplay(provider) }
   ]
 }
 
@@ -322,6 +335,7 @@ function getProviderStatus(provider) {
 
 const openCreateProviderModal = () => {
   editingProviderId.value = null
+  originalProviderEnabled.value = null
   Object.assign(providerForm, {
     provider_id: '',
     display_name: '',
@@ -337,6 +351,7 @@ const openCreateProviderModal = () => {
     api_key: '',
     capabilities: ['chat'],
     is_enabled: true,
+    include_user_uid: false,
     headers_text: '{}',
     extra_text: '{}'
   })
@@ -345,6 +360,7 @@ const openCreateProviderModal = () => {
 
 const openEditProviderModal = (provider) => {
   editingProviderId.value = provider.provider_id
+  originalProviderEnabled.value = provider.is_enabled !== false
   Object.assign(providerForm, {
     provider_id: provider.provider_id,
     display_name: provider.display_name,
@@ -360,9 +376,11 @@ const openEditProviderModal = (provider) => {
     api_key: provider.api_key || '',
     capabilities: provider.capabilities?.length ? provider.capabilities : ['chat'],
     is_enabled: provider.is_enabled !== false,
+    include_user_uid: provider.include_user_uid === true,
     headers_text: formatJsonText(provider.headers_json),
     extra_text: formatJsonText(provider.extra_json)
   })
+  originalProviderFields.value = JSON.stringify({ ...providerForm, is_enabled: null })
   showProviderModal.value = true
 }
 
@@ -381,6 +399,7 @@ const buildProviderPayload = () => ({
   api_key: providerForm.api_key || null,
   capabilities: providerForm.capabilities,
   is_enabled: providerForm.is_enabled,
+  include_user_uid: providerForm.provider_type !== 'gemini' && providerForm.include_user_uid,
   headers_json: parseJsonObject(providerForm.headers_text, '请求头'),
   extra_json: parseJsonObject(providerForm.extra_text, '扩展配置')
 })
@@ -422,19 +441,46 @@ const saveProvider = async () => {
   }
 }
 
-const saveProviderAndEnable = async () => {
+/** 只提交供应商启用状态，并在停用成功后关闭编辑弹窗。 */
+const applyProviderEnabled = async (enabled) => {
   saving.value = true
   try {
-    const payload = { ...buildProviderPayload(), is_enabled: true }
-    await modelProviderApi.updateProvider(providerForm.provider_id, payload)
-    message.success('供应商已保存并启用')
-    showProviderModal.value = false
+    await modelProviderApi.updateProvider(providerForm.provider_id, { is_enabled: enabled })
+    originalProviderEnabled.value = enabled
+    providerForm.is_enabled = enabled
+    if (!enabled) showProviderModal.value = false
     await loadProviders()
+    message.success(`供应商已${enabled ? '启用' : '停用'}`)
   } catch (error) {
-    message.error(error.message || '保存失败')
+    message.error(error?.response?.data?.detail || error.message || '切换供应商状态失败')
   } finally {
     saving.value = false
   }
+}
+
+/** 切换启用状态前保护默认模型与未保存的其他配置。 */
+const toggleProviderEnabled = (enabled) => {
+  if (saving.value) return
+  if (!editingProviderId.value) {
+    providerForm.is_enabled = enabled
+    return
+  }
+  if (!enabled && providerContainsDefaultModel(providerForm.provider_id)) {
+    warnDefaultModelProtected()
+    return
+  }
+  if (!enabled && hasUnsavedProviderFields.value) {
+    Modal.confirm({
+      title: '停用供应商？',
+      content: '弹窗内未保存的其他修改将丢弃；此操作只保存启用状态。',
+      okText: '停用',
+      okType: 'danger',
+      cancelText: '继续编辑',
+      onOk: () => applyProviderEnabled(enabled)
+    })
+    return
+  }
+  applyProviderEnabled(enabled)
 }
 
 const deleteProvider = async (provider) => {
@@ -470,6 +516,7 @@ const deleteProvider = async (provider) => {
 }
 
 const deleteProviderFromEdit = async () => {
+  if (saving.value) return
   const provider = providers.value.find((p) => p.provider_id === editingProviderId.value)
   if (provider) {
     deleteProvider(provider)
@@ -705,12 +752,21 @@ defineExpose({
   <div class="model-provider-manage-panel">
     <PageShoulder v-model:search="searchQuery" search-placeholder="搜索供应商...">
       <template #actions>
+        <a-button
+          class="lucide-icon-btn"
+          @click="loadProviders"
+          :disabled="loading"
+          aria-label="刷新供应商"
+        >
+          <RefreshCw
+            :size="14"
+            class="page-shoulder-refresh-icon"
+            :class="{ 'is-spinning': loading }"
+          />
+        </a-button>
         <a-button type="primary" class="lucide-icon-btn" @click="openCreateProviderModal">
           <Plus :size="14" />
           新增供应商
-        </a-button>
-        <a-button class="lucide-icon-btn" @click="loadProviders" :loading="loading">
-          <RefreshCw :size="14" :class="{ spinning: loading }" />
         </a-button>
       </template>
     </PageShoulder>
@@ -799,16 +855,33 @@ defineExpose({
     <!-- Provider Edit Modal -->
     <a-modal
       v-model:open="showProviderModal"
-      :title="editingProviderId ? '编辑供应商' : '新增供应商'"
       :width="560"
-      :confirm-loading="saving"
+      :closable="false"
+      :mask-closable="!saving"
+      :keyboard="!saving"
     >
+      <template #title>
+        <div class="provider-modal-titlebar">
+          <span>{{ editingProviderId ? '编辑供应商' : '新增供应商' }}</span>
+          <div class="provider-modal-status">
+            <span>启用</span>
+            <a-switch
+              :checked="editingProviderId ? originalProviderEnabled : providerForm.is_enabled"
+              :loading="saving"
+              :disabled="saving"
+              :aria-label="editingProviderId ? (originalProviderEnabled ? '停用供应商' : '启用供应商') : '创建时启用供应商'"
+              @change="toggleProviderEnabled"
+            />
+          </div>
+        </div>
+      </template>
       <template #footer>
         <div class="provider-modal-footer">
           <a-button
             v-if="editingProviderId"
             danger
             class="lucide-icon-btn"
+            :disabled="saving"
             @click="deleteProviderFromEdit"
           >
             <Trash2 :size="14" />
@@ -816,25 +889,18 @@ defineExpose({
           </a-button>
           <span v-else></span>
           <div class="provider-modal-footer-actions">
-            <a-button @click="showProviderModal = false">取消</a-button>
-            <template v-if="editingProviderId && !providerForm.is_enabled">
-              <a-button :loading="saving" @click="saveProvider">仅保存</a-button>
-              <a-button type="primary" :loading="saving" @click="saveProviderAndEnable">
-                保存并启用
-              </a-button>
-            </template>
+            <a-button :disabled="saving" @click="showProviderModal = false">取消</a-button>
             <a-button
-              v-else
               type="primary"
               :loading="saving"
               @click="editingProviderId ? saveProvider() : createProvider()"
             >
-              确认
+              {{ editingProviderId ? '保存' : '确认' }}
             </a-button>
           </div>
         </div>
       </template>
-      <div class="modal-form" autocomplete="off">
+      <div class="modal-form" autocomplete="off" :inert="saving">
         <div class="form-row">
           <label class="form-label">
             <span>Provider ID</span>
@@ -888,7 +954,17 @@ defineExpose({
             />
           </label>
           <label class="form-label">
-            <span>API Key</span>
+            <span class="api-key-label">
+              API Key
+              <a
+                v-if="providerForm.provider_id === 'fluxionai'"
+                href="https://fluxionai.space/register?source=github&campaign=yuxi&promo=YUXI"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                注册送 $7 API 额度
+              </a>
+            </span>
             <a-input-password
               v-model:value="providerForm.api_key"
               autocomplete="new-password"
@@ -954,11 +1030,16 @@ defineExpose({
         </label>
 
         <div class="form-switch">
-          <span>状态</span>
+          <a-tooltip
+            :title="providerForm.provider_type === 'gemini' ? 'Gemini 供应商暂不支持请求携带用户 ID。' : '开启后，智能体对话产生的聊天模型请求会携带带 HMAC 签名的 x-yuxi-uid 请求头（值为当前用户 UID），外部网关验签后即可按用户统计用量并防止伪造。需要先在 API/worker 环境变量配置 YUXI_UID_SIGNATURE_SECRET，保存时会校验；仅影响该供应商且仅在开启时生效。'"
+          >
+            <span>请求携带用户 ID</span>
+          </a-tooltip>
           <a-switch
-            v-model:checked="providerForm.is_enabled"
-            checked-children="启用"
-            un-checked-children="停用"
+            v-model:checked="providerForm.include_user_uid"
+            :disabled="providerForm.provider_type === 'gemini'"
+            checked-children="携带"
+            un-checked-children="关闭"
           />
         </div>
 
@@ -1662,6 +1743,7 @@ defineExpose({
 }
 
 .remote-type-filter {
+  font-size: 12px;
   flex-shrink: 0;
 }
 
@@ -1777,6 +1859,29 @@ defineExpose({
   line-height: 1.5;
 }
 
+.api-key-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 8px;
+
+  a {
+    color: var(--main-600);
+    font-size: 11px;
+    font-weight: 400;
+
+    &:hover {
+      text-decoration: underline;
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--main-400);
+      outline-offset: 2px;
+    }
+  }
+}
+
 .full-width {
   grid-column: 1 / -1;
 }
@@ -1805,6 +1910,22 @@ defineExpose({
   :deep(.ant-collapse-header) {
     padding-inline: 0;
   }
+}
+
+.provider-modal-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.provider-modal-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--gray-600);
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .provider-modal-footer {

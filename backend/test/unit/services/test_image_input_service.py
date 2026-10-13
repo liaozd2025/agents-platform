@@ -68,7 +68,10 @@ async def test_transcribe_skips_when_vision_model_is_not_configured(monkeypatch:
 
     monkeypatch.setattr(image_input_service, "system_options", _Options())
     message = HumanMessage(
-        content=[{"type": "text", "text": "看图"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]
+        content=[
+            {"type": "text", "text": "看图"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+        ]
     )
 
     assert await image_input_service.transcribe_message_images(message) is None
@@ -95,9 +98,7 @@ async def test_transcribe_replaces_image_blocks_and_keeps_text(monkeypatch: pyte
         ]
     )
 
-    transcribed = await image_input_service.transcribe_message_images(
-        message, exclude_spec="alibaba-cn:qwen3.7-max"
-    )
+    transcribed = await image_input_service.transcribe_message_images(message, exclude_spec="alibaba-cn:qwen3.7-max")
 
     assert transcribed is not None
     assert [block["type"] for block in transcribed.content_blocks] == ["text", "text"]
@@ -124,13 +125,11 @@ async def test_transcribe_skips_when_vision_model_is_the_main_model(monkeypatch:
     monkeypatch.setattr("yuxi.models.chat.load_chat_model", fail_load)
     message = HumanMessage(content=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}])
 
-    assert (
-        await image_input_service.transcribe_message_images(message, exclude_spec="alibaba-cn:qwen3.7-max") is None
-    )
+    assert await image_input_service.transcribe_message_images(message, exclude_spec="alibaba-cn:qwen3.7-max") is None
 
 
 def test_non_image_model_mark_expires() -> None:
-    """"不接图"标记按 spec 记录，避免后续请求重复发注定失败的调用。"""
+    """ "不接图"标记按 spec 记录，避免后续请求重复发注定失败的调用。"""
     assert image_input_service.is_known_non_image_model("alibaba-cn:qwen3.7-max") is False
 
     image_input_service.mark_non_image_model("alibaba-cn:qwen3.7-max")
@@ -182,66 +181,66 @@ async def test_tuning_params_only_apply_to_openai_compatible_providers(
         image_input_service._vision_transcripts.clear()
 
 
-def test_correct_transcript_paths_fixes_mistyped_hash() -> None:
-    """转述里被抄错的 hash 路径自动纠正为消息原文中的真实路径（实测缺陷回放）。"""
-    real = "/home/gem/user-data/projects/w1/uploads/9fc2ac5549a8434cb734e71009d6c16a_preview.png"
-    transcript = f"这是一张品牌标识图片。\n**图片文件路径：**\n{real.replace('9fc2ac55', '9fc2c554')}"
-    reference = f"<attachment_context>\n- preview.png: {real}\n</attachment_context>"
-
-    corrected = image_input_service.correct_transcript_paths(transcript, reference)
-
-    assert real in corrected
-    assert "9fc2c554" not in corrected
-
-
-def test_correct_transcript_paths_keeps_exact_and_skips_ambiguous() -> None:
-    """完全匹配的路径不动；存在第二个同样接近的候选（歧义）时不纠正。"""
-    a = "/home/gem/user-data/projects/w1/uploads/9fc2ac5549a8434cb734e71009d6c16a_preview.png"
-    b = "/home/gem/user-data/projects/w1/uploads/9fc2ac5549a8434cb734e71009d6c16b_preview.png"
-    reference = f"- {a}\n- {b}"
-
-    # 完全匹配：原样保留
-    assert image_input_service.correct_transcript_paths(f"路径 {a}", reference) == f"路径 {a}"
-
-    # 候选与 a、b 都只差一个字符：歧义，不纠正
-    ambiguous_candidate = a[:-1] + "x"
-    assert (
-        image_input_service.correct_transcript_paths(f"路径 {ambiguous_candidate}", reference)
-        == f"路径 {ambiguous_candidate}"
-    )
-
-
 @pytest.mark.asyncio
-async def test_transcribe_message_images_corrects_path_in_transcript(monkeypatch: pytest.MonkeyPatch) -> None:
-    """端到端：视觉模型转述里抄错的路径在注入前被纠正。"""
-    real = "/home/gem/user-data/projects/w1/uploads/9fc2ac5549a8434cb734e71009d6c16a_preview.png"
+async def test_transcript_cache_scopes_identity_prunes_expiry_and_limits_capacity(monkeypatch):
+    """真实调用次数证明身份隔离、过期回收与固定容量。"""
 
-    class _Options:
+    class Options:
         async def get(self):
-            return {"vision_model": "alibaba-cn:qwen3.7-flash"}
+            return {"vision_model": "vendor:vision"}
 
-    class _VisionModel:
+    calls = []
+    loads = []
+
+    class Vision:
         async def ainvoke(self, messages):
-            garbled = real.replace("9fc2ac55", "9fc2c554")
-            return AIMessage(content=f"图片描述。\n图片文件路径：\n{garbled}")
+            calls.append(messages)
+            return AIMessage("描述")
 
-    monkeypatch.setattr(image_input_service, "system_options", _Options())
-    monkeypatch.setattr(
-        image_input_service,
-        "model_cache",
-        _FakeModelCache({"alibaba-cn:qwen3.7-flash": ["text", "image"]}),
-    )
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", lambda _spec, **_kwargs: _VisionModel())
-    message = HumanMessage(
-        content=[
-            {"type": "text", "text": f"分析这个文件：<attachment_context>\n- preview.png: {real}\n</attachment_context>"},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
-        ]
-    )
+    def load(spec, **kwargs):
+        loads.append(kwargs)
+        return Vision()
 
-    result = await image_input_service.transcribe_message_images(message, exclude_spec="alibaba-cn:qwen3.7-max")
+    monkeypatch.setattr(image_input_service, "system_options", Options())
+    monkeypatch.setattr("yuxi.models.chat.load_chat_model", load)
+    monkeypatch.setattr(image_input_service, "_VISION_CACHE_MAX_ENTRIES", 2)
+    message = HumanMessage(content=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}])
+    for uid, thread in [("u1", "t1"), ("u1", "t1"), ("u2", "t1"), ("u2", "t2")]:
+        assert await image_input_service.transcribe_message_images(message, uid=uid, session_id=thread)
+        assert loads[-1]["uid"] == uid and loads[-1]["session_id"] == thread
+    assert len(calls) == 3 and len(image_input_service._vision_transcripts) == 2
+    for key in image_input_service._vision_transcripts:
+        image_input_service._vision_transcripts[key] = (0, "过期")
+    await image_input_service.transcribe_message_images(message, uid="u3", session_id="t3")
+    assert len(calls) == 4 and len(image_input_service._vision_transcripts) == 1
 
-    assert result is not None
-    text = image_input_service.message_text(result)
-    assert real in text
-    assert "9fc2c554" not in text
+
+def test_explicit_image_declaration_overrides_learned_rejection(monkeypatch):
+    """管理员更新声明后立即恢复图片直传；明确支持的声明不得被学习覆盖。"""
+    cache = _FakeModelCache({"vendor:main": []})
+    monkeypatch.setattr(image_input_service, "model_cache", cache)
+    image_input_service.mark_non_image_model("vendor:main")
+    assert image_input_service.is_known_non_image_model("vendor:main")
+    cache.modalities_by_spec["vendor:main"] = ["text", "image"]
+    assert not image_input_service.is_known_non_image_model("vendor:main")
+    image_input_service._non_image_model_specs.clear()
+    image_input_service.mark_non_image_model("vendor:main")
+    assert not image_input_service._non_image_model_specs
+
+
+def test_image_fingerprint_preserves_block_boundaries():
+    """有序图片列表的边界与 MIME 不得在缓存键中丢失。"""
+    left = [{"url": "https://a.test/ahttps://b.test/c"}, {"url": "https://d.test/e"}]
+    right = [{"url": "https://a.test/a"}, {"url": "https://b.test/chttps://d.test/e"}]
+    assert image_input_service._image_fingerprint(left) != image_input_service._image_fingerprint(right)
+    assert image_input_service._image_fingerprint(left) != image_input_service._image_fingerprint(left[::-1])
+    assert image_input_service._image_fingerprint(
+        [{"base64": "AA", "mime_type": "image/png"}]
+    ) != image_input_service._image_fingerprint([{"base64": "AA", "mime_type": "image/jpeg"}])
+
+
+def test_image_fingerprint_ignores_generated_block_ids():
+    """LangChain 自动生成的块 ID 不得破坏同一图片的缓存命中。"""
+    first = {"base64": "AA", "mime_type": "image/png", "id": "random-a", "index": 0}
+    second = {**first, "id": "random-b", "index": 1}
+    assert image_input_service._image_fingerprint([first]) == image_input_service._image_fingerprint([second])

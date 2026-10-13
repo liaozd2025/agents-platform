@@ -8,11 +8,15 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
 from yuxi.agents.middlewares.model_input import ImageInputCompatibilityMiddleware
+from yuxi.agents.toolkits.buildin.tools import ocr_parse_file
 from yuxi.services import image_input_service
 
 
 def _request(model, messages, tools=None) -> ModelRequest:
-    return ModelRequest(model=model, messages=messages, tools=tools or [])
+    request = ModelRequest(model=model, messages=messages)
+    if tools is not None:
+        request = request.override(tools=tools)
+    return request
 
 
 def _openai_model() -> ChatOpenAI:
@@ -251,6 +255,7 @@ async def test_translates_provider_image_rejection_to_backend_ocr(error_message:
     request = _request(
         SimpleNamespace(),
         [_read_file_call_message(), _read_file_image_message()],
+        tools=[ocr_parse_file],
     )
     calls = 0
 
@@ -264,10 +269,54 @@ async def test_translates_provider_image_rejection_to_backend_ocr(error_message:
     response = await middleware.awrap_model_call(request, handler)
 
     assert calls == 1
-    assert [tool.name for tool in middleware.tools] == ["ocr_parse_file"]
     assert response.result[0].content == "当前模型不支持图片输入，正在改用 OCR 工具提取图片文字。"
     assert response.result[0].tool_calls[0]["name"] == "ocr_parse_file"
     assert response.result[0].tool_calls[0]["args"] == {"file_path": "/home/gem/user-data/uploads/image.png"}
+
+
+@pytest.mark.asyncio
+async def test_no_ocr_fallback_when_tool_disabled() -> None:
+    """OCR 工具被禁用（不在请求工具集中）时，图片输入拒绝不得伪造 OCR tool_call。"""
+    middleware = ImageInputCompatibilityMiddleware()
+    # 契约：中间件不得通过 tools 属性向模型注入工具，否则会绕过智能体工具开关
+    assert getattr(middleware, "tools", []) == []
+    request = _request(
+        SimpleNamespace(),
+        [_read_file_call_message(), _read_file_image_message()],
+    )
+
+    async def handler(_request):
+        error = RuntimeError("This model does not support image input")
+        error.status_code = 400
+        raise error
+
+    response = await middleware.awrap_model_call(request, handler)
+
+    message = response.result[0]
+    assert not message.tool_calls
+    assert "OCR" in message.content
+    assert "禁用" in message.content
+
+
+def test_no_ocr_fallback_when_tool_disabled_sync() -> None:
+    """同步路径同样遵守工具开关：OCR 禁用时不伪造 tool_call。"""
+    middleware = ImageInputCompatibilityMiddleware()
+    request = _request(
+        SimpleNamespace(),
+        [_read_file_call_message(), _read_file_image_message()],
+    )
+
+    def handler(_request):
+        error = RuntimeError("This model does not support image input")
+        error.status_code = 400
+        raise error
+
+    response = middleware.wrap_model_call(request, handler)
+
+    message = response.result[0]
+    assert not message.tool_calls
+    assert "OCR" in message.content
+    assert "禁用" in message.content
 
 
 @pytest.mark.asyncio
@@ -412,6 +461,7 @@ async def test_translates_openrouter_missing_vision_endpoint() -> None:
     request = _request(
         SimpleNamespace(),
         [_read_file_call_message(), _read_file_image_message()],
+        tools=[ocr_parse_file],
     )
 
     async def handler(_request):
@@ -600,7 +650,7 @@ async def test_falls_back_to_ocr_when_vision_model_is_not_configured(monkeypatch
     async def handler(_request):
         raise _dashscope_rejection()
 
-    response = await middleware.awrap_model_call(_image_request(), handler)
+    response = await middleware.awrap_model_call(_image_request().override(tools=[ocr_parse_file]), handler)
 
     assert response.result[0].content == "当前模型无法读取图片，且没有可供 OCR 工具解析的文件路径。"
 
@@ -618,6 +668,7 @@ async def test_falls_back_to_ocr_when_vision_model_call_fails(
     request = _request(
         _yuxi_model("alibaba-cn:qwen3.7-max"),
         [_read_file_call_message(path), _read_file_image_message(path)],
+        tools=[ocr_parse_file],
     )
 
     async def handler(_request):
@@ -645,7 +696,7 @@ async def test_keeps_image_when_vision_model_is_the_main_model(
     async def handler(_request):
         raise _dashscope_rejection()
 
-    response = await middleware.awrap_model_call(_image_request(), handler)
+    response = await middleware.awrap_model_call(_image_request().override(tools=[ocr_parse_file]), handler)
 
     assert response.result[0].content == "当前模型无法读取图片，且没有可供 OCR 工具解析的文件路径。"
 
@@ -660,7 +711,9 @@ def _attachment_context_message(real_path: str) -> HumanMessage:
 
 
 def _read_file_response(path: str, call_id: str = "call_rf") -> ModelResponse:
-    return ModelResponse(result=[AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"file_path": path}, "id": call_id}])])
+    return ModelResponse(
+        result=[AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"file_path": path}, "id": call_id}])]
+    )
 
 
 REAL_PATH = "/home/gem/user-data/projects/w1/uploads/9fc2ac5549a8434cb734e71009d6c16a_preview.png"
@@ -668,8 +721,8 @@ TYPED_PATH = REAL_PATH.replace("9fc2ac55", "9fc2c554")
 
 
 @pytest.mark.asyncio
-async def test_corrects_mistyped_read_file_path_before_tool_execution() -> None:
-    """read_file 抄错 hash 时，工具执行前自动纠正为消息里的真实路径（实测缺陷回放）。"""
+async def test_keeps_read_file_paths_untouched_before_tool_execution() -> None:
+    """文件路径由工具边界处理，中间件不得静默改读另一文件。"""
     middleware = ImageInputCompatibilityMiddleware()
     request = _request(_yuxi_model("alibaba-cn:qwen3.7-max"), [_attachment_context_message(REAL_PATH)])
 
@@ -678,7 +731,7 @@ async def test_corrects_mistyped_read_file_path_before_tool_execution() -> None:
 
     response = await middleware.awrap_model_call(request, handler)
 
-    assert response.result[0].tool_calls[0]["args"]["file_path"] == REAL_PATH
+    assert response.result[0].tool_calls[0]["args"]["file_path"] == TYPED_PATH
 
 
 @pytest.mark.asyncio
@@ -725,3 +778,50 @@ async def test_keeps_exact_and_non_read_file_tool_calls_untouched() -> None:
 
     assert response.result[0].tool_calls[0]["args"]["file_path"] == REAL_PATH
     assert response.result[0].tool_calls[1]["args"]["command"] == f"cat {TYPED_PATH}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 429])
+async def test_transcribed_retry_preserves_unrelated_errors(vision_settings, monkeypatch, status):
+    """转述成功后的认证与限流失败不得变成 OCR 成功响应。"""
+    vision_settings["vision_model"] = "vendor:vision"
+    monkeypatch.setattr("yuxi.models.chat.load_chat_model", lambda _spec, **kwargs: _FakeVisionModel())
+    error = RuntimeError(f"Error code: {status}")
+    error.status_code = status
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        raise _dashscope_rejection() if calls == 1 else error
+
+    with pytest.raises(RuntimeError) as raised:
+        await ImageInputCompatibilityMiddleware().awrap_model_call(_image_request(), handler)
+    assert raised.value is error and calls == 2
+
+
+@pytest.mark.asyncio
+async def test_visual_retry_inherits_runtime_identity(vision_settings, monkeypatch):
+    """错误兜底入口保留真实 runtime 的 UID 与线程。"""
+    vision_settings["vision_model"] = "vendor:vision"
+    seen = []
+
+    def load(spec, **kwargs):
+        seen.append(kwargs)
+        return _FakeVisionModel()
+
+    monkeypatch.setattr("yuxi.models.chat.load_chat_model", load)
+    request = _image_request().override(
+        runtime=SimpleNamespace(context=SimpleNamespace(uid="owner", thread_id="thread"))
+    )
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _dashscope_rejection()
+        return ModelResponse(result=[AIMessage("完成")])
+
+    await ImageInputCompatibilityMiddleware().awrap_model_call(request, handler)
+    assert seen[0]["uid"] == "owner" and seen[0]["session_id"] == "thread"

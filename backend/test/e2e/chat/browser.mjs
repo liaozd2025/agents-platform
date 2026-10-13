@@ -62,6 +62,23 @@ try {
   if (env.CHAT_EXPECT_BASELINE !== '1') {
     assert.deepEqual(metrics.markdown, { waiting: '开始', pending: 1, flushed: '正文9', final: '尾部完整', remaining: 0 })
   }
+  await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+  metrics.citations = await evaluate(`import('/test/browser/citationSources.js').then(m=>m.checkCitationSources())`)
+  assert.deepEqual(metrics.citations.labels, ['1 说明书.pdf', '2 新九典视界知识库内容'])
+  await wait(300)
+  await screenshot('citation-sources-mobile')
+  metrics.citations.modal = await evaluate(`import('/test/browser/citationSources.js').then(m=>m.checkCitationModal())`)
+  assert.equal(metrics.citations.modal.title, '新九典视界知识库内容')
+  assert.deepEqual(metrics.citations.modal.excerpt, ['知识库真实原文'])
+  assert.ok(metrics.citations.modal.bounds.left >= 0 && metrics.citations.modal.bounds.right <= metrics.citations.modal.bounds.width)
+  await wait(300)
+  await screenshot('citation-source-original-mobile')
+  await evaluate(`import('/src/stores/theme.js').then(m=>m.useThemeStore().setTheme(true))`)
+  await wait(300)
+  await screenshot('citation-source-original-dark-mobile')
+  await evaluate(`import('/src/stores/theme.js').then(m=>m.useThemeStore().setTheme(false))`)
+  await evaluate(`window.unmountCitationSources()`)
+  await call('Emulation.clearDeviceMetricsOverride')
   const created = await fetch(`http://127.0.0.1:${env.CLIENT_API_PORT}/api/chat/thread`, {
     method: 'POST', headers: { Authorization: `Bearer ${config.token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ agent_id: 'client-test', title: '长聊天合成验证' })

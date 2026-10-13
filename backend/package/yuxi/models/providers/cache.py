@@ -18,6 +18,9 @@ from yuxi.utils.logging_config import logger
 
 REDIS_CACHE_KEY = "yuxi:model_cache"
 _CACHE_TTL_SECONDS = 5
+# UID 签名密钥只从这一个固定环境变量读取：provider 配置不接收环境变量名，
+# 从结构上消除借签名头探测或离线猜解服务器其他环境变量的通道。
+USER_UID_SIGNATURE_SECRET_ENV = "YUXI_UID_SIGNATURE_SECRET"
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,8 @@ class ModelInfo:
     max_completion_tokens: int | None = None
     input_modalities: list[str] | None = None
     reasoning: bool | None = None
+    # 开启后聊天模型请求注入带 HMAC 签名的 x-yuxi-uid 头，供外部网关按用户计量。
+    include_user_uid: bool = False
 
     # Embedding 专属
     dimension: int | None = None
@@ -68,6 +73,7 @@ class ModelInfo:
             "max_completion_tokens": self.max_completion_tokens,
             "input_modalities": self.input_modalities,
             "reasoning": self.reasoning,
+            "include_user_uid": self.include_user_uid,
             "dimension": self.dimension,
             "batch_size": self.batch_size,
         }
@@ -89,6 +95,7 @@ class ModelInfo:
             max_completion_tokens=data.get("max_completion_tokens"),
             input_modalities=data.get("input_modalities"),
             reasoning=data.get("reasoning"),
+            include_user_uid=bool(data.get("include_user_uid", False)),
             dimension=data.get("dimension"),
             batch_size=data.get("batch_size", 40),
         )
@@ -177,6 +184,7 @@ class ModelCache:
                     max_completion_tokens=model.get("max_completion_tokens"),
                     input_modalities=model.get("input_modalities"),
                     reasoning=model.get("reasoning"),
+                    include_user_uid=bool(provider.include_user_uid),
                     dimension=model.get("dimension"),
                     batch_size=model.get("batch_size", 40),
                 )

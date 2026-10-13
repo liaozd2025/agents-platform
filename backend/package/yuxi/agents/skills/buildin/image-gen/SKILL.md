@@ -1,6 +1,8 @@
 ---
 name: image-gen
 description: "通过 Kie 生成或编辑图片，支持 GPT Image 2 和 Nano Banana 2。当用户要求生成图片、海报、插画，或提供参考图要求修改时使用。"
+version: "2026.09.14"
+tool_dependencies: ["present_artifacts"]
 ---
 
 # 图片生成技能

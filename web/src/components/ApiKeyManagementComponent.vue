@@ -62,9 +62,6 @@
                       size="small"
                       @change="toggleEnabled(record)"
                     />
-                    <span class="status-text" :class="{ enabled: record.is_enabled }">
-                      {{ record.is_enabled ? '已启用' : '已禁用' }}
-                    </span>
                   </div>
                 </template>
                 <template v-if="column.key === 'lastUsed'">

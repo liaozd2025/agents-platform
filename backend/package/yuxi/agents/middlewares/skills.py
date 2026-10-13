@@ -16,8 +16,8 @@ from langgraph.types import Command
 from yuxi.agents.backends.paths import VIRTUAL_PERSONAL_SKILLS_PATH, VIRTUAL_SKILLS_PATH
 from yuxi.agents.mcp.service import get_enabled_mcp_tools
 from yuxi.agents.skills.runtime import RuntimeSkill, build_dependency_bundle
-from yuxi.agents.skills.service import is_valid_skill_slug, normalize_string_list
 from yuxi.agents.toolkits import get_all_tool_instances
+from yuxi.services.skills.package import is_valid_skill_slug, normalize_string_list
 from yuxi.utils.logging_config import logger
 
 
@@ -69,7 +69,7 @@ class SkillsMiddleware(AgentMiddleware):
         runtime_context = request.runtime.context
 
         if self.enable_skills_prompt:
-            effective_skills = getattr(runtime_context, "_effective_skill_slugs", None)
+            effective_skills = getattr(runtime_context, "_skill_runtime_snapshot", {}).get("effective_skills", None)
             if isinstance(effective_skills, list):
                 effective_skills = normalize_string_list(effective_skills)
                 preloaded_skills = self._get_preloaded_skills(runtime_context)
@@ -105,6 +105,7 @@ class SkillsMiddleware(AgentMiddleware):
         # 排除基础工具集中的工具（如 present_artifacts），它们始终可见、不受 Skill 激活影响。
         gated_tool_names = self._resolve_gated_tool_names(runtime_context) - activated_tool_names
         model_tools = list(request.tools or [])
+        registered_tool_names = {tool.name for tool in model_tools}
         if gated_tool_names:
             model_tools = [t for t in model_tools if t.name not in gated_tool_names]
 
@@ -130,7 +131,7 @@ class SkillsMiddleware(AgentMiddleware):
             model_tools.append(t)
             existing_tool_names.add(t.name)
         for t in active_mcp_tools:
-            if t.name in existing_tool_names:
+            if t.name in registered_tool_names or t.name in existing_tool_names:
                 raise RuntimeError(f"Skill MCP 工具名冲突：{t.name}")
             model_tools.append(t)
             existing_tool_names.add(t.name)
@@ -205,7 +206,15 @@ class SkillsMiddleware(AgentMiddleware):
         if request.tool_call.get("name") != "read_file":
             return result
 
+        from langchain_core.messages import ToolMessage
+
+        messages = (result.update or {}).get("messages", []) if isinstance(result, Command) else [result]
+        if any(isinstance(message, ToolMessage) and message.status == "error" for message in messages):
+            return result
+
         args = request.tool_call.get("args") or {}
+        if isinstance(args, dict) and isinstance(args.get("limit"), int) and args["limit"] <= 0:
+            return result
         file_path = args.get("file_path") if isinstance(args, dict) else None
         slug = self._extract_skill_slug_from_skill_md_path(file_path)
 
@@ -269,15 +278,15 @@ class SkillsMiddleware(AgentMiddleware):
         return None
 
     def _get_effective_skills(self, runtime_context) -> set[str]:
-        selected = getattr(runtime_context, "_effective_skill_slugs", [])
+        selected = getattr(runtime_context, "_skill_runtime_snapshot", {}).get("effective_skills", [])
         return set(normalize_string_list(selected if isinstance(selected, list) else []))
 
     def _get_runtime_skills(self, runtime_context) -> dict[str, RuntimeSkill]:
-        runtime_skills = getattr(runtime_context, "_runtime_skills", {})
+        runtime_skills = getattr(runtime_context, "_skill_runtime_snapshot", {}).get("runtime_skills", {})
         return runtime_skills if isinstance(runtime_skills, dict) else {}
 
     def _get_preloaded_skills(self, runtime_context) -> list[str]:
-        selected = getattr(runtime_context, "_preloaded_skills", [])
+        selected = getattr(runtime_context, "_skill_runtime_snapshot", {}).get("preloaded_skills", [])
         effective = self._get_effective_skills(runtime_context)
         return [
             slug for slug in normalize_string_list(selected if isinstance(selected, list) else []) if slug in effective
@@ -286,7 +295,7 @@ class SkillsMiddleware(AgentMiddleware):
     def _build_preloaded_skills_section(self, slugs: list[str], runtime_context) -> str:
         """构建已预加载 Skill 的完整系统提示段。"""
 
-        contents = getattr(runtime_context, "_preloaded_skill_contents", {})
+        contents = getattr(runtime_context, "_skill_runtime_snapshot", {}).get("preloaded_skill_contents", {})
         if not isinstance(contents, dict):
             contents = {}
         sections = ["# Preloaded Skills", "The following Skill instructions are already loaded and active."]

@@ -126,7 +126,7 @@ async def main() -> None:
                 "business",
                 business_version,
                 BUSINESS_SCHEMA_VERSION,
-                upgrade_from=(1, 2, 3, 4, 5, 7, 8),
+                upgrade_from=(1, 2, 3, 4, 5, 7, 8, 9),
             )
             knowledge_version = versions.get("knowledge")
             _require_supported_version(
@@ -159,7 +159,7 @@ async def main() -> None:
                 async with pg_manager.get_async_session_context() as session:
                     await apply_pi_retirement(session, pi_run_ids, pi_request_ids)
                     await session.commit()
-                await pg_manager.record_schema_version("business", BUSINESS_SCHEMA_VERSION)
+                await pg_manager.upgrade_agent_resource_selection()
 
             if knowledge_version is None:
                 await pg_manager.create_knowledge_tables()

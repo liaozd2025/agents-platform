@@ -65,16 +65,19 @@ async def test_graph_uses_shared_summary_middleware_factory(
     assert captured["summary_context"].summary_threshold == threshold
     assert captured["summary_backend"] is build_args[0]
     middleware_names = [type(middleware).__name__ for middleware in middlewares]
-    assert middleware_names.index("ModelRetryMiddleware") < middleware_names.index("ImageInputCompatibilityMiddleware")
+    assert middleware_names.index("NetworkRetryMiddleware") < middleware_names.index(
+        "ImageInputCompatibilityMiddleware"
+    )
 
 
 @pytest.mark.unit
 def test_shared_summary_factory_uses_one_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 
-    def load_model(fully_specified_name, *, session_id):
-        """记录摘要模型实际接收的会话 ID。"""
+    def load_model(fully_specified_name, *, session_id, uid):
+        """记录摘要模型实际接收的会话 ID 与用户 UID。"""
         captured["session_id"] = session_id
+        captured["uid"] = uid
         return object()
 
     monkeypatch.setattr(summary_module, "load_chat_model", load_model)
@@ -86,12 +89,14 @@ def test_shared_summary_factory_uses_one_threshold(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(summary_module, "create_summary_middleware", create_summary_middleware)
     context = _context(summary_threshold=96)
     context.thread_id = "summary-thread"
+    context.uid = "summary-uid"
     backend = object()
 
     summary_module.create_summary_middleware_from_context(context, backend=backend)
 
     assert captured["backend"] is backend
     assert captured["session_id"] == "summary-thread"
+    assert captured["uid"] == "summary-uid"
     assert captured["trigger"] == ("tokens", 96 * 1024)
     assert captured["trim_tokens_to_summarize"] == 96 * 1024
     assert "l1_l2_trigger_ratio" not in captured
@@ -109,7 +114,8 @@ async def test_graph_passes_conversation_session_to_model(monkeypatch, graph_mod
     """主 Agent 与子 Agent 构图都使用实际线程的模型会话。"""
     context = _context()
     context.thread_id = "graph-thread"
-    monkeypatch.setattr(graph_module, "prepare_agent_runtime_context", AsyncMock(return_value=context))
+    context.uid = "graph-uid"
+    context._runtime_prepared = True
     monkeypatch.setattr(graph_module, "sync_agent_context_skills", AsyncMock())
     monkeypatch.setattr(graph_module, "resolve_configured_runtime_tools", AsyncMock(return_value=[]))
     monkeypatch.setattr(graph_module, "create_agent_composite_backend", lambda _context: object())
@@ -118,12 +124,20 @@ async def test_graph_passes_conversation_session_to_model(monkeypatch, graph_mod
     monkeypatch.setattr(agent_class, "_get_checkpointer", AsyncMock(return_value=None))
     captured = {}
 
-    def load_model(fully_specified_name, *, session_id):
+    def load_model(fully_specified_name, *, session_id, uid):
         """用装配参数作为模型占位，核对传给图的对象。"""
-        captured.update(spec=fully_specified_name, session_id=session_id)
+        captured.update(spec=fully_specified_name, session_id=session_id, uid=uid)
         return captured
 
     monkeypatch.setattr(graph_module, "load_chat_model", load_model)
     monkeypatch.setattr(graph_module, "create_agent", lambda **kwargs: kwargs)
     graph = await agent_class().get_graph(context=context)
-    assert graph["model"] == {"spec": context.model, "session_id": context.thread_id}
+    assert graph["model"] == {"spec": context.model, "session_id": context.thread_id, "uid": context.uid}
+
+
+@pytest.mark.parametrize("agent_class", [chatbot_graph.ChatbotAgent, subagent_graph.SubAgentBackend])
+@pytest.mark.asyncio
+async def test_graph_rejects_unprepared_context(agent_class):
+    """未经权限资源准备的对象不能构建执行图。"""
+    with pytest.raises(ValueError, match="已准备"):
+        await agent_class().get_graph(context=_context())

@@ -10,6 +10,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from yuxi.models.providers.builtin import BUILTIN_PROVIDERS
+from yuxi.models.providers.cache import USER_UID_SIGNATURE_SECRET_ENV
 from yuxi.models.providers.repository import (
     create_model_provider,
     delete_model_provider,
@@ -44,6 +45,13 @@ def _normalize_dict(value: Any) -> dict:
 def _validate_provider_id(provider_id: str) -> None:
     if not _PROVIDER_ID_RE.match(provider_id):
         raise ValueError("provider_id 只能包含字母、数字、下划线和中划线，长度 2-100")
+
+
+def _normalize_include_user_uid(value: Any) -> bool:
+    """uid 头开关只接受真实 JSON 布尔值，拒绝字符串等易被 truthiness 误判的输入。"""
+    if isinstance(value, bool):
+        return value
+    raise ValueError("include_user_uid 必须是布尔值")
 
 
 def _normalize_model_item(model: dict[str, Any]) -> dict[str, Any]:
@@ -161,6 +169,7 @@ _FIELD_DEFAULTS: dict[str, Any] = {
     "extra_json": {},
     "is_enabled": True,
     "is_builtin": False,
+    "include_user_uid": False,
 }
 _FIELD_NORMALIZERS = {
     "capabilities": _normalize_list,
@@ -169,6 +178,7 @@ _FIELD_NORMALIZERS = {
     "extra_json": _normalize_dict,
     "is_enabled": bool,
     "is_builtin": bool,
+    "include_user_uid": _normalize_include_user_uid,
 }
 
 
@@ -300,26 +310,6 @@ async def get_model_provider_by_id(db: AsyncSession, provider_id: str) -> ModelP
     return await get_model_provider(db, provider_id)
 
 
-def _merge_builtin_model_modalities(existing_models: list[dict], builtin_models: list[dict]) -> bool:
-    """为已登记的内置模型补上缺失的 input_modalities，返回是否有改动。
-
-    只补空值：管理员已填写的声明（含有意留空前的历史值）保持不变，避免启动时覆盖人工配置。
-    """
-    declared_by_model_id = {
-        str(item.get("id")): item.get("input_modalities") for item in builtin_models if item.get("input_modalities")
-    }
-    changed = False
-    for model in existing_models:
-        if not isinstance(model, dict) or model.get("input_modalities"):
-            continue
-        declared = declared_by_model_id.get(str(model.get("id")))
-        if not declared:
-            continue
-        model["input_modalities"] = list(declared)
-        changed = True
-    return changed
-
-
 async def ensure_builtin_model_providers_in_db(db: AsyncSession) -> None:
     """确保独立模型配置模块的内置 provider 模板存在。
 
@@ -360,11 +350,46 @@ async def ensure_builtin_model_providers_in_db(db: AsyncSession) -> None:
         await create_model_provider(db, _normalize_payload(payload))
 
 
+def _merge_builtin_model_modalities(existing_models: list[dict], builtin_models: list[dict]) -> bool:
+    """为已登记的内置模型补上缺失的 input_modalities，返回是否有改动。
+
+    只补空值：管理员已填写的声明（含有意留空前的历史值）保持不变，避免启动时覆盖人工配置。
+    """
+    declared_by_model_id = {
+        str(item.get("id")): item.get("input_modalities") for item in builtin_models if item.get("input_modalities")
+    }
+    changed = False
+    for model in existing_models:
+        if not isinstance(model, dict) or model.get("input_modalities"):
+            continue
+        declared = declared_by_model_id.get(str(model.get("id")))
+        if not declared:
+            continue
+        model["input_modalities"] = list(declared)
+        changed = True
+    return changed
+
+
+def _validate_user_uid_header(provider_type: str, include_user_uid: bool) -> None:
+    """校验 UID 头适配能力与签名密钥，避免保存不生效的 Gemini 设置。"""
+    if not include_user_uid:
+        return
+    if provider_type == "gemini":
+        raise ValueError("Gemini 供应商暂不支持请求携带用户 ID")
+    if not (os.getenv(USER_UID_SIGNATURE_SECRET_ENV) or "").strip():
+        raise ValueError(
+            f"开启“请求携带用户 ID”前，需要先在 API/worker 环境变量配置 {USER_UID_SIGNATURE_SECRET_ENV}"
+            "（专用随机密钥，勿复用 JWT_SECRET_KEY）；配置方法详见"
+            "https://xerrors.github.io/Yuxi/intro/model-config"
+        )
+
+
 async def create_provider_config(db: AsyncSession, data: dict[str, Any], username: str) -> ModelProvider:
     """创建独立模型供应商配置。"""
     payload = _normalize_payload(data)
     if await get_model_provider(db, payload["provider_id"]):
         raise ValueError(f"供应商 {payload['provider_id']} 已存在")
+    _validate_user_uid_header(payload["provider_type"], payload["include_user_uid"])
     payload["created_by"] = username
     payload["updated_by"] = username
     return await create_model_provider(db, payload)
@@ -391,6 +416,10 @@ async def update_provider_config(
             payload.get("enabled_models", provider.enabled_models or []),
             payload.get("provider_type", provider.provider_type),
         )
+    _validate_user_uid_header(
+        payload.get("provider_type", provider.provider_type),
+        payload.get("include_user_uid", provider.include_user_uid),
+    )
     payload["updated_by"] = username
     return await update_model_provider(db, provider, payload)
 

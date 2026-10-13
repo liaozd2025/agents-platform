@@ -7,6 +7,7 @@ import { buildDirectoryLabels, resolveDirectoryLabel as resolveProjectDirectoryL
 export const useProjectsStore = defineStore('projects', () => {
   const projects = ref([])
   const isLoading = ref(false)
+  const hasLoaded = ref(false)
   const error = ref('')
   let requestVersion = 0
 
@@ -51,7 +52,10 @@ export const useProjectsStore = defineStore('projects', () => {
     error.value = ''
     try {
       const loadedProjects = (await projectApi.getProjects()) || []
-      if (currentVersion === requestVersion) projects.value = loadedProjects
+      if (currentVersion === requestVersion) {
+        projects.value = loadedProjects
+        hasLoaded.value = true
+      }
       return projects.value
     } catch (loadError) {
       if (currentVersion === requestVersion) error.value = '项目加载失败'
@@ -59,6 +63,13 @@ export const useProjectsStore = defineStore('projects', () => {
     } finally {
       if (currentVersion === requestVersion) isLoading.value = false
     }
+  }
+
+  /** 清空会话项目，并阻止退出前的请求写回。 */
+  const reset = () => {
+    invalidatePendingLoad()
+    projects.value = []
+    hasLoaded.value = false
   }
 
   const upsertProject = (project) => {
@@ -79,20 +90,16 @@ export const useProjectsStore = defineStore('projects', () => {
     projects.value = projects.value.filter((project) => project.id !== projectId)
   }
 
-  const reset = () => {
-    invalidatePendingLoad()
-    projects.value = []
-  }
-
   return {
     projects,
     isLoading,
+    hasLoaded,
     error,
     loadProjects,
+    reset,
     upsertProject,
     replaceProject,
     removeProject,
-    reset,
     directoryLabels,
     ensureDirectoryLabels,
     resolveDirectoryLabel

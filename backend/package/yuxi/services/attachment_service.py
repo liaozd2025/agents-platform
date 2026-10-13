@@ -246,17 +246,6 @@ async def _rollback_stored_attachments(workdir, records: list[dict]) -> None:
                 pass
 
 
-def _sniff_inline_image_type(content: bytes) -> tuple[str, str] | None:
-    """按魔数识别内联图片的 (扩展名, MIME)；无法识别时返回 None。"""
-    for signature, extension, mime_type in _IMAGE_SIGNATURE_TYPES:
-        if content.startswith(signature):
-            return extension, mime_type
-    # WEBP 是 RIFF 容器，前 4 字节不足以判定，必须再看第 8~12 字节的 "WEBP" 标记
-    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
-        return ".webp", "image/webp"
-    return None
-
-
 async def persist_inline_chat_image(
     *,
     workdir,
@@ -299,6 +288,17 @@ async def persist_inline_chat_image(
         "path": runtime_path,
         "original_path": runtime_path,
     }
+
+
+def _sniff_inline_image_type(content: bytes) -> tuple[str, str] | None:
+    """按魔数识别内联图片的 (扩展名, MIME)；无法识别时返回 None。"""
+    for signature, extension, mime_type in _IMAGE_SIGNATURE_TYPES:
+        if content.startswith(signature):
+            return extension, mime_type
+    # WEBP 是 RIFF 容器，前 4 字节不足以判定，必须再看第 8~12 字节的 "WEBP" 标记
+    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    return None
 
 
 async def _cleanup_expired_tmp_attachments(minio_client, bucket_name: str, uid: str) -> None:
@@ -419,6 +419,8 @@ async def parse_tmp_attachment_view(
         )
     except StorageError as exc:
         raise HTTPException(status_code=400, detail=f"读取临时附件失败: {exc}") from exc
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Tmp attachment parse failed for {safe_name}: {exc}")
         raise HTTPException(status_code=400, detail=f"附件解析失败: {exc}") from exc

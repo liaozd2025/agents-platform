@@ -1,6 +1,6 @@
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelRetryMiddleware, TodoListMiddleware
+from langchain.agents.middleware import TodoListMiddleware
 
 from yuxi.agents import BaseAgent
 from yuxi.agents.backends import (
@@ -11,12 +11,13 @@ from yuxi.agents.backends import (
 from yuxi.agents.backends.paths import runtime_workdir_path
 from yuxi.agents.context import (
     DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS,
-    prepare_agent_runtime_context,
 )
 from yuxi.agents.middlewares import (
     ImageInputCompatibilityMiddleware,
+    NetworkRetryMiddleware,
     SteerMiddleware,
     TokenUsageMiddleware,
+    ToolErrorGuardMiddleware,
     create_memory_middleware,
     create_summary_middleware_from_context,
 )
@@ -39,6 +40,8 @@ from .state import ChatBotState
 async def _build_middlewares(context, backend):
     """构建中间件列表"""
     middlewares = [
+        # 最外层隔离普通工具异常，保留取消与 interrupt 的传播。
+        ToolErrorGuardMiddleware(),
         SteerMiddleware(),
         create_agent_filesystem_middleware(
             getattr(context, "tool_token_limit", DEFAULT_TOOL_RESULT_EVICTION_K_TOKENS) * 1024,
@@ -57,7 +60,12 @@ async def _build_middlewares(context, backend):
             create_summary_middleware_from_context(context, backend=backend),
             TodoListMiddleware(system_prompt=TODO_MID_PROMPT),
             PatchToolCallsMiddleware(),
-            ModelRetryMiddleware(max_retries=getattr(context, "model_retry_times", 2), on_failure="error"),
+            # 网络类错误(断网/连接抖动)按预算(默认600s)持续重试，非网络错误按 max_retries
+            # 次数重试——两者合并进 NetworkRetryMiddleware，避免拆成两个中间件后因装配顺序
+            # 或外层重试网络错误而放大预算。
+            NetworkRetryMiddleware(
+                max_retries=getattr(context, "model_retry_times", 2),
+            ),
             ImageInputCompatibilityMiddleware(),
             TokenUsageMiddleware(),
             CitationMiddleware(),
@@ -78,14 +86,10 @@ class ChatbotAgent(BaseAgent):
     capabilities = ["file_upload", "files", "context_compression"]
     context_schema = ChatBotContext
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    async def get_graph(self, context=None, **kwargs):
-        context = await prepare_agent_runtime_context(
-            context or self.context_schema(),
-            context_schema=self.context_schema,
-        )
+    async def get_graph(self, *, context, **kwargs):
+        """从显式准备的 Context 构建执行图。"""
+        if not getattr(context, "_runtime_prepared", False):
+            raise ValueError("构图需要已准备的 Context")
         await sync_agent_context_skills(context)
 
         # DeepAgents 0.7 移除 backend factory：每次 graph 构造创建本 Run 独享的
@@ -93,7 +97,11 @@ class ChatbotAgent(BaseAgent):
         backend = create_agent_composite_backend(context)
         model_spec = resolve_chat_model_spec(context.model)
         graph = create_agent(
-            model=load_chat_model(fully_specified_name=model_spec, session_id=context.thread_id),
+            model=load_chat_model(
+                fully_specified_name=model_spec,
+                session_id=context.thread_id,
+                uid=context.uid,
+            ),
             tools=await resolve_configured_runtime_tools(context),
             system_prompt=build_prompt_with_context(context),
             middleware=await _build_middlewares(context, backend),

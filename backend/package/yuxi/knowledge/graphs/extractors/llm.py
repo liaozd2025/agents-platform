@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import json_repair
@@ -26,15 +27,30 @@ SCHEMA_INSTRUCTION = """抽取 Schema 约束：
 {schema}
 """
 
-# 单次图谱抽取的模型请求超时（秒）。
-# 早期固定为 60s，但推理类模型（如 qwen3.7-max）会先输出思考过程再给结果，
-# 遇到长 chunk（3000+ 字符）时 60s 必然超时，表现为「抽取失败」并在重试 3 次后放弃。
-# 默认放宽到 300s，同时允许通过 extractor_options.model_timeout 按知识库覆写。
+# 保留 fork 的默认超时；timeout_seconds 使用上游校验并兼容已有 model_timeout 配置。
 DEFAULT_EXTRACTION_TIMEOUT_SECONDS = 300.0
+MAX_EXTRACTION_TIMEOUT_SECONDS = 600.0
 
 
 class LLMGraphExtractor(GraphExtractor):
     extractor_type = "llm"
+
+    def _resolve_timeout_seconds(self) -> float:
+        raw = self.options.get("timeout_seconds", self.options.get("model_timeout", DEFAULT_EXTRACTION_TIMEOUT_SECONDS))
+        # bool 是 int 的子类：float(True) == 1.0 会被区间校验放行，配出一个 1 秒的超时，
+        # 构建时每块必超时——配置保存成功、整个图谱全挂，是最难排查的失败形态。
+        if isinstance(raw, bool):
+            raise ValueError("LLM 抽取器 timeout_seconds 必须是数字")
+        try:
+            timeout = float(raw)
+        except (TypeError, ValueError, OverflowError) as exc:
+            # 超大整数（JSON 里合法）会在 float() 上抛 OverflowError，必须与 TypeError 同等对待，
+            # 否则它会穿透到路由的兜底分支变成 500，而非法配置应当是 400。
+            raise ValueError("LLM 抽取器 timeout_seconds 必须是数字") from exc
+        # NaN 与 ±inf 会让下面的区间比较全部为 False，必须显式挡掉
+        if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_EXTRACTION_TIMEOUT_SECONDS:
+            raise ValueError(f"LLM 抽取器 timeout_seconds 必须大于 0 且不超过 {MAX_EXTRACTION_TIMEOUT_SECONDS:g} 秒")
+        return timeout
 
     def validate_options(self) -> None:
         if not self.options.get("model_spec"):
@@ -48,27 +64,19 @@ class LLMGraphExtractor(GraphExtractor):
             raise ValueError("LLM 抽取器 concurrency_count 必须是整数") from exc
         if concurrency_count < 1 or concurrency_count > 1000:
             raise ValueError("LLM 抽取器 concurrency_count 必须在 1 到 1000 之间")
-        if self.options.get("model_params") is not None and not isinstance(self.options["model_params"], dict):
-            raise ValueError("LLM 抽取器 model_params 必须是对象")
-        # 提前校验超时配置，避免在真正抽取时才失败（那时已经消耗了并发额度）。
+        # 注意：timeout_seconds 不能通过 model_params 设置——select_model 会把显式的
+        # timeout 参数覆盖到 model_params 之上，所以只能在这里读取并显式传入。
         self._resolve_timeout_seconds()
-
-    def _resolve_timeout_seconds(self) -> float:
-        """解析单次抽取的模型请求超时，非法配置直接报错而不是静默回退。
-
-        Returns:
-            float: 超时秒数，缺省为 DEFAULT_EXTRACTION_TIMEOUT_SECONDS。
-        """
-        raw_timeout = self.options.get("model_timeout")
-        if raw_timeout in (None, ""):
-            return DEFAULT_EXTRACTION_TIMEOUT_SECONDS
-        try:
-            timeout = float(raw_timeout)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("LLM 抽取器 model_timeout 必须是数字") from exc
-        if timeout <= 0:
-            raise ValueError("LLM 抽取器 model_timeout 必须大于 0")
-        return timeout
+        model_params = self.options.get("model_params")
+        if model_params is not None and not isinstance(model_params, dict):
+            raise ValueError("LLM 抽取器 model_params 必须是对象")
+        # model_params 会展开成 ChatOpenAI 的构造参数，顶层 enable_thinking 最终落到
+        # AsyncCompletions.create() 上，接口直接报未知参数，每块抽取都失败。
+        if model_params and "enable_thinking" in model_params:
+            raise ValueError(
+                "LLM 抽取器 model_params 不支持顶层 enable_thinking，请写在 extra_body 中，"
+                '例如 {"extra_body": {"enable_thinking": false}}'
+            )
 
     async def extract(self, text: str, *, chunk_metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         self.validate_options()

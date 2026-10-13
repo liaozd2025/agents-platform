@@ -229,7 +229,25 @@ watch(activeTab, (tab) => { if (tab) loadedTabs.value.add(tab) }, { immediate: t
 </script>
 
 <style lang="less">
-.settings-modal {
+.settings-modal.ant-modal {
+  .ant-modal-content {
+    border: 1px solid var(--gray-200);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .ant-modal-body {
+    padding: 0;
+  }
+}
+
+.settings-container {
+  display: flex;
+  height: min(84vh, 840px);
   width: 100%;
   height: 100dvh;
   overflow: hidden;

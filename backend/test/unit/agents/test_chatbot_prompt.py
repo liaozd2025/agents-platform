@@ -4,6 +4,7 @@ from yuxi.agents.context import DEFAULT_SYSTEM_PROMPT_PLACEHOLDER, is_custom_sys
 from yuxi.agents.buildin.chatbot.prompt import (
     CUSTOM_PROMPT_HEADER,
     DEFAULT_IDENTITY_PROMPT,
+    PLATFORM_PROMPT,
     build_prompt_with_context,
 )
 
@@ -16,6 +17,12 @@ def test_default_chatbot_identifies_as_jiudian_ai_assistant():
     assert "你是九典AI助手" in system_prompt
     assert "当用户问你是谁时，只回答“我是九典AI助手”，不要补充其他内容" in system_prompt
     assert "语析" not in system_prompt
+
+
+def test_chatbot_prompt_prefers_complete_explanatory_paragraphs():
+    assert "减少 bullet points" in PLATFORM_PROMPT
+    assert "完整的句子和段落" in PLATFORM_PROMPT
+    assert "详细的解释和背景信息" in PLATFORM_PROMPT
 
 
 def test_chatbot_prompt_declares_workspace_visibility_and_default_write_boundary():
@@ -67,7 +74,7 @@ def test_custom_system_prompt_takes_over_agent_identity():
 def test_workspace_appended_prompt_does_not_suppress_default_identity():
     """工作区 AGENTS.md/USER.md 被追加进 system_prompt 后，不得被误判为「已自定义」。
 
-    build_agent_input_context 会把工作区文件内容追加到 system_prompt，未配置提示词的
+    prepare_agent_runtime_context 会把工作区文件内容追加到 system_prompt，未配置提示词的
     智能体也会因此拿到一段非空文本。此时必须依据运行时标志判定，否则默认身份被顶掉，
     模型只能泛泛自称「我是一个 AI 助手」。
 
@@ -117,7 +124,7 @@ def test_is_custom_system_prompt_excludes_default_placeholder():
 def test_missing_runtime_flag_falls_back_to_content_check():
     """运行时标志缺失时的兜底路径：退回按 system_prompt 内容判定。
 
-    生产链路始终经 build_agent_input_context 写入 system_prompt_is_custom，
+    生产链路始终经 prepare_agent_runtime_context 写入 system_prompt_is_custom，
     不会走到这里；兜底分支只能看到追加工作区内容之后的值，因此在「未配置 + 有工作区
     AGENTS.md/USER.md」的组合下会判为已自定义，与主路径结论不同。本用例固定该兜底行为，
     并提醒：新增直接构造 Context 的调用路径时必须自行提供 system_prompt_is_custom。
