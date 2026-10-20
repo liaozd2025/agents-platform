@@ -33,8 +33,21 @@ from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
 from yuxi.models.chat import load_chat_model, resolve_chat_model_spec
 
 from .context import ChatBotContext
-from .prompt import TODO_MID_PROMPT, build_prompt_with_context
+from .prompt import PRODUCT_FACT_PROMPT, TODO_MID_PROMPT, build_prompt_with_context
 from .state import ChatBotState
+
+
+async def _session_has_product_kb(context) -> bool:
+    """判断当前会话可见知识库中是否包含「产品知识库」"""
+    try:
+        from yuxi.agents.backends.knowledge_base_backend import (
+            resolve_visible_knowledge_bases_for_context,
+        )
+
+        visible_kbs = await resolve_visible_knowledge_bases_for_context(context)
+    except Exception:  # noqa: BLE001
+        return False
+    return any((kb.get("name") or "").strip() == "产品知识库" for kb in visible_kbs)
 
 
 async def _build_middlewares(context, backend):
@@ -96,6 +109,9 @@ class ChatbotAgent(BaseAgent):
         # CompositeBackend，filesystem 与 summary middleware 共用同一实例。
         backend = create_agent_composite_backend(context)
         model_spec = resolve_chat_model_spec(context.model)
+        system_prompt = build_prompt_with_context(context)
+        if await _session_has_product_kb(context):
+            system_prompt += PRODUCT_FACT_PROMPT
         graph = create_agent(
             model=load_chat_model(
                 fully_specified_name=model_spec,
@@ -103,7 +119,7 @@ class ChatbotAgent(BaseAgent):
                 uid=context.uid,
             ),
             tools=await resolve_configured_runtime_tools(context),
-            system_prompt=build_prompt_with_context(context),
+            system_prompt=system_prompt,
             middleware=await _build_middlewares(context, backend),
             state_schema=ChatBotState,
             checkpointer=await self._get_checkpointer(),

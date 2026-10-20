@@ -6,6 +6,36 @@ from dataclasses import dataclass
 from typing import Any
 
 _MENTION_RE = re.compile(r'@knowledge:(?:"((?:\\.|[^"\\])*)"|(\S+))')
+
+# 产品事实类问题关键词：命中即视为「确定性事实」提问，优先走产品事实表而非向量检索。
+_FACT_PATTERNS = (
+    "成份", "成分", "性状", "规格", "用法用量", "用量", "有效期", "保质期",
+    "贮藏", "储藏", "保存", "批准文号", "执行标准", "包装", "生产企业", "生产厂家",
+    "适应症", "功能主治", "主治", "禁忌", "不良反应", "注意事项", "药理毒理",
+    "药代动力学", "药物相互作用", "孕妇", "哺乳期", "儿童用药", "老年用药",
+    "上市许可持有人", "剂型",
+)
+
+
+def is_product_fact_query(query: str) -> bool:
+    """判断问题是否为产品确定性事实类提问（轻量关键词规则，宁缺勿滥）。"""
+    text = str(query or "")
+    return any(pattern in text for pattern in _FACT_PATTERNS)
+
+
+# 产品整行信息请求关键词：如「要一下基本信息」「产品资料」，属于综合档案类提问，
+# 指向产品事实表的整行数据而非某一单项。与 _FACT_PATTERNS 分开判定、分开处理。
+_WHOLE_ROW_PATTERNS = (
+    "基本信息", "产品资料", "产品信息", "产品概况", "产品档案", "整体介绍", "全面介绍",
+)
+
+
+def is_whole_row_query(query: str) -> bool:
+    """判断问题是否为「产品基本信息/资料」类整行请求。"""
+    text = str(query or "")
+    return any(pattern in text for pattern in _WHOLE_ROW_PATTERNS)
+
+
 _NO_KB_PATTERNS = (
     "你好",
     "您好",

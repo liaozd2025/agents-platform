@@ -120,6 +120,15 @@
       <template #toolbar-actions>
         <div class="panel-actions">
           <button
+            v-if="showFactLayerEntry"
+            type="button"
+            class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-table-factlayer-button"
+            @click="openFactLayerModal()"
+          >
+            <Table :size="14" />
+            <span>产品事实表</span>
+          </button>
+          <button
             type="button"
             class="lucide-icon-btn extension-panel-action extension-panel-action-secondary file-table-mindmap-button"
             @click="emit('mindmap')"
@@ -467,6 +476,8 @@
         </div>
       </template>
     </FileBrowserTable>
+
+    <FactLayerModal :open="factLayerOpen" :kb-id="store.kbId" @close="factLayerOpen = false" />
   </div>
 </template>
 
@@ -517,10 +528,24 @@ import {
   MoreHorizontal,
   Pencil,
   Search,
+  Table,
   Map as MapIcon
 } from '@lucide/vue'
 
 const store = useDatabaseStore()
+
+// 「产品事实表」入口（不入库，仅前端展示）：产品知识库的根目录视图在工具栏显示按钮
+const showFactLayerEntry = computed(() => {
+  const kbName = String(store.getDatabaseNameById(store.kbId) || store.database?.name || '').trim()
+  return (
+    kbName === '产品知识库' && !isFilteredView.value && (store.folderBreadcrumbs || []).length <= 1
+  )
+})
+
+const factLayerOpen = ref(false)
+const openFactLayerModal = () => {
+  factLayerOpen.value = true
+}
 
 const emit = defineEmits(['mindmap', 'search'])
 
@@ -1386,6 +1411,7 @@ import { buildChunkParamsPayload, isPlainObject } from '@/utils/chunkUtils'
 import { parseDownloadFilename } from '@/utils/file_utils'
 import ChunkParamsConfig from '@/components/ChunkParamsConfig.vue'
 import FileBrowserTable from '@/components/common/FileBrowserTable.vue'
+import FactLayerModal from '@/components/FactLayerModal.vue'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import FallbackAvatar from '@/components/common/FallbackAvatar.vue'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'

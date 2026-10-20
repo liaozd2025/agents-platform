@@ -3,7 +3,7 @@ name: knowledge-base
 slug: knowledge-base
 description: "使用 Yuxi 知识库进行检索、打开文档、文档内定位和查看思维导图。当用户需要基于已配置知识库回答问题、核验资料或引用文档内容时使用此技能。"
 version: "2026.06.24"
-tool_dependencies: ["list_kbs", "query_kb", "find_kb_document", "open_kb_document", "get_mindmap", "search_file", "download_kb_file"]
+tool_dependencies: ["list_kbs", "query_kb", "find_kb_document", "open_kb_document", "get_mindmap", "search_file", "download_kb_file", "query_product_facts"]
 ---
 
 # 知识库技能
@@ -19,11 +19,13 @@ tool_dependencies: ["list_kbs", "query_kb", "find_kb_document", "open_kb_documen
 - `get_mindmap`：查看知识库思维导图结构。
 - `search_file`：按文件名关键词搜索知识库中的文件，支持指定知识库或跨知识库，返回文件列表与分页信息。
 - `download_kb_file`：按 `kb_id` 和 `file_id` 下载知识库原始二进制（pdf/docx/xlsx 等）到沙盒 `outputs` 目录，返回沙盒内可见的 `virtual_path`。当后续需要用代码读取原始文件结构（如 `openpyxl` 读 xlsx 单元格、`pdfplumber` 重新解析版面）时使用；`query_kb`/`open_kb_document` 只返回文本切片，无法满足需要文件对象的场景。
+- `query_product_facts`：查询「产品知识库」产品事实表，获取产品确定性事实（规格、成份、用法用量、有效期、批准文号等）的权威当前值。**仅当会话启用了「产品知识库」时可用**；其余知识库不提供事实表，调用会返回不可用提示。当用户询问某产品的确定性事实（有唯一正确答案的数值/规格类问题）时，必须优先且只使用本工具，不要用 `query_kb` 向量检索替代。
 
 ## 操作流程
 
 1. 需要先确认当前会话有哪些知识库可用；不确定时调用 `list_kbs`。
 2. 针对用户问题选择最相关的知识库，使用 `query_kb` 检索。
+3. 当用户询问产品的确定性事实（规格、成份、用法用量、有效期、批准文号等有唯一答案的问题）且会话启用了「产品知识库」时，使用 `query_product_facts` 查询事实表，不要用 `query_kb` 向量检索替代。
 3. 检索结果的 `metadata.chunk_count == 1` 表示文件只有一个分片；除非需要原文行号或额外上下文，否则无需打开。大于 1 且当前片段不足以回答时，使用返回的 `file_id` 调用 `open_kb_document` 查看上下文。字段缺失或为 0 表示未知，不据此判断文档完整。
 4. 如果用户要求定位术语、指标、章节或原文证据，使用 `find_kb_document` 在候选文档内查找。
 5. 当用户关心知识库结构、文件分类或知识框架时，使用 `get_mindmap`。

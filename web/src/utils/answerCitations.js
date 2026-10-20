@@ -61,13 +61,41 @@ export function mergeCitationSources(sources) {
       }
     }
   }
-  return [...merged.values()]
+  const list = [...merged.values()]
+  registerCitationSources(list)
+  return list
+}
+
+// 会话级引用登记表：记录本页会话中所有消息真实绑定过的检索来源。
+// 追问轮模型可能复用早前轮次的来源输出 <cite>，而当前消息没有再次绑定该来源
+// （本轮未检索或未命中同一文件），导致精确匹配失败、弹窗空空。
+// source 是稳定文件身份（kb://kb_id/file_id 或精确 URL），同身份的片段可安全借用，
+// 不涉及对正文的猜测或改写。仅作展示兜底，不参与答案生成。
+const citationRegistry = new Map()
+const CITATION_REGISTRY_LIMIT = 300
+
+function registerCitationSources(list) {
+  for (const item of list) {
+    if (!item?.source) continue
+    const existing = citationRegistry.get(item.source)
+    if (existing) {
+      if ((item.excerpts?.length || 0) <= (existing.excerpts?.length || 0)) continue
+      citationRegistry.delete(item.source)
+    }
+    citationRegistry.set(item.source, item)
+  }
+  while (citationRegistry.size > CITATION_REGISTRY_LIMIT) {
+    citationRegistry.delete(citationRegistry.keys().next().value)
+  }
 }
 
 /** 未绑定文件不猜测来源；只有安全 URL 能提供无片段入口。 */
 export function resolveAnswerCitation(source, sources) {
   const match = mergeCitationSources(sources).find((item) => item.source === source)
-  return match || { source, title: '', url: safeCitationUrl(source), excerpts: [] }
+  if (match) return match
+  const remembered = citationRegistry.get(source)
+  if (remembered) return remembered
+  return { source, title: '', url: safeCitationUrl(source), excerpts: [] }
 }
 
 /** 解析当前工具已有结果，失败时不从正文猜测证据。 */

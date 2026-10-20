@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost, apiPut, apiRequest, buildQuery } from './base'
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut, apiRequest, buildQuery } from './base'
 
 /** 仅为同源知识库图片附加认证，其他图片交给浏览器普通加载。 */
 export async function fetchKnowledgeImage(src) {
@@ -52,6 +52,56 @@ export const databaseApi = {
    */
   getDatabaseInfo: async (kbId) => {
     return apiGet(`/api/knowledge/databases/${kbId}`)
+  },
+
+  /**
+   * 获取产品事实表（Fact Layer）现值数据
+   * @param {string} kbId - 知识库ID
+   * @param {string} product - 产品名过滤（模糊匹配，可选）
+   * @returns {Promise} - { rows, total }
+   */
+  getFactLayerTable: async (kbId, product = '') => {
+    const query = product ? `?product=${encodeURIComponent(product)}` : ''
+    return apiGet(`/api/knowledge/databases/${kbId}/fact-layer${query}`)
+  },
+
+  /**
+   * 编辑产品事实表（Fact Layer）中某个产品的现值
+   * @param {string} kbId - 知识库ID
+   * @param {string} productId - 产品名（product_id）
+   * @param {Object} updates - { 事实项: 新值 }，空字符串表示清空
+   * @returns {Promise} - { updated, product_id, fact_items }
+   */
+  updateFactLayerRow: async (kbId, productId, updates) => {
+    return apiPatch(`/api/knowledge/databases/${kbId}/fact-layer/${encodeURIComponent(productId)}`, {
+      updates
+    })
+  },
+
+  /**
+   * 新增产品事实表行（产品）
+   * @param {string} kbId - 知识库ID
+   * @param {string} productId - 产品名
+   * @param {Object} values - 可选初始值 { 事实项: 值 }
+   * @returns {Promise} - { created, product_id }
+   */
+  createFactLayerRow: async (kbId, productId, values = {}) => {
+    return apiPost(`/api/knowledge/databases/${kbId}/fact-layer`, {
+      product_id: productId,
+      values
+    })
+  },
+
+  /**
+   * 删除产品事实表行（产品）
+   * @param {string} kbId - 知识库ID
+   * @param {string} productId - 产品名
+   * @returns {Promise} - { deleted, product_id }
+   */
+  deleteFactLayerRow: async (kbId, productId) => {
+    return apiDelete(
+      `/api/knowledge/databases/${kbId}/fact-layer/${encodeURIComponent(productId)}`
+    )
   },
 
   /**

@@ -11,6 +11,7 @@ from langgraph.prebuilt.tool_node import ToolRuntime
 from pydantic import BaseModel, Field
 
 from yuxi.agents.backends.sandbox import ProvisionerSandboxBackend
+from yuxi.agents.toolkits.kbs.facts_tools import query_product_facts  # noqa: F401 顶层导入以注册到工具列表
 from yuxi.agents.toolkits.registry import tool
 from yuxi.knowledge.schemas import (
     FindInputSchema,
@@ -23,10 +24,15 @@ from yuxi.utils import logger
 # ========== 通用知识库工具 ==========
 
 
+def get_product_fact_tools() -> list:
+    """获取产品事实真值表工具列表"""
+    return [query_product_facts]
+
+
 def get_common_kb_tools() -> list:
     """获取通用知识库工具列表
 
-    返回 7 个通用工具：
+    返回 8 个通用工具：
     - list_kbs: 列出用户可访问的知识库
     - get_mindmap: 获取指定知识库的思维导图
     - query_kb: 在指定知识库中检索
@@ -34,6 +40,7 @@ def get_common_kb_tools() -> list:
     - open_kb_document: 按 file_id 分段打开知识库文档
     - search_file: 搜索知识库中的文件
     - download_kb_file: 按 file_id 下载知识库原始文件到沙盒 outputs
+    - query_product_facts: 查询产品事实真值表（产品确定性事实的权威来源）
     """
     return [
         list_kbs,
@@ -43,7 +50,7 @@ def get_common_kb_tools() -> list:
         open_kb_document,
         search_file,
         download_kb_file,
-    ]
+    ] + get_product_fact_tools()
 
 
 class ListKBsInput(BaseModel):
@@ -153,6 +160,10 @@ async def query_kb(kb_id: str, query_text: str, file_name: str | None = None, ru
 
     当用户需要查询具体内容时使用此工具。kb_id 是知识库资源 ID，也就是 kb_id；返回结果中的
     file_id 可继续用于 find_kb_document 或 open_kb_document。
+
+    注意：如果用户询问的是某个产品的确定性事实（成份、规格、性状、用法用量、有效期、
+    批准文号、贮藏、生产企业等有唯一正确答案的信息），且会话启用了「产品知识库」，
+    必须改用 query_product_facts 查询产品事实表，不要用本工具做向量检索替代。
     """
     if not kb_id:
         return "请提供 kb_id"
