@@ -20,7 +20,7 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useThemeStore } from '@/stores/theme'
 import { fetchKnowledgeImage } from '@/apis/knowledge_api'
-import { resolveAnswerCitation } from '@/utils/answerCitations.js'
+import { isResolvableCitation, resolveAnswerCitation } from '@/utils/answerCitations.js'
 import { renderMarkdown } from '@/utils/markdown_preview'
 import { HTML_PREVIEW_MAX_HEIGHT, HTML_PREVIEW_MIN_HEIGHT } from '@/utils/htmlPreviewRenderer'
 import 'katex/dist/katex.min.css'
@@ -68,7 +68,8 @@ const previewRef = ref(null)
 const selectedCitationSource = ref('')
 const citationOpen = ref(false)
 const selectedCitation = computed(() =>
-  selectedCitationSource.value
+  selectedCitationSource.value &&
+  isResolvableCitation(selectedCitationSource.value, props.citationSources)
     ? resolveAnswerCitation(selectedCitationSource.value, props.citationSources)
     : null
 )
@@ -354,6 +355,19 @@ const revokeKbImageBlobUrls = () => {
   kbImageBlobUrls.clear()
 }
 
+// 模型可能编造 <cite> 来源（如 kb://default/...）：凡当前消息、会话登记表、
+// 安全 URL 都解析不到的角标直接移除，避免点击后弹空窗。
+const removeUnresolvableCitations = () => {
+  const root = previewRef.value
+  if (!root) return
+
+  root.querySelectorAll('.citation-ref[data-citation-source]').forEach((button) => {
+    const resolvable = isResolvableCitation(button.dataset.citationSource, props.citationSources)
+    // 用 display 切换而非移除：流式期间来源可能晚于正文到达，后续可恢复显示。
+    button.style.display = resolvable ? '' : 'none'
+  })
+}
+
 const enhanceKbImages = () => {
   const root = previewRef.value
   if (!root) return
@@ -387,6 +401,7 @@ onMounted(async () => {
   await nextTick()
   enhanceHtmlPreviews()
   enhanceKbImages()
+  removeUnresolvableCitations()
   if (props.codeCopy) enhanceCodeBlocks()
 })
 
@@ -400,7 +415,7 @@ onBeforeUnmount(() => {
 })
 
 watch(
-  [renderedContent, shikiTheme, () => props.codeCopy],
+  [renderedContent, shikiTheme, () => props.codeCopy, () => props.citationSources],
   async ([content, theme, codeCopy], _, onCleanup) => {
     let expired = false
     onCleanup(() => {
@@ -419,6 +434,7 @@ watch(
       replaceHtmlPreservingPreviews(html)
       revokeKbImageBlobUrls()
       cleanupHtmlPreviewFrames()
+      removeUnresolvableCitations()
 
       await nextTick()
       if (expired) return

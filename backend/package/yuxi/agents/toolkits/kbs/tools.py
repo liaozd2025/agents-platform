@@ -34,6 +34,9 @@ def get_common_kb_tools() -> list:
     - open_kb_document: 按 file_id 分段打开知识库文档
     - search_file: 搜索知识库中的文件
     - download_kb_file: 按 file_id 下载知识库原始文件到沙盒 outputs
+
+    注：query_product_facts（产品事实表工具）已拆分为独立工具，
+    在 toolkits.service 中独立注册，不再隶属知识库工具包。
     """
     return [
         list_kbs,
@@ -153,6 +156,10 @@ async def query_kb(kb_id: str, query_text: str, file_name: str | None = None, ru
 
     当用户需要查询具体内容时使用此工具。kb_id 是知识库资源 ID，也就是 kb_id；返回结果中的
     file_id 可继续用于 find_kb_document 或 open_kb_document。
+
+    注意：如果用户询问的是某个产品的确定性事实（成份、规格、性状、用法用量、有效期、
+    批准文号、贮藏、生产企业等有唯一正确答案的信息），必须改用 query_product_facts
+    查询产品事实表，不要用本工具做向量检索替代。
     """
     if not kb_id:
         return "请提供 kb_id"

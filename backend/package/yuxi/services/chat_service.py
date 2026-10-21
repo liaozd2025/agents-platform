@@ -28,6 +28,12 @@ from yuxi.agents.callbacks.model_request_timing import FirstModelRequestRecorder
 from yuxi.agents.context import BaseContext
 from yuxi.agents.middlewares.citations import knowledge_citation_sources
 from yuxi.agents.state import AgentStatePayload
+from yuxi.agents.toolkits.kbs.facts_tools import (
+    fact_table_coverage_detail,
+    format_fact_table_note,
+    format_whole_row_note,
+    product_in_fact_table,
+)
 from yuxi.models.utils import parse_assistant_message_body
 from yuxi.repositories.agent_repository import AgentRepository
 from yuxi.repositories.agent_run_repository import AgentRunRepository
@@ -46,6 +52,8 @@ from yuxi.services.input_message_service import AgentRunInputMessage
 from yuxi.services.knowledge_retrieval_policy import (
     decide_knowledge_retrieval,
     format_retrieval_context,
+    is_product_fact_query,
+    is_whole_row_query,
     retrieve_for_decision,
 )
 from yuxi.services.langfuse_service import (
@@ -1124,23 +1132,46 @@ async def stream_agent_chat(
         ]
         retrieval_chunks: list[dict[str, Any]] = []
         retrieval_decision = await decide_knowledge_retrieval(query, current_user)
+        # 事实类问题先做逐项覆盖预判（一次查询同时供闸门与兜底说明使用）
+        fact_coverage = await fact_table_coverage_detail(query) if is_product_fact_query(query) else None
         if retrieval_decision.kb_ids:
-            retrieval_chunks = await retrieve_for_decision(query, retrieval_decision)
-            retrieval_context = format_retrieval_context(retrieval_chunks)
-            if isinstance(human_message.content, str):
-                human_message = human_message.model_copy(
-                    update={
-                        "content": (
-                            f"{human_message.content}\n\n<knowledge_context>\n{retrieval_context}\n</knowledge_context>"
-                        )
-                    }
-                )
-            meta["knowledge_retrieval"] = {
-                "intent": retrieval_decision.intent,
-                "kb_ids": list(retrieval_decision.kb_ids),
-                "mentioned": retrieval_decision.mentioned,
-                "result_count": len(retrieval_chunks),
-            }
+            # 产品事实表优先（硬规则）：问题为事实类，且事实表确定能覆盖该问题
+            # （产品在表中 + 所问事实项均有值）时，跳过检索预注入并强制直查事实表。
+            # 事实表已与知识库解耦，任何会话都可用，判定只看问题本身与覆盖预判。
+            # 覆盖不了（产品不在表、事实项为空、无法判断）→ 放行走原有检索链路兜底
+            # （正常注入 <knowledge_context> + 原生来源引用），模型仍会先查事实表。
+            if fact_coverage is not None and fact_coverage["required_items"] and not fact_coverage["missing_items"]:
+                # 标记本轮强制直查事实表：构图时摘除检索类工具，物理上杜绝绕路。
+                context.fact_table_only = True
+                meta["knowledge_retrieval"] = {
+                    "intent": retrieval_decision.intent,
+                    "kb_ids": list(retrieval_decision.kb_ids),
+                    "mentioned": retrieval_decision.mentioned,
+                    "result_count": 0,
+                    "skipped_reason": "product_fact_query",
+                }
+            else:
+                retrieval_chunks = await retrieve_for_decision(query, retrieval_decision)
+                retrieval_context = format_retrieval_context(retrieval_chunks)
+                if isinstance(human_message.content, str):
+                    content = (
+                        f"{human_message.content}\n\n<knowledge_context>\n{retrieval_context}\n</knowledge_context>"
+                    )
+                    # 事实类问题但事实表覆盖预判未通过 → 注入逐项覆盖说明：
+                    # 已收录项直查事实表不带引用；未收录项须声明并保留检索来源引用。
+                    if fact_coverage is not None:
+                        content += f"\n\n{format_fact_table_note(fact_coverage)}"
+                    elif is_whole_row_query(query) and await product_in_fact_table(query):
+                        # 「基本信息/产品资料」类整行请求且产品已收录 → 固定路径：
+                        # 先查事实表整行作答（不带引用），缺项声明后用检索内容补（带引用）。
+                        content += f"\n\n{format_whole_row_note()}"
+                    human_message = human_message.model_copy(update={"content": content})
+                meta["knowledge_retrieval"] = {
+                    "intent": retrieval_decision.intent,
+                    "kb_ids": list(retrieval_decision.kb_ids),
+                    "mentioned": retrieval_decision.mentioned,
+                    "result_count": len(retrieval_chunks),
+                }
         human_message = human_message.model_copy(
             update={
                 "additional_kwargs": {

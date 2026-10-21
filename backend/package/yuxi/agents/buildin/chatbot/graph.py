@@ -33,7 +33,7 @@ from yuxi.agents.toolkits.service import resolve_configured_runtime_tools
 from yuxi.models.chat import load_chat_model, resolve_chat_model_spec
 
 from .context import ChatBotContext
-from .prompt import TODO_MID_PROMPT, build_prompt_with_context
+from .prompt import PRODUCT_FACT_PROMPT, TODO_MID_PROMPT, build_prompt_with_context
 from .state import ChatBotState
 
 
@@ -96,14 +96,21 @@ class ChatbotAgent(BaseAgent):
         # CompositeBackend，filesystem 与 summary middleware 共用同一实例。
         backend = create_agent_composite_backend(context)
         model_spec = resolve_chat_model_spec(context.model)
+        system_prompt = build_prompt_with_context(context) + PRODUCT_FACT_PROMPT
+        # 事实表已与知识库解耦，query_product_facts 常驻注册，事实类提问的直查指令始终挂载。
+        tools = await resolve_configured_runtime_tools(context)
+        if getattr(context, "fact_table_only", False):
+            # 本轮命中事实表闸门：只保留事实表与用户交互工具，物理上杜绝模型绕路检索。
+            _allowed = {"query_product_facts", "ask_user_question"}
+            tools = [tool for tool in tools if tool.name in _allowed]
         graph = create_agent(
             model=load_chat_model(
                 fully_specified_name=model_spec,
                 session_id=context.thread_id,
                 uid=context.uid,
             ),
-            tools=await resolve_configured_runtime_tools(context),
-            system_prompt=build_prompt_with_context(context),
+            tools=tools,
+            system_prompt=system_prompt,
             middleware=await _build_middlewares(context, backend),
             state_schema=ChatBotState,
             checkpointer=await self._get_checkpointer(),

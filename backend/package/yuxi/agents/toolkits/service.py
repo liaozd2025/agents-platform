@@ -103,6 +103,15 @@ async def resolve_configured_runtime_tools(context) -> list[Any]:
     selected_tool_names = set(_CORE_INTERACTION_TOOL_NAMES)
     selected_tool_sources = {name: "local" for name in _CORE_INTERACTION_TOOL_NAMES}
 
+    # 产品事实表工具：独立于知识库授权注册（模块隔离）。
+    # 不随知识库技能/知识库选择装配；问答编排层（chat_service）负责何时强制使用它。
+    from yuxi.agents.toolkits.kbs.facts_tools import query_product_facts as _fact_tool
+
+    if _fact_tool.name not in selected_tool_names:
+        selected_tools.append(_fact_tool)
+        selected_tool_names.add(_fact_tool.name)
+        selected_tool_sources[_fact_tool.name] = "local"
+
     for tool_name in getattr(context, "tools", None) or []:
         if not isinstance(tool_name, str) or tool_name in selected_tool_names:
             continue

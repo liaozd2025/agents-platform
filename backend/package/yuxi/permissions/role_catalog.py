@@ -122,6 +122,20 @@ PERMISSION_CATALOG = (
         "knowledge_base:read",
     ),
     PermissionDefinition(
+        "fact_layer:read",
+        "产品事实表",
+        "业务资源",
+        "查看产品事实表数据（独立于知识库权限）",
+        display_order=55,
+    ),
+    PermissionDefinition(
+        "fact_layer:manage",
+        "管理产品事实表",
+        "业务资源",
+        "编辑、新增和删除产品事实表数据（独立于知识库权限）",
+        "fact_layer:read",
+    ),
+    PermissionDefinition(
         "knowledge_evaluation:manage",
         "评估知识库",
         "业务资源",
@@ -163,6 +177,7 @@ ALL_PERMISSION_KEYS = (*BASE_PERMISSION_KEYS, *ASSIGNABLE_PERMISSION_KEYS)
 USER_PERMISSION_KEYS = (
     "knowledge_base:read",
     "skill:use",
+    "fact_layer:read",
 )
 
 ADMIN_PERMISSION_KEYS = (
@@ -184,6 +199,8 @@ ADMIN_PERMISSION_KEYS = (
     "knowledge_base:read",
     "knowledge_base:manage",
     "knowledge_evaluation:manage",
+    "fact_layer:read",
+    "fact_layer:manage",
     "agent:manage",
     "skill:use",
     "skill:manage",

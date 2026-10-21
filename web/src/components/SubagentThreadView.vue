@@ -51,6 +51,7 @@ import { MessageProcessor } from '@/utils/messageProcessor'
 import ScrollController from '@/utils/scrollController'
 import { formatContextToken } from '@/utils/contextUsage'
 import { getSubagentRunTokenUsage } from '@/utils/subagentRuns'
+import { setCitationScope } from '@/utils/answerCitations.js'
 
 const props = defineProps({
   threadId: { type: String, required: true },
@@ -286,6 +287,7 @@ const startRunStream = async (runId, afterSeq = '0-0', resetMessages = false) =>
 }
 
 watch([() => props.threadId, () => props.runId], () => {
+  setCitationScope(props.threadId || 'default')
   stopRunStream()
   resetStreamState()
   lastEventId.value = '0-0'
@@ -307,6 +309,7 @@ watch(
 watch(streamedMessages, () => scrollToBottom(), { deep: true, flush: 'post' })
 
 onMounted(() => {
+  setCitationScope(props.threadId || 'default')
   loadThread()
   if (typeof ResizeObserver !== 'undefined' && contentRef.value) {
     resizeObserver = new ResizeObserver(() => scrollToBottom())
