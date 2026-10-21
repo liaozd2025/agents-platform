@@ -66,42 +66,67 @@ export function mergeCitationSources(sources) {
   return list
 }
 
-// 会话级引用登记表：记录本页会话中所有消息真实绑定过的检索来源。
+// 引用登记表：按 thread 隔离，记录本会话内各消息真实绑定过的检索来源。
 // 追问轮模型可能复用早前轮次的来源输出 <cite>，而当前消息没有再次绑定该来源
-// （本轮未检索或未命中同一文件），导致精确匹配失败、弹窗空空。
-// source 是稳定文件身份（kb://kb_id/file_id 或精确 URL），同身份的片段可安全借用，
-// 不涉及对正文的猜测或改写。仅作展示兜底，不参与答案生成。
-const citationRegistry = new Map()
-const CITATION_REGISTRY_LIMIT = 300
+// （本轮未检索或未命中同一文件）。同 thread 内按来源身份借用片段是安全的：
+// source 是稳定文件身份（kb://kb_id/file_id 或精确 URL），片段做并集累积，
+// 不丢弃同文件后续新片段，也不跨 thread 借用。仅作展示兜底，不参与答案生成。
+const citationRegistry = new Map() // threadId -> Map(source -> merged item)
+const CITATION_SOURCE_LIMIT = 300
+const CITATION_SCOPE_LIMIT = 10
+let activeCitationScope = 'default'
+
+/** 切换当前会话（thread）作用域；渲染与登记都归属当前 thread，互不借用。 */
+export function setCitationScope(scope) {
+  activeCitationScope = typeof scope === 'string' && scope ? scope : 'default'
+}
+
+function getScopeRegistry() {
+  let scopeMap = citationRegistry.get(activeCitationScope)
+  if (!scopeMap) {
+    scopeMap = new Map()
+    citationRegistry.set(activeCitationScope, scopeMap)
+    while (citationRegistry.size > CITATION_SCOPE_LIMIT) {
+      citationRegistry.delete(citationRegistry.keys().next().value)
+    }
+  }
+  return scopeMap
+}
 
 function registerCitationSources(list) {
+  const scopeMap = getScopeRegistry()
   for (const item of list) {
     if (!item?.source) continue
-    const existing = citationRegistry.get(item.source)
-    if (existing) {
-      if ((item.excerpts?.length || 0) <= (existing.excerpts?.length || 0)) continue
-      citationRegistry.delete(item.source)
+    const existing = scopeMap.get(item.source)
+    if (!existing) {
+      scopeMap.set(item.source, item)
+      continue
     }
-    citationRegistry.set(item.source, item)
+    // 同来源片段做并集：新片段追加、旧片段保留，元数据取最新。
+    const excerpts = [...(existing.excerpts || [])]
+    for (const excerpt of item.excerpts || []) {
+      if (!excerpts.some((entry) => entry.text === excerpt.text)) excerpts.push(excerpt)
+    }
+    scopeMap.set(item.source, { ...item, excerpts })
   }
-  while (citationRegistry.size > CITATION_REGISTRY_LIMIT) {
-    citationRegistry.delete(citationRegistry.keys().next().value)
+  while (scopeMap.size > CITATION_SOURCE_LIMIT) {
+    scopeMap.delete(scopeMap.keys().next().value)
   }
 }
 
-/** 角标可解析才算真引用：当前消息绑定、会话登记表借用或安全 URL，其余视为编造不渲染。 */
+/** 角标可解析才算真引用：当前消息绑定、本会话登记表借用或安全 URL，其余视为编造不渲染。 */
 export function isResolvableCitation(source, sources) {
   if (typeof source !== 'string' || !source) return false
   if (mergeCitationSources(sources).some((item) => item.source === source)) return true
-  if (citationRegistry.has(source)) return true
+  if (getScopeRegistry().has(source)) return true
   return Boolean(safeCitationUrl(source))
 }
 
-/** 未绑定文件不猜测来源；只有安全 URL 能提供无片段入口。 */
+/** 未绑定文件不猜测来源；优先当前消息证据，其次本会话内借用的同身份来源。 */
 export function resolveAnswerCitation(source, sources) {
   const match = mergeCitationSources(sources).find((item) => item.source === source)
   if (match) return match
-  const remembered = citationRegistry.get(source)
+  const remembered = getScopeRegistry().get(source)
   if (remembered) return remembered
   return { source, title: '', url: safeCitationUrl(source), excerpts: [] }
 }

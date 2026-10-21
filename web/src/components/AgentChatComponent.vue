@@ -947,6 +947,7 @@ import {
 } from '@lucide/vue'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import { generatePixelAvatar } from '@/utils/pixelAvatar'
+import { setCitationScope } from '@/utils/answerCitations.js'
 import { CheckCircleOutlined, CloseCircleOutlined, SyncOutlined } from '@ant-design/icons-vue'
 import AgentInputArea from '@/components/AgentInputArea.vue'
 import ContextUsageRing from '@/components/ContextUsageRing.vue'
@@ -1096,6 +1097,7 @@ const recordSubagentThread = (toolCallId, childThreadId) => {
 const getSubagentThreadIdByToolCall = (toolCallId) =>
   (toolCallId && chatState.subagentThreadByToolCall[String(toolCallId)]) || ''
 const setCurrentThreadId = (threadId, options) => {
+  setCitationScope(threadId || 'default')
   return chatThreadsStore.setCurrentThreadId(threadId || null, options)
 }
 const streamSmoother = useStreamSmoother({
