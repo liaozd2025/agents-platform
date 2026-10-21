@@ -55,38 +55,38 @@ export const databaseApi = {
   },
 
   /**
-   * 获取产品事实表（Fact Layer）现值数据
-   * @param {string} kbId - 知识库ID
+   * 获取产品事实表（Fact Layer）现值数据（独立接口，不再挂在知识库下）
+   * @param {string} kbId - 保留参数兼容既有调用，实际请求不使用
    * @param {string} product - 产品名过滤（模糊匹配，可选）
    * @returns {Promise} - { rows, total }
    */
   getFactLayerTable: async (kbId, product = '') => {
     const query = product ? `?product=${encodeURIComponent(product)}` : ''
-    return apiGet(`/api/knowledge/databases/${kbId}/fact-layer${query}`)
+    return apiGet(`/api/fact-layer${query}`)
   },
 
   /**
    * 编辑产品事实表（Fact Layer）中某个产品的现值
-   * @param {string} kbId - 知识库ID
+   * @param {string} kbId - 保留参数兼容既有调用，实际请求不使用
    * @param {string} productId - 产品名（product_id）
    * @param {Object} updates - { 事实项: 新值 }，空字符串表示清空
    * @returns {Promise} - { updated, product_id, fact_items }
    */
   updateFactLayerRow: async (kbId, productId, updates) => {
-    return apiPatch(`/api/knowledge/databases/${kbId}/fact-layer/${encodeURIComponent(productId)}`, {
+    return apiPatch(`/api/fact-layer/${encodeURIComponent(productId)}`, {
       updates
     })
   },
 
   /**
    * 新增产品事实表行（产品）
-   * @param {string} kbId - 知识库ID
+   * @param {string} kbId - 保留参数兼容既有调用，实际请求不使用
    * @param {string} productId - 产品名
    * @param {Object} values - 可选初始值 { 事实项: 值 }
    * @returns {Promise} - { created, product_id }
    */
   createFactLayerRow: async (kbId, productId, values = {}) => {
-    return apiPost(`/api/knowledge/databases/${kbId}/fact-layer`, {
+    return apiPost(`/api/fact-layer`, {
       product_id: productId,
       values
     })
@@ -94,14 +94,12 @@ export const databaseApi = {
 
   /**
    * 删除产品事实表行（产品）
-   * @param {string} kbId - 知识库ID
+   * @param {string} kbId - 保留参数兼容既有调用，实际请求不使用
    * @param {string} productId - 产品名
    * @returns {Promise} - { deleted, product_id }
    */
   deleteFactLayerRow: async (kbId, productId) => {
-    return apiDelete(
-      `/api/knowledge/databases/${kbId}/fact-layer/${encodeURIComponent(productId)}`
-    )
+    return apiDelete(`/api/fact-layer/${encodeURIComponent(productId)}`)
   },
 
   /**

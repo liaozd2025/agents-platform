@@ -29,7 +29,6 @@ from yuxi.agents.context import BaseContext
 from yuxi.agents.middlewares.citations import knowledge_citation_sources
 from yuxi.agents.state import AgentStatePayload
 from yuxi.agents.toolkits.kbs.facts_tools import (
-    PRODUCT_KB_NAME,
     fact_table_coverage_detail,
     format_fact_table_note,
     format_whole_row_note,
@@ -1136,17 +1135,18 @@ async def stream_agent_chat(
         # 事实类问题先做逐项覆盖预判（一次查询同时供闸门与兜底说明使用）
         fact_coverage = await fact_table_coverage_detail(query) if is_product_fact_query(query) else None
         if retrieval_decision.kb_ids:
-            # 产品事实表优先（硬规则）：会话检索范围含「产品知识库」、问题为事实类，
-            # 且事实表确定能覆盖该问题（产品在表中 + 所问事实项均有值）时，
-            # 才跳过检索预注入，强制模型先调 query_product_facts 查事实表作答。
+            # 产品事实表优先（硬规则）：问题为事实类，且事实表确定能覆盖该问题
+            # （产品在表中 + 所问事实项均有值）时，跳过检索预注入并强制直查事实表。
+            # 事实表已与知识库解耦，任何会话都可用，判定只看问题本身与覆盖预判。
             # 覆盖不了（产品不在表、事实项为空、无法判断）→ 放行走原有检索链路兜底
             # （正常注入 <knowledge_context> + 原生来源引用），模型仍会先查事实表。
             if (
-                any(name == PRODUCT_KB_NAME for _, name in retrieval_decision.kb_names)
-                and fact_coverage is not None
+                fact_coverage is not None
                 and fact_coverage["required_items"]
                 and not fact_coverage["missing_items"]
             ):
+                # 标记本轮强制直查事实表：构图时摘除检索类工具，物理上杜绝绕路。
+                context.fact_table_only = True
                 meta["knowledge_retrieval"] = {
                     "intent": retrieval_decision.intent,
                     "kb_ids": list(retrieval_decision.kb_ids),
@@ -1165,11 +1165,7 @@ async def stream_agent_chat(
                     # 已收录项直查事实表不带引用；未收录项须声明并保留检索来源引用。
                     if fact_coverage is not None:
                         content += f"\n\n{format_fact_table_note(fact_coverage)}"
-                    elif (
-                        any(name == PRODUCT_KB_NAME for _, name in retrieval_decision.kb_names)
-                        and is_whole_row_query(query)
-                        and await product_in_fact_table(query)
-                    ):
+                    elif is_whole_row_query(query) and await product_in_fact_table(query):
                         # 「基本信息/产品资料」类整行请求且产品已收录 → 固定路径：
                         # 先查事实表整行作答（不带引用），缺项声明后用检索内容补（带引用）。
                         content += f"\n\n{format_whole_row_note()}"

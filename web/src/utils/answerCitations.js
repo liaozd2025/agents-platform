@@ -89,6 +89,14 @@ function registerCitationSources(list) {
   }
 }
 
+/** 角标可解析才算真引用：当前消息绑定、会话登记表借用或安全 URL，其余视为编造不渲染。 */
+export function isResolvableCitation(source, sources) {
+  if (typeof source !== 'string' || !source) return false
+  if (mergeCitationSources(sources).some((item) => item.source === source)) return true
+  if (citationRegistry.has(source)) return true
+  return Boolean(safeCitationUrl(source))
+}
+
 /** 未绑定文件不猜测来源；只有安全 URL 能提供无片段入口。 */
 export function resolveAnswerCitation(source, sources) {
   const match = mergeCitationSources(sources).find((item) => item.source === source)

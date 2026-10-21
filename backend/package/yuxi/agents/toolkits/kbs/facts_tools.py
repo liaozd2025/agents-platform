@@ -3,7 +3,8 @@
 产品事实表（fact_layer_current 宽表）的只读查询工具。
 产品确定性事实（规格/参数/数值类）的唯一权威来源，与向量检索链路相互独立。
 
-仅服务于名称为「产品知识库」的知识库；其余知识库不提供产品事实查询。
+本工具是独立注册的工具，不隶属知识库工具包，也不依赖会话挂载了哪个知识库；
+与产品知识库的配合只发生在上层问答编排（事实表优先、检索兜底）。
 """
 
 from typing import Any
@@ -16,7 +17,7 @@ from yuxi.agents.toolkits.registry import tool
 from yuxi.storage.postgres.manager import pg_manager
 from yuxi.utils import logger
 
-# 产品事实表所属的知识库名称（只有该知识库提供事实表查询）
+# 产品知识库名称（仅用于上层问答编排的业务判断，如检索闸门；工具本身不依赖它）
 PRODUCT_KB_NAME = "产品知识库"
 # 事实表（宽表：一个产品一行，每个事实项一列）
 _FACT_TABLE = "fact_layer_current"
@@ -27,10 +28,17 @@ _NON_FACT_COLUMNS = ("product_id", "sources", "updated_at")
 class QueryProductFactsInput(BaseModel):
     """查询产品事实输入模型"""
 
-    product_name: str = Field(description="产品名称，支持部分匹配（如'阿司匹林'可命中'阿司匹林肠溶片'）")
+    product_name: str | None = Field(
+        default=None,
+        description="产品名称，支持部分匹配（如'阿司匹林'可命中'阿司匹林肠溶片'）",
+    )
     fact_item: str | None = Field(
         default=None,
         description="要查询的具体事实项（如'有效期'、'用法用量'、'规格（说明书【规格】栏）'）。为空时返回该产品的全部事实",
+    )
+    query: str | None = Field(
+        default=None,
+        description="兼容别名：模型可能把产品名（可含事实项）放到 query 参数里传入，等价于 product_name",
     )
 
 
@@ -53,15 +61,17 @@ async def _load_fact_columns(session) -> list[str]:
 
 
 @tool(
-    category="knowledge",
-    tags=["知识库", "产品事实"],
+    category="buildin",
+    tags=["产品事实"],
     display_name="查询产品事实",
     args_schema=QueryProductFactsInput,
 )
-async def query_product_facts(product_name: str, fact_item: str | None = None, runtime: ToolRuntime = None) -> Any:
-    """查询「产品知识库」的产品事实表，获取产品确定性事实的权威当前值。
+async def query_product_facts(
+    product_name: str | None = None, fact_item: str | None = None, runtime: ToolRuntime = None, query: str | None = None
+) -> Any:
+    """查询产品事实表，获取产品确定性事实的权威当前值。
 
-    本工具只服务于「产品知识库」：其事实表是产品事实数据的唯一权威来源。
+    事实表是产品事实数据的唯一权威来源，独立于知识库文档体系。
     当用户询问某个产品的确定性事实信息时，必须优先且只使用本工具查询，
     禁止改用检索知识库（query_kb）等向量检索工具。
 
@@ -71,9 +81,8 @@ async def query_product_facts(product_name: str, fact_item: str | None = None, r
     - 用户明确询问"某产品的某项指标是多少"
 
     不应使用本工具的场景：
-    - 当前会话没有启用「产品知识库」时，本工具不可用，如实告知用户即可
     - 开放性、解释性、方法论类问题（如"为什么""怎么用"），改用检索知识库工具
-    - 非产品知识库范围内的文档内容问题
+    - 与产品事实数据无关的文档内容问题
 
     使用规则：
     1. 本工具返回的值即为当前权威答案，直接依据它组织回答，不要再用检索结果佐证或覆盖
@@ -88,26 +97,19 @@ async def query_product_facts(product_name: str, fact_item: str | None = None, r
     Returns:
         产品事实列表，每条包含事实项、当前值与来源信息
     """
-    if not product_name or not product_name.strip():
+    product_value = (product_name or "").strip()
+    item = (fact_item or "").strip()
+    alias_query = (query or "").strip()
+    # 兼容模型传参走形：把产品名（可含事实项）写进 query 别名，如「乙酰半胱氨酸颗粒 有效期」
+    if not product_value and alias_query:
+        parts = alias_query.split()
+        product_value = parts[0] if parts else ""
+        if not item and len(parts) > 1:
+            item = "".join(parts[1:]).strip()
+    if not product_value:
         return "请提供要查询的产品名称"
 
-    # 会话可见知识库即数据边界：只有启用了「产品知识库」才允许查询事实表
-    from yuxi.agents.toolkits.kbs.tools import _resolve_visible_knowledge_bases_for_query
-
-    visible_kbs = await _resolve_visible_knowledge_bases_for_query(runtime)
-    if not visible_kbs:
-        return "无法获取当前会话可访问的知识库"
-    has_product_kb = any(
-        (kb.get("name") or "").strip() == PRODUCT_KB_NAME for kb in visible_kbs
-    )
-    if not has_product_kb:
-        return (
-            f"产品事实表只存在于「{PRODUCT_KB_NAME}」中，"
-            "当前会话未启用该知识库，无法查询产品事实"
-        )
-
-    product_pattern = f"%{product_name.strip()}%"
-    item = (fact_item or "").strip()
+    product_pattern = f"%{product_value}%"
 
     try:
         async with pg_manager.get_async_session_context() as session:
@@ -214,7 +216,24 @@ async def fact_table_coverage_detail(query: str) -> dict:
                 base = col.split("（")[0].split("(")[0].strip()
                 if base and base in query:
                     required.append(col)
+            # 覆盖判定必须从严：问题按事实类词汇提问、但该词汇映射不到任何列时，
+            # 记为缺失而不是忽略——否则「有效期和价格」这类问题会被误判全覆盖、
+            # 跳过检索后无法回答未收录项（审阅 P1#3）。
+            from yuxi.services.knowledge_retrieval_policy import _FACT_PATTERNS
+
+            mapped_bases = {col.split("（")[0].split("(")[0].strip() for col in fact_columns}
+            unmapped = [
+                pattern
+                for pattern in _FACT_PATTERNS
+                if pattern in query
+                and not any(pattern == base or pattern in base or base in pattern for base in mapped_bases)
+            ]
+            if not required and not unmapped:
+                return detail
             if not required:
+                # 有事实类词汇但全部映射不上列：直接判不覆盖，缺项即这些词汇。
+                detail["matched_products"] = matched
+                detail["missing_items"] = unmapped
                 return detail
             cols_sql = ", ".join(_quote_ident(c) for c in required)
             covered = list(required)
@@ -237,7 +256,7 @@ async def fact_table_coverage_detail(query: str) -> dict:
             detail["matched_products"] = matched
             detail["required_items"] = required
             detail["covered_items"] = covered
-            detail["missing_items"] = [c for c in required if c not in covered]
+            detail["missing_items"] = [c for c in required if c not in covered] + unmapped
             return detail
     except Exception:
         logger.warning("fact_table_coverage_detail 预判失败，按不覆盖处理", exc_info=True)

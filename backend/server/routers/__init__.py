@@ -9,6 +9,7 @@ from server.routers.auth_router import auth
 from server.routers.chat_router import chat
 from server.routers.dashboard_router import dashboard
 from server.routers.external_kb_router import external_kb
+from server.routers.fact_layer_router import fact_layer
 from server.routers.filesystem_router import filesystem_router
 from server.routers.graph_router import graph
 from server.routers.knowledge_dashboard_router import knowledge_dashboard
@@ -58,6 +59,7 @@ router.include_router(mention_router)  # /api/mention/* 提及文件搜索接口
 router.include_router(knowledge_dashboard)  # /api/dashboard/stats/knowledge 知识域仪表盘
 router.include_router(external_kb)  # /api/knowledge/databases/external* CLI 与外部 Agent 调用
 router.include_router(knowledge)  # /api/knowledge/* 知识库管理与检索
+router.include_router(fact_layer)  # /api/fact-layer/* 产品事实表（独立模块，不隶属知识库）
 router.include_router(evaluation)  # /api/evaluation/* 知识库评估
 router.include_router(graph)  # /api/graph/* 图谱查询与管理
 router.include_router(workspace_knowledge)  # /api/workspace/knowledge/* 工作区知识文件只读视图
