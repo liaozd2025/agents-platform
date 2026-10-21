@@ -1140,11 +1140,7 @@ async def stream_agent_chat(
             # 事实表已与知识库解耦，任何会话都可用，判定只看问题本身与覆盖预判。
             # 覆盖不了（产品不在表、事实项为空、无法判断）→ 放行走原有检索链路兜底
             # （正常注入 <knowledge_context> + 原生来源引用），模型仍会先查事实表。
-            if (
-                fact_coverage is not None
-                and fact_coverage["required_items"]
-                and not fact_coverage["missing_items"]
-            ):
+            if fact_coverage is not None and fact_coverage["required_items"] and not fact_coverage["missing_items"]:
                 # 标记本轮强制直查事实表：构图时摘除检索类工具，物理上杜绝绕路。
                 context.fact_table_only = True
                 meta["knowledge_retrieval"] = {

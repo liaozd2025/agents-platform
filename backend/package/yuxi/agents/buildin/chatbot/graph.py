@@ -104,13 +104,13 @@ class ChatbotAgent(BaseAgent):
             _allowed = {"query_product_facts", "ask_user_question"}
             tools = [tool for tool in tools if tool.name in _allowed]
         graph = create_agent(
-    model=load_chat_model(
-        fully_specified_name=model_spec,
-        session_id=context.thread_id,
-        uid=context.uid,
-    ),
-    tools=tools,
-    system_prompt=system_prompt,
+            model=load_chat_model(
+                fully_specified_name=model_spec,
+                session_id=context.thread_id,
+                uid=context.uid,
+            ),
+            tools=tools,
+            system_prompt=system_prompt,
             middleware=await _build_middlewares(context, backend),
             state_schema=ChatBotState,
             checkpointer=await self._get_checkpointer(),

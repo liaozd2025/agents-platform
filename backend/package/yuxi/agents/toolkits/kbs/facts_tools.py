@@ -122,10 +122,7 @@ async def query_product_facts(
                 fuzzy = [c for c in fact_columns if c != item and item in c]
                 target_columns = exact or fuzzy
                 if not target_columns:
-                    return (
-                        f"产品事实表中没有名为“{item}”的事实项。"
-                        f"可用事实项：{'、'.join(fact_columns)}"
-                    )
+                    return f"产品事实表中没有名为“{item}”的事实项。可用事实项：{'、'.join(fact_columns)}"
             else:
                 target_columns = fact_columns
 
@@ -174,11 +171,7 @@ async def query_product_facts(
                 if row.get(col) is not None:
                     facts[col] = row[col]
             source_files = sorted(
-                {
-                    (meta or {}).get("source_file")
-                    for meta in sources.values()
-                    if (meta or {}).get("source_file")
-                }
+                {(meta or {}).get("source_file") for meta in sources.values() if (meta or {}).get("source_file")}
             )
             output.append(
                 {
@@ -325,9 +318,7 @@ def format_fact_table_note(detail: dict) -> str:
     missing = "、".join(detail.get("missing_items") or [])
     parts = ["<fact_table_note>\n用户的问题同时涉及事实表已收录与未收录的事实项，回答必须逐项区分来源："]
     if covered:
-        parts.append(
-            f"- 「{covered}」在产品事实表中已收录：直接以事实表值为准作答，这部分不要输出任何引用标记；"
-        )
+        parts.append(f"- 「{covered}」在产品事实表中已收录：直接以事实表值为准作答，这部分不要输出任何引用标记；")
     if missing:
         parts.append(
             f"- 「{missing}」在产品事实表中未收录（该项无值）：必须先说明「产品事实表中未收录该事实项，"
