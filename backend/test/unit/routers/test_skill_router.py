@@ -1,477 +1,205 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from yuxi.storage.postgres.models_business import Skill, User
+import pytest
 
-from server.routers.skill_router import skills, user_skills
-from server.utils.auth_middleware import get_authorization_context, get_db
+from yuxi.api.dependencies.auth import get_db, get_required_user
+from yuxi.api.routers.extensions.skills import skills as system_skills_router
+from yuxi.api.routers.extensions.skills import user_skills as user_skills_router
+from yuxi.modules.extensions.skills.models import Skill
+from yuxi.modules.identity.models import User, Role, RolePermission, UserRoleAssignment
+from yuxi.modules.extensions.skills.package import SkillEditConflict
 
 
-def _build_app(*, uid: str = "admin", permissions: set[str] | None = None) -> FastAPI:
+def _build_app(*, role: str = "admin", uid: str | None = None, permissions: set[str] | None = None) -> FastAPI:
+    """真实权限依赖从角色快照求值，只替换已认证用户和数据库边界。"""
     app = FastAPI()
-    app.include_router(skills, prefix="/api")
-    app.include_router(user_skills, prefix="/api")
-    permission_keys = {"skill:use", "skill:manage"} if permissions is None else permissions
-
-    async def fake_db():
-        return None
-
-    async def fake_authorization_context():
-        user = User(
-            username=uid,
-            uid=uid,
-            password_hash="x",
-            department_id=1,
-        )
-        return SimpleNamespace(
-            user=user,
-            has_permission=lambda permission: permission in permission_keys,
-        )
-
-    app.dependency_overrides[get_db] = fake_db
-    app.dependency_overrides[get_authorization_context] = fake_authorization_context
+    app.include_router(system_skills_router, prefix="/api")
+    app.include_router(user_skills_router, prefix="/api")
+    keys = permissions if permissions is not None else ({"skill:manage", "skill:use"} if role in {"admin", "superadmin"} else {"skill:use"})
+    assignment = Role(
+        code=role,
+        name=role,
+        is_active=True,
+        default_scope_type="all",
+        default_departments=[],
+        permissions=[RolePermission(permission_key=key) for key in keys],
+    )
+    user = User(
+        id=1,
+        username=uid or role,
+        uid=uid or role,
+        password_hash="x",
+        department_id=1,
+        is_deleted=0,
+        user_kind="human",
+        role_assignments=[UserRoleAssignment(role=assignment, scope_mode="inherit", scope_departments=[])],
+    )
+    user.department_ancestor_ids = (1,)
+    app.dependency_overrides[get_db] = lambda: None
+    app.dependency_overrides[get_required_user] = lambda: user
     return app
 
 
-def _skill(
-    slug: str = "demo",
-    *,
-    source_type: str = "upload",
-    created_by: str = "admin",
-    enabled: bool = True,
-    user_uids: list[str] | None = None,
-) -> Skill:
+def _skill_for_user(uid: str) -> Skill:
+    """构造由共享权限逻辑投影管理权限的 Skill 数据。"""
     return Skill(
-        slug=slug,
-        name=slug,
+        slug="demo",
+        name="demo",
         description="demo skill",
-        source_type=source_type,
-        dir_path=f"shared/{slug}",
+        source_type="upload",
+        dir_path="shared/demo",
         share_config={
             "version": 2,
-            "read_scope": {"access_level": "user", "user_uids": user_uids or [created_by]},
-            "manage_scope": {"access_level": "user", "user_uids": user_uids or [created_by]},
+            "read_scope": {"access_level": "user", "user_uids": [uid]},
+            "manage_scope": {"access_level": "user", "user_uids": [uid]},
         },
-        enabled=enabled,
-        created_by=created_by,
-        updated_by=created_by,
+        enabled=True,
+        created_by=uid,
+        updated_by=uid,
     )
 
 
-def test_list_visible_skills_route_returns_allowed_levels_and_can_manage(monkeypatch):
-    async def fake_list_visible_skills_for_management(_db, user):
-        assert user.uid == "admin"
-        return [_skill()]
+@pytest.mark.parametrize(
+    ("role", "can_manage", "allowed_access_levels"),
+    [
+        ("admin", True, ["global", "department", "user"]),
+        ("user", False, ["user"]),
+    ],
+    ids=["admin", "user"],
+)
+def test_skill_list_projects_real_permissions_and_allowed_levels(monkeypatch, role, can_manage, allowed_access_levels):
+    """列表响应按真实权限逻辑投影管理标记和可设定共享范围。"""
+
+    async def visible_skills(_repository, user):
+        assert user.uid == role
+        return [_skill_for_user(role)]
 
     monkeypatch.setattr(
-        "yuxi.repositories.skill_repository.SkillRepository.list_visible_for_management",
-        fake_list_visible_skills_for_management,
+        "yuxi.modules.extensions.skills.repository.SkillRepository.list_visible_for_management",
+        visible_skills,
     )
 
-    client = TestClient(_build_app())
-    resp = client.get("/api/system/skills")
-
-    assert resp.status_code == 200, resp.text
-    payload = resp.json()
-    assert payload["success"] is True
-    assert payload["data"][0]["slug"] == "demo"
-    assert payload["data"][0]["can_manage"] is True
-    assert payload["allowed_access_levels"] == ["global", "department", "user"]
-
-
-def test_list_visible_skills_route_allows_normal_user_readonly_items(monkeypatch):
-    async def fake_list_visible_skills_for_management(_db, user):
-        assert user.uid == "user"
-        return [
-            _skill(slug="owned-disabled", created_by="user", enabled=False),
-            _skill(slug="shared", created_by="other", user_uids=["user"]),
-        ]
-
-    monkeypatch.setattr(
-        "yuxi.repositories.skill_repository.SkillRepository.list_visible_for_management",
-        fake_list_visible_skills_for_management,
-    )
-
-    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
-    resp = client.get("/api/system/skills")
-
-    assert resp.status_code == 200, resp.text
-    payload = resp.json()
-    assert payload["success"] is True
-    assert [(item["slug"], item["can_manage"]) for item in payload["data"]] == [
-        ("owned-disabled", False),
-        ("shared", False),
-    ]
-    assert payload["allowed_access_levels"] == ["user"]
-
-
-def test_list_accessible_skills_route(monkeypatch):
-    async def fake_list_accessible_skills(_db, user):
-        assert user.uid == "user"
-        return [_skill(created_by="user")]
-
-    monkeypatch.setattr("server.routers.skill_router.list_accessible_skills", fake_list_accessible_skills)
-
-    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
-    resp = client.get("/api/skills/accessible")
-
-    assert resp.status_code == 200, resp.text
-    payload = resp.json()
-    assert payload["success"] is True
-    assert payload["data"][0]["slug"] == "demo"
-    assert payload["data"][0]["can_manage"] is False
-
-
-def test_list_skill_cards_route_scans_personal_source(monkeypatch):
-    captured = {}
-
-    async def fake_list_skill_cards(_db, user):
-        captured["uid"] = user.uid
-        item = _skill(source_type="personal", created_by="user")
-        return [item]
-
-    monkeypatch.setattr("server.routers.skill_router.list_skill_cards_for_user", fake_list_skill_cards)
-
-    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
-    resp = client.get("/api/skills")
-
-    assert resp.status_code == 200, resp.text
-    assert "personal_cache" not in resp.json()
-    assert captured == {"uid": "user"}
-
-
-def test_personal_skill_confirm_and_delete_routes(monkeypatch):
-    async def fake_confirm(*, draft_id, slugs, operator):
-        assert draft_id == "draft-1"
-        assert slugs == ["demo-v2"]
-        assert operator.uid == "user"
-        return [{"slug": "demo", "requested_slug": "demo-v2", "success": True}]
-
-    async def fake_delete(uid, slug):
-        assert (uid, slug) == ("user", "demo")
-
-    monkeypatch.setattr("server.routers.skill_router.confirm_personal_skill_install_draft", fake_confirm)
-    monkeypatch.setattr("server.routers.skill_router.delete_personal_skill", fake_delete)
-
-    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
-    confirm_resp = client.post(
-        "/api/skills/personal/install-drafts/draft-1/confirm",
-        json={"slugs": ["demo-v2"]},
-    )
-    delete_resp = client.delete("/api/skills/personal/demo")
-
-    assert confirm_resp.status_code == 200, confirm_resp.text
-    assert confirm_resp.json()["data"][0]["slug"] == "demo"
-    assert delete_resp.status_code == 200, delete_resp.text
-
-
-def test_update_personal_skill_enabled_route(monkeypatch):
-    async def fake_update(uid, slug, *, enabled):
-        assert (uid, slug, enabled) == ("user", "demo", False)
-        return SimpleNamespace(
-            to_dict=lambda: {"slug": "demo", "source_scope": "personal", "enabled": False},
-            source_scope="personal",
-            source_type="personal",
-        )
-
-    monkeypatch.setattr("server.routers.skill_router.update_personal_skill_enabled", fake_update)
-
-    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
-    response = client.put("/api/skills/personal/demo/enabled", json={"enabled": False})
+    response = TestClient(_build_app(role=role)).get("/api/system/skills")
 
     assert response.status_code == 200, response.text
-    assert response.json()["data"]["enabled"] is False
+    payload = response.json()
+    assert payload["success"] is True
+    assert [(item["slug"], item["can_manage"]) for item in payload["data"]] == [("demo", can_manage)]
+    assert payload["allowed_access_levels"] == allowed_access_levels
 
 
-def test_create_uploaded_skill_draft_route(monkeypatch):
-    captured: dict[str, object] = {}
-
-    async def fake_create_uploaded_skill_draft(*, filename, file_bytes, operator):
-        captured["filename"] = filename
-        captured["file_bytes"] = file_bytes.decode("utf-8")
-        captured["operator_uid"] = operator.uid
-        return {"draft_id": "draft-1", "items": [{"slug": "demo"}], "failures": []}
-
-    monkeypatch.setattr("server.routers.skill_router.create_uploaded_skill_draft", fake_create_uploaded_skill_draft)
-
-    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
-    resp = client.post(
-        "/api/skills/import/prepare",
-        files={"file": ("SKILL.md", b"---\nname: demo\ndescription: demo skill\n---\n", "text/markdown")},
-    )
-
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["data"]["draft_id"] == "draft-1"
-    assert captured == {
-        "filename": "SKILL.md",
-        "file_bytes": "---\nname: demo\ndescription: demo skill\n---\n",
-        "operator_uid": "user",
-    }
-
-
-def test_remote_skill_prepare_and_shared_confirm_use_function_permissions(monkeypatch):
-    captured: dict[str, object] = {}
-
-    async def fake_create_remote_skill_draft(*, source, skills, operator):
-        captured["prepare"] = {"source": source, "skills": skills, "operator_uid": operator.uid}
-        return {"draft_id": "draft-remote", "items": [{"slug": "frontend-design"}], "failures": []}
-
-    async def fake_confirm_skill_install_draft(_db, *, draft_id, share_config, slugs, operator):
-        captured["confirm"] = {
-            "draft_id": draft_id,
-            "share_config": share_config,
-            "slugs": slugs,
-            "operator_uid": operator.uid,
-        }
-        return [
-            {"slug": "frontend-design", "success": True},
-            {"slug": "broken", "success": False, "error": "解析失败"},
-        ]
-
-    monkeypatch.setattr("server.routers.skill_router.create_remote_skill_draft", fake_create_remote_skill_draft)
-    monkeypatch.setattr("server.routers.skill_router.confirm_skill_install_draft", fake_confirm_skill_install_draft)
-
-    client = TestClient(_build_app(uid="user", permissions={"skill:manage"}))
-    prepare_resp = client.post(
-        "/api/skills/remote/prepare",
-        json={"source": "anthropics/skills", "skills": ["frontend-design"]},
-    )
-    confirm_resp = client.post(
-        "/api/skills/install-drafts/draft-remote/confirm",
-        json={
-            "share_config": {
-                "version": 2,
-                "read_scope": {"access_level": "user", "user_uids": ["user"]},
-                "manage_scope": None,
-            },
-            "slugs": ["frontend-design"],
-        },
-    )
-
-    assert prepare_resp.status_code == 200, prepare_resp.text
-    assert confirm_resp.status_code == 200, confirm_resp.text
-    assert confirm_resp.json()["summary"] == {"total": 2, "success": 1, "failed": 1}
-    assert captured["prepare"] == {
-        "source": "anthropics/skills",
-        "skills": ["frontend-design"],
-        "operator_uid": "user",
-    }
-    assert captured["confirm"]["draft_id"] == "draft-remote"
-    assert captured["confirm"]["slugs"] == ["frontend-design"]
-    assert captured["confirm"]["operator_uid"] == "user"
-
-
-def test_remote_skill_list_route_reads_policy_independently(monkeypatch):
-    captured: dict[str, object] = {}
-
-    async def fake_list_remote_skills(source):
-        captured["source"] = source
-        return [{"name": "demo", "description": "demo skill"}]
-
-    monkeypatch.setattr("server.routers.skill_router.list_remote_skills", fake_list_remote_skills)
-
-    response = TestClient(_build_app(uid="user", permissions={"skill:use"})).post(
-        "/api/skills/remote/list",
-        json={"source": "owner/repo"},
-    )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["data"] == [{"name": "demo", "description": "demo skill"}]
-    assert captured == {"source": "owner/repo"}
-
-
-def test_normal_user_cannot_confirm_shared_skill_install(monkeypatch):
-    async def unexpected_confirm(*_args, **_kwargs):
-        raise AssertionError("普通用户不应进入共享 Skill 安装服务")
-
-    monkeypatch.setattr("server.routers.skill_router.confirm_skill_install_draft", unexpected_confirm)
-
-    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
-    response = client.post(
-        "/api/skills/install-drafts/draft-remote/confirm",
-        json={"share_config": None, "slugs": ["frontend-design"]},
-    )
+def test_builtin_routes_require_admin():
+    """内置 Skill 路由通过生产管理员依赖拒绝普通用户。"""
+    response = TestClient(_build_app(role="user")).get("/api/system/skills/builtin")
 
     assert response.status_code == 403
+    assert response.json() == {"detail": "缺少功能权限: skill:manage"}
 
 
-def test_skill_routes_return_403_without_function_permission():
-    client = TestClient(_build_app(uid="user", permissions=set()))
+def test_builtin_sync_requires_manage_permission_without_calling_service(monkeypatch):
+    """内置 Skill 同步在生产功能权限依赖处拒绝普通使用者。"""
+    initializer = AsyncMock(side_effect=AssertionError("unauthorized request reached service"))
+    monkeypatch.setattr("yuxi.api.routers.extensions.skills.init_builtin_skills", initializer)
 
-    assert client.get("/api/skills").status_code == 403
-    assert client.get("/api/system/skills").status_code == 403
+    response = TestClient(_build_app(role="user")).post("/api/system/skills/builtin/sync")
+
+    assert response.status_code == 403
+    initializer.assert_not_awaited()
 
 
-def test_skill_manage_route_returns_404_for_invisible_resource(monkeypatch):
-    async def fake_update_skill_enabled(*_args, **_kwargs):
-        raise ValueError("技能 'hidden' 不存在或无权管理")
+def test_builtin_sync_passes_superadmin_to_service(monkeypatch):
+    """同步路由把实际认证用户传给 Skill 初始化服务并装配响应。"""
+    initializer = AsyncMock(return_value=[])
+    monkeypatch.setattr("yuxi.api.routers.extensions.skills.init_builtin_skills", initializer)
 
-    monkeypatch.setattr("server.routers.skill_router.update_skill_enabled", fake_update_skill_enabled)
+    response = TestClient(_build_app(role="superadmin")).post("/api/system/skills/builtin/sync")
 
-    response = TestClient(_build_app(uid="user", permissions={"skill:manage"})).put(
-        "/api/system/skills/hidden/enabled",
-        json={"enabled": True},
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "data": []}
+    initializer.assert_awaited_once_with(None, created_by="superadmin")
+
+
+def test_skill_content_conflict_maps_to_http_409(monkeypatch):
+    """Skill 修订冲突通过路由稳定映射为 HTTP 409。"""
+    saver = AsyncMock(side_effect=SkillEditConflict("revision changed"))
+    monkeypatch.setattr("yuxi.api.routers.extensions.skills.save_skill_content", saver)
+
+    response = TestClient(_build_app()).put(
+        "/api/system/skills/demo/content",
+        json={"expected_revision": "revision-1", "changes": []},
     )
 
-    assert response.status_code == 404
+    assert response.status_code == 409
+    assert response.json() == {"detail": "revision changed"}
+    saver.assert_awaited_once()
 
 
-def test_discard_skill_draft_route(monkeypatch):
-    captured: dict[str, str] = {}
-
-    async def fake_discard_skill_install_draft(*, draft_id, operator):
-        captured["draft_id"] = draft_id
-        captured["operator_uid"] = operator.uid
-
-    monkeypatch.setattr("server.routers.skill_router.discard_skill_install_draft", fake_discard_skill_install_draft)
-
-    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
-    resp = client.delete("/api/skills/install-drafts/draft-1")
-
-    assert resp.status_code == 200, resp.text
-    assert captured == {"draft_id": "draft-1", "operator_uid": "user"}
-
-
-def test_dependency_options_route_checks_manage_permission(monkeypatch):
-    captured: dict[str, object] = {}
-
-    async def fake_get_manageable_skill_or_raise(_db, user, slug):
-        captured["manageable"] = {"slug": slug, "operator_uid": user.uid}
-        return _skill(slug=slug)
-
-    async def fake_get_skill_dependency_options(_db, user, slug=None):
-        captured["options"] = {"slug": slug, "operator_uid": user.uid}
-        return {"tools": [{"slug": "calculator", "name": "Calculator"}], "mcps": ["mcp-a"], "skills": ["other"]}
-
-    monkeypatch.setattr("server.routers.skill_router.get_manageable_skill_or_raise", fake_get_manageable_skill_or_raise)
-    monkeypatch.setattr("server.routers.skill_router.get_skill_dependency_options", fake_get_skill_dependency_options)
-
-    client = TestClient(_build_app())
-    resp = client.get("/api/system/skills/dependency-options?slug=demo")
-
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["data"]["skills"] == ["other"]
-    assert captured["manageable"] == {"slug": "demo", "operator_uid": "admin"}
-    assert captured["options"] == {"slug": "demo", "operator_uid": "admin"}
-
-
-def test_skill_tree_and_file_routes_check_management_read_permission(monkeypatch):
-    captured: dict[str, object] = {}
-
-    async def fake_get_skill_tree(_db, *, slug, operator):
-        captured["tree_slug"] = slug
-        captured["tree_operator"] = operator.uid
-        return [{"name": "SKILL.md", "path": "SKILL.md", "is_dir": False}]
-
-    async def fake_read_skill_file(_db, *, slug, relative_path, operator):
-        captured["file"] = {"slug": slug, "path": relative_path, "operator_uid": operator.uid}
-        return {"path": relative_path, "content": "---\nname: demo\n---\n"}
-
-    monkeypatch.setattr("server.routers.skill_router.get_skill_tree", fake_get_skill_tree)
-    monkeypatch.setattr("server.routers.skill_router.read_skill_file", fake_read_skill_file)
-
-    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
-    tree_resp = client.get("/api/system/skills/demo/tree")
-    file_resp = client.get("/api/system/skills/demo/file?path=SKILL.md")
-
-    assert tree_resp.status_code == 200, tree_resp.text
-    assert file_resp.status_code == 200, file_resp.text
-    assert captured["tree_slug"] == "demo"
-    assert captured["tree_operator"] == "user"
-    assert captured["file"] == {"slug": "demo", "path": "SKILL.md", "operator_uid": "user"}
-
-
-def test_skill_export_route_still_checks_manage_permission(monkeypatch, tmp_path):
-    captured: dict[str, object] = {}
-    export_path = tmp_path / "demo.zip"
-    export_path.write_bytes(b"zip")
-
-    async def fake_export_skill_zip(_db, *, slug, operator):
-        captured["export_slug"] = slug
-        captured["operator_uid"] = operator.uid
-        return str(export_path), "demo.zip"
-
-    monkeypatch.setattr("server.routers.skill_router.export_skill_zip", fake_export_skill_zip)
-
-    client = TestClient(_build_app())
-    resp = client.get("/api/system/skills/demo/export")
-
-    assert resp.status_code == 200, resp.text
-    assert captured["export_slug"] == "demo"
-    assert captured["operator_uid"] == "admin"
-
-
-def test_update_skill_dependencies_route_passes_operator(monkeypatch):
-    captured: dict[str, object] = {}
-
-    async def fake_edit_shared_skill_dependencies(
-        _db,
-        *,
-        slug,
-        tool_dependencies,
-        mcp_dependencies,
-        skill_dependencies,
-        expected_revision,
-        operator,
-    ):
-        captured["slug"] = slug
-        captured["tool_dependencies"] = tool_dependencies
-        captured["mcp_dependencies"] = mcp_dependencies
-        captured["skill_dependencies"] = skill_dependencies
-        captured["expected_revision"] = expected_revision
-        captured["operator_uid"] = operator.uid
-        return _skill(slug=slug), "next-revision"
-
-    monkeypatch.setattr(
-        "server.routers.skill_router.edit_shared_skill_dependencies", fake_edit_shared_skill_dependencies
+def test_skill_upload_validation_returns_displayable_business_error(tmp_path, monkeypatch):
+    """真实解析拒绝非法 slug，并返回前端可展示的业务 detail。"""
+    monkeypatch.setenv("YUXI_RUNTIME_DIR", str(tmp_path))
+    response = TestClient(_build_app()).post(
+        "/api/skills/import/prepare",
+        files={"file": ("SKILL.md", b"---\nname: demo\nslug: Invalid_Slug\ndescription: demo\n---\n", "text/markdown")},
     )
-
-    client = TestClient(_build_app())
-    resp = client.put(
-        "/api/system/skills/demo/dependencies",
-        json={
-            "tool_dependencies": ["calculator"],
-            "mcp_dependencies": ["mcp-a"],
-            "skill_dependencies": ["other-skill"],
-            "expected_revision": "old-revision",
-        },
-    )
-
-    assert resp.status_code == 200, resp.text
-    assert captured == {
-        "slug": "demo",
-        "tool_dependencies": ["calculator"],
-        "mcp_dependencies": ["mcp-a"],
-        "skill_dependencies": ["other-skill"],
-        "expected_revision": "old-revision",
-        "operator_uid": "admin",
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": {
+            "code": "skill_request_invalid",
+            "message": "SKILL.md frontmatter.slug 必须是小写字母/数字/短横线，且不能连续短横线",
+        }
     }
-    assert resp.json()["data"]["revision"] == "next-revision"
 
 
-def test_builtin_routes_require_manage_permission():
-    client = TestClient(_build_app(uid="user", permissions={"skill:use"}))
+@pytest.mark.parametrize(
+    "metadata", ['name: demo\ndescription: "PRIVATE_YAML_MARKER', 'name: "PRIVATE_YAML_MARKER\ndescription:\n  note: value']
+)
+def test_skill_upload_yaml_error_does_not_echo_input(tmp_path, monkeypatch, metadata):
+    """YAML 两条失败路径都只返回安全语法提示。"""
+    monkeypatch.setenv("YUXI_RUNTIME_DIR", str(tmp_path))
+    response = TestClient(_build_app()).post(
+        "/api/skills/import/prepare",
+        files={"file": ("SKILL.md", f"---\n{metadata}\n---\n".encode(), "text/markdown")},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "code": "skill_request_invalid",
+        "message": "SKILL.md frontmatter YAML 解析失败，请检查 YAML 语法",
+    }
+    assert "PRIVATE_YAML_MARKER" not in response.text
 
-    resp = client.get("/api/system/skills/builtin")
 
-    assert resp.status_code == 403
+def test_disabled_owned_and_enabled_shared_cards_remain_readonly_without_manage_permission(monkeypatch):
+    """保留fork卡片展示，功能权限撤销后不得把资源manage_scope当管理授权。"""
+    owned = _skill_for_user("user")
+    owned.slug = "owned-disabled"
+    owned.enabled = False
+    shared = _skill_for_user("other")
+    shared.slug = "shared"
+    shared.share_config = {"version": 2, "read_scope": {"access_level": "user", "user_uids": ["user"]}, "manage_scope": None}
+
+    async def visible(repository, user):
+        assert user.uid == "user"
+        return [owned, shared]
+
+    monkeypatch.setattr("yuxi.modules.extensions.skills.repository.SkillRepository.list_visible_for_management", visible)
+    response = TestClient(_build_app(role="user")).get("/api/system/skills")
+    assert response.status_code == 200, response.text
+    assert [(item["slug"], item["can_manage"]) for item in response.json()["data"]] == [("owned-disabled", False), ("shared", False)]
+    assert response.json()["allowed_access_levels"] == ["user"]
 
 
-def test_sync_builtin_skills_route(monkeypatch):
-    captured: dict[str, str] = {}
+def test_accessible_skills_route_preserves_current_authenticated_user(monkeypatch):
+    """使用接口把当前身份交给真正可执行Skill目录，不能替换为管理员身份。"""
 
-    async def fake_init_builtin_skills(_db, *, created_by):
-        captured["created_by"] = created_by
-        return [_skill(slug="builtin-demo", source_type="builtin")]
+    async def accessible(db, user):
+        assert user.uid == "user"
+        return [_skill_for_user("user")]
 
-    monkeypatch.setattr("server.routers.skill_router.init_builtin_skills", fake_init_builtin_skills)
-
-    client = TestClient(_build_app())
-    resp = client.post("/api/system/skills/builtin/sync")
-
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["data"][0]["slug"] == "builtin-demo"
-    assert captured == {"created_by": "admin"}
+    monkeypatch.setattr("yuxi.api.routers.extensions.skills.list_accessible_skills", accessible)
+    response = TestClient(_build_app(role="user")).get("/api/skills/accessible")
+    assert response.status_code == 200, response.text
+    assert response.json()["data"][0]["slug"] == "demo"

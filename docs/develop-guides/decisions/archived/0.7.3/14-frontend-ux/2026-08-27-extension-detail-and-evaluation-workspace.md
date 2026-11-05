@@ -2,7 +2,7 @@
 
 状态：archived
 类型：feature
-Owner：web/src/components/shared/ExtensionDetailLayout.vue
+Owner：frontend/src/components/shared/ExtensionDetailLayout.vue
 
 ## 问题
 
@@ -12,7 +12,7 @@ Skill、MCP 与知识库详情分别维护标题栏、Tab、内容宽度和响�
 
 ## 决策
 
-将详情布局收敛到 `web/src/components/shared/ExtensionDetailLayout.vue`。该组件只拥有全高页面、breadcrumb、actions、受控 Tabs、loading、empty、内容宽度和响应式装配，不读取业务数据、不判断权限、不发起 API。标准详情内容使用 768px 阅读宽度；知识库 panel 由调用方保持 100% 可用宽度。操作按钮颜色继续由 `web/src/assets/css/extensions.less` 持有，避免出现第二个视觉 Owner。
+将详情布局收敛到 `frontend/src/components/shared/ExtensionDetailLayout.vue`。该组件只拥有全高页面、breadcrumb、actions、受控 Tabs、loading、empty、内容宽度和响应式装配，不读取业务数据、不判断权限、不发起 API。标准详情内容使用 768px 阅读宽度；知识库 panel 由调用方保持 100% 可用宽度。操作按钮颜色继续由 `frontend/src/assets/css/extensions.less` 持有，避免出现第二个视觉 Owner。
 
 Skill 与 MCP 使用同一布局。Skill 将生效范围和运行依赖合并到“配置”页，但保留两个既有 API 的独立保存边界；项目结构默认隐藏，展开后作为唯一有完整边界的辅助区域。文件预览隐藏通用 header，由项目结构操作区调用 `AgentFilePreview.startEditing`，保存和取消仍由预览组件持有。MCP 信息、编辑和工具列表移除重复外层卡片，测试连接、编辑和工具开关仍由 `McpDetailView.vue` 持有。
 

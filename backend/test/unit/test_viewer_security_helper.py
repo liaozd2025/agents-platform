@@ -2,7 +2,8 @@
 
 import httpx
 import pytest
-from test.integration.api.test_viewer_filesystem_security import create_thread_for_user
+
+from test.integration.api.helpers import create_default_agent_thread
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -15,15 +16,15 @@ async def test_thread_helper_rejects_missing_agent_instead_of_skipping(agent):
         """仅替换待验证的 HTTP 协议响应。"""
         if request.method == "GET":
             return httpx.Response(200, json={"agent": agent})
-        assert request.url.path == "/api/chat/thread"
-        return httpx.Response(200, json={"thread_id": "thread", "workdir_path": "workdir"})
+        assert request.url.path == "/api/v1/agents/sessions"
+        return httpx.Response(201, json={"id": "thread"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond), base_url="http://test") as client:
         if agent:
-            assert await create_thread_for_user(client, {}) == ("thread", "workdir")
+            assert await create_default_agent_thread(client, {}, title_prefix="viewer-security") == "thread"
         else:
             try:
-                with pytest.raises(AssertionError, match="Default agent payload missing id"):
-                    await create_thread_for_user(client, {})
+                with pytest.raises(AssertionError, match="default agent response must include its slug"):
+                    await create_default_agent_thread(client, {}, title_prefix="viewer-security")
             except pytest.skip.Exception:
                 pytest.fail("Malformed success response must fail, not skip")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-import yuxi.services.login_rate_limit_service as limiter
+import yuxi.modules.identity.services.login_limits as limiter
 
 WINDOW = limiter.LOGIN_FAILURE_WINDOW_SECONDS
 
@@ -142,21 +142,32 @@ async def test_record_sets_window_expire(fake_redis, fixed_time):
     assert fake_redis.expires.get(limiter._ip_account_key("1.2.3.4", "alice")) == WINDOW
 
 
-def test_extract_client_ip_prefers_forwarded_for():
-    class FakeRequest:
-        headers = {"x-forwarded-for": "9.9.9.9, 10.0.0.1"}
+def test_api_ip_boundary_rejects_client_headers_and_accepts_only_trusted_proxy(monkeypatch):
+    """IP协议解析归API边界，限流服务只接收可信地址字符串。"""
+    from yuxi.api.middleware import access_log
+
+    monkeypatch.setattr(access_log, "is_trusted_web_proxy", lambda peer: peer == "172.18.0.2")
+
+    class ForgedRequest:
+        headers = {"x-real-ip": "8.8.8.8", "x-forwarded-for": "9.9.9.9, 10.0.0.1"}
         client = type("Client", (), {"host": "172.17.0.1"})
 
-    assert limiter.extract_client_ip(FakeRequest()) == "9.9.9.9"
+    assert access_log.extract_client_ip(ForgedRequest()) == "172.17.0.1"
+
+    class TrustedProxyRequest:
+        headers = {"x-real-ip": "9.9.9.9", "x-forwarded-for": "8.8.8.8"}
+        client = type("Client", (), {"host": "172.18.0.2"})
+
+    assert access_log.extract_client_ip(TrustedProxyRequest()) == "9.9.9.9"
 
     class DirectRequest:
         headers = {}
         client = type("Client", (), {"host": "192.168.1.5"})
 
-    assert limiter.extract_client_ip(DirectRequest()) == "192.168.1.5"
+    assert access_log.extract_client_ip(DirectRequest()) == "192.168.1.5"
 
     class NoClientRequest:
         headers = {}
         client = None
 
-    assert limiter.extract_client_ip(NoClientRequest()) == "unknown"
+    assert access_log.extract_client_ip(NoClientRequest()) == "unknown"

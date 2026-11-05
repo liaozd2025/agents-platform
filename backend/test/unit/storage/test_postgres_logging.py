@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from yuxi.storage.postgres import manager as manager_module
+from yuxi.infrastructure.postgres import manager as manager_module
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/server/routers/auth_router.py
+Owner：backend/yuxi/modules/identity/services/management.py
+
+## 当前迁移状态
+
+2026-11-02：用户分页及授权筛选进入 identity 管理服务，HTTP 入口为 api/routers/identity/auth.py。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：web/src/apis/knowledge_api.js
+Owner：frontend/src/apis/knowledge_api.js
 
 ## 问题
 

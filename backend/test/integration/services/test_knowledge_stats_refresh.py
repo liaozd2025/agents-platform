@@ -5,7 +5,7 @@ import os
 import socket
 import uuid
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 import httpx
@@ -14,33 +14,16 @@ from fastapi import FastAPI
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from yuxi.knowledge.manager import KnowledgeBaseManager
-from yuxi.knowledge.implementations.milvus import MilvusKB
-from yuxi.repositories import knowledge_base_repository, knowledge_file_repository
-from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
-from yuxi.repositories.knowledge_file_repository import KnowledgeFileRepository
-from yuxi.storage.postgres.models_knowledge import KnowledgeBase, KnowledgeChunk, KnowledgeFile
-from yuxi.storage.redis import close_async_redis_client, get_async_redis_client
-from server.routers import knowledge_router
+from yuxi.modules.knowledge.manager import KnowledgeBaseManager
+import yuxi.modules.knowledge.repositories.bases as knowledge_base_repository
+import yuxi.modules.knowledge.repositories.files as knowledge_file_repository
+from yuxi.modules.knowledge.repositories.bases import KnowledgeBaseRepository
+from yuxi.modules.knowledge.repositories.files import KnowledgeFileRepository
+from yuxi.modules.knowledge.models import KnowledgeBase, KnowledgeChunk, KnowledgeFile
+from yuxi.infrastructure.redis import close_async_redis_client, get_async_redis_client
+import yuxi.api.routers.knowledge.management as knowledge_router
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
-
-
-@pytest.fixture(scope="session", autouse=True)
-def ensure_live_api_schema():
-    """只使用独立 Schema。"""
-
-
-@pytest.fixture(scope="session", autouse=True)
-def cleanup_test_knowledge_resources():
-    """测试资源由局部 fixture 清理。"""
-    yield
-
-
-@pytest.fixture(scope="session", autouse=True)
-def cleanup_test_sandboxes():
-    """本测试不创建沙盒。"""
-    yield
+pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.self_managed_resources]
 
 
 @pytest.fixture
@@ -68,9 +51,7 @@ async def stats_store(monkeypatch):
             await connection.run_sync(KnowledgeFile.__table__.create)
             await connection.run_sync(KnowledgeChunk.__table__.create)
         async with sessions.begin() as session:
-            session.add(
-                KnowledgeBase(kb_id=schema, name="stats regression", kb_type="milvus", additional_params={"keep": True})
-            )
+            session.add(KnowledgeBase(kb_id=schema, name="stats regression", kb_type="milvus", additional_params={"keep": True}))
             session.add(
                 KnowledgeFile(
                     file_id=schema,
@@ -94,7 +75,7 @@ async def stats_store(monkeypatch):
 
 @pytest.mark.parametrize("fails", [False, True])
 async def test_operation_refresh_ignores_cached_stats(stats_store, tmp_path, fails):
-    """成功与异常收尾都必须写回真实结果，读缓存可继续复用。"""
+    """成功与异常收尾都必须写回真实结果，统计读取返回同一最新事实。"""
     kb_id, sessions, redis = stats_store
     cached = await KnowledgeFileRepository().get_kb_file_stats(kb_id)
     assert cached["pending_index_count"] == 1
@@ -124,11 +105,13 @@ async def test_operation_refresh_ignores_cached_stats(stats_store, tmp_path, fai
         assert row.additional_params["stats"]["chunk_count"] == 158
         assert row.additional_params["stats"]["token_count"] == 900
         assert row.additional_params["stats"]["pending_index_count"] == 0
-    summaries = await manager.get_databases()
+    summaries = await manager.get_knowledge_bases()
     assert len(summaries) == 1
     assert summaries[0].chunk_count == 158
     assert summaries[0].pending_index_count == 0
-    assert await KnowledgeFileRepository().get_kb_file_stats(kb_id) == cached
+    fresh = await KnowledgeFileRepository().get_kb_file_stats(kb_id)
+    assert fresh["chunk_count"] == row.additional_params["stats"]["chunk_count"]
+    assert fresh["pending_index_count"] == 0
 
 
 async def test_refresh_queries_after_acquiring_row_lock(stats_store, tmp_path):
@@ -138,7 +121,7 @@ async def test_refresh_queries_after_acquiring_row_lock(stats_store, tmp_path):
     async with sessions.begin() as blocker:
         await blocker.execute(select(KnowledgeBase).with_for_update())
         blocker_pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
-        task = asyncio.create_task(manager._refresh_database_stats(kb_id))
+        task = asyncio.create_task(manager._refresh_knowledge_base_stats(kb_id))
         try:
             async with asyncio.timeout(10):
                 while True:
@@ -168,25 +151,29 @@ async def test_refresh_queries_after_acquiring_row_lock(stats_store, tmp_path):
     assert row.additional_params["stats"] == result
 
 
-async def test_repair_returns_fresh_persisted_stats(stats_store, tmp_path, monkeypatch):
-    """文件缺失统计修复后，响应与持久投影都忽略旧缓存。"""
+async def test_knowledge_base_list_returns_fresh_persisted_stats(stats_store, tmp_path, monkeypatch):
+    """文件操作刷新后，真实 HTTP 列表读取持久投影而非旧统计缓存。"""
     kb_id, sessions, redis = stats_store
-    await KnowledgeFileRepository().get_kb_file_stats(kb_id)
+    cached = await KnowledgeFileRepository().get_kb_file_stats(kb_id)
+    assert cached["pending_index_count"] == 1
     await redis.expire(f"yuxi:kb_file_stats:{kb_id}", 300)
-    async with sessions.begin() as session:
-        row = (await session.execute(select(KnowledgeFile))).scalar_one()
-        row.status = "indexed"
-        row.file_size = 5
-        session.add(KnowledgeChunk(kb_id=kb_id, file_id=kb_id, chunk_id=kb_id, chunk_index=0, content="hello"))
     manager = KnowledgeBaseManager(str(tmp_path))
-    # 统计修复只使用 PG；避开与本测试无关的 Milvus 连接初始化。
-    executor = object.__new__(MilvusKB)
-    monkeypatch.setattr(manager, "get_kb_executor", AsyncMock(return_value=executor))
-    monkeypatch.setattr(knowledge_router, "knowledge_base", manager)
+
+    async def operation():
+        """提交文件状态与统计，供实际聚合读取。"""
+        await KnowledgeFileRepository().update_fields(
+            file_id=kb_id,
+            kb_id=kb_id,
+            data={"status": "indexed", "chunk_count": 7, "token_count": 42},
+        )
+
+    await manager._run_with_stats_refresh(kb_id, operation())
+    # 本用例验证统计的 HTTP 投影；身份与可见性由知识库权限 integration 验证。
+    monkeypatch.setattr(manager, "get_knowledge_bases_by_uid", lambda _uid: manager.get_knowledge_bases())
+    monkeypatch.setattr(knowledge_router, "knowledge_base_manager", manager)
     app = FastAPI()
     app.include_router(knowledge_router.knowledge, prefix="/api")
-    # 本用例验证 HTTP 统计契约；权限规则由知识库权限 integration 拥有。
-    app.dependency_overrides[knowledge_router.require_knowledge_base_manage] = lambda: object()
+    app.dependency_overrides[knowledge_router.get_admin_user] = lambda: SimpleNamespace(uid="stats-viewer")
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         server = uvicorn.Server(uvicorn.Config(app, lifespan="off", log_level="error"))
@@ -198,18 +185,45 @@ async def test_repair_returns_fresh_persisted_stats(stats_store, tmp_path, monke
                         serving.result()
                     await asyncio.sleep(0.01)
             async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{listener.getsockname()[1]}") as client:
-                response = await client.post(f"/api/knowledge/databases/{kb_id}/stats/repair")
+                response = await client.get("/api/knowledge/knowledge-bases")
             assert response.status_code == 200, response.text
-            result = response.json()
+            knowledge_bases = response.json()["knowledge_bases"]
         finally:
             server.should_exit = True
             await asyncio.wait_for(serving, timeout=10)
-    assert result["updated_files"] == 1
-    assert result["stats"]["chunk_count"] == 1
+    assert len(knowledge_bases) == 1
+    result = knowledge_bases[0]
+    assert result["kb_id"] == kb_id
+    assert result["stats"]["chunk_count"] == 7
+    assert result["stats"]["token_count"] == 42
     assert result["stats"]["pending_index_count"] == 0
     row = await KnowledgeBaseRepository().get_by_kb_id(kb_id)
     file = await KnowledgeFileRepository().get_by_file_id(kb_id)
     assert row.additional_params["stats"] == result["stats"]
-    assert file.chunk_count == 1
-    assert file.token_count > 0
-    assert result["stats"]["token_count"] == file.token_count
+    assert file.chunk_count == result["stats"]["chunk_count"]
+    assert file.token_count == result["stats"]["token_count"]
+    fresh = await KnowledgeFileRepository().get_kb_file_stats(kb_id)
+    assert fresh["chunk_count"] == row.additional_params["stats"]["chunk_count"]
+    assert fresh["pending_index_count"] == 0
+
+
+async def test_second_file_immediately_refreshes_detail_and_file_list_stats(stats_store, tmp_path):
+    """旧统计已经缓存时，第二个文件提交后的详情与列表仍读取两个文件。"""
+    kb_id, sessions, redis = stats_store
+    assert (await KnowledgeFileRepository().get_kb_file_stats(kb_id))["file_count"] == 1
+    await redis.set(f"yuxi:kb_file_stats:{kb_id}", '{"file_count":1,"row_count":1}', ex=300)
+    manager = KnowledgeBaseManager(str(tmp_path))
+
+    async def upload():
+        """提交第二个文件的真实元数据，外部文件接收留在上传 E2E 验证。"""
+        async with sessions.begin() as db:
+            db.add(KnowledgeFile(file_id=kb_id + "-second", kb_id=kb_id, filename="second.md", file_size=6, status="uploaded"))
+
+    await manager._run_with_stats_refresh(kb_id, upload())
+    detail = await manager.get_knowledge_base_info(kb_id)
+    listing = await manager.list_document_files(kb_id)
+    assert detail.file_count == 2
+    assert detail.total_size == 6
+    assert listing["total"] == 2
+    assert listing["stats"]["file_count"] == 2
+    assert listing["stats"]["total_size"] == 6

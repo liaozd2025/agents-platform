@@ -4,6 +4,8 @@
 类型：feature
 Owner：docker/sandbox_provisioner/app.py
 
+本记录描述旧 provisioner 的资源契约。当前 Container/Cube 拓扑不装配该实现；预算转换及未承接能力由[Container 沙盒](../../../advanced/container-sandbox.md#资源与网络)说明，迁移仍按[企业集成提案](../proposed/2026-11-02-fork-upstream-080-migration.md)验收。以下验证仅针对旧实现。
+
 ## 问题
 
 上游新增 Docker 内存、CPU 和进程数上限；fork 已在 Docker、Kubernetes、tmpfs、实例容量和复用检查中使用同一份资源规格。合并两套配置会使创建时的 2 GiB 覆盖 fork 的 4 GiB，而健康和复用检查仍读取原规格。

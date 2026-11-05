@@ -1,0 +1,926 @@
+<template>
+  <div class="share-config-form" :class="{ disabled }">
+    <a-alert
+      v-if="hasManageScopeViolation"
+      type="warning"
+      show-icon
+      message="当前管理权限范围大于读取权限范围，请调整后再保存。"
+    />
+
+    <section v-for="scope in scopeOptions" :key="scope.key" class="permission-scope-section">
+      <div class="permission-scope-header" :class="{ 'has-content': Boolean(scopes[scope.key]) }">
+        <div class="permission-scope-label">
+          <h4>{{ scope.title }}</h4>
+          <p v-if="scope.description" class="permission-scope-description">{{ scope.description }}</p>
+        </div>
+        <a-switch
+          size="small"
+          v-if="scope.key !== 'read_scope' || !requireReadScope"
+          :checked="Boolean(scopes[scope.key])"
+          :aria-label="`${scope.title}${scopes[scope.key] ? '已开启' : '已关闭'}`"
+          :disabled="disabled || (scope.key === 'read_scope' && requireReadScope)"
+          @change="(enabled) => toggleScope(scope.key, enabled)"
+        />
+      </div>
+      <template v-if="scopes[scope.key]">
+        <div
+          class="share-mode-cards"
+          :class="`active-${scopes[scope.key].access_level}`"
+          role="radiogroup"
+          :aria-label="scope.title"
+        >
+          <div
+            v-for="option in shareModeOptions"
+            :key="option.value"
+            role="radio"
+            class="share-mode-card"
+            :class="{ active: scopes[scope.key].access_level === option.value }"
+            :aria-checked="scopes[scope.key].access_level === option.value"
+            :tabindex="!disabled && scopes[scope.key].access_level === option.value ? 0 : -1"
+            @click="setAccessLevel(scope.key, option.value)"
+            @keydown.enter.prevent="setAccessLevel(scope.key, option.value)"
+            @keydown.space.prevent="setAccessLevel(scope.key, option.value)"
+          >
+            <div class="card-main">
+              <div class="card-header">
+                <div class="card-icon-wrapper" aria-hidden="true">
+                  <component :is="option.icon" class="card-icon" :size="20" />
+                </div>
+                <div class="card-title">{{ option.title }}</div>
+                <div
+                  v-if="
+                    scopes[scope.key].access_level === option.value && option.value !== 'global'
+                  "
+                  class="card-action"
+                  @click.stop
+                >
+                  <a-dropdown
+                    v-model:open="selectionDropdownOpen[scope.key][option.value]"
+                    :trigger="['click']"
+                    placement="bottomRight"
+                    overlay-class-name="share-selection-popover"
+                  >
+                    <a-button
+                      size="small"
+                      class="select-action lucide-icon-btn"
+                      :aria-label="option.value === 'department' ? '选择组织节点' : '选择用户'"
+                      :disabled="disabled"
+                    >
+                      <UserPlus class="select-action-icon" :size="14" />
+                      <span class="access-count">{{
+                        getAccessCount(scope.key, option.value)
+                      }}</span>
+                    </a-button>
+                    <template #overlay>
+                      <div class="selection-dropdown" @mousedown.stop @click.stop>
+                        <div class="selection-dropdown-header">
+                          <div class="selection-dropdown-title">
+                            {{ scope.key === 'manage_scope' ? '可管理' : '可读取'
+                            }}{{ option.value === 'department' ? '组织节点' : '用户' }}
+                          </div>
+                          <div class="selection-dropdown-subtitle">
+                            {{ getAccessSummary(scope.key, option.value) }}
+                          </div>
+                        </div>
+                        <a-input
+                          v-model:value="selectionSearch[scope.key][option.value]"
+                          size="small"
+                          allow-clear
+                          class="selection-search"
+                          :placeholder="
+                            option.value === 'department' ? '搜索组织节点' : '搜索用户名，支持远程查找'
+                          "
+                          @mousedown.stop
+                          @click.stop
+                        />
+                        <div v-if="option.value === 'department'" class="selection-tree">
+                          <div v-if="departmentsLoading" class="selection-loading">
+                            <a-spin size="small" />
+                          </div>
+                          <div v-else-if="departmentLoadError" class="selection-error">
+                            <span>{{ departmentLoadError }}</span>
+                            <a-button type="link" size="small" @click="loadDepartments"
+                              >重试</a-button
+                            >
+                          </div>
+                          <a-tree
+                            v-else-if="getDepartmentTree(scope.key).length"
+                            checkable
+                            check-strictly
+                            block-node
+                            :selectable="false"
+                            :disabled="disabled"
+                            :tree-data="getDepartmentTree(scope.key)"
+                            :checked-keys="scopes[scope.key]?.department_ids || []"
+                            :expanded-keys="getDepartmentExpandedKeys(scope.key)"
+                            @check="(keys) => updateDepartmentSelection(scope.key, keys)"
+                            @expand="(keys) => updateDepartmentExpandedKeys(scope.key, keys)"
+                          >
+                            <template #title="{ data }">
+                              <span class="department-tree-title">
+                                <span class="department-tree-name" :title="data.title">
+                                  {{ data.title }}
+                                </span>
+                                <span v-if="data.inherited" class="inherited-label">
+                                  已由上级授权
+                                </span>
+                              </span>
+                            </template>
+                          </a-tree>
+                          <div v-else class="selection-empty">暂无可选组织节点</div>
+                        </div>
+                        <div
+                          v-else-if="option.value === 'user' && usersLoading"
+                          class="selection-loading"
+                        >
+                          <a-spin size="small" />
+                        </div>
+                        <div
+                          v-else-if="option.value === 'user' && userLoadError"
+                          class="selection-error"
+                        >
+                          <span>{{ userLoadError }}</span>
+                          <a-button type="link" size="small" @click="loadUsers">重试</a-button>
+                        </div>
+                        <div
+                          v-else-if="option.value === 'user' && userSelectionOptions.length"
+                          class="selection-list"
+                        >
+                          <div
+                            v-for="item in userSelectionOptions"
+                            :key="item.value"
+                            role="checkbox"
+                            :aria-checked="isSelected(scope.key, option.value, item.value)"
+                            tabindex="0"
+                            class="selection-item"
+                            :class="{ selected: isSelected(scope.key, option.value, item.value) }"
+                            @mousedown.stop
+                            @click.stop="
+                              toggleSelection(
+                                scope.key,
+                                option.value,
+                                item.value,
+                                !isSelected(scope.key, option.value, item.value)
+                              )
+                            "
+                            @keydown.enter.prevent="
+                              toggleSelection(
+                                scope.key,
+                                option.value,
+                                item.value,
+                                !isSelected(scope.key, option.value, item.value)
+                              )
+                            "
+                            @keydown.space.prevent="
+                              toggleSelection(
+                                scope.key,
+                                option.value,
+                                item.value,
+                                !isSelected(scope.key, option.value, item.value)
+                              )
+                            "
+                          >
+                            <span class="selection-item-content">
+                              <a-checkbox
+                                :checked="isSelected(scope.key, option.value, item.value)"
+                                @click.stop
+                                @change="
+                                  toggleSelection(
+                                    scope.key,
+                                    option.value,
+                                    item.value,
+                                    $event.target.checked
+                                  )
+                                "
+                              />
+                              <span class="selection-label">{{ item.label }}</span>
+                            </span>
+                          </div>
+                          <div v-if="userSearchHasMore" class="selection-more-hint">
+                            结果过多，请输入用户名进一步筛选
+                          </div>
+                        </div>
+                        <div v-else class="selection-empty">暂无可选项</div>
+                      </div>
+                    </template>
+                  </a-dropdown>
+                </div>
+              </div>
+              <div class="card-description">{{ option.description }}</div>
+            </div>
+          </div>
+        </div>
+      </template>
+    </section>
+
+    <a-alert
+      v-if="disabled && disabledReason"
+      type="info"
+      show-icon
+      class="share-disabled-alert"
+      :message="disabledReason"
+    />
+  </div>
+</template>
+
+<script setup>
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { Building2, Globe, Users, UserPlus } from '@lucide/vue'
+import { authApi } from '@/apis/auth_api.js'
+import { departmentApi } from '@/apis/department_api.js'
+import {
+  buildDepartmentShareTree,
+  getDepartmentSelectionSummary,
+  isDepartmentSelectionCovered,
+  normalizeDepartmentSelection
+} from '@/shared/lib/departmentTree.js'
+
+const departments = ref([])
+const users = ref([])
+const departmentsLoading = ref(true)
+const usersLoading = ref(true)
+const departmentLoadError = ref('')
+const userLoadError = ref('')
+const syncingFromProps = ref(false)
+
+const props = defineProps({
+  modelValue: {
+    type: Object,
+    required: true,
+    default: () => ({
+      version: 2,
+      read_scope: { access_level: 'global', department_ids: [], user_uids: [] },
+      manage_scope: null
+    })
+  },
+  disabled: { type: Boolean, default: false },
+  disabledReason: { type: String, default: '' },
+  requireReadScope: { type: Boolean, default: false },
+  allowedAccessLevels: {
+    type: Array,
+    default: () => ['global', 'department', 'user']
+  }
+})
+
+const emit = defineEmits(['update:modelValue'])
+
+const scopeOptions = [
+  { key: 'read_scope', title: '读取权限' },
+  { key: 'manage_scope', title: '管理权限', description: '仅管理员生效，包含使用权限' }
+]
+
+const baseShareModeOptions = [
+  { value: 'global', title: '全局共享', description: '所有用户都可以访问', icon: Globe },
+  {
+    value: 'department',
+    title: '组织共享',
+    description: '选中节点及其下级组织可以访问',
+    icon: Building2
+  },
+  { value: 'user', title: '指定人', description: '选中的用户可以访问', icon: Users }
+]
+
+const scopes = reactive({ read_scope: null, manage_scope: null })
+const selectionSearch = reactive({
+  read_scope: { department: '', user: '' },
+  manage_scope: { department: '', user: '' }
+})
+// 选择浮层使用受控状态，避免树节点展开被 Dropdown 当成 overlay click 后自动关闭。
+const selectionDropdownOpen = reactive({
+  read_scope: { department: false, user: false },
+  manage_scope: { department: false, user: false }
+})
+const departmentExpandedKeys = reactive({ read_scope: [], manage_scope: [] })
+const normalizedAllowedAccessLevels = computed(() => {
+  const allowed = props.allowedAccessLevels.filter((level) =>
+    ['global', 'department', 'user'].includes(level)
+  )
+  return allowed.length ? allowed : ['global']
+})
+const shareModeOptions = computed(() =>
+  baseShareModeOptions.filter((option) =>
+    normalizedAllowedAccessLevels.value.includes(option.value)
+  )
+)
+
+const createScope = (scope) => ({
+  access_level: scope?.access_level || 'global',
+  department_ids: Array.from(
+    new Set((scope?.department_ids || []).map(Number).filter(Number.isFinite))
+  ),
+  user_uids: Array.from(
+    new Set((scope?.user_uids || []).map((uid) => String(uid).trim()).filter(Boolean))
+  )
+})
+
+const normalizeScope = (scope) => {
+  if (!scope) return null
+  const normalized = createScope(scope)
+  if (!normalizedAllowedAccessLevels.value.includes(normalized.access_level)) {
+    normalized.access_level = normalizedAllowedAccessLevels.value[0]
+  }
+  if (normalized.access_level === 'global') {
+    normalized.department_ids = []
+    normalized.user_uids = []
+  } else if (normalized.access_level === 'department') {
+    normalized.user_uids = []
+  } else {
+    normalized.department_ids = []
+  }
+  return normalized
+}
+
+const isManageScopeWithinRead = (manageScope, readScope = scopes.read_scope) => {
+  if (!manageScope) return true
+  if (!readScope) return false
+  if (readScope.access_level === 'global') return true
+  if (manageScope.access_level !== readScope.access_level) return false
+  if (readScope.access_level === 'user') {
+    return (
+      manageScope.access_level === 'user' &&
+      manageScope.user_uids.every((uid) => readScope.user_uids.includes(uid))
+    )
+  }
+  if (manageScope.access_level === 'department') {
+    return isDepartmentSelectionCovered(
+      departments.value,
+      readScope.department_ids,
+      manageScope.department_ids
+    )
+  }
+  return true
+}
+
+const initConfig = () => {
+  syncingFromProps.value = true
+  const source = props.modelValue || {}
+  const isV2 = source.version === 2
+  const readScope = isV2 ? source.read_scope : source
+  scopes.read_scope = normalizeScope(readScope)
+  scopes.manage_scope = normalizeScope(isV2 ? source.manage_scope : null)
+  const hadMissingRequiredRead = props.requireReadScope && !scopes.read_scope
+  if (hadMissingRequiredRead) {
+    scopes.read_scope = normalizeScope({ access_level: 'global' })
+  }
+  nextTick(() => {
+    syncingFromProps.value = false
+    if (hadMissingRequiredRead) emitConfig()
+  })
+}
+
+const emitConfig = () => {
+  emit('update:modelValue', {
+    version: 2,
+    read_scope: normalizeScope(scopes.read_scope),
+    manage_scope: normalizeScope(scopes.manage_scope)
+  })
+}
+
+const toggleScope = (scopeKey, enabled) => {
+  if (props.disabled) return
+  const defaultManageLevel = scopes.read_scope?.access_level || 'global'
+  scopes[scopeKey] = enabled
+    ? normalizeScope({ access_level: scopeKey === 'read_scope' ? 'global' : defaultManageLevel })
+    : null
+}
+
+const setAccessLevel = (scopeKey, accessLevel) => {
+  if (
+    props.disabled ||
+    !scopes[scopeKey] ||
+    !normalizedAllowedAccessLevels.value.includes(accessLevel)
+  )
+    return
+  scopes[scopeKey].access_level = accessLevel
+  scopes[scopeKey] = normalizeScope(scopes[scopeKey])
+}
+
+const userOptions = computed(() =>
+  users.value.map((user) => ({
+    label: user.department_name ? `${user.username}（${user.department_name}）` : user.username,
+    value: user.uid,
+    role: user.role,
+    department_id: user.department_id
+  }))
+)
+
+// 远程搜索结果与已选项合并：已选中但不在当前结果里的用户仍需展示，
+// 否则切换搜索词后“已选”会凭空消失，用户无法取消勾选。
+const userSelectionOptions = computed(() => {
+  const merged = new Map()
+  for (const option of userOptions.value) merged.set(option.value, option)
+  const selectedUids = [
+    ...(scopes.read_scope?.user_uids || []),
+    ...(scopes.manage_scope?.user_uids || [])
+  ]
+  for (const uid of selectedUids) {
+    if (!merged.has(uid)) merged.set(uid, { label: uid, value: uid, department_id: null })
+  }
+  return Array.from(merged.values()).sort(
+    (a, b) => Number(isUserSelected(b.value)) - Number(isUserSelected(a.value))
+  )
+})
+
+const isUserSelected = (uid) =>
+  (scopes.read_scope?.user_uids || []).includes(String(uid)) ||
+  (scopes.manage_scope?.user_uids || []).includes(String(uid))
+
+const getAccessCount = (scopeKey, accessLevel) => {
+  const scope = scopes[scopeKey]
+  if (accessLevel === 'department') return scope?.department_ids.length || 0
+  if (accessLevel === 'user') return scope?.user_uids.length || 0
+  return ''
+}
+const getAccessSummary = (scopeKey, accessLevel) => {
+  const scope = scopes[scopeKey]
+  if (accessLevel === 'global') return '所有用户可访问'
+  if (accessLevel === 'department') {
+    return getDepartmentSelectionSummary(departments.value, scope?.department_ids || [])
+  }
+  return `${scope?.user_uids.length || 0} 个用户可访问`
+}
+const isSelected = (scopeKey, accessLevel, value) => {
+  const scope = scopes[scopeKey]
+  if (!scope) return false
+  return accessLevel === 'department'
+    ? scope.department_ids.includes(Number(value))
+    : scope.user_uids.includes(String(value))
+}
+const toggleSelection = (scopeKey, accessLevel, value, checked) => {
+  if (props.disabled || !scopes[scopeKey]) return
+  const scope = scopes[scopeKey]
+  if (accessLevel === 'user') {
+    scope.user_uids = Array.from(
+      new Set(
+        checked
+          ? [...scope.user_uids, String(value)]
+          : scope.user_uids.filter((uid) => uid !== String(value))
+      )
+    )
+  }
+}
+
+const getDepartmentTree = (scopeKey) =>
+  buildDepartmentShareTree(
+    departments.value,
+    scopes[scopeKey]?.department_ids || [],
+    selectionSearch[scopeKey].department
+  )
+const collectExpandedKeys = (tree) =>
+  tree.flatMap((node) =>
+    node.children?.length ? [node.key, ...collectExpandedKeys(node.children)] : []
+  )
+const getDepartmentExpandedKeys = (scopeKey) =>
+  selectionSearch[scopeKey].department
+    ? collectExpandedKeys(getDepartmentTree(scopeKey))
+    : departmentExpandedKeys[scopeKey]
+const updateDepartmentExpandedKeys = (scopeKey, keys) => {
+  departmentExpandedKeys[scopeKey] = keys.map(Number)
+}
+const updateDepartmentSelection = (scopeKey, checkedKeys) => {
+  if (props.disabled || !scopes[scopeKey]) return
+  const keys = Array.isArray(checkedKeys) ? checkedKeys : checkedKeys.checked
+  scopes[scopeKey].department_ids = normalizeDepartmentSelection(departments.value, keys || [])
+}
+
+const loadDepartments = async () => {
+  departmentsLoading.value = true
+  departmentLoadError.value = ''
+  try {
+    const result = await departmentApi.getDepartments()
+    departments.value = result.departments || result || []
+    const rootKeys = departments.value
+      .filter((department) => department.parent_id == null)
+      .map((department) => Number(department.id))
+    departmentExpandedKeys.read_scope = rootKeys
+    departmentExpandedKeys.manage_scope = rootKeys
+  } catch (error) {
+    console.error('加载部门列表失败:', error)
+    departmentLoadError.value = '组织节点加载失败'
+  } finally {
+    departmentsLoading.value = false
+  }
+}
+// 远程搜索并发控制：仅接受最后一次请求的结果，避免慢响应覆盖新结果。
+let userSearchSeq = 0
+let userSearchTimer = null
+// 远端返回总数大于已加载条数时，提示用户继续输入关键字缩小范围
+const userSearchHasMore = ref(false)
+
+/**
+ * 按关键字拉取候选用户。
+ * @param {string} keyword 搜索关键字，空串表示取默认前若干条
+ */
+const fetchUsers = async (keyword = '') => {
+  const seq = ++userSearchSeq
+  usersLoading.value = true
+  userLoadError.value = ''
+  try {
+    const { users: rows, total } = await authApi.getUserAccessOptions({ keyword, limit: 100 })
+    // 丢弃过期响应：期间已有更新的搜索发起
+    if (seq !== userSearchSeq) return
+    users.value = rows
+    userSearchHasMore.value = total > rows.length
+  } catch (error) {
+    if (seq !== userSearchSeq) return
+    console.error('加载用户列表失败:', error)
+    userLoadError.value = '用户列表加载失败'
+    users.value = []
+  } finally {
+    if (seq === userSearchSeq) usersLoading.value = false
+  }
+}
+
+/** 首次加载 / 出错重试：清空关键字后重新拉取。 */
+const loadUsers = () => {
+  selectionSearch.read_scope.user = ''
+  selectionSearch.manage_scope.user = ''
+  return fetchUsers('')
+}
+
+// 搜索框输入防抖 300ms，避免每个字符都打一次接口
+watch(
+  () => [selectionSearch.read_scope.user, selectionSearch.manage_scope.user],
+  ([readKeyword, manageKeyword]) => {
+    window.clearTimeout(userSearchTimer)
+    // 两个浮层共用一个结果集，取当前非空的关键字即可
+    const keyword = (readKeyword || manageKeyword || '').trim()
+    userSearchTimer = window.setTimeout(() => fetchUsers(keyword), 300)
+  }
+)
+
+watch(() => props.modelValue, initConfig, { deep: true })
+watch(normalizedAllowedAccessLevels, initConfig)
+watch(
+  scopes,
+  () => {
+    if (!syncingFromProps.value) emitConfig()
+  },
+  { deep: true }
+)
+
+const validateScope = (scope, title) => {
+  if (!scope || scope.access_level === 'global') return { valid: true, message: '' }
+  if (scope.access_level === 'department' && !scope.department_ids.length) {
+    return { valid: false, message: `${title}至少需要选择一个组织节点` }
+  }
+  if (
+    scope.access_level === 'department' &&
+    normalizeDepartmentSelection(departments.value, scope.department_ids).length !==
+      scope.department_ids.length
+  ) {
+    return { valid: false, message: `${title}不能同时选择上级和下级组织节点` }
+  }
+  if (scope.access_level === 'user' && !scope.user_uids.length) {
+    return { valid: false, message: `${title}至少需要选择一个用户` }
+  }
+  return { valid: true, message: '' }
+}
+
+const validate = () => {
+  const readResult = validateScope(scopes.read_scope, '读取权限')
+  if (!readResult.valid) return readResult
+  const manageResult = validateScope(scopes.manage_scope, '管理权限')
+  if (!manageResult.valid) return manageResult
+  if (!isManageScopeWithinRead(scopes.manage_scope)) {
+    return { valid: false, message: '管理权限必须包含在读取权限范围内' }
+  }
+  return manageResult
+}
+
+const hasManageScopeViolation = computed(() =>
+  Boolean(scopes.manage_scope && !isManageScopeWithinRead(scopes.manage_scope))
+)
+
+onMounted(() => {
+  initConfig()
+  loadDepartments()
+  loadUsers()
+})
+
+defineExpose({ scopes, validate })
+</script>
+
+<style lang="less" scoped>
+.share-config-form {
+  container-type: inline-size;
+  container-name: agent-sharing;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--gray-150);
+}
+
+.permission-scope-section {
+  padding: 14px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.permission-scope-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+
+  &.has-content {
+    margin-bottom: 12px;
+  }
+}
+
+.permission-scope-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.permission-scope-description {
+  margin: 4px 0 0;
+  color: var(--gray-500);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.permission-scope-header h4 {
+  margin: 0;
+  color: var(--gray-800);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.permission-scope-header :deep(.ant-switch) {
+  flex-shrink: 0;
+}
+
+.share-mode-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.share-mode-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--gray-200);
+  border-radius: 10px;
+  background: var(--gray-0);
+  cursor: pointer;
+}
+
+.share-mode-card:hover,
+.share-mode-card.active {
+  border-color: var(--main-color);
+  background: var(--main-10);
+}
+
+.card-header,
+.card-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.card-main {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.card-title {
+  flex: 1;
+  color: var(--gray-800);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  min-height: 20px;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+}
+
+.card-description {
+  color: var(--gray-500);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.card-icon-wrapper {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  color: var(--main-color);
+  height: 20px;
+}
+
+.card-action {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  height: 20px;
+
+  :deep(.ant-btn) {
+    height: 20px;
+    padding: 0 8px;
+    font-size: 12px;
+    line-height: 1;
+  }
+}
+
+.access-count {
+  margin-left: 3px;
+}
+
+.share-disabled-alert {
+  margin-top: 2px;
+}
+
+.selection-dropdown {
+  width: min(280px, calc(100vw - 64px));
+  padding: 10px;
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  background: var(--gray-0);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+}
+
+.selection-dropdown-header {
+  margin-bottom: 8px;
+}
+
+.selection-dropdown-title {
+  color: var(--gray-800);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.selection-dropdown-subtitle,
+.selection-empty {
+  color: var(--gray-500);
+  font-size: 12px;
+}
+
+.selection-search {
+  margin-bottom: 8px;
+}
+
+.selection-list {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.selection-more-hint {
+  padding: 6px 4px;
+  border-top: 1px solid var(--gray-150);
+  color: var(--gray-500);
+  font-size: 12px;
+  text-align: center;
+}
+
+.selection-tree {
+  max-height: 280px;
+  overflow-y: auto;
+
+  :deep(.ant-tree) {
+    background: transparent;
+  }
+}
+
+.department-tree-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.department-tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inherited-label {
+  flex: none;
+  color: var(--gray-500);
+  font-size: 11px;
+}
+
+.selection-loading,
+.selection-error {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: center;
+}
+
+.selection-error {
+  color: var(--gray-500);
+  font-size: 12px;
+}
+
+.selection-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.selection-item:hover,
+.selection-item.selected {
+  background: var(--main-10);
+}
+
+.selection-item-content {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.selection-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@container agent-sharing (max-width: 559px) {
+  .permission-scope-section + .permission-scope-section {
+    border-top: 1px solid var(--gray-150);
+  }
+
+  .permission-scope-section:last-of-type {
+    padding-bottom: 0;
+  }
+
+  .share-mode-cards {
+    gap: 8px;
+  }
+
+  .share-mode-card {
+    position: relative;
+    padding: 12px 6px 10px;
+    border-radius: 8px;
+  }
+
+  .share-mode-card:focus-visible {
+    outline: 2px solid var(--main-color);
+    outline-offset: 2px;
+  }
+
+  .card-main,
+  .card-header {
+    position: static;
+  }
+
+  .card-header {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .card-title {
+    flex: none;
+    justify-content: center;
+    font-size: 12px;
+  }
+
+  .card-description {
+    display: none;
+  }
+
+  .card-icon-wrapper {
+    color: var(--gray-500);
+  }
+
+  .active .card-icon-wrapper,
+  .active .card-title {
+    color: var(--main-color);
+  }
+
+  .card-action {
+    position: absolute;
+    top: -8px;
+    right: 4px;
+    height: 20px;
+
+    :deep(.ant-btn) {
+      min-width: 22px;
+      height: 20px;
+      padding: 0 4px;
+      border-radius: 6px;
+      color: var(--main-color);
+      font-variant-numeric: tabular-nums;
+      box-shadow: none;
+    }
+  }
+
+  .select-action-icon {
+    display: none;
+  }
+
+  .access-count {
+    margin: 0;
+  }
+}
+</style>

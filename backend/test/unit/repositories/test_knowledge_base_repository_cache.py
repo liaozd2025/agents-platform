@@ -5,8 +5,8 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-import yuxi.repositories.knowledge_base_repository as repository_module
-from yuxi.repositories.knowledge_base_repository import KnowledgeBaseRepository
+import yuxi.modules.knowledge.repositories.bases as repository_module
+from yuxi.modules.knowledge.repositories.bases import KnowledgeBaseRepository
 
 pytestmark = pytest.mark.unit
 
@@ -59,7 +59,7 @@ def _patch_cache_lock(monkeypatch, events: list[str]):
 
 
 @pytest.mark.asyncio
-async def test_update_invalidates_cache_before_database_commit(monkeypatch):
+async def test_update_invalidates_cache_before_knowledge_base_commit(monkeypatch):
     events = []
     row = SimpleNamespace(kb_id="kb_1", name="Old")
     session = _FakeSession(row, events)
@@ -85,7 +85,7 @@ async def test_update_invalidates_cache_before_database_commit(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cache_invalidation_failure_aborts_before_database_update(monkeypatch):
+async def test_cache_invalidation_failure_aborts_before_knowledge_base_update(monkeypatch):
     events = []
     row = SimpleNamespace(kb_id="kb_1", name="Old")
     session = _FakeSession(row, events)
@@ -105,7 +105,7 @@ async def test_cache_invalidation_failure_aborts_before_database_update(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_delete_holds_cache_lock_through_database_commit(monkeypatch):
+async def test_purge_holds_cache_lock_through_knowledge_base_commit(monkeypatch):
     events = []
     row = SimpleNamespace(kb_id="kb_1")
     session = _FakeSession(row, events)
@@ -117,7 +117,7 @@ async def test_delete_holds_cache_lock_through_database_commit(monkeypatch):
 
     monkeypatch.setattr(repository_module, "delete_cached_kb_config", fake_delete_cached)
 
-    await KnowledgeBaseRepository().delete("kb_1")
+    await KnowledgeBaseRepository().purge("kb_1")
 
     assert session.deleted == [row]
     assert events == [
@@ -173,7 +173,7 @@ async def test_refresh_stats_preserves_concurrent_additional_params(monkeypatch)
     from unittest.mock import AsyncMock
 
     monkeypatch.setattr(
-        "yuxi.repositories.knowledge_file_repository.KnowledgeFileRepository.query_kb_file_stats",
+        "yuxi.modules.knowledge.repositories.files.KnowledgeFileRepository.query_kb_file_stats",
         AsyncMock(return_value={"file_count": 3}),
     )
     result = await KnowledgeBaseRepository().refresh_stats("kb_1")

@@ -5,9 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from yuxi.services import memory_service
-from yuxi.workspace import paths as workspace_paths
-from yuxi.workspace.filesystem import Workspace
+import yuxi.modules.agents.services.memory as memory_service
+from yuxi.modules.workspace import paths as workspace_paths
+from yuxi.modules.workspace.filesystem import Workspace
 
 pytestmark = pytest.mark.unit
 
@@ -56,7 +56,7 @@ def test_replace_authorized_file_is_atomic_on_publish_failure(tmp_path, monkeypa
     def fail_rename(*_args, **_kwargs):
         raise OSError("publish failed")
 
-    monkeypatch.setattr("yuxi.workspace.filesystem.os.rename", fail_rename)
+    monkeypatch.setattr("yuxi.modules.workspace.filesystem.os.rename", fail_rename)
 
     with pytest.raises(OSError, match="publish failed"):
         workspace.replace_authorized_file(memory_service.MEMORY_PATH, b"new")
@@ -100,7 +100,6 @@ async def test_remember_memory_validates_run_and_publishes_append(
         uid="user-1",
         thread_id="thread-1",
         run_id="run-1",
-        request_id="request-1",
         worker_id="worker-1",
         content="请使用中文",
     )
@@ -145,7 +144,6 @@ async def test_remember_memory_fails_closed_when_config_disabled(tmp_path, monke
             uid="user-1",
             thread_id="thread-1",
             run_id="run-1",
-            request_id="request-1",
             worker_id="worker-1",
             content="不应写入",
         )
@@ -194,7 +192,6 @@ async def test_remember_memory_recreates_deleted_file(tmp_path, monkeypatch: pyt
         uid="user-1",
         thread_id="thread-1",
         run_id="run-1",
-        request_id="request-1",
         worker_id="worker-1",
         content="重建后的第一条记忆",
     )
@@ -204,7 +201,7 @@ async def test_remember_memory_recreates_deleted_file(tmp_path, monkeypatch: pyt
     assert memory_path.read_text(encoding="utf-8") == "重建后的第一条记忆\n"
 
 
-async def test_load_memory_prompt_returns_none_when_file_missing_or_empty(tmp_path, monkeypatch: pytest.MonkeyPatch):
+async def test_load_memory_prompt_returns_empty_when_enabled_and_file_missing_or_empty(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path / "threads"))
     workspace_paths.ensure_user_workspace("user-1")
     memory_path = tmp_path / "threads" / "shared" / "user-1" / "workspace" / "agents" / "MEMORY.md"
@@ -220,10 +217,10 @@ async def test_load_memory_prompt_returns_none_when_file_missing_or_empty(tmp_pa
     monkeypatch.setattr(memory_service.UserConfig, "load", fake_load_config)
 
     memory_path.unlink()
-    assert await memory_service.load_memory_prompt("user-1") is None
+    assert await memory_service.load_memory_prompt("user-1") == ""
 
     memory_path.write_text("   \n", encoding="utf-8")
-    assert await memory_service.load_memory_prompt("user-1") is None
+    assert await memory_service.load_memory_prompt("user-1") == ""
 
 
 async def test_load_memory_prompt_respects_switch_and_budget(tmp_path, monkeypatch: pytest.MonkeyPatch):

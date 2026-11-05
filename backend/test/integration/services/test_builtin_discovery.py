@@ -6,16 +6,47 @@ import uuid
 from importlib import invalidate_caches
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from yuxi.agents import presets
-from yuxi.agents.buildin import AgentBackendNotFoundError
-from yuxi.services.skills import shared as skill_service
-from yuxi.services.agent_config_service import initialize_agent_presets
-from yuxi.storage.postgres.models_business import Agent, Skill
+from yuxi.modules.agents import presets
+from yuxi.modules.agents.runtime.agent_backends import AgentBackendNotFoundError
+from yuxi.modules.extensions.skills.builtin import sync as skill_service
+from yuxi.modules.agents.services.configuration import initialize_agent_presets
+from yuxi.modules.agents.models.definitions import Agent
+from yuxi.modules.extensions.skills.models import Skill
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
+
+
+async def test_default_chatbot_is_first_in_fresh_database():
+    """独立空 Schema 中默认助手最先落库，重复初始化保留原记录。"""
+    schema = f"pytest_presets_{uuid.uuid4().hex}"
+    engine = create_async_engine(os.environ["POSTGRES_URL"], execution_options={"schema_translate_map": {None: schema}})
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+            await conn.run_sync(Agent.__table__.create)
+
+        async with sessions() as db:
+            await initialize_agent_presets(db)
+
+        async with sessions() as db:
+            agents = list(await db.scalars(select(Agent).order_by(Agent.id)))
+            assert [agent.slug for agent in agents] == ["default-chatbot", "deep-research", "knowledge-base-qa"]
+            assert agents[0].id == 1
+            assert agents[0].created_at == min(agent.created_at for agent in agents)
+            original = [(agent.id, agent.slug, agent.created_at) for agent in agents]
+            await initialize_agent_presets(db)
+
+        async with sessions() as db:
+            agents = list(await db.scalars(select(Agent).order_by(Agent.id)))
+            assert [(agent.id, agent.slug, agent.created_at) for agent in agents] == original
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await engine.dispose()
 
 
 async def test_backend_http_contract_rejects_unknown_ids(test_client, admin_headers):
@@ -23,14 +54,12 @@ async def test_backend_http_contract_rejects_unknown_ids(test_client, admin_head
     response = await test_client.get("/api/agent/backends", headers=admin_headers)
     assert response.status_code == 200, response.text
     backends = {item["backend_id"]: item for item in response.json()["backends"]}
-    assert set(backends) == {"ChatbotAgent", "SubAgentBackend"}
+    assert set(backends) == {"ChatbotAgent"}
     assert backends["ChatbotAgent"]["name"] == "智能助手"
-    assert "context_compression" in backends["ChatbotAgent"]["capabilities"]
+    assert all("capabilities" not in item for item in backends.values())
     assert all("id" not in item for item in backends.values())
     response = await test_client.get("/api/agent/backends/SubAgentBackend", headers=admin_headers)
-    assert response.status_code == 200, response.text
-    assert response.json()["backend_id"] == "SubAgentBackend"
-    assert "configurable_items" in response.json()
+    assert response.status_code == 404, response.text
 
     slug = f"pytest-unknown-backend-{uuid.uuid4().hex}"
     engine = create_async_engine(os.environ["POSTGRES_URL"])
@@ -90,8 +119,7 @@ async def test_unknown_backend_prevents_all_preset_writes(tmp_path, monkeypatch)
     modules = [f"a_valid_{suffix}", f"z_invalid_{suffix}"]
     for module, slug, backend in zip(modules, slugs, ["ChatbotAgent", "UnknownBackend"], strict=True):
         (tmp_path / f"{module}.py").write_text(
-            "from yuxi.agents.presets import AgentPreset\n"
-            f'PRESET = AgentPreset(slug="{slug}", name="验证角色", description="测试", backend_id="{backend}")\n'
+            f'from yuxi.modules.agents.presets import AgentPreset\nPRESET = AgentPreset(slug="{slug}", name="验证角色", description="测试", backend_id="{backend}")\n'
         )
     monkeypatch.setattr(presets, "__file__", str(tmp_path / "__init__.py"))
     monkeypatch.setattr(presets, "__path__", [str(tmp_path)])
@@ -110,12 +138,10 @@ async def test_unknown_backend_prevents_all_preset_writes(tmp_path, monkeypatch)
             await db.commit()
         await engine.dispose()
         for module in modules:
-            sys.modules.pop(f"yuxi.agents.presets.{module}", None)
+            sys.modules.pop(f"yuxi.modules.agents.presets.{module}", None)
 
 
-async def test_discovered_content_persists_and_preserves_customization(
-    tmp_path, monkeypatch, test_client, admin_headers
-):
+async def test_discovered_content_persists_and_preserves_customization(tmp_path, monkeypatch, test_client, admin_headers):
     """新文件进入持久记录；重启初始化保留角色定制与 Skill 停用状态。"""
     suffix = uuid.uuid4().hex
     role_slug = f"pytest-preset-{suffix}"
@@ -124,9 +150,9 @@ async def test_discovered_content_persists_and_preserves_customization(
     role_dir = tmp_path / "presets"
     role_dir.mkdir()
     (role_dir / f"{module_name}.py").write_text(
-        "from yuxi.agents.presets import AgentPreset\n"
+        "from yuxi.modules.agents.presets import AgentPreset\n"
         f'PRESET = AgentPreset(slug="{role_slug}", name="发现测试", description="初始化测试", '
-        'backend_id="SubAgentBackend", context={"system_prompt": "原始提示词"})\n'
+        'backend_id="ChatbotAgent", context={"system_prompt": "原始提示词"})\n'
     )
     monkeypatch.setattr(presets, "__file__", str(role_dir / "__init__.py"))
     monkeypatch.setattr(presets, "__path__", [str(role_dir)])
@@ -135,11 +161,10 @@ async def test_discovered_content_persists_and_preserves_customization(
     skill_dir.mkdir(parents=True)
     skill_md = skill_dir / "SKILL.md"
     skill_md.write_text(
-        f"---\nname: 测试技能\nslug: {skill_slug}\ndescription: 初始描述\n"
-        'version: "1.0"\ntool_dependencies: [web_search]\n---\n技能正文\n'
+        f'---\nname: 测试技能\nslug: {skill_slug}\ndescription: 初始描述\nversion: "1.0"\ntool_dependencies: [web_search]\n---\n技能正文\n'
     )
     monkeypatch.setattr(skill_service, "BUILTIN_SKILLS_DIR", skill_dir.parent)
-    monkeypatch.setattr(skill_service, "get_skill_data_dir", lambda: tmp_path / "skill-sources")
+    monkeypatch.setattr(skill_service, "get_skills_root_dir", lambda: tmp_path / "skill-sources/shared")
     engine = create_async_engine(os.environ["POSTGRES_URL"])
     sessions = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -151,7 +176,7 @@ async def test_discovered_content_persists_and_preserves_customization(
         async with sessions() as db:
             role = await db.scalar(select(Agent).where(Agent.slug == role_slug))
             skill = await db.scalar(select(Skill).where(Skill.slug == skill_slug))
-            assert role.backend_id == "SubAgentBackend" and role.is_subagent
+            assert role.backend_id == "ChatbotAgent"
             assert role.config_json == {"context": {"system_prompt": "原始提示词"}}
             assert skill.description == "初始描述"
             assert skill.tool_dependencies == ["web_search"]
@@ -165,6 +190,7 @@ async def test_discovered_content_persists_and_preserves_customization(
         response = await test_client.get(f"/api/agent/{role_slug}", headers=admin_headers)
         assert response.status_code == 200, response.text
         assert response.json()["agent"]["name"] == "管理员定制"
+        assert "capabilities" not in response.json()["agent"]
         assert response.json()["agent"]["config_json"]["context"]["system_prompt"] == "定制提示词"
 
         skill_md.write_text(skill_md.read_text().replace("初始描述", "更新描述").replace('"1.0"', '"2.0"'))
@@ -186,4 +212,4 @@ async def test_discovered_content_persists_and_preserves_customization(
             await db.execute(delete(Skill).where(Skill.slug == skill_slug))
             await db.commit()
         await engine.dispose()
-        sys.modules.pop(f"yuxi.agents.presets.{module_name}", None)
+        sys.modules.pop(f"yuxi.modules.agents.presets.{module_name}", None)

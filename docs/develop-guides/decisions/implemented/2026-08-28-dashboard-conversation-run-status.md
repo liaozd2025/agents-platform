@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/repositories/dashboard_repository.py
+Owner：backend/yuxi/modules/system/repositories/dashboard.py
+
+## 当前迁移状态
+
+2026-11-02：当前会话 Owner 为 Session，执行关联字段为 AgentRun.thread_id。列表和详情继续返回独立 run_status；旧 Conversation 历史尚需离线转换，不能把本次代码合并视为历史迁移完成。
 
 ## 问题
 

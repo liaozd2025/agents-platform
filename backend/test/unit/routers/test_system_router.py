@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import server.routers.system_router as system_router
-from server.routers.system_router import system
+import yuxi.api.routers.system as system_router
+from yuxi.api.dependencies.auth import get_authorization_context, get_db
+from yuxi.api.routers.system import system
 
 pytestmark = pytest.mark.unit
 
 
 def test_discovery_endpoint_is_public(monkeypatch):
-    monkeypatch.setattr("server.routers.system_router.get_version", lambda: "0.7.1.dev0")
+    monkeypatch.setattr("yuxi.api.routers.system.get_version", lambda: "0.7.1.dev0")
 
     app = FastAPI()
     app.include_router(system, prefix="/api")
@@ -27,7 +30,7 @@ def test_discovery_endpoint_is_public(monkeypatch):
     assert payload["capabilities"]["cli"]["api_key_auth"] is True
     assert payload["capabilities"]["cli"]["agent_list"] is True
     assert payload["capabilities"]["cli"]["agent_show"] is True
-    assert payload["capabilities"]["cli"]["kb_upload"] is True
+    assert "kb_upload" not in payload["capabilities"]["cli"]
     assert payload["endpoints"]["cli_auth_sessions"] == "/api/auth/cli/sessions"
     assert payload["endpoints"]["readiness"] == "/api/system/ready"
 
@@ -62,3 +65,59 @@ def test_serialize_system_config_includes_field_metadata():
 
     assert result["default_model"] == "test-provider:latest"
     assert result["_config_items"]["default_model"]["type"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_brand_info_uses_packaged_template_outside_project_directory(monkeypatch, tmp_path):
+    """品牌模板从包内读取，不依赖 API 进程的工作目录。"""
+    monkeypatch.delenv("YUXI_BRAND_FILE_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(system_router, "get_version", lambda: "0.7.3")
+
+    config = await system_router.load_info_config()
+
+    assert config["organization"]["name"] == "九典制药智能体平台"
+    assert config["organization"]["logo"] == "/jiudian-pharma-logo.png"
+    assert config["branding"]["name"] == "九典制药智能体平台"
+    assert config["branding"]["sidebar_name"] == "智能体平台"
+    assert config["footer"]["copyright"].endswith("v0.7.3")
+
+
+@pytest.mark.asyncio
+async def test_web_provider_guard_normalizes_before_lookup(monkeypatch):
+    """带空白的默认供应商不能绕过凭据检查。"""
+    from yuxi.modules.extensions.options import WEB_PROVIDER_OPTIONS
+
+    class FakeOption:
+        def __init__(self, key: str):
+            self.key = key
+
+        async def get(self, db=None):
+            return {"api_key": self.key}
+
+    monkeypatch.setitem(WEB_PROVIDER_OPTIONS, "tavily", FakeOption(""))
+    with pytest.raises(ValueError, match="API Key"):
+        await system_router._ensure_web_provider_configured(None, {"web_search_provider": " tavily "})
+
+    monkeypatch.setitem(WEB_PROVIDER_OPTIONS, "tavily", FakeOption("configured"))
+    assert await system_router._ensure_web_provider_configured(None, {"web_search_provider": " tavily "}) is None
+
+
+def test_generic_option_endpoint_rejects_system_options():
+    """system_options 只能经专用系统配置入口写入。"""
+    app = FastAPI()
+    app.include_router(system, prefix="/api")
+
+    async def fake_db():
+        return None
+
+    app.dependency_overrides[get_db] = fake_db
+    app.dependency_overrides[get_authorization_context] = lambda: SimpleNamespace(
+        user=SimpleNamespace(username="admin"), has_permission=lambda key: key == "system_config:manage"
+    )
+    response = TestClient(app).put(
+        "/api/system/config/options/system_options",
+        json={"value": {"web_search_provider": "tavily"}},
+    )
+
+    assert response.status_code == 404

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from yuxi.services.file_preview import render_file_preview
-from yuxi.workspace import preview as preview_module
-from yuxi.workspace.preview import preview_workspace_file
+from yuxi.api.responses.files import render_file_result
+from yuxi.modules.workspace import preview as preview_module
+from yuxi.modules.workspace.preview import preview_workspace_file
 
 # 本机实测的企业加密（DLP）密文头：既不是 zip 也不是 OLE2，但后缀仍是 Office 扩展名。
 _ENCRYPTED_BYTES = b"\x63\xc0\xb6\x4d\x0d\x50\xc1\x2f" + b"\x00" * 64
@@ -44,7 +44,7 @@ async def test_encrypted_xlsx_skips_spreadsheet_parser(monkeypatch):
     def _fail(*args, **kwargs):
         raise AssertionError("疑似加密表格不应进入表格解析")
 
-    monkeypatch.setattr(preview_module, "render_preview", _fail)
+    monkeypatch.setattr(preview_module, "prepare_file_preview", _fail)
 
     result = await preview_workspace_file(
         "uploads/台账.xlsx",
@@ -79,14 +79,15 @@ async def test_valid_ooxml_pptx_still_converts_to_pdf(monkeypatch, tmp_path):
     assert result.content == b"%PDF-1.4 fake"
 
 
-async def test_render_file_preview_returns_payload_with_encryption_hint():
+async def test_workspace_preview_http_payload_preserves_encryption_hint():
     """HTTP 层返回结构化 payload，前端据此展示 message（而不是通用错误文案）。"""
-    payload = await render_file_preview(
+    result = await preview_workspace_file(
         "/home/gem/user-data/shared/u1/workspace/projects/p1/uploads/黑豆+黑养膏.pptx",
         _ENCRYPTED_BYTES,
         office_cache_key="unit:render-payload",
     )
 
+    payload = render_file_result(result)
     assert isinstance(payload, dict)
     assert payload["supported"] is False
     assert payload["preview_type"] == "unsupported"

@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/agents/mcp/service.py
+Owner：backend/yuxi/modules/extensions/mcp/service.py
+
+## 当前迁移状态
+
+2026-11-02：MCP 装配迁入 extensions/mcp；本文镜像构建与生产补丁记录属于原版本，当前镜像和工具部署是否就绪需另行验证。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 内置图表 MCP 使用 npx 临时下载程序。生产网络访问 npm 失败时，每次工具初始化等待约一分钟，后续同线程请求因此排队。

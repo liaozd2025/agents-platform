@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 from sqlalchemy import select
 
 APP_ROOT = Path(__file__).resolve().parents[1]
-for import_path in (APP_ROOT, APP_ROOT / "package"):
+for import_path in (APP_ROOT,):
     if str(import_path) not in sys.path:
         sys.path.insert(0, str(import_path))
 
@@ -78,31 +78,84 @@ def build_department_actions(
 ) -> list[DepartmentAction]:
     """按 OA 父子路径生成创建或编码回填计划。"""
     # 旧 OA 顶层节点在当前平台统一挂到集团根节点（id=1）下。
-    existing_by_parent = {(parent_id, name.strip()): (department_id, oa_code, oa_id) for department_id, name, parent_id, oa_code, oa_id in existing}
+    existing_by_parent = {
+        (parent_id, name.strip()): (department_id, oa_code, oa_id) for department_id, name, parent_id, oa_code, oa_id in existing
+    }
     mapped_department_ids: dict[int, int] = {}
     seen_codes: set[str] = set()
     actions: list[DepartmentAction] = []
     for department in oa_departments:
         if department.oa_code in seen_codes:
-            actions.append(DepartmentAction("skip", department.oa_id, department.oa_code, department.name, parent_oa_id=department.parent_oa_id, reason="OA 部门编码重复"))
+            actions.append(
+                DepartmentAction(
+                    "skip",
+                    department.oa_id,
+                    department.oa_code,
+                    department.name,
+                    parent_oa_id=department.parent_oa_id,
+                    reason="OA 部门编码重复",
+                )
+            )
             continue
         seen_codes.add(department.oa_code)
         current_parent_id = 1 if department.parent_oa_id is None else mapped_department_ids.get(department.parent_oa_id)
         if current_parent_id is None:
-            actions.append(DepartmentAction("skip", department.oa_id, department.oa_code, department.name, parent_oa_id=department.parent_oa_id, reason="父部门未映射"))
+            actions.append(
+                DepartmentAction(
+                    "skip",
+                    department.oa_id,
+                    department.oa_code,
+                    department.name,
+                    parent_oa_id=department.parent_oa_id,
+                    reason="父部门未映射",
+                )
+            )
             continue
         current = existing_by_parent.get((current_parent_id, department.name))
         if current is not None:
             department_id, current_code, current_oa_id = current
             mapped_department_ids[department.oa_id] = department_id
             if (current_code and current_code != department.oa_code) or (current_oa_id and current_oa_id != department.oa_id):
-                actions.append(DepartmentAction("conflict", department.oa_id, department.oa_code, department.name, department_id, current_oa_id, department.parent_oa_id, "当前部门已有不同 OA 标识"))
+                actions.append(
+                    DepartmentAction(
+                        "conflict",
+                        department.oa_id,
+                        department.oa_code,
+                        department.name,
+                        department_id,
+                        current_oa_id,
+                        department.parent_oa_id,
+                        "当前部门已有不同 OA 标识",
+                    )
+                )
             elif current_code and current_oa_id:
-                actions.append(DepartmentAction("skip", department.oa_id, department.oa_code, department.name, department_id=department_id, parent_oa_id=department.parent_oa_id, reason="部门标识已存在"))
+                actions.append(
+                    DepartmentAction(
+                        "skip",
+                        department.oa_id,
+                        department.oa_code,
+                        department.name,
+                        department_id=department_id,
+                        parent_oa_id=department.parent_oa_id,
+                        reason="部门标识已存在",
+                    )
+                )
             else:
-                actions.append(DepartmentAction("update_identity", department.oa_id, department.oa_code, department.name, department_id=department_id, existing_oa_id=current_oa_id, parent_oa_id=department.parent_oa_id))
+                actions.append(
+                    DepartmentAction(
+                        "update_identity",
+                        department.oa_id,
+                        department.oa_code,
+                        department.name,
+                        department_id=department_id,
+                        existing_oa_id=current_oa_id,
+                        parent_oa_id=department.parent_oa_id,
+                    )
+                )
         else:
-            actions.append(DepartmentAction("create", department.oa_id, department.oa_code, department.name, parent_oa_id=department.parent_oa_id))
+            actions.append(
+                DepartmentAction("create", department.oa_id, department.oa_code, department.name, parent_oa_id=department.parent_oa_id)
+            )
             # dry-run 中也记录将创建的节点，使子节点可按真实父路径继续匹配。
             mapped_department_ids[department.oa_id] = -department.oa_id
             existing_by_parent[(-department.oa_id, department.name)] = (-department.oa_id, department.oa_code, department.oa_id)
@@ -111,19 +164,23 @@ def build_department_actions(
 
 async def load_database_departments() -> list[tuple[int, str, int | None, str | None, int | None]]:
     """读取当前部门树，供 dry-run 计划计算使用。"""
-    from yuxi.storage.postgres.manager import pg_manager
-    from yuxi.storage.postgres.models_business import Department
+    from yuxi.infrastructure.postgres.manager import pg_manager
+    from yuxi.modules.identity.models import Department
 
     async with pg_manager.get_async_session_context() as session:
-        rows = (await session.execute(select(Department.id, Department.name, Department.parent_id, Department.oa_department_code, Department.oa_department_id))).all()
+        rows = (
+            await session.execute(
+                select(Department.id, Department.name, Department.parent_id, Department.oa_department_code, Department.oa_department_id)
+            )
+        ).all()
     return list(rows)
 
 
 async def apply_actions(actions: list[DepartmentAction]) -> None:
     """在一个事务中按 OA 父子关系创建部门。"""
-    from yuxi.repositories.department_repository import DepartmentRepository
-    from yuxi.storage.postgres.manager import pg_manager
-    from yuxi.storage.postgres.models_business import Department, ROOT_DEPARTMENT_ID
+    from yuxi.infrastructure.postgres.manager import pg_manager
+    from yuxi.modules.identity.models import ROOT_DEPARTMENT_ID, Department
+    from yuxi.modules.identity.repositories.departments import DepartmentRepository
 
     async with pg_manager.get_async_session_context() as session:
         repository = DepartmentRepository(session)
@@ -161,7 +218,9 @@ async def apply_actions(actions: list[DepartmentAction]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="同步旧 OA 部门树")
-    parser.add_argument("--url", default=os.getenv("OA_USER_MIGRATION_URL", "").replace("/DrugDevp/QueryUserPage", "/DrugDevp/QueryDepartmentTree"))
+    parser.add_argument(
+        "--url", default=os.getenv("OA_USER_MIGRATION_URL", "").replace("/DrugDevp/QueryUserPage", "/DrugDevp/QueryDepartmentTree")
+    )
     parser.add_argument("--license-file", default=os.getenv("OA_USER_MIGRATION_LICENSE_FILE"))
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--apply", action="store_true", help="提交数据库变更；默认 dry-run")
@@ -172,12 +231,13 @@ async def run(args: argparse.Namespace) -> int:
     if not args.url:
         LOGGER.error("请提供 --url 或 OA_USER_MIGRATION_URL")
         return 2
-    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.infrastructure.postgres.manager import pg_manager
 
     try:
         pg_manager.initialize()
-        await pg_manager.create_business_tables()
-        await pg_manager.ensure_business_schema()
+        from yuxi.infrastructure.postgres.schema import require_current_schema
+
+        await require_current_schema(pg_manager)
         # 运行时 Code 只在内存中存在，避免通过命令行或环境变量泄露。
         code = (
             fetch_oa_access_code(
@@ -191,7 +251,9 @@ async def run(args: argparse.Namespace) -> int:
         if not code:
             LOGGER.error("请配置 OA_USER_MIGRATION_LICENSE_FILE")
             return 2
-        actions = build_department_actions(await asyncio.to_thread(fetch_oa_departments, args.url, code, args.timeout), await load_database_departments())
+        actions = build_department_actions(
+            await asyncio.to_thread(fetch_oa_departments, args.url, code, args.timeout), await load_database_departments()
+        )
         counts: dict[str, int] = {}
         for action in actions:
             counts[action.action] = counts.get(action.action, 0) + 1

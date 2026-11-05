@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/services/knowledge_retrieval_policy.py
+Owner：backend/yuxi/modules/knowledge/source_references.py
+
+## 当前迁移状态
+
+2026-11-02：来源元数据仍由 source_references.py 解析；新 consumer 为 knowledge/services/tools.py 的已授权 query_kb，结果经 knowledge/mcp/references.py 进入 Turn 引用投影。旧 chat service 自动注入 knowledge_sources、LITE 包结构和旧前端路径属于历史实现，不再是当前交付 Owner。
 
 ## 问题
 

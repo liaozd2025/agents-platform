@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/agents/mcp/service.py
+Owner：backend/yuxi/modules/extensions/mcp/runtime.py
+
+## 当前迁移状态
+
+2026-11-02：出站请求限制迁入 extensions/mcp/runtime，旧 package 路径及本文历史实验次数不表示本次完整网络验证完成。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

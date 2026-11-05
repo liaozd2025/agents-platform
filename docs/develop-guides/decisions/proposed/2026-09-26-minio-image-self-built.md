@@ -18,7 +18,7 @@ Owner：docker/minio/Dockerfile
 
 `docker-compose.yml` 与 `docker-compose.prod.yml` 的 MinIO 服务增加 `build` 段，镜像名改为 `<项目名>-minio:RELEASE.2023-03-20T20-16-18Z`（项目名取 `COMPOSE_PROJECT_NAME`，默认 `yuxi`，与仓库其他自建镜像一致）；环境变量、卷、健康检查与 `command` 保持不变，因此既有数据卷和凭据无需调整。`docker/save_docker_images.sh|.ps1` 在导出前构建该镜像，并从 `docker compose config --images` 解析其镜像名：`.env` 里的 `COMPOSE_PROJECT_NAME` 不进 shell 环境，按它拼装出的名字会与 Compose 实际使用的名字漂移，目标机器上只能现场构建而离线环境无法构建。两个脚本同时切到仓库根执行并对构建失败显式退出。`scripts/init.sh|.ps1` 的预热步骤改为 `docker compose build minio`。
 
-`scripts/ci_build_topology_images.sh` 把 MinIO 纳入预构建（新增第三个缓存目录参数），`system-tests.yml` 的两个 job 各增加一个恢复 `/tmp/yuxi-buildkit-cache/minio` 的 `actions/cache` 步骤；层缓存按 `docker/minio/` 下文件哈希失效，命中后不再重复下载二进制。
+`scripts/ci/build_topology_images.sh` 把 MinIO 纳入预构建（新增第三个缓存目录参数），`system-tests.yml` 的两个 job 各增加一个恢复 `/tmp/yuxi-buildkit-cache/minio` 的 `actions/cache` 步骤；层缓存按 `docker/minio/` 下文件哈希失效，命中后不再重复下载二进制。
 
 `docs/advanced/deployment.md` 的组件表把 MinIO 标注为本地构建并说明校验方式。该组件仍是 AGPL-3.0，再分发义务不因构建位置改变。
 

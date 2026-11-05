@@ -4,9 +4,9 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from server.routers import knowledge_eval_router
-from server.utils.auth_middleware import get_authorization_context
-from yuxi.permissions import ResourcePermission
+import yuxi.api.routers.knowledge.evaluation as knowledge_eval_router
+from yuxi.api.dependencies.auth import get_authorization_context
+from yuxi.modules.identity.permissions import ResourcePermission
 
 
 @pytest.mark.asyncio
@@ -32,12 +32,12 @@ async def test_dataset_only_manage_route_checks_the_dataset_knowledge_base(monke
 
 @pytest.mark.asyncio
 async def test_dataset_manage_route_rejects_admin_without_manage_permission(monkeypatch):
-    from yuxi.knowledge.runtime import knowledge_base
+    from yuxi.modules.knowledge.runtime import knowledge_base
 
     async def fake_get_dataset(_repository, _dataset_id):
         return SimpleNamespace(kb_id="kb-1")
 
-    async def fake_get_database_info(_kb_id):
+    async def fake_get_knowledge_base_info(_kb_id):
         return {
             "created_by": "owner",
             "share_config": {
@@ -48,7 +48,7 @@ async def test_dataset_manage_route_rejects_admin_without_manage_permission(monk
         }
 
     monkeypatch.setattr(knowledge_eval_router.EvaluationRepository, "get_dataset", fake_get_dataset)
-    monkeypatch.setattr(knowledge_base, "get_database_info", fake_get_database_info)
+    monkeypatch.setattr(knowledge_base, "get_knowledge_base_info", fake_get_knowledge_base_info)
     admin = SimpleNamespace(uid="other-admin", department_id=1)
 
     with pytest.raises(HTTPException) as exc_info:
@@ -69,7 +69,7 @@ def test_evaluation_routes_require_function_permission():
 
     app.dependency_overrides[get_authorization_context] = fake_authorization
 
-    response = TestClient(app).get("/evaluation/databases/kb-1/datasets")
+    response = TestClient(app).get("/evaluation/knowledge-bases/kb-1/datasets")
 
     assert response.status_code == 403
     assert response.json()["detail"] == "缺少功能权限: knowledge_evaluation:manage"

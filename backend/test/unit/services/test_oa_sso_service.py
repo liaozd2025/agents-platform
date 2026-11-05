@@ -7,18 +7,20 @@ import httpx
 import jwt
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException, status
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from yuxi.services import oa_sso_service
-from yuxi.storage.postgres.models_business import (
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from test.support.sqlite import create_utc_sqlite_engine
+from yuxi.infrastructure.postgres.base import Base
+from yuxi.modules.identity.models import (
     GROUP_NODE_TYPE,
     ROOT_DEPARTMENT_ID,
-    Base,
     Department,
     Role,
     User,
 )
+from yuxi.modules.identity.services import oa as oa_sso_service
+from yuxi.shared.errors import AuthenticationFailedError, PermissionDeniedError
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -46,7 +48,7 @@ async def test_production_account_login_accepts_account_only_config(monkeypatch)
 @pytest_asyncio.fixture
 async def oa_session():
     """创建 OA SSO 用户映射所需的最小数据库。"""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_utc_sqlite_engine()
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 
@@ -83,7 +85,7 @@ async def oa_session():
 async def test_oa_token_requires_matching_accounts():
     assert oa_sso_service.extract_oa_token_account(issue_oa_token()) == "oa-user-1"
 
-    with pytest.raises(HTTPException, match="账号不一致"):
+    with pytest.raises(AuthenticationFailedError, match="账号不一致"):
         oa_sso_service.extract_oa_token_account(issue_oa_token(second_account="another-user"))
 
 
@@ -268,14 +270,14 @@ async def test_oa_userinfo_tolerates_unusable_avatar_payload(monkeypatch, avatar
 
 
 @pytest.mark.parametrize(
-    ("account", "company_code", "user_state", "expected_status"),
+    ("account", "company_code", "user_state", "expected_error", "expected_message"),
     [
-        ("another-user", "TEST", "service", 401),
-        ("oa-user-1", "OTHER", "service", 403),
-        ("oa-user-1", "TEST", "left", 403),
+        ("another-user", "TEST", "service", AuthenticationFailedError, "账号校验失败"),
+        ("oa-user-1", "OTHER", "service", PermissionDeniedError, "不属于允许接入的公司"),
+        ("oa-user-1", "TEST", "left", PermissionDeniedError, "不是在职状态"),
     ],
 )
-async def test_oa_userinfo_rejects_identity_mismatch(monkeypatch, account, company_code, user_state, expected_status):
+async def test_oa_userinfo_rejects_identity_mismatch(monkeypatch, account, company_code, user_state, expected_error, expected_message):
 
     class FakeAsyncClient:
         async def __aenter__(self):
@@ -305,9 +307,9 @@ async def test_oa_userinfo_rejects_identity_mismatch(monkeypatch, account, compa
     monkeypatch.setattr(oa_sso_service.oa_sso_config, "userinfo_url", "https://oa.example.test/userinfo")
     monkeypatch.setattr(oa_sso_service.oa_sso_config, "company_code", "TEST")
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(expected_error, match=expected_message) as exc_info:
         await oa_sso_service.fetch_oa_identity(issue_oa_token(), "oa-user-1")
-    assert exc_info.value.status_code == expected_status
+    assert not hasattr(exc_info.value, "status_code")
 
 
 async def test_oa_exchange_creates_one_local_user_and_issues_yuxi_token(monkeypatch, oa_session):
@@ -449,7 +451,7 @@ async def test_oa_account_exchange_rejects_missing_external_tokens(monkeypatch, 
     monkeypatch.setattr(oa_sso_service.oa_sso_config, "userinfo_url", "https://oa.example.test/userinfo")
     monkeypatch.setattr(oa_sso_service.oa_sso_config, "company_code", "TEST")
 
-    with pytest.raises(HTTPException, match="账号登录失败"):
+    with pytest.raises(AuthenticationFailedError, match="账号登录失败"):
         await oa_sso_service.exchange_oa_account_handler("oa-user-1", oa_session)
 
 
@@ -485,7 +487,7 @@ async def test_oa_account_exchange_rejects_returned_account_mismatch(monkeypatch
     monkeypatch.setattr(oa_sso_service.oa_sso_config, "userinfo_url", "https://oa.example.test/userinfo")
     monkeypatch.setattr(oa_sso_service.oa_sso_config, "company_code", "TEST")
 
-    with pytest.raises(HTTPException, match="账号校验失败"):
+    with pytest.raises(AuthenticationFailedError, match="账号校验失败"):
         await oa_sso_service.exchange_oa_account_handler("oa-user-1", oa_session)
 
 
@@ -518,10 +520,10 @@ async def test_oa_account_exchange_does_not_login_when_oa_identity_validation_fa
     monkeypatch.setattr(
         oa_sso_service,
         "fetch_oa_identity",
-        AsyncMock(side_effect=HTTPException(status.HTTP_401_UNAUTHORIZED, "OA 登录凭证已失效")),
+        AsyncMock(side_effect=AuthenticationFailedError("OA 登录凭证已失效")),
     )
 
-    with pytest.raises(HTTPException, match="凭证已失效"):
+    with pytest.raises(AuthenticationFailedError, match="凭证已失效"):
         await oa_sso_service.exchange_oa_account_handler("oa-user-1", oa_session)
 
     assert await oa_session.scalar(select(func.count(User.id))) == 0

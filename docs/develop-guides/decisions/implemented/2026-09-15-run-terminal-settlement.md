@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：web/src/composables/useAgentRunStream.js
+Owner：frontend/src/modules/session/model/useAgentRunStream.js
 
 ## 问题
 

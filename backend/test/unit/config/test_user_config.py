@@ -3,18 +3,22 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from yuxi.config import UserConfig, UserConfigSchema
-from yuxi.storage.postgres.models_business import Base, Department, User
-from yuxi.storage.postgres.models_business import UserConfig as UserConfigRecord
+from test.support.sqlite import create_utc_sqlite_engine
+from yuxi.infrastructure.postgres.base import Base
+from yuxi.modules.identity.models import Department, User
+from yuxi.modules.identity.models import UserConfig as UserConfigRecord
+from yuxi.modules.identity.preferences import UserConfig, UserConfigSchema
+from yuxi.modules.identity.services.preferences import save_user_config
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
 @pytest_asyncio.fixture()
-async def session():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def session(monkeypatch, tmp_path):
+    monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path / "user-data"))
+    engine = create_utc_sqlite_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -49,10 +53,20 @@ async def test_user_config_load_returns_defaults_without_creating_row(session):
 async def test_user_config_save_persists_user_specific_values(session):
     db, user = session
 
-    saved = await UserConfig(uid=user.uid, schema=UserConfigSchema(enable_memory=True)).save(db)
+    saved = await save_user_config(db, uid=user.uid, schema=UserConfigSchema(enable_memory=True))
     loaded = await UserConfig.load(db, user.uid)
 
     assert saved.dump_config()["enable_memory"] is True
     assert loaded.dump_config()["enable_memory"] is True
     result = await db.execute(select(UserConfigRecord).filter(UserConfigRecord.uid == user.uid))
     assert result.scalar_one().enable_memory is True
+
+
+async def test_new_user_config_record_defaults_to_disabled(session):
+    """新记录默认关闭，实际持久化值与配置缺省一致。"""
+    db, user = session
+    db.add(UserConfigRecord(uid=user.uid))
+    await db.commit()
+
+    record = await db.scalar(select(UserConfigRecord).filter(UserConfigRecord.uid == user.uid))
+    assert record.enable_memory is False

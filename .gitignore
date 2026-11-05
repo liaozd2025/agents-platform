@@ -49,14 +49,11 @@ cache
 ### IDE
 .vscode
 .idea
-.vibe
-.qoder
 .claude
 .cursor
-.trae
 .codex
-.sisyphus
 .pytest_cache
+.zcode
 
 *.secret*
 *.nogit*
@@ -72,19 +69,8 @@ cache
 docker-compose.override.yml
 
 *.pdf
-src/data
 */package-lock.json
-web/package-lock.json
-saves
-saves_dev
-notebooks
-graphrag
+frontend/package-lock.json
 docker/volumes
 docs/vibe
-.cursorrules
-
-/models
-
-.taskr/
-.workbuddy/
-web/src/utils/__tests__/
+/backend/test/ci-reports/

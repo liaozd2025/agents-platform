@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/services/skills/projection.py
+Owner：backend/yuxi/modules/extensions/skills/projection.py
 
 ## 问题
 

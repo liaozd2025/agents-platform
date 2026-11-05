@@ -21,14 +21,13 @@ from typing import Any, Mapping
 
 import pymysql
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # 在容器中脚本位于 /app/scripts，业务包位于 /app/package；允许直接执行脚本。
 if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "package"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from yuxi.storage.postgres.models_business import Agent, Conversation, Message, Project
-
+from yuxi.modules.workspace.models import Project
 
 LOGGER = logging.getLogger("jd_ai_h5_migration")
 SOURCE_NAME = "jd-ai-h5"
@@ -394,9 +393,7 @@ def prepare_records(
             )
             for source_message in source_messages:
                 message_id = _as_text(source_message.get("id"))
-                message_payloads.append(
-                    build_message_payload(source_message, files=files_by_message.get(message_id, []))
-                )
+                message_payloads.append(build_message_payload(source_message, files=files_by_message.get(message_id, [])))
             prepared.append((conversation_payload, message_payloads))
         except (TypeError, ValueError, KeyError) as exc:
             LOGGER.warning(
@@ -404,9 +401,7 @@ def prepare_records(
                 conversation_id,
                 exc,
             )
-            stats.failures.append(
-                {"conversation_id": conversation_id, "stage": "source_validation", "reason": str(exc)}
-            )
+            stats.failures.append({"conversation_id": conversation_id, "stage": "source_validation", "reason": str(exc)})
 
     stats.prepared_conversations = len(prepared)
     stats.prepared_messages = sum(len(messages_for_conversation) for _, messages_for_conversation in prepared)
@@ -419,63 +414,8 @@ async def import_records(
     postgres_url: str,
     stats: MigrationStats,
 ) -> None:
-    """逐会话事务写入 PostgreSQL，并对已迁移记录执行幂等跳过。"""
-
-    engine = create_async_engine(postgres_url, pool_pre_ping=True)
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    try:
-        async with session_factory() as session:
-            target_agent = await session.scalar(select(Agent.slug).where(Agent.slug == TARGET_AGENT_SLUG))
-            if target_agent is None:
-                raise RuntimeError(f"目标 Agent 不存在或不可用: {TARGET_AGENT_SLUG}")
-            LOGGER.info("目标 Agent 校验通过: %s", TARGET_AGENT_SLUG)
-
-        for conversation_payload, message_payloads in records:
-            thread_id = conversation_payload["thread_id"]
-            try:
-                async with session_factory() as session:
-                    async with session.begin():
-                        existing = await session.scalar(
-                            select(Conversation).where(Conversation.thread_id == thread_id).with_for_update()
-                        )
-                        if existing is not None:
-                            metadata = existing.extra_metadata or {}
-                            migration = metadata.get("migration", {}) if isinstance(metadata, dict) else {}
-                            if (
-                                migration.get("source") == SOURCE_NAME
-                                and migration.get("source_conversation_id") == thread_id
-                            ):
-                                stats.skipped_conversations += 1
-                                LOGGER.info("会话已迁移，幂等跳过: thread_id=%s", thread_id)
-                                continue
-                            raise RuntimeError(f"目标库已有同名 thread_id，但来源不匹配: {thread_id}")
-
-                        project = await _get_or_create_migration_project(
-                            session,
-                            uid=str(conversation_payload["uid"]),
-                        )
-                        # 当前 Conversation.project_id 为非空字段；历史脚本必须在写入前绑定同 UID 的 Project。
-                        conversation_payload = {
-                            **conversation_payload,
-                            "project_id": project.id,
-                        }
-                        conversation = Conversation(**conversation_payload)
-                        session.add(conversation)
-                        await session.flush()
-                        session.add_all(
-                            [
-                                Message(conversation_id=conversation.id, **message_payload)
-                                for message_payload in message_payloads
-                            ]
-                        )
-                stats.imported_conversations += 1
-                stats.imported_messages += len(message_payloads)
-                LOGGER.info("会话迁移成功: thread_id=%s messages=%s", thread_id, len(message_payloads))
-            except Exception as exc:  # noqa: BLE001 - 单会话失败必须进入清单并继续其他会话。
-                LOGGER.exception("会话写入失败，事务已回滚: thread_id=%s", thread_id)
-                stats.failures.append({"conversation_id": thread_id, "stage": "target_import", "reason": str(exc)})
-    finally:
-        await engine.dispose()
+    """旧H5写入模型不能直接用于当前Input/Turn基线，转换器就绪前明确拒绝。"""
+    raise RuntimeError("当前版本仅支持H5迁移预检；Session/Input/Turn数据转换尚未实现，禁止直接应用旧Conversation导入")
 
 
 def build_migration_project(*, uid: str, project_id: str) -> Project:
@@ -571,18 +511,15 @@ def _log_summary(stats: MigrationStats, *, dry_run: bool) -> None:
 async def async_main(args: argparse.Namespace) -> int:
     """执行源库读取、转换和可选的目标库导入。"""
 
+    if args.apply:
+        raise RuntimeError("当前版本仅支持H5迁移预检；新会话数据转换尚未实现，不能使用--apply")
     if args.limit_conversations < 0:
         raise ValueError("--limit-conversations 不能小于 0")
     postgres_url = os.getenv("POSTGRES_URL")
     if args.apply and not postgres_url:
         raise RuntimeError("--apply 需要配置 POSTGRES_URL")
 
-    company_code = (
-        args.company_code
-        or os.getenv("OA_ACCOUNT_LOGIN_COMPANY_CODE")
-        or os.getenv("OA_SSO_COMPANY_CODE")
-        or "ZD"
-    )
+    company_code = args.company_code or os.getenv("OA_ACCOUNT_LOGIN_COMPANY_CODE") or os.getenv("OA_SSO_COMPANY_CODE") or "ZD"
     batch_id = args.batch_id or f"{SOURCE_NAME}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     stats = MigrationStats()
     connection = _connect_source()

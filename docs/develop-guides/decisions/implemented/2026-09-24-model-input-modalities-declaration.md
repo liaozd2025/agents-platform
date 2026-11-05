@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/models/providers/service.py
+Owner：backend/yuxi/modules/models/providers/service.py
 
 ## 问题
 

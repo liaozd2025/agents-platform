@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/services/knowledge_retrieval_policy.py
+Owner：backend/yuxi/modules/knowledge/services/access.py
+
+## 当前迁移状态
+
+2026-11-02：以下自动预检索规则属于历史实现。当前采用 Knowledge MCP/Skill 工具选择，不再用硬编码问候、翻译白名单或默认全库预取注入模型输入。services/access.py 在每次调用求交功能权限、资源共享范围与会话选择；APP 读取还求交有效 owner 当前权限。旧自动预取测试由当前选择收窄、撤权和来源归属用例替代。
 
 ## 问题
 

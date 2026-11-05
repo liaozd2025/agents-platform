@@ -2,7 +2,7 @@
 
 状态：archived
 类型：simplification
-Owner：backend/package/yuxi/knowledge/parser/unified.py
+Owner：backend/yuxi/infrastructure/document_parsing/parser.py
 
 ## 问题
 

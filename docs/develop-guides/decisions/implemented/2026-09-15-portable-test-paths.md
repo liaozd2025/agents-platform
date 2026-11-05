@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：scripts/verify_engineering_contracts.py
+Owner：scripts/ci/verify_engineering_contracts.py
 
 ## 问题
 Windows上决策及事故记录投影以平台反斜杠输出，与现有仓库相对路径契约不一致。PDF资产测试直接取file URL的pathname，Windows盘符和非ASCII路径仍为URL形式，构建器因此找不到入口。两者在Linux常见英文路径下易被遗漏。

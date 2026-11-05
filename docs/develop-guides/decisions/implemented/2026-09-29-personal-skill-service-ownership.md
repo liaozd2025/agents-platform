@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：architecture
-Owner：backend/package/yuxi/services/skills/personal.py
+Owner：backend/yuxi/modules/extensions/skills/personal.py
 
 ## 问题
 
@@ -12,7 +12,7 @@ Owner：backend/package/yuxi/services/skills/personal.py
 
 ### 实现方案
 
-个人 Skill 的确认、列举、安装、读取和删除由 `services/skills/personal.py` 统一拥有；共用包解析和复制由 `services/skills/package.py` 提供，底层文件原语复用现有 filesystem 工具。`workspace/personal_skills.py` 和只拼接目录的 `get_personal_skills_root_dir` 不再存在。个人 Skill 字节仍保存在现有 UserWorkspace 的 `agents/skills`，服务在安装、读取和删除边界校验固定用户目录及目标路径。
+个人 Skill 的确认、列举、安装、读取和删除由 `modules/extensions/skills/personal.py` 统一拥有；共用包解析和复制由 `modules/extensions/skills/package.py` 提供，底层文件原语复用现有 filesystem 工具。`workspace/personal_skills.py` 和只拼接目录的 `get_personal_skills_root_dir` 不再存在。个人 Skill 字节仍保存在现有 UserWorkspace 的 `agents/skills`，服务在安装、读取和删除边界校验固定用户目录及目标路径。
 
 `personal.py` 是唯一允许直接定位 UserWorkspace 宿主根的 service。工程门禁按精确文件路径放行它对 `user_workspace_dir` 的导入，继续拒绝其他 service、repository 对宿主根的访问。新增 Skill 模块按主要公开用例、领域查询、私有实现的顺序组织；单次异步投影转发和仅提取工具 slug 的薄层函数内联到消费用例。
 

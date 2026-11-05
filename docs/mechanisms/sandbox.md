@@ -1,108 +1,61 @@
 # 沙盒与文件系统机制
 
-本页解释 Agent 的文件和命令如何进入动态沙盒，以及 UserWorkspace、Project Workdir、Skills、Viewer 和 provisioner 的关系。部署参数见[沙盒配置与运维](../advanced/sandbox-operations.md)。
+## 执行后端
 
-## 一句话理解
+`SANDBOX_BACKEND` 只允许两个值：
 
-Yuxi 让多个访问入口看到同一份持久文件，但给它们不同的访问能力：
+| 值 | 执行 Owner | 生命周期 | 隔离定位 |
+|---|---|---|---|
+| `cube` | 每用户一个持久 Cube VM | 跨 Run 复用，空闲休眠，显式重建 | Linux/KVM，强隔离 |
+| `container`（默认） | 独立 `sandbox-runner`，每 Run 一个临时容器 | 首次 `execute` 创建，Run 终态/取消/失败时销毁 | 普通 Docker/Podman，单租户或可信代码 |
 
-- Agent 通过带认证的 provisioner 代理访问动态 Sandbox；
-- Viewer、附件和 artifact API 直接访问 UserWorkspace 的持久文件；
-- 知识库通过知识库工具访问，不挂载为沙盒目录。
+两种后端复用 Agent 工具入口、Workspace 虚拟路径、审批、审计和 Run lease。每个 Run 终态（包括 yielded）都登记 `runtime_cleanup_pending`；统一的 `cleanup_run` 确认资源释放后才清除责任。Cube 清理所属命令并保留用户 VM，container 删除所属 Run 容器。清理失败由现有恢复循环重试。
 
-模型和产品接口只使用虚拟路径。宿主机路径、容器路径和对象存储 URL 不能混用；每个文件入口都在所属文件系统边界内校验路径、用户和权限。
+Steer 在原事务中提交旧 Run 的 yielded 状态及新 pending Run，提交后先清理旧环境再投递接续。即使周期补投提前到达，Run 领取边界也拒绝同 Thread 尚有清理责任的首次执行；清理恢复后由 pending 补投接续，不丢失已消费输入。
 
-## 运行链路
+Container 模式的部署、挂载、资源限制和能力差异见[Container 沙盒](../advanced/container-sandbox.md)。以下“用户 VM”段落描述 Cube 后端。
 
-```mermaid
-flowchart LR
-    Model["模型 / 文件工具 / shell"] --> Backend["Agent Sandbox backend"]
-    Backend --> Provider["Sandbox provider\nidentity / cache / keepalive"]
-    Provider --> Provisioner["sandbox-provisioner\ncreate / discover / proxy / delete"]
-    Provisioner --> Runtime["Docker container 或 Kubernetes Pod"]
-    Runtime --> UserData["UserWorkspace\n/home/gem/user-data rw"]
-    Runtime --> Skills["Skill projection\n/home/gem/skills ro"]
-    Viewer["Viewer / artifact / attachment API"] --> Workspace["Workspace + Workdir\n持久 no-follow 访问"]
-    Workspace --> UserData
-```
+## Cube 用户 VM
 
-Graph 创建时，Agent backend 取得 `uid`、根运行 scope 和 `workdir_path`，并同步获授权的 Skill 投影。普通聊天与恢复直接进入模型；只有 backend 实际访问文件或执行命令时才创建沙盒。容量不足时工具报告 `sandbox_capacity_exhausted`，不会创建超出资源预算的实例。API/worker 只持有 provisioner 代理地址，不直接访问动态容器或 NodePort。
+每个用户固定一个持久 Cube VM。所有 Agent 对话共用普通账号 `user` 的软件、Home 和配置，自然并发执行；项目的 cwd、Run 结果、协作身份和执行名额仍分别管理。Agent 没有 sudo 权限，平台控制凭据不进入 VM 的环境变量或模型上下文。
 
-## Identity、Workdir 和生命周期
+## 文件边界
 
-`runtime_scope_id` 是一次顶层执行树的沙盒分组键，当前使用根 Conversation 的 thread ID。根 Agent 和子 Agent 共享这个 scope，因此可以共享同一个运行时、`/tmp`、环境和文件挂载；子 Agent 的 child thread 只隔离 LangGraph checkpoint。
+| 路径 | 文件 Owner | 是否唤醒 VM |
+|---|---|---|
+| `/home/user/workspace`、`~/workspace` | 宿主 UserWorkspace，读写同一份文件 | 否 |
+| Workspace 内的 `agents/skills` | 用户个人 Skills，可写 | 否 |
+| `/home/user/skills` | 用户获授权的共享投影，只读 | 否 |
+| `/home/user/.config`、venv、其他普通账号可访问路径 | VM 文件系统 | 是 |
 
-Conversation 通过 `project_id` 绑定 Project；Project 拥有这项绑定和 `workdir_path`，UserWorkspace 拥有该路径下的实际文件字节。`workdir_path` 是当前用户 UserWorkspace 下的合法相对 POSIX 路径，不能包含 `..`、反斜杠或符号链接。`linked` Project 只能引用已经存在的目录，目标不存在时请求失败。新 `managed` Project 使用上海时间和 Project ID 前 8 位分配 `projects/YYYY-MM-DD_HH-MM-SS_<project-id-prefix>`；同名条目已经存在时依次追加 `-1`、`-2`，既有 `projects/<uuid>` 保持有效，目录创建失败时请求失败。Workdir 决定当前工作目录和 Viewer 文件范围，但不决定 sandbox identity，也不把同一用户的其他 Project 变成安全隔离边界。两个顶层 Conversation 即使绑定同一 Workdir，也会创建不同 runtime。
+`/home/user/workspace` 是当前用户 UserWorkspace 的直接可写持久挂载，`~/workspace` 是同一绝对路径的 Home 缩写。`/home/user/skills` 是获授权共享 Skills 的只读投影。固定路径由 `modules/workspace/runtime_paths.py` 拥有，Cube provider、文件工具、附件、产物与 Viewer 共用此契约。路径没有环境变量覆盖或历史别名。
 
-| 运行类型 | checkpoint | runtime scope | Workdir |
-| --- | --- | --- | --- |
-| 普通 Agent | 当前 thread | 根 thread | 当前 Project 的 Workdir |
-| 子 Agent | child thread | 根 thread | 继承根 Conversation |
-| 远程 Skill 安装 | 临时 thread | 临时 thread | 无持久用户目录，`inherit_env=False` |
+默认 Project 工作目录位于 Workspace 的 `projects/YYYYMMDD/<六位标识>`，日期使用上海时间，标识取 Project UUID 前六位。路径分配避开用户已有文件和数据库目录绑定，重名按顺序添加 `-1`、`-2` 后缀。目录在数据库绑定提交后物化；已有时间戳目录继续按原绑定访问。手动创建的 linked Project 使用用户选择的现有目录。生成与校验由 `modules/workspace/paths.py` 拥有，取舍见[目录分层决策](../develop-guides/decisions/implemented/2026-10-15-project-workdir-date-layout.md)。
 
-`uid + runtime_scope_id` 派生稳定 `sandbox_id`。同一 runtime 存活期间不能改绑到另一个 Workdir。根执行树终态后，worker 清理 runtime，但保留 UserWorkspace 文件。
+`runtime/sandbox/backend.py` 保持现有文件和 execute 工具返回协议。`modules/workspace/runtime_files.py` 将共享路径交给宿主文件边界，拒绝 symlink 越界；其他路径通过固定普通账号的受追踪进程访问。Cube v0.7.3 的 HTTP 文件接口不能证明普通用户权限，因此不使用该接口；读写、编辑和搜索均由 VM 内核执行权限边界。模型不能指定执行账号。
 
-## 工具审批与历史 PI 结果
+共享 Workspace 是用户工作文件，不是 Home 的备份。成果登记、预览和下载继续读取 Workspace 的最新文件；Home 中的成果需要先复制到 Workspace。个人 Skills 位于 Workspace 的 `agents/skills`，共享投影只包含用户获授权的来源。管理页远程 Skill CLI 在操作者 VM 的请求专属目录中运行，宿主安装边界校验发布文件，只清理该请求目录。
 
-普通 Agent 使用文件工具和 `execute`，需要批准的调用通过工具审批恢复。普通 SubAgent 继承父运行的审批模式：`default` 下不能调用写文件、编辑和命令工具；`always_trust` 下可以使用这些工具。SubAgent 的独立 Run、checkpoint 和结果继续由既有子智能体服务持久化。
+收到当前线程的轮次终态通知时，文件面板使该线程的预览缓存失效，并重新读取正在展示的产物。面板关闭或切到其它标签期间也保留此失效结果，返回产物时读取最新内容；重复打开缺少修改时间和大小信息的交付卡片也重新读取。运行期间从文件树打开的 Workdir 文件继续按元数据变化刷新。预览读取失败时显示文件错误，重新打开或手动刷新可再次读取。当前预览读取实时文件，保留历史版本需要另存文件，缓存不提供历史快照。前端行为由[文件面板](https://github.com/xerrors/Yuxi/blob/main/frontend/src/modules/session/ui/workspace/AgentPanel.vue)与[会话工作区](https://github.com/xerrors/Yuxi/blob/main/frontend/src/modules/session/ui/SessionWorkspace.vue)拥有。
 
-历史 PI child Run、对话、用量和已交付文件保留原有读取权限，并通过 Run 结果、子任务详情和 Viewer/artifact 下载入口查看。PI child 对话只读，新增请求和恢复均被后端拒绝。升级迁移收敛未结束的 PI Run；部署前必须停止旧 worker 和仍执行 PI 的沙箱，具体取舍见[PI 退役决策](../develop-guides/decisions/implemented/2026-09-18-retire-pi-executor.md)。
+## 生命周期与并发
 
-## 挂载和文件 Owner
+超级管理员的系统概览显示执行节点当前活跃 VM 数量与 VM 总数。`GET /api/dashboard/stats/vms` 只读配置节点的全部实例列表，运行中的实例计为活跃，休眠等其他实例计入总数；不会连接或唤醒 VM。数量在进入概览或点击 VM 总数旁的刷新按钮时更新，控制面不可用时显示未知值并提供重试，其他业务统计继续展示。
 
-| 虚拟路径 | 内容 | Agent 权限 |
-| --- | --- | --- |
-| `/home/gem/user-data` | 当前用户的整个 UserWorkspace | 读写 |
-| `/home/gem/skills` | 当前用户已授权的共享/内置 Skill 投影 | 只读 |
-| `/home/gem/user-data/<workdir_path>` | 当前 Project 的工作目录 | 默认 cwd |
+PostgreSQL 的 `user_sandboxes` 保存实例引用、代次、控制凭据和操作状态，`sandbox_commands` 保存所属 Run/attempt、执行标识与进程组。用户 advisory lock 协调创建、唤醒、休眠、重建与执行领取；命令运行期间不持有用户锁，因此同用户命令可以并行。
 
-`uploads/` 和 `outputs/` 在首次使用时创建。个人 Skill 位于 `/home/gem/user-data/agents/skills/<slug>`，不会复制到共享 projection。
+首次远端操作创建 VM，休眠后恢复原实例。默认空闲五分钟且没有活动 Run、文件操作或待清理命令时，worker 暂停 VM。状态查询和宿主文件编辑不延长 VM 活动时间。API/worker 关闭不删除环境。控制面断流或实例失联显式报错，不自动重建或盲目重试创建；中断创建通过操作标识核对 Cube 实际实例。
 
-同一用户的 Sandbox 能看到整个 UserWorkspace，所以 Project A 可以读取 Project B。系统提示词要求 Agent 未经用户明确要求不要在当前 Workdir 外写入，但这只是行为约束，不是安全隔离；真正的边界由用户挂载、Workdir ownership 查询和工具路径校验提供。
+Run 取消监听直接清理所属命令，超时与 lease 失效清理由持久句柄恢复。执行标识、环境代次和进程组一起核验，不能取消另一个 Run 或新代次 VM。清理直接启动普通用户 Python，不读取用户 shell 启动配置。终止未确认时保留待清理状态，阻止休眠与重建，无关命令可以继续。主动 `setsid` 脱离的守护进程不在普通进程组取消保证内。
 
-文件访问使用相对路径和 no-follow 原语，拒绝 `..`、符号链接、特殊文件和跨用户根目录。普通运行服务以 `1000:1000` 访问数据；storage migrator 只在停机迁移中承担一次性 root 文件操作。
+用户设置提供 `GET /api/user/sandbox` 和 `POST /api/user/sandbox/rebuild`。认证上下文决定用户身份，没有删除接口或 Public API。正在运行、取消收尾的 Run 和活动操作阻止重建，后端在用户锁内再次检查并返回 409。空闲确认后替换 VM 并增加代次，清除软件和 Home，保留 Workspace 与 Skills。
 
-Agent 的 `grep` 通过沙盒原生文件搜索 API 执行字面量匹配，未指定路径时搜索当前用户的 UserWorkspace 与已授权共享 Skill。结果包含路径、行号、文本和截断标志，并受跨根全局 `max_count` 限制；未指定限额时采用原生服务默认值（1.11.0 每根 500 条），达到限额会标记截断。默认搜索不包含隐藏文件，可通过显式 glob 选择；目录 glob 相对于搜索根。单根结构化结果超过 `SANDBOX_MAX_OUTPUT_BYTES` 时返回明确错误。
+单节点部署要求见[沙盒配置与运维](../advanced/sandbox-operations.md)。原生节点重启恢复和资源压力隔离需要按部署环境单独验证。后台进程在休眠恢复后的连续运行不是产品承诺。
 
-搜索请求路径必须属于可读根，glob 拒绝 `..`。原生搜索允许显式指定的根内符号链接指向容器内其他位置；grep 不提供容器内部的 no-follow 隔离。用户之间的隔离由 provisioner 的 uid、挂载与独立容器边界执行，Agent 的 shell 也使用同一容器边界。宿主 Workspace 文件访问继续执行上述 no-follow 契约。
-
-## Docker 和 Kubernetes
-
-Docker backend 为每个 runtime 创建独立 bridge 网络，不发布沙盒端口，也不加入应用 `app-network`。网络只连接 provisioner 和对应沙盒；跨网络实际可达性仍取决于宿主 Docker 平台，独立网络名称不构成认证边界。provisioner 复用实例前会检查 uid、Workdir、挂载、网络和执行认证策略。
-
-Kubernetes backend 创建 Pod 和 NodePort Service。Pod 从 User Data PVC 的 `shared/<uid>/workspace` 挂载 `/home/gem/user-data`，从 Skill PVC 的 `skill-projections/<uid>` 只读挂载 `/home/gem/skills`。Pod 默认不自动挂载 ServiceAccount token；具体安全性仍取决于 namespace、PVC、NetworkPolicy 和 ServiceAccount 配置。
-
-`memory` backend 只记录 ID 到 URL 的映射，不创建隔离环境或准备持久目录，不能作为生产隔离承诺。
-
-## 环境变量和信任边界
-
-API/worker 使用 `SANDBOX_PROVISIONER_TOKEN` 调用 provisioner。动态沙盒会收到全局 `sandbox.env` 与当前用户 Agent 环境的合并值，用户值覆盖同名全局值；这些值都可能被沙盒内代码读取和外传。provisioner token、数据库凭据、对象存储管理凭据和云平台管理员密钥不能进入这两类环境。
-
-provisioner 使用管理主密钥和 sandbox_id 派生独立执行密钥，覆盖沙盒的 `SANDBOX_API_KEY` 并清空其他 JWT 认证配置。每个沙盒仅持有自己的执行密钥，不能据此推导另一沙盒的密钥。管理代理和健康检查使用目标沙盒的密钥，主密钥不传给沙盒。Docker 与 Kubernetes 的启动入口将 AIO 网关所有请求设为需要认证，包含静态后缀和带查询参数的下载；不匹配预期认证模板的镜像启动失败。
-
-远程 Skill 安装使用不继承环境变量的一次性 Sandbox，也不挂载持久用户根。Skill 文件是只读的，但其中脚本仍可能被执行；脚本如需写文件，应写入当前 Project Workdir 或 User Data。
-
-## 失败、恢复和观察边界
-
-| 现象 | 能证明什么 | 不能证明什么 |
-| --- | --- | --- |
-| provisioner `/health` 正常 | 进程和 backend 已初始化 | 某个 runtime 已创建、挂载或权限正确 |
-| create/discover 返回代理 URL | 找到 identity 匹配的实例 | Workdir 内容和 Viewer 权限正确 |
-| Viewer 读到文件 | API 完成 ownership 和 no-follow 访问 | Agent runtime 当前可用 |
-| runtime 被回收 | 动态进程生命周期结束 | 持久文件被删除或内容正确 |
-| 迁移器成功 | 迁移目标和路径约束通过回读 | 未来 Agent 行为都正确 |
-
-Viewer 和 Agent 看到不同内容时，先核对同一 `uid`、Conversation 绑定的 `project_id`、Project 的 `workdir_path`、runtime scope、宿主 bind/PVC subPath 和 generation。不要用对象 URL 推断文件系统权限，也不要用相邻 Run 的路径猜测当前结果。
+用户环境变量由 `services/environment.py` 保存和验证，runner 在开始执行流时使用已有数据库 session 读取一次快照，普通 shell 命令通过执行上下文复用。快照不进入运行清单或 checkpoint，退出后释放，重试 attempt 重新读取。无 Run 操作及手动验证读取最新配置，文件及清理进程使用独立干净环境。`POST /api/user/agent-env/verify` 通过同一持久命令执行器访问当前用户 VM，不改变当前 Run 或已有进程的环境变量；生效时机、结果边界与页面操作见[用户 Agent 环境变量](../advanced/configuration.md#用户-agent-环境变量)。
 
 ## 源码定位与验证
 
-- [Sandbox provider](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/agents/backends/sandbox/provider.py)：runtime identity、缓存和 keepalive
-- [Workspace 路径](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/workspace/paths.py)：uid 与 Workdir 映射
-- [Workspace 文件系统](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/workspace/filesystem.py)：宿主 no-follow 文件原语
-- [provisioner](https://github.com/xerrors/Yuxi/blob/main/docker/sandbox_provisioner/app.py)：Docker/Kubernetes 创建、代理和回收
-- [storage migration](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/storage_migration.py)：历史布局迁移
-- [Sandbox backend unit tests](https://github.com/xerrors/Yuxi/tree/main/backend/test/unit/backends)
-- [Workspace/Workdir unit tests](https://github.com/xerrors/Yuxi/tree/main/backend/test/unit/workspace)
-- [Project Workdir provisioner integration](https://github.com/xerrors/Yuxi/blob/main/backend/test/integration/services/test_project_workdir_provisioner.py)
+[Sandbox 公共入口](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/runtime/sandbox/__init__.py)提供 Backend、可信上下文、后端选择及就绪检查；业务 service 不选择具体实现。[Cube provider](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/runtime/sandbox/cube_provider.py)协调用户锁、环境代次、命令登记与清理，[Cube adapter](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/runtime/sandbox/cube.py)执行远端普通账号协议，[Sandbox repository](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/repositories/sandbox.py)保存环境与命令事实。[Workspace 路径契约](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/workspace/runtime_paths.py)和[文件边界](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/workspace/runtime_files.py)决定访问宿主共享文件还是 VM 文件。
 
-修改 identity、挂载、路径或清理语义时，除了相关 unit，还要验证真实 Docker/PVC 挂载和最终 POSIX 文件字节。
+[用户环境集成测试](https://github.com/xerrors/Yuxi/blob/main/backend/test/integration/sandbox/test_cube_user_environment.py)覆盖环境复用与生命周期，[文件边界测试](https://github.com/xerrors/Yuxi/blob/main/backend/test/integration/sandbox/test_cube_shared_mount_fuzz.py)检查共享挂载的路径约束，[Agent E2E](https://github.com/xerrors/Yuxi/blob/main/backend/test/e2e/test_cube_agent_execution_e2e.py)核对执行、产物和取消。命令返回成功后仍需读取目标文件及持久命令状态；Cube 节点不可用时，明确记录未执行范围。

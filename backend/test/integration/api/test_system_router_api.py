@@ -12,9 +12,10 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from yuxi.config import get_legacy_storage_dir, get_runtime_dir
-from yuxi.config.options import get_option, invalidate_option_cache
-from yuxi.storage.postgres.models_business import ConfigOption
+from yuxi.infrastructure.runtime_settings import get_runtime_dir
+from yuxi.modules.system.models import ConfigOption
+from yuxi.modules.system.repositories.options import get_option
+from yuxi.modules.system.services.options import invalidate_option_cache
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -27,28 +28,21 @@ async def test_health_endpoint_is_public(test_client):
 
 async def test_logs_endpoint_returns_only_api_process_log(test_client, admin_headers):
     """管理员日志接口应明确读取当前 API 进程拥有的日志文件。"""
-    from yuxi.utils.logging_config import LOG_FILE
+    from yuxi.infrastructure.observability.logging import LOG_FILE
 
     api_marker = f"api-log-contract-{uuid4()}"
     worker_marker = f"worker-log-contract-{uuid4()}"
-    legacy_marker = f"legacy-shared-log-contract-{uuid4()}"
     log_path = Path(LOG_FILE)
     worker_log_path = get_runtime_dir().parent / "worker" / "logs" / log_path.name
-    legacy_log_path = get_legacy_storage_dir() / "logs" / log_path.name
     worker_log_original = worker_log_path.read_bytes() if worker_log_path.exists() else None
-    legacy_log_original = legacy_log_path.read_bytes() if legacy_log_path.exists() else None
 
     assert log_path.parent == get_runtime_dir() / "logs"
-    assert get_legacy_storage_dir().resolve() not in log_path.resolve().parents
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write(f"2026-08-17 20:00:00 - INFO - test:1 - {api_marker}\n")
     worker_log_path.parent.mkdir(parents=True, exist_ok=True)
     with worker_log_path.open("a", encoding="utf-8") as worker_log:
         worker_log.write(f"2026-08-17 20:00:00 - INFO - worker:1 - {worker_marker}\n")
-    legacy_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with legacy_log_path.open("a", encoding="utf-8") as legacy_log:
-        legacy_log.write(f"2026-08-17 20:00:00 - INFO - legacy:1 - {legacy_marker}\n")
 
     try:
         response = await test_client.get("/api/system/logs?levels=INFO", headers=admin_headers)
@@ -59,16 +53,11 @@ async def test_logs_endpoint_returns_only_api_process_log(test_client, admin_hea
         assert payload["log_file"] == LOG_FILE
         assert api_marker in payload["log"]
         assert worker_marker not in payload["log"]
-        assert legacy_marker not in payload["log"]
     finally:
         if worker_log_original is None:
             worker_log_path.unlink(missing_ok=True)
         else:
             worker_log_path.write_bytes(worker_log_original)
-        if legacy_log_original is None:
-            legacy_log_path.unlink(missing_ok=True)
-        else:
-            legacy_log_path.write_bytes(legacy_log_original)
 
 
 async def test_readiness_endpoint_proves_core_runtime_dependencies(test_client):
@@ -84,9 +73,7 @@ async def test_readiness_endpoint_proves_core_runtime_dependencies(test_client):
     }
     assert response.json()["degraded"] is False
     assert response.json()["components"]
-    assert all(
-        component["status"] == "ok" for component in response.json()["components"].values() if component["required"]
-    )
+    assert all(component["status"] == "ok" for component in response.json()["components"].values() if component["required"])
 
 
 async def test_discovery_and_openapi_declare_full_knowledge_capabilities(test_client):
@@ -106,7 +93,7 @@ async def test_discovery_and_openapi_declare_full_knowledge_capabilities(test_cl
     assert openapi_response.status_code == 200, openapi_response.text
     openapi_paths = openapi_response.json()["paths"]
     assert {
-        "/api/knowledge/databases",
+        "/api/knowledge/knowledge-bases",
         "/api/dashboard/stats/knowledge",
         "/api/workspace/knowledge/tree",
         "/api/workspace/knowledge/file",
@@ -119,7 +106,9 @@ async def test_info_endpoint_is_public(test_client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["success"] is True
-    assert "data" in payload
+    assert set(payload["data"]) == {"branding", "footer"}
+    assert set(payload["data"]["branding"]) == {"name", "logo", "title", "login_bg"}
+    assert all(isinstance(value, str) for value in payload["data"]["branding"].values())
 
 
 async def test_config_requires_system_config_permission(test_client, standard_user, admin_headers):
@@ -156,14 +145,16 @@ async def test_ocr_options_and_config_options_permissions(
     configs_response = await test_client.get("/api/system/config/options", headers=admin_headers)
     assert configs_response.status_code == 200, configs_response.text
     configs = configs_response.json()["options"]
-    assert {item["key"] for item in configs} == {
+    assert set(options["option_keys"]) == {
         "mineru_ocr_host_opts",
         "mineru_official_api_opts",
-        "pp_structure_v3_ocr_host_opts",
         "paddleocr_api_opts",
-        "remote_skill_source_policy",
     }
-    assert all("deepseek" not in item["key"] for item in configs)
+    config_keys = {item["key"] for item in configs}
+    assert set(options["option_keys"]).issubset(config_keys)
+    assert {"pp_structure_v3_ocr_host_opts", "deepseek_ocr_host_opts"}.isdisjoint(config_keys)
+    assert "paddleocr_pp_structure_v3" in {engine["engine_id"] for engine in options["engines"]}
+    assert "pp_structure_v3_ocr" not in {engine["engine_id"] for engine in options["engines"]}
     official = next(item for item in configs if item["key"] == "mineru_official_api_opts")
     assert official["params"]["fields"][0]["sensitive"] is True
     assert official["value"]["api_key"] == ""
@@ -192,6 +183,54 @@ async def test_config_option_update_is_visible_and_restored(test_client, admin_h
             headers=admin_headers,
         )
         assert restore_response.status_code == 200, restore_response.text
+
+
+@pytest.mark.parametrize(
+    ("key", "values", "invalid_values"),
+    [
+        ("mineru_ocr_host_opts", {"tier": "advanced"}, [{"tier": "unsupported"}, {"tier": ""}]),
+        ("mineru_official_api_opts", {"model_version": "vlm"}, [{"model_version": "hybrid"}, {"model_version": ""}]),
+    ],
+)
+async def test_mineru_defaults_round_trip_and_reject_invalid_choices(
+    test_client, admin_headers, postgres_sessions, key, values, invalid_values
+):
+    """通过真实 HTTP 保存默认值，独立回读 PG 并确认非法值不改变配置。"""
+    async with postgres_sessions() as db:
+        record = await get_option(db, key)
+        previous = {"value": deepcopy(record.value), "updated_by": record.updated_by, "updated_at": record.updated_at}
+
+    try:
+        saved = await test_client.put(
+            f"/api/system/config/options/{key}",
+            json={"value": values},
+            headers=admin_headers,
+        )
+        assert saved.status_code == 200, saved.text
+        reloaded = await test_client.get("/api/system/config/options", headers=admin_headers)
+        assert reloaded.status_code == 200, reloaded.text
+        option = next(item for item in reloaded.json()["options"] if item["key"] == key)
+        for field, value in values.items():
+            assert option["value"][field] == value
+        if key == "mineru_official_api_opts":
+            assert option["value"]["api_key"] == ""
+
+        for invalid in invalid_values:
+            rejected = await test_client.put(f"/api/system/config/options/{key}", json={"value": invalid}, headers=admin_headers)
+            assert rejected.status_code == 400, rejected.text
+            assert "不支持的" in rejected.text
+
+        async with postgres_sessions() as db:
+            record = await get_option(db, key)
+            for field, value in values.items():
+                assert record.value[field] == value
+            unchanged = all(record.value.get(field) == value for field, value in (previous["value"] or {}).items() if field not in values)
+            assert unchanged, "更新模型不得改变凭据或其他配置"
+    finally:
+        async with postgres_sessions() as db:
+            await db.execute(update(ConfigOption).where(ConfigOption.key == key).values(**previous))
+            await db.commit()
+        await invalidate_option_cache(key)
 
 
 async def test_remote_skill_policy_explicit_empty_list_is_visible_and_restored(test_client, admin_headers):
@@ -239,7 +278,7 @@ async def test_ocr_health_is_available_to_logged_in_users_and_returns_all_method
         del db
         return {"rapid_ocr": {"status": "healthy", "message": "ok"}}
 
-    monkeypatch.setattr("yuxi.services.ocr_service.check_all_ocr_health", fake_health)
+    monkeypatch.setattr("yuxi.modules.documents.service.check_all_ocr_health", fake_health)
 
     response = await test_client.get("/api/system/ocr/health", headers=standard_user["headers"])
     assert response.status_code == 200, response.text
@@ -271,11 +310,7 @@ async def test_retired_system_config_field_is_hidden_rejected_and_preserved(test
             previous_updated_by = record.updated_by
             previous_updated_at = record.updated_at
             seeded_value = {**previous_value, retired_field: True}
-            await db.execute(
-                update(ConfigOption)
-                .where(ConfigOption.key == "system_options")
-                .values(value=seeded_value)
-            )
+            await db.execute(update(ConfigOption).where(ConfigOption.key == "system_options").values(value=seeded_value))
             await db.commit()
         await invalidate_option_cache("system_options")
 
@@ -302,11 +337,7 @@ async def test_retired_system_config_field_is_hidden_rejected_and_preserved(test
         assert batch_response.json()["detail"] == f"未知配置字段: {retired_field}"
 
         previous_model = config["default_model"]
-        updated_model = (
-            "test-provider:test-model"
-            if previous_model != "test-provider:test-model"
-            else "test-provider:alternate-model"
-        )
+        updated_model = "test-provider:test-model" if previous_model != "test-provider:test-model" else "test-provider:alternate-model"
         update_response = await test_client.post(
             "/api/system/config",
             json={"key": "default_model", "value": updated_model},

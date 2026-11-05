@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from yuxi.modules.extensions.mcp.models import MCPServer
+
+import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from yuxi.agents.mcp.service import MCPServerNotFoundError
-from yuxi.storage.postgres.models_business import User
+from yuxi.modules.extensions.mcp.service import MCPServerNotFoundError
+from yuxi.modules.identity.models import User, Role, RolePermission, UserRoleAssignment
 
-from server.routers.mcp_router import mcp
-from server.utils.auth_middleware import get_authorization_context, get_db
+from yuxi.api.routers.extensions.mcp import mcp
+from yuxi.api.dependencies.auth import get_required_user, get_db
 
 
 def _build_app(*, can_manage: bool = True) -> FastAPI:
@@ -18,19 +20,25 @@ def _build_app(*, can_manage: bool = True) -> FastAPI:
     async def fake_db():
         return None
 
-    async def fake_authorization():
-        user = User(
-            username="manager" if can_manage else "user",
-            uid="manager" if can_manage else "user",
-            password_hash="x",
-        )
-        return SimpleNamespace(
-            user=user,
-            has_permission=lambda permission: can_manage and permission == "mcp:manage",
-        )
-
+    permission = Role(
+        code="mcp-test",
+        name="MCP test",
+        is_active=True,
+        default_scope_type="all",
+        default_departments=[],
+        permissions=[RolePermission(permission_key="mcp:manage")] if can_manage else [],
+    )
+    user = User(
+        id=1,
+        username="manager" if can_manage else "user",
+        uid="manager" if can_manage else "user",
+        password_hash="x",
+        user_kind="human",
+        is_deleted=0,
+        role_assignments=[UserRoleAssignment(role=permission, scope_mode="inherit")],
+    )
     app.dependency_overrides[get_db] = fake_db
-    app.dependency_overrides[get_authorization_context] = fake_authorization
+    app.dependency_overrides[get_required_user] = lambda: user
     return app
 
 
@@ -52,7 +60,7 @@ def test_update_mcp_server_status(monkeypatch):
         captured["updated_by"] = updated_by
         return enabled, DummyServer(enabled)
 
-    monkeypatch.setattr("server.routers.mcp_router.set_server_enabled", fake_set_server_enabled)
+    monkeypatch.setattr("yuxi.api.routers.extensions.mcp.set_server_enabled", fake_set_server_enabled)
 
     client = TestClient(_build_app())
     resp = client.put("/api/system/mcp-servers/demo-mcp/status", json={"enabled": False})
@@ -68,7 +76,7 @@ def test_update_mcp_server_status_not_found(monkeypatch):
     async def fake_set_server_enabled(db, name, enabled, updated_by=None):
         raise MCPServerNotFoundError(f"Server '{name}' does not exist")
 
-    monkeypatch.setattr("server.routers.mcp_router.set_server_enabled", fake_set_server_enabled)
+    monkeypatch.setattr("yuxi.api.routers.extensions.mcp.set_server_enabled", fake_set_server_enabled)
 
     client = TestClient(_build_app())
     resp = client.put("/api/system/mcp-servers/missing/status", json={"enabled": True})
@@ -79,7 +87,7 @@ def test_update_mcp_server_status_rejects_legacy_stdio(monkeypatch):
     async def fake_set_server_enabled(db, name, enabled, updated_by=None):
         raise ValueError("历史 stdio MCP 已被禁用")
 
-    monkeypatch.setattr("server.routers.mcp_router.set_server_enabled", fake_set_server_enabled)
+    monkeypatch.setattr("yuxi.api.routers.extensions.mcp.set_server_enabled", fake_set_server_enabled)
 
     client = TestClient(_build_app())
     resp = client.put("/api/system/mcp-servers/legacy-stdio/status", json={"enabled": True})
@@ -89,6 +97,7 @@ def test_update_mcp_server_status_rejects_legacy_stdio(monkeypatch):
 def test_get_mcp_servers_without_manage_permission_is_stripped(monkeypatch):
     class DummyServer:
         def __init__(self):
+            self.slug = "test-mcp"
             self.name = "test-mcp"
             self.slug = "test-mcp"
             self.description = "test mcp description"
@@ -99,6 +108,7 @@ def test_get_mcp_servers_without_manage_permission_is_stripped(monkeypatch):
             self.env = {"API_KEY": "secret"}
             self.headers = {"Auth": "Bearer secret"}
             self.enabled = 1
+            self.auth_mode = "headers"
 
         def to_dict(self):
             return {
@@ -116,7 +126,12 @@ def test_get_mcp_servers_without_manage_permission_is_stripped(monkeypatch):
     async def fake_get_all_mcp_servers(db):
         return [DummyServer()]
 
-    monkeypatch.setattr("server.routers.mcp_router.get_all_mcp_servers", fake_get_all_mcp_servers)
+    monkeypatch.setattr("yuxi.api.routers.extensions.mcp.get_all_mcp_servers", fake_get_all_mcp_servers)
+
+    async def fake_states(db, servers, user_id):
+        return {server.slug: "not_required" for server in servers}
+
+    monkeypatch.setattr("yuxi.api.routers.extensions.mcp.personal_connection_states", fake_states)
 
     # 1. 管理员请求，应该返回全部字段
     client_admin = TestClient(_build_app(can_manage=True))
@@ -142,58 +157,55 @@ def test_get_mcp_servers_without_manage_permission_is_stripped(monkeypatch):
     assert data_user["enabled"] is True
 
 
-def test_create_mcp_server_rejects_extra_config_fields():
-    client = TestClient(_build_app())
-    resp = client.post(
-        "/api/system/mcp-servers",
-        json={
-            "slug": "demo-mcp",
-            "name": "Demo MCP",
-            "transport": "streamable_http",
-            "url": "https://example.com/mcp",
-            "enabled": True,
-        },
-    )
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        (
+            "post",
+            "/api/system/mcp-servers",
+            {
+                "slug": "demo-mcp",
+                "name": "Demo MCP",
+                "transport": "streamable_http",
+                "url": "https://example.com/mcp",
+                "enabled": True,
+            },
+        ),
+        (
+            "post",
+            "/api/system/mcp-servers",
+            {
+                "slug": "unsafe-mcp",
+                "name": "Unsafe MCP",
+                "transport": "stdio",
+                "command": "python3",
+                "args": ["-c", "print('unsafe')"],
+            },
+        ),
+        (
+            "put",
+            "/api/system/mcp-servers/demo-mcp",
+            {
+                "name": "Demo MCP",
+                "transport": "streamable_http",
+                "url": "https://example.com/mcp",
+                "slug": "renamed-mcp",
+            },
+        ),
+    ],
+    ids=["create-extra-field", "create-stdio", "update-extra-field"],
+)
+def test_mcp_server_rejects_unsupported_configuration(method, path, payload):
+    response = TestClient(_build_app()).request(method, path, json=payload)
 
-    assert resp.status_code == 422, resp.text
-
-
-def test_create_mcp_server_rejects_stdio_command():
-    client = TestClient(_build_app())
-    resp = client.post(
-        "/api/system/mcp-servers",
-        json={
-            "slug": "unsafe-mcp",
-            "name": "Unsafe MCP",
-            "transport": "stdio",
-            "command": "python3",
-            "args": ["-c", "print('unsafe')"],
-        },
-    )
-
-    assert resp.status_code == 422, resp.text
-
-
-def test_update_mcp_server_rejects_extra_config_fields():
-    client = TestClient(_build_app())
-    resp = client.put(
-        "/api/system/mcp-servers/demo-mcp",
-        json={
-            "name": "Demo MCP",
-            "transport": "streamable_http",
-            "url": "https://example.com/mcp",
-            "slug": "renamed-mcp",
-        },
-    )
-
-    assert resp.status_code == 422, resp.text
+    assert response.status_code == 422, response.text
 
 
 def test_update_builtin_mcp_server_rejects_connection_changes(monkeypatch):
     async def fake_update_mcp_server(db, slug, **kwargs):
         raise PermissionError("系统内置 MCP 的连接配置由代码管理，无法通过接口修改")
 
-    monkeypatch.setattr("server.routers.mcp_router.update_mcp_server", fake_update_mcp_server)
+    monkeypatch.setattr("yuxi.api.routers.extensions.mcp.update_mcp_server", fake_update_mcp_server)
 
     client = TestClient(_build_app())
     resp = client.put(
@@ -211,7 +223,7 @@ def test_update_mcp_server_not_found(monkeypatch):
     async def fake_update_mcp_server(db, slug, **kwargs):
         raise MCPServerNotFoundError(f"Server '{slug}' does not exist")
 
-    monkeypatch.setattr("server.routers.mcp_router.update_mcp_server", fake_update_mcp_server)
+    monkeypatch.setattr("yuxi.api.routers.extensions.mcp.update_mcp_server", fake_update_mcp_server)
 
     client = TestClient(_build_app())
     resp = client.put(
@@ -220,3 +232,35 @@ def test_update_mcp_server_not_found(monkeypatch):
     )
 
     assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.parametrize("field,value", [("icon", "📚"), ("tags", ["docs"])])
+@pytest.mark.parametrize("method,path", [("post", "/api/system/mcp-servers"), ("put", "/api/system/mcp-servers/example")])
+def test_presentation_fields_reach_service_and_response(monkeypatch, field, value, method, path):
+    """fork 展示字段真实进入服务与序列化响应，未知字段仍拒绝。"""
+    captured = {}
+
+    async def save(db, **values):
+        captured.update(values)
+        return MCPServer(
+            slug=values["slug"],
+            name=values.get("name", "Example"),
+            transport=values["transport"],
+            url=values["url"],
+            tags=values.get("tags"),
+            icon=values.get("icon"),
+            enabled=True,
+        )
+
+    for name in ["create_mcp_server", "update_mcp_server"]:
+        monkeypatch.setattr("yuxi.api.routers.extensions.mcp." + name, save)
+    client = TestClient(_build_app())
+    payload = {"slug": "example", "name": "Example", "transport": "streamable_http", "url": "https://example.com/mcp"}
+    if method == "put":
+        payload.pop("slug")
+    response = getattr(client, method)(path, json={**payload, field: value})
+    assert response.status_code == 200, response.text
+    assert captured[field] == value
+    assert response.json()["data"][field] == value
+    unknown = getattr(client, method)(path, json={**payload, "unknown_presentation": value})
+    assert unknown.status_code == 422

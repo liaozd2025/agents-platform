@@ -1,18 +1,18 @@
 from types import SimpleNamespace
 
-from yuxi.agents.context import DEFAULT_SYSTEM_PROMPT_PLACEHOLDER, is_custom_system_prompt
-from yuxi.agents.buildin.chatbot.prompt import (
+import pytest
+
+from yuxi.modules.agents.runtime.agent_backends.chatbot.prompt import (
     CUSTOM_PROMPT_HEADER,
     DEFAULT_IDENTITY_PROMPT,
     PLATFORM_PROMPT,
     build_prompt_with_context,
 )
+from yuxi.modules.agents.runtime.context import DEFAULT_SYSTEM_PROMPT_PLACEHOLDER, is_custom_system_prompt
 
 
 def test_default_chatbot_identifies_as_jiudian_ai_assistant():
-    system_prompt = build_prompt_with_context(
-        SimpleNamespace(system_prompt="", workdir_path="/home/gem/user-data/projects/demo")
-    )
+    system_prompt = build_prompt_with_context(SimpleNamespace(system_prompt="", workdir_path="/home/user/workspace/projects/demo"))
 
     assert "你是九典AI助手" in system_prompt
     assert "当用户问你是谁时，只回答“我是九典AI助手”，不要补充其他内容" in system_prompt
@@ -28,21 +28,19 @@ def test_chatbot_prompt_prefers_complete_explanatory_paragraphs():
 def test_chatbot_prompt_declares_workspace_visibility_and_default_write_boundary():
     prompt = build_prompt_with_context(
         SimpleNamespace(
-            workdir_path="/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111",
+            workdir_path="/home/user/workspace/projects/11111111-1111-4111-8111-111111111111",
             system_prompt="",
         )
     )
 
     assert "可以读取其他 Project 目录作为参考" in prompt
     assert "未经用户明确要求，不得在当前 Project Workdir 之外" in prompt
-    assert "/home/gem/user-data/agents/skills/" in prompt
+    assert "/home/user/workspace/agents/skills/" in prompt
     assert "html:preview" not in prompt
 
 
 def test_chatbot_prompt_requires_structured_interrupt_for_blocking_user_input():
-    prompt = build_prompt_with_context(
-        SimpleNamespace(system_prompt="", workdir_path="/home/gem/user-data/projects/demo")
-    )
+    prompt = build_prompt_with_context(SimpleNamespace(system_prompt="", workdir_path="/home/user/workspace/projects/demo"))
 
     assert "必须调用 `ask_user_question` 进入等待状态" in prompt
     assert "不要只发送问题文本后结束本轮" in prompt
@@ -56,7 +54,7 @@ def test_custom_system_prompt_takes_over_agent_identity():
     prompt = build_prompt_with_context(
         SimpleNamespace(
             system_prompt="你是采购合规助手，只回答采购合规相关问题。",
-            workdir_path="/home/gem/user-data/projects/demo",
+            workdir_path="/home/user/workspace/projects/demo",
         )
     )
 
@@ -81,12 +79,11 @@ def test_workspace_appended_prompt_does_not_suppress_default_identity():
     负向守卫：若改回按 system_prompt 内容判定，本用例会失败。
     """
     workspace_block = (
-        "用户工作区 agents/AGENTS.md 内容：\n# AGENTS\n\n以下是约束 Agent 行为的一些要求\n\n"
-        "用户工作区 agents/USER.md 内容：\n# 关于我\n"
+        "用户工作区 agents/AGENTS.md 内容：\n# AGENTS\n\n以下是约束 Agent 行为的一些要求\n\n用户工作区 agents/USER.md 内容：\n# 关于我\n"
     )
     prompt = build_prompt_with_context(
         SimpleNamespace(
-            workdir_path="/home/gem/user-data/projects/demo",
+            workdir_path="/home/user/workspace/projects/demo",
             system_prompt=workspace_block,
             system_prompt_is_custom=False,
         )
@@ -103,7 +100,7 @@ def test_explicit_custom_flag_wins_over_appended_workspace_text():
     workspace_block = "用户工作区 agents/AGENTS.md 内容：\n# AGENTS\n"
     prompt = build_prompt_with_context(
         SimpleNamespace(
-            workdir_path="/home/gem/user-data/projects/demo",
+            workdir_path="/home/user/workspace/projects/demo",
             system_prompt="你是采购合规助手。" + workspace_block,
             system_prompt_is_custom=True,
         )
@@ -131,7 +128,7 @@ def test_missing_runtime_flag_falls_back_to_content_check():
     """
     prompt = build_prompt_with_context(
         SimpleNamespace(
-            workdir_path="/home/gem/user-data/projects/demo",
+            workdir_path="/home/user/workspace/projects/demo",
             system_prompt="用户工作区 agents/AGENTS.md 内容：\n# AGENTS\n",
             # 故意不提供 system_prompt_is_custom，命中回退分支
         )
@@ -139,3 +136,23 @@ def test_missing_runtime_flag_falls_back_to_content_check():
 
     assert CUSTOM_PROMPT_HEADER in prompt
     assert "只回答“我是九典AI助手”" not in prompt
+
+
+@pytest.mark.parametrize("custom_prompt", ["", "用户补充规则\n保留第二行"])
+def test_chatbot_prompt_preserves_base_workdir_and_custom_context(custom_prompt):
+    """动态上下文进入拼装结果，且自定义规则保留在末尾。"""
+    workdir = "/home/user/workspace/projects/prompt-test"
+    prompt = build_prompt_with_context(SimpleNamespace(workdir_path=f"{workdir}/", system_prompt=custom_prompt))
+
+    assert PLATFORM_PROMPT.strip() in prompt
+    assert f"{workdir}/uploads/" in prompt
+    assert f"{workdir}//" not in prompt
+    if custom_prompt:
+        assert prompt.endswith(custom_prompt)
+
+
+@pytest.mark.parametrize("workdir", [None, "", "/"])
+def test_chatbot_prompt_rejects_missing_workdir(workdir):
+    """没有当前工作目录时拒绝拼装。"""
+    with pytest.raises(ValueError, match="缺少当前 Workdir"):
+        build_prompt_with_context(SimpleNamespace(workdir_path=workdir, system_prompt=""))

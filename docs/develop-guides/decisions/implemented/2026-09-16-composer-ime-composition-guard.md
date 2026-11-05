@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：web/src/components/MessageInputComponent.vue
+Owner：frontend/src/modules/session/ui/MessageInputComponent.vue
 
 ## 问题
 

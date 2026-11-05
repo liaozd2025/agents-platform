@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from yuxi.services.skills import remote as svc
+from yuxi.modules.extensions.skills import remote as svc
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +41,7 @@ class _FakeRemoteSkillSandbox:
 
 
 def _use_fake_sandbox(monkeypatch: pytest.MonkeyPatch, sandbox: _FakeRemoteSkillSandbox) -> None:
-    monkeypatch.setattr(svc, "_RemoteSkillSandbox", SimpleNamespace(create=lambda: sandbox))
+    monkeypatch.setattr(svc, "_RemoteSkillRequest", SimpleNamespace(create=lambda uid: sandbox))
 
 
 @pytest.mark.parametrize(
@@ -142,7 +142,7 @@ async def test_list_remote_skills_uses_isolated_home(monkeypatch: pytest.MonkeyP
     )
     _use_fake_sandbox(monkeypatch, sandbox)
 
-    items = await svc.list_remote_skills("anthropics/skills")
+    items = await svc.list_remote_skills("anthropics/skills", uid="user-1")
 
     assert items == [{"name": "frontend-design", "description": "Create distinctive frontend interfaces."}]
     assert sandbox.calls == [["npx", "-y", "skills", "add", "https://github.com/anthropics/skills", "--list"]]
@@ -150,18 +150,17 @@ async def test_list_remote_skills_uses_isolated_home(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_remote_skill_sandbox_executes_cli_through_provisioner_backend():
+async def test_remote_skill_sandbox_executes_cli_through_user_backend():
     calls: list[str] = []
 
     class FakeBackend:
-        def execute(self, command: str, *, timeout: int):
+        async def aexecute(self, command: str, *, timeout: int):
             assert timeout == svc.CLI_TIMEOUT_SECONDS
             calls.append(command)
             return SimpleNamespace(output="done", exit_code=0)
 
-    sandbox = svc._RemoteSkillSandbox(
-        thread_id="remote-skill-test",
-        home=f"{svc.REMOTE_SKILL_SANDBOX_ROOT}/.remote-skill-test",
+    sandbox = svc._RemoteSkillRequest(
+        home=f"{svc.WORKSPACE_PATH}/.remote-skills/remote-skill-test",
         backend=FakeBackend(),
     )
 
@@ -174,35 +173,38 @@ async def test_remote_skill_sandbox_executes_cli_through_provisioner_backend():
 
 
 @pytest.mark.asyncio
-async def test_remote_skill_sandbox_rejects_incomplete_command() -> None:
-    class FakeBackend:
-        def execute(self, _command: str, *, timeout: int):
-            assert timeout == svc.CLI_TIMEOUT_SECONDS
-            return SimpleNamespace(output="still running", exit_code=None)
+@pytest.mark.parametrize("exit_code", [1, None])
+async def test_remote_skill_sandbox_rejects_failed_command_without_echoing_output(exit_code) -> None:
+    """失败和未完成的命令均不把原始输出作为业务提示。"""
 
-    sandbox = svc._RemoteSkillSandbox(
-        thread_id="remote-skill-test",
-        home=f"{svc.REMOTE_SKILL_SANDBOX_ROOT}/.remote-skill-test",
+    class FakeBackend:
+        async def aexecute(self, _command: str, *, timeout: int):
+            assert timeout == svc.CLI_TIMEOUT_SECONDS
+            return SimpleNamespace(output="PRIVATE_CLI_MARKER", exit_code=exit_code)
+
+    sandbox = svc._RemoteSkillRequest(
+        home=f"{svc.WORKSPACE_PATH}/.remote-skills/remote-skill-test",
         backend=FakeBackend(),
     )
 
-    with pytest.raises(ValueError, match="still running"):
+    with pytest.raises(ValueError, match="skills CLI 执行失败，请检查来源或稍后重试") as failure:
         await sandbox.run(["npx", "-y", "skills", "add", "https://github.com/owner/repo", "--list"])
+    assert "PRIVATE_CLI_MARKER" not in str(failure.value)
 
 
-def test_remote_skill_sandbox_uses_unique_workspace_uid(monkeypatch: pytest.MonkeyPatch):
-    captured: dict[str, str | bool] = {}
+def test_remote_skill_sandbox_uses_operator_workspace(monkeypatch, tmp_path):
+    """请求有独立目录，运行身份固定为操作者。"""
+    from yuxi.modules.workspace.paths import user_workspace_dir
 
-    class FakeBackend:
-        def __init__(self, *, thread_id, uid, inherit_env):
-            captured["thread_id"] = thread_id
-            captured["uid"] = uid
-            captured["inherit_env"] = inherit_env
-
-    monkeypatch.setattr(svc, "ProvisionerSandboxBackend", FakeBackend)
-    sandbox = svc._RemoteSkillSandbox.create()
-
-    assert captured == {"thread_id": sandbox.thread_id, "uid": sandbox.thread_id, "inherit_env": False}
+    monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("yuxi.modules.agents.runtime.sandbox.backend.get_sandbox_provider", lambda: SimpleNamespace())
+    first = svc._RemoteSkillRequest.create("user-1")
+    second = svc._RemoteSkillRequest.create("user-1")
+    assert first.backend.id == second.backend.id == "user-1"
+    assert first.home != second.home
+    root = user_workspace_dir("user-1")
+    assert (root / ".remote-skills" / Path(first.home).name).is_dir()
+    assert (root / ".remote-skills" / Path(second.home).name).is_dir()
 
 
 @pytest.mark.asyncio
@@ -211,6 +213,7 @@ async def test_download_remote_skills_downloads_duplicate_skill_once(monkeypatch
     _use_fake_sandbox(monkeypatch, sandbox)
 
     preparation = await svc.download_remote_skills(
+        uid="user-1",
         source="anthropics/skills",
         skills=["frontend-design", "frontend-design"],
     )
@@ -258,7 +261,7 @@ async def test_download_remote_skills_preserves_partial_results(
     sandbox = _FakeRemoteSkillSandbox(available=available)
     _use_fake_sandbox(monkeypatch, sandbox)
 
-    preparation = await svc.download_remote_skills(source="test/repo", skills=skills)
+    preparation = await svc.download_remote_skills(uid="user-1", source="test/repo", skills=skills)
     try:
         results = [
             (
@@ -270,9 +273,7 @@ async def test_download_remote_skills_preserves_partial_results(
         ]
         assert results == expected_results
         assert len(sandbox.calls) == 1
-        cli_skill_names = [
-            sandbox.calls[0][index + 1] for index, arg in enumerate(sandbox.calls[0]) if arg == "--skill"
-        ]
+        cli_skill_names = [sandbox.calls[0][index + 1] for index, arg in enumerate(sandbox.calls[0]) if arg == "--skill"]
         assert cli_skill_names == expected_cli_skills
     finally:
         await preparation.cleanup()
@@ -299,6 +300,7 @@ async def test_download_remote_skills_removes_temp_home_when_sandbox_cleanup_fai
 
     with pytest.raises(RuntimeError, match="cleanup failed"):
         await svc.download_remote_skills(
+            uid="user-1",
             source="anthropics/skills",
             skills=["frontend-design"],
         )
@@ -308,10 +310,10 @@ async def test_download_remote_skills_removes_temp_home_when_sandbox_cleanup_fai
 
 @pytest.mark.asyncio
 async def test_download_remote_skills_creates_sandbox_before_temp_home(monkeypatch: pytest.MonkeyPatch):
-    def fail_create():
+    def fail_create(uid):
         raise RuntimeError("provider init failed")
 
-    monkeypatch.setattr(svc, "_RemoteSkillSandbox", SimpleNamespace(create=fail_create))
+    monkeypatch.setattr(svc, "_RemoteSkillRequest", SimpleNamespace(create=fail_create))
     monkeypatch.setattr(
         svc.tempfile,
         "mkdtemp",
@@ -319,39 +321,33 @@ async def test_download_remote_skills_creates_sandbox_before_temp_home(monkeypat
     )
 
     with pytest.raises(RuntimeError, match="provider init failed"):
-        await svc.download_remote_skills(source="anthropics/skills", skills=["frontend-design"])
+        await svc.download_remote_skills(uid="user-1", source="anthropics/skills", skills=["frontend-design"])
 
 
 @pytest.mark.asyncio
-async def test_remote_skill_sandbox_cleanup_surfaces_release_failure(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    release_calls: list[tuple[tuple, dict]] = []
+async def test_remote_skill_cleanup_preserves_other_request_and_workspace(monkeypatch, tmp_path):
+    """回读真实文件证明清理不会删除用户环境或其他请求目录。"""
+    from yuxi.modules.workspace.paths import user_workspace_dir
 
-    class FakeProvider:
-        def release(self, *_args, **_kwargs):
-            release_calls.append((_args, _kwargs))
-            raise RuntimeError("release failed")
-
-    monkeypatch.setattr(svc, "get_sandbox_provider", lambda: FakeProvider())
-    sandbox = svc._RemoteSkillSandbox(
-        thread_id="remote-skill-test",
-        home="/home/gem/user-data/outputs/.remote-skill-test",
-        backend=SimpleNamespace(),
-    )
-
-    with pytest.raises(RuntimeError, match="release failed"):
-        await sandbox.cleanup()
-
-    assert release_calls == [
-        (
-            ("remote-skill-test",),
-            {
-                "uid": "remote-skill-test",
-                "clear_cache_on_delete_failure": True,
-            },
-        )
-    ]
+    monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr("yuxi.modules.agents.runtime.sandbox.backend.get_sandbox_provider", lambda: SimpleNamespace())
+    first = svc._RemoteSkillRequest.create("user-1")
+    second = svc._RemoteSkillRequest.create("user-1")
+    root = user_workspace_dir("user-1")
+    (root / "keep.txt").write_text("keep")
+    first_home = root / ".remote-skills" / Path(first.home).name
+    second_home = root / ".remote-skills" / Path(second.home).name
+    (second_home / "keep.txt").write_text("other request")
+    npm_bin = first_home / ".npm/_npx/cache/node_modules/.bin"
+    npm_bin.mkdir(parents=True)
+    (npm_bin / "skills").symlink_to("../skills/bin/cli.mjs")
+    (first_home / "other-request").symlink_to(second_home, target_is_directory=True)
+    (first_home / "user-file").symlink_to(root / "keep.txt")
+    await first.cleanup()
+    assert not (root / ".remote-skills" / Path(first.home).name).exists()
+    assert (root / ".remote-skills" / Path(second.home).name).is_dir()
+    assert (second_home / "keep.txt").read_text() == "other request"
+    assert (root / "keep.txt").read_text() == "keep"
 
 
 def test_parse_search_skills() -> None:
@@ -397,7 +393,7 @@ async def test_search_remote_skills(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     _use_fake_sandbox(monkeypatch, sandbox)
 
-    items = await svc.search_remote_skills("web")
+    items = await svc.search_remote_skills("web", uid="user-1")
     assert items == [
         {
             "source": "vercel-labs/agent-skills",

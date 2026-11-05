@@ -7,23 +7,20 @@ from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
-from yuxi.agents.middlewares.model_input import ImageInputCompatibilityMiddleware
-from yuxi.agents.toolkits.buildin.tools import ocr_parse_file
-from yuxi.services import image_input_service
+from yuxi.modules.agents.runtime.middlewares.model_input import ImageInputCompatibilityMiddleware
+from yuxi.modules.agents.services import image_input as image_input_service
+from yuxi.modules.extensions.tools.builtin.ocr_parse_file import ocr_parse_file
 
 
 def _request(model, messages, tools=None) -> ModelRequest:
-    request = ModelRequest(model=model, messages=messages)
-    if tools is not None:
-        request = request.override(tools=tools)
-    return request
+    return ModelRequest(model=model, messages=messages, tools=tools or [])
 
 
 def _openai_model() -> ChatOpenAI:
     return ChatOpenAI(model="test-model", api_key="test-key", base_url="https://example.com/v1")
 
 
-def _read_file_image_message(path: str = "/home/gem/user-data/uploads/image.png") -> ToolMessage:
+def _read_file_image_message(path: str = "/home/user/workspace/uploads/image.png") -> ToolMessage:
     return ToolMessage(
         content_blocks=[{"type": "image", "base64": "abc", "mime_type": "image/png"}],
         tool_call_id="call_image",
@@ -193,9 +190,7 @@ def test_removes_orphan_tool_result_for_truncated_tool_call_before_provider_repl
     replay = seen["messages"]
     assert [message.type for message in replay] == ["human", "ai", "human"]
     assert replay[1].invalid_tool_calls == []
-    assert all(
-        not (isinstance(block, dict) and block.get("type") == "invalid_tool_call") for block in replay[1].content
-    )
+    assert all(not (isinstance(block, dict) and block.get("type") == "invalid_tool_call") for block in replay[1].content)
     assert all(getattr(message, "tool_call_id", None) != "chatcmpl-tool-truncated" for message in replay)
 
 
@@ -244,8 +239,7 @@ def test_final_model_boundary_preserves_direct_sandbox_execution_tools() -> None
         ("This model does not support image input", 400),
         ("No endpoints found that support image input", 404),
         (
-            "Error code: 400 - {'code': 20041, 'message': "
-            "'The model is not a VLM (Vision Language Model). Please use text-only prompts.'}",
+            "Error code: 400 - {'code': 20041, 'message': 'The model is not a VLM (Vision Language Model). Please use text-only prompts.'}",
             400,
         ),
     ],
@@ -271,7 +265,7 @@ async def test_translates_provider_image_rejection_to_backend_ocr(error_message:
     assert calls == 1
     assert response.result[0].content == "当前模型不支持图片输入，正在改用 OCR 工具提取图片文字。"
     assert response.result[0].tool_calls[0]["name"] == "ocr_parse_file"
-    assert response.result[0].tool_calls[0]["args"] == {"file_path": "/home/gem/user-data/uploads/image.png"}
+    assert response.result[0].tool_calls[0]["args"] == {"file_path": "/home/user/workspace/uploads/image.png"}
 
 
 @pytest.mark.asyncio
@@ -344,9 +338,7 @@ async def test_continues_text_response_truncated_by_model_output_limit() -> None
     async def handler(request):
         requests.append(request)
         if len(requests) == 1:
-            return ModelResponse(
-                result=[AIMessage(content="上半部分", response_metadata={"stop_reason": "max_tokens"})]
-            )
+            return ModelResponse(result=[AIMessage(content="上半部分", response_metadata={"stop_reason": "max_tokens"})])
         return ModelResponse(result=[AIMessage(content="下半部分", response_metadata={"stop_reason": "end_turn"})])
 
     response = await middleware.awrap_model_call(
@@ -442,9 +434,7 @@ async def test_continues_truncated_response_after_removing_invalid_tool_call() -
         replayed = request.messages[-2]
         assert isinstance(replayed, AIMessage)
         assert replayed.invalid_tool_calls == []
-        assert all(
-            not (isinstance(block, dict) and block.get("type") == "invalid_tool_call") for block in replayed.content
-        )
+        assert all(not (isinstance(block, dict) and block.get("type") == "invalid_tool_call") for block in replayed.content)
         return ModelResponse(result=[AIMessage(content="下半部分", response_metadata={"stop_reason": "end_turn"})])
 
     await middleware.awrap_model_call(
@@ -476,7 +466,7 @@ async def test_translates_openrouter_missing_vision_endpoint() -> None:
 
 def test_omits_historical_tool_image_after_ocr_fallback() -> None:
     middleware = ImageInputCompatibilityMiddleware()
-    path = "/home/gem/user-data/uploads/image.png"
+    path = "/home/user/workspace/uploads/image.png"
     messages = [
         _read_file_call_message(path),
         _read_file_image_message(path),
@@ -579,12 +569,10 @@ def _text_of(message) -> str:
 
 
 @pytest.mark.asyncio
-async def test_uses_configured_vision_model_when_provider_rejects_image(
-    vision_settings: dict, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_uses_configured_vision_model_when_provider_rejects_image(vision_settings: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     vision_settings["vision_model"] = "alibaba-cn:qwen3.7-flash"
     vision_model = _FakeVisionModel()
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", lambda _spec, **_kwargs: vision_model)
+    monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", lambda _spec, **_kwargs: vision_model)
     middleware = ImageInputCompatibilityMiddleware()
     seen = []
 
@@ -610,12 +598,10 @@ async def test_uses_configured_vision_model_when_provider_rejects_image(
 
 
 @pytest.mark.asyncio
-async def test_known_non_image_model_transcribes_before_calling_handler(
-    vision_settings: dict, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_known_non_image_model_transcribes_before_calling_handler(vision_settings: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     vision_settings["vision_model"] = "alibaba-cn:qwen3.7-flash"
     vision_model = _FakeVisionModel()
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", lambda _spec, **_kwargs: vision_model)
+    monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", lambda _spec, **_kwargs: vision_model)
     middleware = ImageInputCompatibilityMiddleware()
     request = _image_request()
     handler_calls = 0
@@ -644,7 +630,7 @@ async def test_falls_back_to_ocr_when_vision_model_is_not_configured(monkeypatch
     def fail_load(_spec, **_kwargs):
         raise AssertionError("未配置视觉模型时不应加载模型")
 
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", fail_load)
+    monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", fail_load)
     middleware = ImageInputCompatibilityMiddleware()
 
     async def handler(_request):
@@ -656,13 +642,11 @@ async def test_falls_back_to_ocr_when_vision_model_is_not_configured(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_falls_back_to_ocr_when_vision_model_call_fails(
-    vision_settings: dict, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_falls_back_to_ocr_when_vision_model_call_fails(vision_settings: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """视觉模型不可用时仍要退回既有 OCR 兜底，而不是让本轮直接失败。"""
     vision_settings["vision_model"] = "alibaba-cn:qwen3.7-flash"
     vision_model = _FakeVisionModel(error=RuntimeError("vision model timeout"))
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", lambda _spec, **_kwargs: vision_model)
+    monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", lambda _spec, **_kwargs: vision_model)
     middleware = ImageInputCompatibilityMiddleware()
     path = "/home/gem/user-data/uploads/image.png"
     request = _request(
@@ -681,16 +665,14 @@ async def test_falls_back_to_ocr_when_vision_model_call_fails(
 
 
 @pytest.mark.asyncio
-async def test_keeps_image_when_vision_model_is_the_main_model(
-    vision_settings: dict, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_keeps_image_when_vision_model_is_the_main_model(vision_settings: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     """视觉模型与主模型相同时不得再调一次同一模型（否则必然同样被拒）。"""
     vision_settings["vision_model"] = "alibaba-cn:qwen3.7-max"
 
     def fail_load(_spec, **_kwargs):
         raise AssertionError("视觉模型与主模型相同时不应加载模型")
 
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", fail_load)
+    monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", fail_load)
     middleware = ImageInputCompatibilityMiddleware()
 
     async def handler(_request):
@@ -705,15 +687,11 @@ async def test_keeps_image_when_vision_model_is_the_main_model(
 
 
 def _attachment_context_message(real_path: str) -> HumanMessage:
-    return HumanMessage(
-        content=[{"type": "text", "text": f"<attachment_context>\n- preview.png: {real_path}\n</attachment_context>"}]
-    )
+    return HumanMessage(content=[{"type": "text", "text": f"<attachment_context>\n- preview.png: {real_path}\n</attachment_context>"}])
 
 
 def _read_file_response(path: str, call_id: str = "call_rf") -> ModelResponse:
-    return ModelResponse(
-        result=[AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"file_path": path}, "id": call_id}])]
-    )
+    return ModelResponse(result=[AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"file_path": path}, "id": call_id}])])
 
 
 REAL_PATH = "/home/gem/user-data/projects/w1/uploads/9fc2ac5549a8434cb734e71009d6c16a_preview.png"
@@ -785,7 +763,7 @@ async def test_keeps_exact_and_non_read_file_tool_calls_untouched() -> None:
 async def test_transcribed_retry_preserves_unrelated_errors(vision_settings, monkeypatch, status):
     """转述成功后的认证与限流失败不得变成 OCR 成功响应。"""
     vision_settings["vision_model"] = "vendor:vision"
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", lambda _spec, **kwargs: _FakeVisionModel())
+    monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", lambda _spec, **kwargs: _FakeVisionModel())
     error = RuntimeError(f"Error code: {status}")
     error.status_code = status
     calls = 0
@@ -810,10 +788,8 @@ async def test_visual_retry_inherits_runtime_identity(vision_settings, monkeypat
         seen.append(kwargs)
         return _FakeVisionModel()
 
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", load)
-    request = _image_request().override(
-        runtime=SimpleNamespace(context=SimpleNamespace(uid="owner", thread_id="thread"))
-    )
+    monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", load)
+    request = _image_request().override(runtime=SimpleNamespace(context=SimpleNamespace(uid="owner", thread_id="thread")))
     calls = 0
 
     async def handler(request):
@@ -825,3 +801,124 @@ async def test_visual_retry_inherits_runtime_identity(vision_settings, monkeypat
 
     await ImageInputCompatibilityMiddleware().awrap_model_call(request, handler)
     assert seen[0]["uid"] == "owner" and seen[0]["session_id"] == "thread"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_image_rejection_respects_configured_ocr_tool(asynchronous: bool, enabled: bool) -> None:
+    """同步与异步回退只调用本次已启用的工具，不由中间件注入。"""
+    middleware = ImageInputCompatibilityMiddleware()
+    assert getattr(middleware, "tools", []) == []
+    request = _request(
+        SimpleNamespace(), [_read_file_call_message(), _read_file_image_message()], tools=[ocr_parse_file] if enabled else []
+    )
+
+    def reject(_request):
+        error = RuntimeError("This model does not support image input")
+        error.status_code = 400
+        raise error
+
+    async def async_reject(request):
+        return reject(request)
+
+    response = await middleware.awrap_model_call(request, async_reject) if asynchronous else middleware.wrap_model_call(request, reject)
+    message = response.result[0]
+    if enabled:
+        assert [call["name"] for call in message.tool_calls] == ["ocr_parse_file"]
+        assert message.tool_calls[0]["args"]["file_path"] == "/home/user/workspace/uploads/image.png"
+    else:
+        assert message.tool_calls == []
+        assert "OCR" in message.content and "禁用" in message.content
+
+
+@pytest.mark.parametrize("model", [_openai_model(), SimpleNamespace()])
+def test_ocr_retry_removes_processed_image_for_every_provider(model) -> None:
+    middleware = ImageInputCompatibilityMiddleware()
+    image = _read_file_image_message()
+    messages = [
+        _read_file_call_message(),
+        image,
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "ocr_parse_file", "args": {"file_path": "/home/user/workspace/uploads/image.png"}, "id": "ocr"}],
+        ),
+        ToolMessage(content="识别文字", tool_call_id="ocr"),
+    ]
+    seen = {}
+
+    def handler(request):
+        seen["messages"] = request.messages
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    middleware.wrap_model_call(_request(model, messages), handler)
+
+    assert image.content_blocks[0]["type"] == "image"
+    assert all(block.get("type") != "image" for message in seen["messages"] for block in message.content_blocks)
+    assert seen["messages"][1].tool_call_id == "call_image"
+    assert seen["messages"][-1].content == "识别文字"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", [_openai_model(), SimpleNamespace()])
+async def test_ocr_fallback_only_requests_unprocessed_images(model) -> None:
+    old_path = "/workspace/old.png"
+    new_path = "/workspace/new.png"
+    messages = [
+        _read_file_call_message(old_path),
+        _read_file_image_message(old_path),
+        AIMessage(content="", tool_calls=[{"name": "ocr_parse_file", "args": {"file_path": old_path}, "id": "ocr"}]),
+        ToolMessage(content="old text", tool_call_id="ocr"),
+        _read_file_call_message(new_path),
+        _read_file_image_message(new_path),
+    ]
+
+    async def handler(_request):
+        error = RuntimeError("This model does not support image input")
+        error.status_code = 400
+        raise error
+
+    result = await ImageInputCompatibilityMiddleware().awrap_model_call(_request(model, messages, tools=[ocr_parse_file]), handler)
+    assert [call["args"]["file_path"] for call in result.result[0].tool_calls] == [new_path]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", [_openai_model(), SimpleNamespace()])
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("ocr_status", ["success", "error"])
+@pytest.mark.parametrize("reread", [False, True])
+async def test_ocr_candidates_follow_read_order_and_allow_rereading(model, asynchronous, ocr_status, reread) -> None:
+    """OCR 请求排除旧图，重新读取可再次回退，重复新图只请求一次。"""
+    old_path, new_path = "/workspace/old.png", "/workspace/new.png"
+    messages = [
+        _read_file_call_message(old_path),
+        _read_file_image_message(old_path),
+        AIMessage(content="", tool_calls=[{"name": "ocr_parse_file", "args": {"file_path": old_path}, "id": "ocr"}]),
+        ToolMessage(content="OCR result", tool_call_id="ocr", status=ocr_status),
+        _read_file_call_message(new_path),
+        _read_file_image_message(new_path),
+    ]
+    if reread:
+        messages.extend([_read_file_call_message(old_path), _read_file_image_message(old_path)])
+    messages.extend([_read_file_call_message(new_path), _read_file_image_message(new_path)])
+    original = [message.model_dump() for message in messages]
+    observed = []
+
+    def reject(request):
+        """记录实际图片视图后模拟服务端拒绝图片输入。"""
+        observed.extend(request.messages)
+        error = RuntimeError("This model does not support image input")
+        error.status_code = 400
+        raise error
+
+    async def async_reject(request):
+        """异步入口复用相同的可观察拒绝行为。"""
+        return reject(request)
+
+    middleware = ImageInputCompatibilityMiddleware()
+    request = _request(model, messages, tools=[ocr_parse_file])
+    result = await middleware.awrap_model_call(request, async_reject) if asynchronous else middleware.wrap_model_call(request, reject)
+    expected = [new_path, old_path] if reread else [new_path]
+    assert [call["args"]["file_path"] for call in result.result[0].tool_calls] == expected
+    assert sum(block.get("type") == "image" for message in observed for block in message.content_blocks) == 2 + int(reread)
+    assert [message.model_dump() for message in messages] == original

@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/utils/rememberedLogin.js
+Owner：frontend/src/shared/lib/rememberedLogin.js
 
 ## 问题
 

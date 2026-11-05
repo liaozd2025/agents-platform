@@ -7,9 +7,12 @@ import uuid
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select, update
-from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import OperationLog, Role, SecurityAudit, User, UserRoleAssignment
-from yuxi.utils.auth_utils import AuthUtils
+
+from yuxi.infrastructure.postgres.manager import pg_manager
+from yuxi.infrastructure.postgres.schema import require_current_schema
+from yuxi.modules.identity.models import Role, SecurityAudit, User, UserRoleAssignment
+from yuxi.modules.identity.security import AuthUtils
+from yuxi.modules.system.models import OperationLog
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -171,15 +174,12 @@ async def role_test_users(test_client):
 
     pg_manager.initialize()
     await pg_manager.async_engine.dispose()
-    await pg_manager.require_current_schema()
+    await require_current_schema(pg_manager)
 
     suffix = uuid.uuid4().hex[:10]
     password = f"Pw!{uuid.uuid4().hex}"
     async with pg_manager.get_async_session_context() as session:
-        roles = {
-            role.code: role
-            for role in (await session.scalars(select(Role).where(Role.code.in_(("superadmin", "user"))))).all()
-        }
+        roles = {role.code: role for role in (await session.scalars(select(Role).where(Role.code.in_(("superadmin", "user"))))).all()}
         users = [
             User(
                 username=f"pytest-role-admin-{suffix}",

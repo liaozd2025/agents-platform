@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from yuxi.permissions.role_catalog import BUILTIN_ROLES, DATA_SCOPE_CATALOG, PERMISSION_CATALOG
+from yuxi.modules.identity.permissions.role_catalog import BUILTIN_ROLES, DATA_SCOPE_CATALOG, PERMISSION_CATALOG
 
 
 def test_role_catalog_has_stable_keys_and_complete_builtin_mappings():

@@ -6,11 +6,11 @@ import argparse
 import asyncio
 import logging
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[1]
-for import_path in (APP_ROOT, APP_ROOT / "package"):
+for import_path in (APP_ROOT,):
     if str(import_path) not in sys.path:
         sys.path.insert(0, str(import_path))
 
@@ -75,18 +75,18 @@ async def run(args: argparse.Namespace) -> int:
         LOGGER.error("未配置 OA_USER_MIGRATION_LICENSE_FILE 或 --license-file")
         return 2
 
-    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.infrastructure.postgres.manager import pg_manager
 
     try:
         department_url = build_department_url(args.url)
         pg_manager.initialize()
-        await pg_manager.require_current_schema()
+        from yuxi.infrastructure.postgres.schema import require_current_schema
+
+        await require_current_schema(pg_manager)
 
         LOGGER.info("开始读取旧 OA 数据并生成部门同步计划")
         code = user_migration.fetch_oa_access_code(args.url, args.license_file, args.timeout)
-        oa_departments = await asyncio.to_thread(
-            department_migration.fetch_oa_departments, department_url, code, args.timeout
-        )
+        oa_departments = await asyncio.to_thread(department_migration.fetch_oa_departments, department_url, code, args.timeout)
         department_actions = department_migration.build_department_actions(
             oa_departments, await department_migration.load_database_departments()
         )
@@ -108,9 +108,7 @@ async def run(args: argparse.Namespace) -> int:
 
         LOGGER.info("开始生成用户同步计划")
         oa_users = await asyncio.to_thread(user_migration.fetch_oa_users, args.url, code, args.timeout)
-        user_actions = user_migration.build_migration_actions(
-            oa_users, department_inputs, existing_users, args.company_code
-        )
+        user_actions = user_migration.build_migration_actions(oa_users, department_inputs, existing_users, args.company_code)
         user_counts = count_actions(user_actions)
         LOGGER.info("用户同步计划：%s", user_counts)
         if user_counts.get("conflict"):

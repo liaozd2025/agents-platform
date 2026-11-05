@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/agents/middlewares/citations.py
+Owner：backend/yuxi/modules/agents/services/references.py
+
+## 当前迁移状态
+
+2026-11-02：新版引用以 Turn 最终输出与同 Turn 持久工具审计为 Owner，按需标注并复核当前来源权限。旧 CitationMiddleware、subagent_task artifact 交接及模型生成 cite 标签的流程已退役；同 tool_call_id 跨 Run 复用不能串源、private artifact 不得暴露的回归已迁到 test/unit/services/test_turn_references.py。OA 标题与原文 URL 通过知识域适配进入该链路，旧文中测试次数只代表历史实现。
 
 ## 问题
 

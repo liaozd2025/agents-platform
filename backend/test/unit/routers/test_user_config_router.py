@@ -4,18 +4,23 @@ import importlib
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from server.routers.user_router import get_logged_in_user, get_user_config, update_user_config
-from yuxi.config import UserConfigSchema
-from yuxi.storage.postgres.models_business import Base, Department, User
+from test.support.sqlite import create_utc_sqlite_engine
+from yuxi.api.routers.identity.users import get_logged_in_user, get_user_config, update_user_config
+from yuxi.infrastructure.postgres.base import Base
+from yuxi.modules.identity.models import Department, User
+from yuxi.modules.identity.preferences import UserConfigSchema
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
 @pytest_asyncio.fixture()
-async def session():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+async def session(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("yuxi.modules.identity.services.preferences.sync_user_profile_to_memory", AsyncMock())
+    engine = create_utc_sqlite_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -62,7 +67,7 @@ async def test_enabling_memory_syncs_user_profile_immediately(session, monkeypat
     async def fake_sync(*, db, uid):
         calls.append((db, uid))
 
-    monkeypatch.setattr(importlib.import_module("server.routers.user_router"), "sync_user_profile_to_memory", fake_sync)
+    monkeypatch.setattr(importlib.import_module("yuxi.modules.identity.services.preferences"), "sync_user_profile_to_memory", fake_sync)
 
     await update_user_config(
         UserConfigSchema(enable_memory=True),
@@ -81,3 +86,16 @@ async def test_user_config_allows_logged_in_user_without_department():
     )
 
     assert await get_logged_in_user(user) is user
+
+
+async def test_memory_sync_failure_is_observable_after_committed_configuration(session, monkeypatch):
+    """文件同步故障明确失败，已提交的偏好仍可从数据库读回。"""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        "yuxi.modules.identity.services.preferences.sync_user_profile_to_memory", AsyncMock(side_effect=OSError("disk full"))
+    )
+    db, user, _ = session
+    with pytest.raises(OSError, match="disk full"):
+        await update_user_config(UserConfigSchema(enable_memory=False), current_user=user, db=db)
+    assert (await get_user_config(current_user=user, db=db))["enable_memory"] is False

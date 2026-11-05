@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/components/extensions/SkillCardList.vue
+Owner：frontend/src/modules/extensions/ui/SkillCardList.vue
 
 ## 问题
 

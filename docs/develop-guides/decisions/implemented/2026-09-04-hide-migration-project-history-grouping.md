@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/components/ConversationNavSection.vue
+Owner：frontend/src/modules/session/ui/SessionNavSection.vue
 
 ## 问题
 

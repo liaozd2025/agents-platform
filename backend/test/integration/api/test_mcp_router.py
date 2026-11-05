@@ -10,7 +10,7 @@ from uuid import uuid4
 import asyncpg
 import pytest
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
+pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.self_managed_resources]
 
 
 @pytest.mark.parametrize(
@@ -149,3 +149,90 @@ async def test_management_connection_uses_real_protocol_and_preserves_state(test
             protocol.shutdown()
             protocol.server_close()
             protocol_thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "payload,reason",
+    [
+        ({"icon": "📚"}, "extra_forbidden"),
+        ({"tags": ["文档"]}, "extra_forbidden"),
+        ({"transport": "stdio"}, "传输类型"),
+        ({"transport": "streamable_http", "command": "sh"}, "extra_forbidden"),
+        ({"transport": "streamable_http", "args": []}, "extra_forbidden"),
+        ({"transport": "streamable_http", "env": {}}, "extra_forbidden"),
+        ({"transport": "streamable_http", "url": "file:///tmp/mcp"}, "HTTP URL"),
+        ({"transport": "streamable_http", "url": "https://example.com:bad/mcp"}, "HTTP URL"),
+        ({"transport": "streamable_http", "url": "https://exa mple.com/mcp"}, "HTTP URL"),
+        ({"transport": "streamable_http", "url": "https://example.com/\u0000mcp"}, "HTTP URL"),
+        ({"transport": "sse", "timeout": -1}, "timeout"),
+        ({"transport": "sse", "timeout": True}, "timeout"),
+        ({"transport": "sse", "timeout": 1.0}, "timeout"),
+        ({"transport": "sse", "timeout": "30"}, "timeout"),
+        ({"transport": "sse", "sse_read_timeout": True}, "sse_read_timeout"),
+    ],
+)
+async def test_remote_config_rejected_before_persistence(test_client, admin_headers, payload, reason):
+    """非法远程配置通过真实 HTTP 拒绝且 PostgreSQL 无记录。"""
+    slug = "pytest-mcp-rejected-" + uuid4().hex[:12]
+    response = await test_client.post(
+        "/api/system/mcp-servers",
+        headers=admin_headers,
+        json={"slug": slug, "name": "Pytest rejected MCP", "url": "https://example.com/mcp", **payload},
+    )
+    conn = await asyncpg.connect(os.environ["POSTGRES_URL"].replace("+asyncpg", ""))
+    try:
+        assert response.status_code in (400, 422), response.text
+        assert reason in response.text or (response.status_code == 400 and response.json()["detail"].startswith("MCP 配置无效"))
+        assert await conn.fetchrow("SELECT * FROM mcp_servers WHERE slug = $1", slug) is None
+    finally:
+        try:
+            # 负向 guard 退化而意外写入时，也只回收本用例的唯一资源。
+            response = await test_client.delete(f"/api/system/mcp-servers/{slug}", headers=admin_headers)
+            assert response.status_code in (200, 404), response.text
+            assert await conn.fetchrow("SELECT * FROM mcp_servers WHERE slug = $1", slug) is None
+        finally:
+            await conn.close()
+
+
+async def test_manifest_metadata_persisted_and_invalid_update_preserves_connection(test_client, admin_headers):
+    """清单展示信息落库，非法更新不得改变既有远程连接。"""
+    from yuxi.modules.extensions.mcp.config import normalize_mcp_manifest_entry
+
+    slug = "pytest-mcp-manifest-" + uuid4().hex[:12]
+    path = f"/api/system/mcp-servers/{slug}"
+    config = normalize_mcp_manifest_entry(
+        slug,
+        {
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "timeout": 30,
+            "extra_data": {"name": "Pytest manifest", "description": "Example docs"},
+        },
+    )
+    response = await test_client.post("/api/system/mcp-servers", headers=admin_headers, json=config)
+    assert response.status_code == 200, response.text
+    conn = await asyncpg.connect(os.environ["POSTGRES_URL"].replace("+asyncpg", ""))
+    try:
+        before = await conn.fetchrow("SELECT * FROM mcp_servers WHERE slug = $1", slug)
+        assert before["name"] == "Pytest manifest"
+        assert before["transport"] == "streamable_http"
+        assert before["description"] == "Example docs"
+        assert not {"command", "args", "env", "extra_data", "icon", "tags"} & set(before.keys())
+        for payload, reason in [
+            ({"url": "file:///tmp/mcp"}, "HTTP URL"),
+            ({"url": "https://example.com:bad/mcp"}, "HTTP URL"),
+            ({"url": "https://exa mple.com/mcp"}, "HTTP URL"),
+            ({"url": "https://example.com/\u0000mcp"}, "HTTP URL"),
+            ({"timeout": True}, "timeout"),
+            ({"sse_read_timeout": True}, "sse_read_timeout"),
+            ({"timeout": 1.0}, "timeout"),
+            ({"sse_read_timeout": "30"}, "sse_read_timeout"),
+        ]:
+            response = await test_client.put(path, headers=admin_headers, json=payload)
+            assert response.status_code in (400, 422), response.text
+            assert reason in response.text or (response.status_code == 400 and response.json()["detail"].startswith("MCP 配置无效"))
+            assert await conn.fetchrow("SELECT * FROM mcp_servers WHERE slug = $1", slug) == before
+    finally:
+        await test_client.delete(path, headers=admin_headers)
+        assert await conn.fetchrow("SELECT * FROM mcp_servers WHERE slug = $1", slug) is None
+        await conn.close()

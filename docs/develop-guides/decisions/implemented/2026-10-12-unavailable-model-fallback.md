@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：web/src/components/ModelSelectorComponent.vue
+Owner：frontend/src/modules/agents/ui/ModelSelectorComponent.vue
 
 ## 问题
 

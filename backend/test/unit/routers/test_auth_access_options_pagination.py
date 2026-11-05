@@ -8,9 +8,11 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from server.routers import auth_router
-from server.routers.auth_router import auth
-from server.utils.auth_middleware import get_authorization_context, get_db
+from yuxi.api.dependencies.auth import get_authorization_context, get_db
+from yuxi.api.errors import domain_error_handler
+from yuxi.api.routers.identity.auth import auth
+from yuxi.modules.identity.services import management as auth_service
+from yuxi.shared.errors import DomainError
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -29,9 +31,10 @@ def _build_client(monkeypatch: pytest.MonkeyPatch, page_result):
         captured.update(kwargs)
         return page_result
 
-    monkeypatch.setattr(auth_router, "list_authorized_users_page", fake_list_authorized_users_page)
+    monkeypatch.setattr(auth_service, "list_authorized_users_page", fake_list_authorized_users_page)
 
     app = FastAPI()
+    app.add_exception_handler(DomainError, domain_error_handler)
     app.include_router(auth, prefix="/api")
 
     async def override_db():
@@ -69,15 +72,11 @@ async def test_total_count_header_and_keyword_are_forwarded(monkeypatch) -> None
     app, captured = _build_client(monkeypatch, (_visible_rows(), 7))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(
-            "/api/auth/users/access-options", params={"keyword": "张", "skip": 0, "limit": 100}
-        )
+        response = await client.get("/api/auth/users/access-options", params={"keyword": "张", "skip": 0, "limit": 100})
 
     assert response.status_code == 200, response.text
     assert response.headers["X-Total-Count"] == "7"
-    assert response.json() == [
-        {"uid": "u1", "username": "张三", "department_id": 1, "department_name": "默认部门"}
-    ]
+    assert response.json() == [{"uid": "u1", "username": "张三", "department_id": 1, "department_name": "默认部门"}]
     assert captured["permission_key"] == "user:read"
     assert captured["keyword"] == "张"
     assert captured["limit"] == 100
@@ -90,8 +89,6 @@ async def test_unreachable_department_returns_404(monkeypatch) -> None:
     app, _captured = _build_client(monkeypatch, None)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(
-            "/api/auth/users/access-options", params={"department_id": 999}
-        )
+        response = await client.get("/api/auth/users/access-options", params={"department_id": 999})
 
     assert response.status_code == 404

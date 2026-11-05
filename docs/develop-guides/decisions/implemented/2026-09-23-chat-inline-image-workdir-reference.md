@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/services/attachment_service.py
+Owner：backend/yuxi/modules/agents/services/attachments.py
+
+## 当前迁移状态
+
+2026-11-02：上述新 Owner 保留内联多图参考文件，不恢复旧附件 manifest 协议。测试回读真实 Workdir 字节，验证两张图片路径独立、同输入重试不重复、无图不注入路径、非法/超限输入不落盘，以及写入失败仍保留原始多模态消息。完整 worker/沙盒 E2E 尚未在本次合并环境执行。
 
 ## 问题
 
@@ -10,11 +14,11 @@ Owner：backend/package/yuxi/services/attachment_service.py
 
 ## 决策
 
-在 worker 持有的 PreparedRunExecution 中，chat_service 遍历本轮持久化 HumanMessage 的全部图片块。通过当前用户与 context.workdir_relative_path 打开既有 Workdir，调用 persist_inline_chat_image，经 no-follow 文件边界写入 uploads，再将返回记录加入本轮 attachment_context。
+在 worker 持有的 PreparedRunExecution 中，agents/services/execution.py 遍历本 Run 持久化 HumanMessage 的全部内联图片块。通过 Session 的用户、APP 与 Project 重新解析已授权 Workdir，调用 persist_inline_chat_image，经 no-follow 文件边界原子写入 uploads，再将返回记录加入对应消息的 attachment_context。
 
-首张文件名为 `chat-image-<request_id>.<ext>`，后续为 `chat-image-<request_id>-<序号>.<ext>`。重试覆盖同一文件，不生成随机副本。文件内容为持久化消息里的图片字节；格式按魔数识别 PNG/JPEG/GIF/WEBP/BMP。
+文件名为 `chat-image-<message_id>-<block_index>.<ext>`，持久消息 ID 与块序号共同绑定来源。重试覆盖同一文件，不生成随机副本。文件内容为持久化消息里的图片字节；格式按魔数识别 PNG/JPEG/GIF/WEBP/BMP。
 
-记录不写入会话附件元数据。解码失败或格式未知返回 None；写盘失败记 warning，不阻断原始多模态输入。路径来自 Workdir 映射，不混用宿主和 Sandbox 路径。模型是否需要转述由后续[输入模态声明决定](2026-09-24-model-input-modalities-declaration.md)。
+记录不写入会话附件元数据。解码失败、格式未知或超出附件大小上限返回 None；写盘失败记结构化 warning，不阻断原始多模态输入。路径来自 Workdir 映射，不混用宿主和 Sandbox 路径。模型是否需要转述由后续[输入模态声明决定](2026-09-24-model-input-modalities-declaration.md)。
 
 ## 替代方案
 

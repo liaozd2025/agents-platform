@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/services/image_input_service.py
+Owner：backend/yuxi/modules/agents/services/image_input.py
 
 ## 问题
 

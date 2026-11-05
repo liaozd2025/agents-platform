@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/views/LoginView.vue
+Owner：frontend/src/pages/LoginView.vue
 
 ## 问题
 

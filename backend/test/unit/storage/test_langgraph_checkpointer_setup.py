@@ -2,8 +2,9 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from yuxi.storage.postgres import manager as manager_module
-from yuxi.storage.postgres.manager import PostgresManager
+import yuxi.infrastructure.postgres.manager as manager_module
+import yuxi.infrastructure.postgres.checkpointer as checkpointer_module
+from yuxi.infrastructure.postgres.manager import PostgresManager
 
 
 def test_langgraph_pool_checks_connections_before_checkout(monkeypatch):
@@ -74,7 +75,7 @@ async def test_langgraph_setup_uses_cross_process_advisory_lock(monkeypatch):
     """官方 checkpoint migration 必须被 PostgreSQL advisory lock 包围。"""
     manager = object.__new__(PostgresManager)
     manager._initialized = True
-    manager._langgraph_checkpointer_setup = False
+    manager.langgraph_checkpointer_setup = False
     statements = []
 
     class Connection:
@@ -82,9 +83,11 @@ async def test_langgraph_setup_uses_cross_process_advisory_lock(monkeypatch):
             statements.append(statement)
             return SimpleNamespace(fetchone=_true_row)
 
+    held_connection = Connection()
+
     @asynccontextmanager
     async def connection():
-        yield Connection()
+        yield held_connection
 
     async def setup():
         statements.append("setup")
@@ -92,9 +95,17 @@ async def test_langgraph_setup_uses_cross_process_advisory_lock(monkeypatch):
     saver = SimpleNamespace(setup=setup)
     manager.langgraph_pool = SimpleNamespace(connection=connection)
     manager.langgraph_checkpointer = saver
-    monkeypatch.setattr(manager_module, "AsyncPostgresSaver", lambda conn: saver)
+    def connection_saver(conn):
+        assert conn is held_connection, "checkpoint DDL 必须使用持锁连接"
+        return SimpleNamespace(setup=setup)
 
-    assert await manager.setup_langgraph_checkpointer() is saver
+    async def reject_pool_setup():
+        raise AssertionError("不能通过池另借连接执行 DDL")
+
+    saver.setup = reject_pool_setup
+    monkeypatch.setattr(checkpointer_module, "AsyncPostgresSaver", connection_saver)
+
+    assert await checkpointer_module.setup_langgraph_checkpointer(manager) is saver
     assert statements == [
         "SELECT pg_advisory_lock(94721802)",
         "setup",
@@ -107,7 +118,7 @@ async def test_langgraph_setup_discards_connection_when_unlock_fails(monkeypatch
     """无法确认 advisory lock 已释放时不能把持锁 session 放回池中。"""
     manager = object.__new__(PostgresManager)
     manager._initialized = True
-    manager._langgraph_checkpointer_setup = False
+    manager.langgraph_checkpointer_setup = False
     connection_closed = False
 
     class Connection:
@@ -126,13 +137,13 @@ async def test_langgraph_setup_discards_connection_when_unlock_fails(monkeypatch
 
     manager.langgraph_pool = SimpleNamespace(connection=connection)
     manager.langgraph_checkpointer = SimpleNamespace(setup=_noop)
-    monkeypatch.setattr(manager_module, "AsyncPostgresSaver", lambda conn: SimpleNamespace(setup=_noop))
+    monkeypatch.setattr(checkpointer_module, "AsyncPostgresSaver", lambda conn: SimpleNamespace(setup=_noop))
 
     with pytest.raises(RuntimeError, match="unlock failed"):
-        await manager.setup_langgraph_checkpointer()
+        await checkpointer_module.setup_langgraph_checkpointer(manager)
 
     assert connection_closed is True
-    assert manager._langgraph_checkpointer_setup is False
+    assert manager.langgraph_checkpointer_setup is False
 
 
 async def _true_row():

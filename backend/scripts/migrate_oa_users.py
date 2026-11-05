@@ -7,20 +7,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from decimal import Decimal, InvalidOperation
 import json
 import logging
 import os
 import secrets
 import sys
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.request import Request, urlopen
 
 from sqlalchemy import select
 
 APP_ROOT = Path(__file__).resolve().parents[1]
-for import_path in (APP_ROOT, APP_ROOT / "package"):
+for import_path in (APP_ROOT,):
     if str(import_path) not in sys.path:
         sys.path.insert(0, str(import_path))
 
@@ -76,9 +76,7 @@ def build_migration_actions(
         )
         for row in existing_users
     }
-    stable_uid_owners = {
-        row[3]: row[0] for row in existing_users if len(row) > 3 and row[3]
-    }
+    stable_uid_owners = {row[3]: row[0] for row in existing_users if len(row) > 3 and row[3]}
     seen: set[str] = set()
     actions: list[MigrationAction] = []
 
@@ -203,7 +201,7 @@ def fetch_oa_access_code(user_page_url: str, license_file: str, timeout: float) 
     secret_key = Path(license_file).read_text(encoding="utf-8").strip()
     if not secret_key:
         raise ValueError("OA 授权文件为空")
-    code_url = f"{user_page_url.rstrip('/')[:-len(suffix)]}/SimpleAuth/GetCode"
+    code_url = f"{user_page_url.rstrip('/')[: -len(suffix)]}/SimpleAuth/GetCode"
     request = Request(
         code_url,
         data=json.dumps({"SecretKey": secret_key}).encode(),
@@ -227,10 +225,10 @@ def resolve_oa_access_code(args: argparse.Namespace) -> str | None:
 
 async def apply_actions(actions: list[MigrationAction]) -> None:
     """在单个事务中执行创建和部门更新动作。"""
-    from yuxi.repositories.user_repository import UserRepository
-    from yuxi.storage.postgres.manager import pg_manager
-    from yuxi.storage.postgres.models_business import User
-    from yuxi.utils.auth_utils import AuthUtils
+    from yuxi.infrastructure.postgres.manager import pg_manager
+    from yuxi.modules.identity.models import User
+    from yuxi.modules.identity.repositories.users import UserRepository
+    from yuxi.modules.identity.security import AuthUtils
 
     async with pg_manager.get_async_session_context() as session:
         repository = UserRepository()
@@ -246,7 +244,13 @@ async def apply_actions(actions: list[MigrationAction]) -> None:
                 if action.display_name is not None:
                     user.display_name = action.display_name
                 # 日志只记录更新类别，避免输出人员姓名等敏感信息。
-                LOGGER.info("更新 OA 用户资料：账号=%s，更新部门=%s，更新稳定UID=%s，更新展示姓名=%s", action.account, action.department_id is not None, action.uid is not None, action.display_name is not None)
+                LOGGER.info(
+                    "更新 OA 用户资料：账号=%s，更新部门=%s，更新稳定UID=%s，更新展示姓名=%s",
+                    action.account,
+                    action.department_id is not None,
+                    action.uid is not None,
+                    action.display_name is not None,
+                )
             elif action.action == "conflict":
                 raise RuntimeError(f"稳定 OA 身份键冲突：{action.account}")
             elif action.action == "create":
@@ -266,8 +270,8 @@ async def apply_actions(actions: list[MigrationAction]) -> None:
 
 async def load_database_inputs() -> tuple[list[tuple[int, int | None]], list[tuple[int, str, int | None, str | None, str | None]]]:
     """读取部门和未删除用户，供计划计算使用。"""
-    from yuxi.storage.postgres.manager import pg_manager
-    from yuxi.storage.postgres.models_business import Department, User
+    from yuxi.infrastructure.postgres.manager import pg_manager
+    from yuxi.modules.identity.models import Department, User
 
     async with pg_manager.get_async_session_context() as session:
         department_rows = (await session.execute(select(Department.id, Department.oa_department_id))).all()
@@ -306,12 +310,13 @@ async def run(args: argparse.Namespace) -> int:
     if not args.url:
         LOGGER.error("请提供 --url 或 OA_USER_MIGRATION_URL")
         return 2
-    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.infrastructure.postgres.manager import pg_manager
 
     try:
         pg_manager.initialize()
-        await pg_manager.create_business_tables()
-        await pg_manager.ensure_business_schema()
+        from yuxi.infrastructure.postgres.schema import require_current_schema
+
+        await require_current_schema(pg_manager)
         code = resolve_oa_access_code(args)
         if not code:
             LOGGER.error("请配置 OA_USER_MIGRATION_LICENSE_FILE")

@@ -6,7 +6,7 @@ from zipfile import ZipFile
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
-from yuxi.utils.filepreview import render_preview
+from yuxi.infrastructure.file_preview import prepare_file_preview
 
 
 def test_xlsx_preview_preserves_sheets_values_merges_and_formula_warning():
@@ -33,7 +33,7 @@ def test_xlsx_preview_preserves_sheets_values_merges_and_formula_warning():
             if item.filename == "xl/worksheets/sheet1.xml":
                 data = data.replace(b"<f>10+20</f><v></v>", b"<f>10+20</f><v>99</v>")
             target.writestr(item, data)
-    result = render_preview("工作簿.XLSX", output.getvalue())
+    result = prepare_file_preview("工作簿.XLSX", output.getvalue())
     assert result.supported is True
     assert result.preview_type == "spreadsheet"
     sheets = result.payload()["content"]["sheets"]
@@ -52,7 +52,7 @@ def test_xls_preview_preserves_legacy_workbook():
     from pathlib import Path
 
     content = (Path(__file__).parents[2] / "fixtures/office/readonly.xls").read_bytes()
-    result = render_preview("旧版.xls", content)
+    result = prepare_file_preview("旧版.xls", content)
     assert result.supported is True
     sheets = result.content["sheets"]
     assert [s["name"] for s in sheets] == ["销售", "说明"]
@@ -65,14 +65,14 @@ def test_xls_preview_preserves_legacy_workbook():
 def test_spreadsheet_rejects_corruption_and_oversized_grid_without_truncation():
     """损坏文件和稀疏超大范围均明确失败，不返回部分成功。"""
     for name in ["broken.xlsx", "encrypted.xls"]:
-        result = render_preview(name, b"not an office document")
+        result = prepare_file_preview(name, b"not an office document")
         assert result.supported is False
         assert "下载" in result.message
     book = Workbook()
     book.active["A100001"] = "不能静默遗漏"
     buffer = BytesIO()
     book.save(buffer)
-    result = render_preview("large.xlsx", buffer.getvalue())
+    result = prepare_file_preview("large.xlsx", buffer.getvalue())
     assert result.supported is False
     assert result.truncated is False
     assert "100000" in result.message
@@ -81,25 +81,25 @@ def test_spreadsheet_rejects_corruption_and_oversized_grid_without_truncation():
 def test_spreadsheet_rejects_zip_expansion_and_oversized_input():
     """压缩包展开预算和原文件大小分别受限。"""
     from zipfile import ZIP_DEFLATED
-    from yuxi.utils.filepreview import MAX_BINARY_PREVIEW_SIZE_BYTES
+    from yuxi.shared.files import MAX_FILE_PREVIEW_BYTES
 
     buffer = BytesIO()
     with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
         archive.writestr("large.xml", b"x" * (64 * 1024 * 1024 + 1))
-    result = render_preview("bomb.xlsx", buffer.getvalue())
+    result = prepare_file_preview("bomb.xlsx", buffer.getvalue())
     assert result.supported is False
     assert "64 MB" in result.message
-    result = render_preview("large.xls", b"x" * (MAX_BINARY_PREVIEW_SIZE_BYTES + 1))
+    result = prepare_file_preview("large.xls", b"x" * (MAX_FILE_PREVIEW_BYTES + 1))
     assert result.supported is False
-    assert "30 MB" in result.message
+    assert "50 MB" in result.message
 
 
 def test_spreadsheet_timeout_stops_parser(monkeypatch):
     """超时杀死真实解析子进程并返回可恢复提示。"""
-    from yuxi.utils import spreadsheet_preview
+    from yuxi.infrastructure import spreadsheet_preview
 
     monkeypatch.setattr(spreadsheet_preview, "SPREADSHEET_TIMEOUT_SECONDS", 0.000001)
-    result = render_preview("slow.xlsx", b"content")
+    result = prepare_file_preview("slow.xlsx", b"content")
     assert result.supported is False
     assert "超时" in result.message
 
@@ -110,7 +110,7 @@ def test_spreadsheet_rejects_excessive_zip_entries():
     with ZipFile(buffer, "w") as archive:
         for index in range(10001):
             archive.writestr(f"entry-{index}", b"")
-    result = render_preview("many-entries.xlsx", buffer.getvalue())
+    result = prepare_file_preview("many-entries.xlsx", buffer.getvalue())
     assert result.supported is False
     assert result.truncated is False
     assert "文件项过多" in result.message
@@ -123,7 +123,7 @@ def test_spreadsheet_rejects_oversized_response_without_partial_content():
         book.active.cell(row, 1, "x" * 30000)
     buffer = BytesIO()
     book.save(buffer)
-    result = render_preview("long-text.xlsx", buffer.getvalue())
+    result = prepare_file_preview("long-text.xlsx", buffer.getvalue())
     assert result.supported is False
     assert result.content is None
     assert result.truncated is False
@@ -139,7 +139,7 @@ def test_xls_preview_uses_saved_formula_result_without_recalculation():
     empty_cache = b"\x03\x00\x00\x00\x00\x00\xff\xff"
     assert content.count(empty_cache) == 1
     content = content.replace(empty_cache, struct.pack("<d", 99.0))
-    result = render_preview("cached.xls", content)
+    result = prepare_file_preview("cached.xls", content)
     assert result.supported is True
     assert result.content["sheets"][0]["rows"][1][1]["text"] == "99"
 
@@ -153,7 +153,33 @@ def test_spreadsheet_rejects_merges_exceeding_native_table_spans():
         sheet.merge_cells(area)
         buffer = BytesIO()
         book.save(buffer)
-        result = render_preview("wide-merge.xlsx", buffer.getvalue())
+        result = prepare_file_preview("wide-merge.xlsx", buffer.getvalue())
         assert result.supported is False
         assert result.content is None
         assert "合并跨度" in result.message
+
+
+def test_fifty_mb_workbook_reaches_parser_and_larger_worker_input_is_rejected():
+    """实际子进程预览恰好 50 MB 的工作簿，并拒绝多一字节的输入。"""
+    from yuxi.infrastructure.spreadsheet_preview import preview_spreadsheet
+
+    book = Workbook()
+    book.active["A1"] = "50 MB preview boundary"
+    buffer = BytesIO()
+    book.save(buffer)
+    original = buffer.getvalue()
+    target_size = 50 * 1024 * 1024
+    padding_name = "preview-padding.bin"
+    empty_padding = BytesIO(original)
+    with ZipFile(empty_padding, "a") as archive:
+        archive.writestr(padding_name, b"")
+    padded = BytesIO(original)
+    with ZipFile(padded, "a") as archive:
+        archive.writestr(padding_name, b"\0" * (target_size - len(empty_padding.getvalue())))
+    content = padded.getvalue()
+    assert len(content) == target_size
+    result = prepare_file_preview("boundary.xlsx", content)
+    assert result.supported is True, result.message
+    assert result.content["sheets"][0]["rows"][0][0]["text"] == "50 MB preview boundary"
+    rejected = preview_spreadsheet(".xlsx", content + b"\0")
+    assert rejected == {"error": "文件过大，当前仅支持 50 MB 以内的文件预览"}

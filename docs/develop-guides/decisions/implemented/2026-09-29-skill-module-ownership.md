@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：architecture
-Owner：backend/package/yuxi/services/skills/shared.py
+Owner：backend/yuxi/modules/extensions/skills/shared.py
 
 ## 问题
 
@@ -12,9 +12,9 @@ Skill 安装和管理用例曾散落在 `agents/skills` 与顶层 `services`；�
 
 ### 实现方案
 
-共享、个人、草稿、远程获取、编辑和投影用例位于 `yuxi.services.skills`；Skill 数据库访问位于 `yuxi.repositories.skill_repository`。包解析、快照复制及包内 slug 改写集中在 `services/skills/package.py`，来源描述位于同目录 `resolved.py`；用例、Agent 运行时和存储迁移直接导入这些实际模块。`yuxi.agents.skills` 保留运行时 Skill 解析和内置 Skill 资源。HTTP 路由、worker、存储迁移与测试都直接导入新的语义 Owner；旧模块路径不保留兼容转发。
+共享、个人、草稿、远程获取、编辑和投影用例与运行时解析统一位于 `yuxi.modules.extensions.skills`；同目录 `repository.py` 拥有数据库查询，`models.py` 拥有 Skill ORM，`builtin/` 提供随代码发布的资源。`package.py` 集中包解析、快照复制和 slug 改写，`resolved.py` 描述来源。API、worker 与 Agent 直接导入实际 Owner，旧模块路径不提供兼容转发。
 
-这次模块迁移不改变 HTTP 契约、持久数据、安装结果或运行时选择语义。远程获取的公开入口位于私有执行与解析细节之前；个人 Skill 的确认与文件操作由 `services/skills/personal.py` 集中持有，`workspace.paths` 只提供用户工作区根与校验原语。
+`edit.py` 拥有读取及已公开文件/依赖 HTTP 契约的适配，`content.py` 拥有受管理 Skill 的资源锁、完整内容修订、不可变目录与数据库引用提交；文件发布和失败边界由[完整内容提交决定](./2026-10-05-skill-content-commit.md)解释，不再原地替换或恢复旧文件；`projection.py` 拥有授权快照、共享行锁到用户投影锁的顺序和投影刷新；`runtime.py` 在预加载读取完成前保持共享行锁。个人来源由 `personal.py` 持有，文件访问复用 `modules/workspace/paths.py` 与 filesystem 原语。Agent 的 Input/Turn/Run、事务提交与投递顺序继续由 Agent 模块拥有；API 的文件响应继续消费 `PreparedFile` 或预览结果。
 
 简单共享查询由调用方直接使用 `SkillRepository`，service 不提供逐方法转发。内置来源筛选由 repository 的 SQL 查询执行，保留原有排序。service 保留组合查询、安装、授权与一致性用例。
 
@@ -26,8 +26,10 @@ Skill 安装和管理用例曾散落在 `agents/skills` 与顶层 `services`；�
 
 ## 后果
 
-调用方按运行时、用例、格式和数据库边界定位 Skill 代码。包格式与文件复制归属 Skill service 内部模块，`workspace` 不依赖这些模块；`services/skills/shared.py` 仍通过 Agent 内置资源目录发现随代码发布的 Skill。旧 Python 模块路径的仓库外消费者需要同步迁移。
+调用方按运行时、用例、格式和数据库边界定位 Skill 代码。包格式与文件复制归属 Skill service 内部模块，`workspace` 不依赖这些模块；`modules/extensions/skills/shared.py` 从同域 `builtin/` 发现随代码发布的 Skill。旧 Python 模块路径的仓库外消费者需要同步迁移。
 
 ## 验证
 
-旧路径搜索、工程契约检查及其 63 项测试通过；完整后端 non-slow unit 为 2454 passed、58 skipped，相关真实 HTTP/PostgreSQL integration 为 7 passed，共享编辑到真实 worker 的确定性 E2E 为 1 passed。锁定版本 Ruff 的 lint、format 和 import 检查，以及前端 lint、394 项 unit、生产构建和文档构建通过。命令与未验证范围见[共享 Skill 编辑验证](./2026-09-28-shared-skill-edit.md#验证)。
+合并后的相关后端单测通过 184 项，覆盖编辑修订值冲突、文件/索引回滚、授权、草稿和运行时解析；前端相关单测通过 13 项。工程信任检查及 64 项测试、Ruff 与单测收集通过。测试环境显式加载分域 ORM，独立运行 Skills 测试无需依赖其他测试的导入顺序。
+
+上游真实 PostgreSQL/HTTP 与 worker 验证见[共享 Skill 编辑验证](./2026-09-28-shared-skill-edit.md#验证)。这些结果只对应上游版本；合并后的 integration/E2E 依用户要求只做收集，待后续调整完成再执行。新增共享编辑 E2E 使用当前 Thread/Input/Turn 接口并回读投影文件与 Run 清单。

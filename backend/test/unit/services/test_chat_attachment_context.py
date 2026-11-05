@@ -1,26 +1,6 @@
-import base64
-from pathlib import Path
-
-import pytest
 from langchain.messages import HumanMessage
 
-from yuxi.services.attachment_service import persist_inline_chat_image
-from yuxi.services.chat_service import _with_attachment_context
-
-WORKDIR_RELATIVE_PATH = "projects/11111111-1111-4111-8111-111111111111"
-
-
-class _FakeWorkdir:
-    """只记录写入 scope 的最小 Workdir 替身。"""
-
-    relative_path = WORKDIR_RELATIVE_PATH
-
-    def __init__(self):
-        self.files: dict[str, bytes] = {}
-
-    def copy_file_from_path(self, scope: str, source_path: str, *, overwrite: bool = True):
-        del overwrite
-        self.files[scope] = Path(source_path).read_bytes()
+from yuxi.modules.agents.services.execution import _with_attachment_context
 
 
 def test_attachment_context_is_added_only_to_model_message():
@@ -31,7 +11,7 @@ def test_attachment_context_is_added_only_to_model_message():
         [
             {
                 "file_name": "report.pdf",
-                "path": "/home/gem/user-data/projects/project-1/uploads/report.pdf",
+                "path": "/home/user/workspace/projects/project-1/uploads/report.pdf",
             }
         ],
     )
@@ -48,7 +28,7 @@ def test_attachment_context_preserves_multimodal_content_blocks():
 
     model_message = _with_attachment_context(
         original,
-        [{"file_name": "notes.md", "path": "/home/gem/user-data/projects/project-1/uploads/notes.md"}],
+        [{"file_name": "notes.md", "path": "/home/user/workspace/projects/project-1/uploads/notes.md"}],
     )
 
     assert model_message.content[:2] == original.content
@@ -62,25 +42,82 @@ def test_attachment_context_ignores_records_without_paths():
     assert _with_attachment_context(original, [{"file_name": "missing"}]) is original
 
 
-@pytest.mark.asyncio
-async def test_inline_chat_image_path_reaches_model_input():
-    """聊天输入的内联图片落盘后，参考图路径必须出现在本轮模型输入中。"""
-    workdir = _FakeWorkdir()
-    record = await persist_inline_chat_image(
-        workdir=workdir,
-        image_content=base64.b64encode(b"\x89PNG\r\n\x1a\nfake-png-body").decode("utf-8"),
-        request_id="req-1",
+async def test_inline_images_reach_model_with_distinct_persisted_paths(tmp_path, monkeypatch):
+    """两张真实输入图片分别落盘，并在各自消息中保留路径和原始多模态内容。"""
+    import base64
+
+    from yuxi.modules.agents.services.execution import _with_inline_image_paths
+    from yuxi.modules.workspace.filesystem import Workspace
+    from yuxi.modules.workspace.paths import ensure_user_workspace
+    from yuxi.modules.workspace.workdir import Workdir
+
+    monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path))
+    ensure_user_workspace("inline-owner")
+    workdir = Workdir("projects/inline", Workspace("inline-owner"))
+    images = [b"\x89PNG\r\n\x1a\nfirst", b"\xff\xd8\xffsecond"]
+    original = HumanMessage(
+        content=[
+            {"type": "text", "text": "比较两张图"},
+            *[
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(content).decode()}}
+                for content in images
+            ],
+        ]
     )
-    assert record is not None
+    enriched = await _with_inline_image_paths(original, workdir=workdir, message_id=7)
+    repeated = await _with_inline_image_paths(original, workdir=workdir, message_id=7)
+    assert enriched.content[:3] == original.content
+    text = enriched.content[-1]["text"]
+    assert "chat-image-7-1.png" in text and "chat-image-7-2.jpg" in text
+    assert repeated.content == enriched.content
+    assert workdir.read_file("/uploads/chat-image-7-1.png", 100) == images[0]
+    assert workdir.read_file("/uploads/chat-image-7-2.jpg", 100) == images[1]
+    assert len(workdir.list_directory("/uploads")) == 2
+    other = await _with_inline_image_paths(HumanMessage("没有图片"), workdir=workdir, message_id=8)
+    assert "<attachment_context>" not in other.content
 
-    message = _with_attachment_context(HumanMessage(content="根据这张图片生成种草图"), [record])
 
-    assert "chat-image-req-1.png" in message.content
-    assert record["path"] in message.content
+async def test_unverified_inline_bytes_never_advertise_a_file(tmp_path, monkeypatch):
+    """损坏base64及未知格式不产生虚构参考路径或工作区写入。"""
+    from unittest.mock import Mock
+
+    from yuxi.modules.agents.services.attachments import persist_inline_chat_image
+
+    workdir = Mock()
+    for image in ("not-base64!!", "cGxhaW4gdGV4dA=="):
+        assert await persist_inline_chat_image(workdir=workdir, image_content=image, request_id="invalid") is None
+    workdir.copy_file_from_stream.assert_not_called()
 
 
-def test_model_input_has_no_reference_path_without_inline_image_record():
-    """落盘被拒或没有内联图片时，模型输入不得出现参考图路径（原缺陷状态）。"""
-    message = _with_attachment_context(HumanMessage(content="根据这张图片生成种草图"), [])
+async def test_oversized_inline_image_never_writes_reference_file(monkeypatch):
+    """有效图片签名不能绕过附件大小边界。"""
+    import base64
+    from unittest.mock import Mock
 
-    assert "<attachment_context>" not in message.content
+    from yuxi.modules.agents.services import attachments
+
+    monkeypatch.setattr(attachments, "MAX_ATTACHMENT_SIZE_BYTES", 8)
+    workdir = Mock()
+    image = base64.b64encode(b"\x89PNG\r\n\x1a\nextra").decode()
+    assert await attachments.persist_inline_chat_image(workdir=workdir, image_content=image, request_id="oversized") is None
+    workdir.copy_file_from_stream.assert_not_called()
+
+
+async def test_reference_write_failure_preserves_original_multimodal_input():
+    """可选参考文件写入失败时继续原始图片输入，不声称文件已发布。"""
+    import base64
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from yuxi.modules.agents.services.execution import _with_inline_image_paths
+
+    workdir = SimpleNamespace(copy_file_from_stream=Mock(side_effect=OSError("disk full")))
+    original = HumanMessage(
+        content=[
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nimage").decode()}}
+        ]
+    )
+    result = await _with_inline_image_paths(original, workdir=workdir, message_id=8)
+    assert result is original
+    assert "attachment_context" not in str(result.content)
+    workdir.copy_file_from_stream.assert_called_once()

@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/utils/projectSelection.js
+Owner：frontend/src/modules/projects/model/projectSelection.js
 
 ## 问题
 

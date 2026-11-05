@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/agents/buildin/chatbot/prompt.py
+Owner：backend/yuxi/modules/agents/runtime/agent_backends/chatbot/prompt.py
+
+## 当前迁移状态
+
+2026-11-02：运行时在追加工作区内容前记录 system_prompt_is_custom；新版 Chatbot prompt 继续据此让自定义身份优先，不恢复旧 SubAgentBackend 文件。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

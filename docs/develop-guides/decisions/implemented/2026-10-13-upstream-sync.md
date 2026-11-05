@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：architecture
-Owner：backend/package/yuxi/services/agent_request_service.py
+Owner：backend/yuxi/modules/agents/services/inputs.py
 
 ## 问题
 

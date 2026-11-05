@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/services/conversation_service.py
+Owner：backend/yuxi/modules/agents/services/checkpoint_messages.py
+
+## 当前迁移状态
+
+2026-11-02：取消后的部分输出由新 checkpoint message 服务保存；公开历史由 public_items 投影读取。旧 Request/Conversation 协议与本文原验证属于历史版本。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

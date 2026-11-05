@@ -2,7 +2,7 @@
 
 状态：archived
 类型：bug-fix
-Owner：web/src/components/AgentChatComponent.vue
+Owner：frontend/src/components/AgentChatComponent.vue
 
 ## 问题
 
@@ -41,10 +41,10 @@ Owner：web/src/components/AgentChatComponent.vue
 | 交付物预览保留原始下载语义 | artifact service/router unit 覆盖预览 renderer、超限和查询参数；`test_chat_router.py` 通过真实 HTTP 验证 Markdown JSON preview 与原始字节下载 | Passed |
 | 同路径 artifact 重生成后不复用旧预览 | `agentPanelSections.test.js` 约束 Run 刷新先失效 artifact cache 再重新读取 | Passed |
 | DOCX/PPTX artifact 在真实 HTTP 中转换为 PDF 并由浏览器展示 | 未执行真实 Office 转换和页面验证 | Not run |
-| 前端 lint、unit 与生产构建成立 | `cd web && pnpm run lint:check && pnpm run test:unit && pnpm run build` | Passed；构建仅有既有第三方注释和大 chunk warning |
+| 前端 lint、unit 与生产构建成立 | `cd frontend && pnpm run lint:check && pnpm run test:unit && pnpm run build` | Passed；构建仅有既有第三方注释和大 chunk warning |
 | 决策记录可由文档站点完整构建 | `cd docs && pnpm run build` | Passed；保留既有语法高亮、Rolldown 插件和大 chunk warning |
 | 工程契约与 staged diff 格式成立 | `python3 scripts/verify_engineering_contracts.py`；`python3 -m unittest scripts.test_verify_engineering_contracts`；`git diff --cached --check` | Passed |
 | 状态面板在真实历史对话中按内容收缩 | 真实 Compose 页面打开含一个附件的状态面板，面板为 340×131px，body 的 clientHeight 与 scrollHeight 均为 89px，不占满聊天区 | Inspected |
 | hover、超限滚动、键盘焦点、纯触屏、暗色与更多响应式视觉完整 | 未构造全部交互状态 | Not run |
 
-子任务状态来源由[独立子 Run 观察](../../../implemented/2026-09-17-subagent-independent-observation.md)取代；父 state 仍提供子任务身份，历史 task 描述继续展示。
+子任务状态来源由[独立子 Run 观察](../../../archived/2026-09-17-subagent-independent-observation.md)取代；父 state 仍提供子任务身份，历史 task 描述继续展示。

@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/services/agent_request_queue_service.py
+Owner：backend/yuxi/modules/agents/services/scheduler.py
+
+## 当前迁移状态
+
+2026-11-02：串行恢复扫描迁入 Input/Turn scheduler，当前消费和投递仍分别遵守 owning transaction 的提交点；旧 Request 队列测试已退役。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/utils/filepreview.py
+Owner：backend/yuxi/infrastructure/file_preview.py
 
 ## 问题
 
@@ -12,7 +12,7 @@ Owner：backend/package/yuxi/utils/filepreview.py
 
 已确认格式范围为上述六种，覆盖工作区、会话文件、Agent 产物和知识库原文件的现有预览入口。Excel 使用只读表格，支持全部可见工作表切换、滚动查看单元格，保留单元格内容、已保存的公式结果、合并单元格和基本格式。缺少已保存公式结果时明确提示；编辑、重新计算公式、图表、图片和复杂排版不在本次验收范围。
 
-已确认的异常与展示边界：Word 和 PowerPoint 沿用静态 PDF 预览，不播放动画、音视频；保留 30 MB 文件上限，并对 Excel 展开规模设置有界保护；加密、损坏、超限或转换失败时说明原因并保留原文件下载，避免静默截断内容。
+已确认的异常与展示边界：Word 和 PowerPoint 沿用静态 PDF 预览，不播放动画、音视频；保留 50 MB 文件上限，并对 Excel 展开规模设置有界保护；加密、损坏、超限或转换失败时说明原因并保留原文件下载，避免静默截断内容。
 
 通用格式与转换由 `backend/package/yuxi/utils/filepreview.py` 拥有，工作区与知识库保留各自存储、授权和缓存边界，遵循[既有 Owner 决策](../archived/0.7.3/05-storage-workdir/2026-08-21-preview-owner-separation.md)。前端格式归一化由 `web/src/utils/file_preview.js` 拥有；`SpreadsheetPreview.vue` 使用原生表格渲染，后端 openpyxl 读取 XLSX、xlrd 读取 XLS，均只使用原文件保存值。Excel 解析在资源受限的独立子进程中执行。
 
@@ -23,7 +23,7 @@ Owner：backend/package/yuxi/utils/filepreview.py
 
 ## 后果
 
-Excel 已保存的公式结果可能与外部数据不同步，预览按文件保存状态展示。压缩文件大小不能代表工作簿展开规模，需限制解析和渲染资源。基本格式范围为粗体、斜体、字体色、填充色、水平对齐、常用十进制、千分位、百分数和货币；日期显示 ISO 值，复杂自定义数字格式显示原值并保留格式提示。预览拒绝超过 30 MB 的原文件、64 MB 的 XLSX 解压总量、10000 个 ZIP 项、100000 个可见表格位置或 16 MB 的响应内容。原生表格合并跨度最多 1000 列、65534 行，超出时拒绝预览以防浏览器静默错列。Excel 解析受 1 GiB 地址空间、20 秒 CPU 和 30 秒墙钟时间约束，超限明确失败。
+Excel 已保存的公式结果可能与外部数据不同步，预览按文件保存状态展示。压缩文件大小不能代表工作簿展开规模，需限制解析和渲染资源。基本格式范围为粗体、斜体、字体色、填充色、水平对齐、常用十进制、千分位、百分数和货币；日期显示 ISO 值，复杂自定义数字格式显示原值并保留格式提示。预览拒绝超过 50 MB 的原文件、64 MB 的 XLSX 解压总量、10000 个 ZIP 项、100000 个可见表格位置或 16 MB 的响应内容。原生表格合并跨度最多 1000 列、65534 行，超出时拒绝预览以防浏览器静默错列。Excel 解析受 1 GiB 地址空间、20 秒 CPU 和 30 秒墙钟时间约束，超限明确失败。
 
 ## 验证
 

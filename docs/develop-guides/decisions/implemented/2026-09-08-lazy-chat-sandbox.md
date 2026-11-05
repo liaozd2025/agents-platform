@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/services/chat_service.py
+Owner：backend/yuxi/modules/agents/runtime/sandbox/backend.py
+
+## 当前迁移状态
+
+2026-11-02：当前执行环境采用新版 sandbox adapter 和 Cube/container 边界；旧 PI/provisioner 时序属于历史实现，不以本文历史通过结果证明当前环境验收。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 PI 执行相关部分由 [PI 退役决策](../implemented/2026-09-18-retire-pi-executor.md) 取代；本记录中的对应验证仅代表退役前版本。
 

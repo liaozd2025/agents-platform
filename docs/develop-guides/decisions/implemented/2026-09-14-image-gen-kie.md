@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/agents/skills/buildin/image-gen/scripts/image_gen.py
+Owner：backend/yuxi/modules/extensions/skills/builtin/image-gen/scripts/image_gen.py
+
+## 当前迁移状态
+
+2026-11-02：Kie 脚本迁至 extensions/skills/builtin/image-gen，当前 sandbox 路径与环境配置以新版技能和执行环境为准；不把原生产补丁视为本次已部署。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 
@@ -10,7 +14,7 @@ image-gen 需要通过 Kie 提供 GPT Image 2 和 Nano Banana 2 的文生图与�
 
 ## 决策
 
-用户确认两个模型均支持文生图与参考图编辑，默认 GPT Image 2，采用平台统一 KIE_API_KEY。[技能脚本](https://github.com/liaozd2025/agents-platform/blob/main/backend/package/yuxi/agents/skills/buildin/image-gen/scripts/image_gen.py)拥有请求参数、异步任务查询和图片落盘；[技能说明](https://github.com/liaozd2025/agents-platform/blob/main/backend/package/yuxi/agents/skills/buildin/image-gen/SKILL.md)拥有 Agent 的调用流程；内置注册更新版本，使整个技能目录随现有同步机制分发。
+用户确认两个模型均支持文生图与参考图编辑，默认 GPT Image 2，采用平台统一 KIE_API_KEY。[技能脚本](https://github.com/liaozd2025/agents-platform/blob/main/backend/yuxi/modules/extensions/skills/builtin/image-gen/scripts/image_gen.py)拥有请求参数、异步任务查询和图片落盘；[技能说明](https://github.com/liaozd2025/agents-platform/blob/main/backend/yuxi/modules/extensions/skills/builtin/image-gen/SKILL.md)拥有 Agent 的调用流程；内置注册更新版本，使整个技能目录随现有同步机制分发。
 
 脚本提供 upload、generate、collect 三个命令，分别上传参考图、创建任务、查询原任务并下载结果。每条命令执行一次对应请求；Agent 对待处理任务间隔至少 10 秒继续 collect，总等待达到 10 分钟时向用户交回原任务编号。生成请求不自动重试；提交超时明确报告结果未知，查询和下载失败继续使用原任务编号。
 

@@ -2,7 +2,17 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/services/knowledge_mcp_service.py
+Owner：backend/yuxi/modules/knowledge/mcp/server.py
+
+## 当前替代与历史边界
+
+2026-11-02 合并新版知识模块后，当前实现由 `modules/knowledge/mcp/server.py` 拥有协议，`api/routers/public_v1/knowledge_mcp.py` 装配 API Key 认证，`modules/knowledge/services/access.py` 每次求交当前功能权限、共享范围与会话选择。内部 Agent 使用短期委托；APP 端用户按有效 owner 的当前权限读取，不能获得企业管理权限。
+
+下文 OAuth 授权码、PKCE、注册、同意页和 30 天 Token 描述的是原 fork 历史实现，不再是当前交付协议。旧客户端须改用本人 Knowledge/Full API Key；旧 OAuth 登记与 Token 不转换成新凭据，也不并行维护第二套认证入口。匿名、JWT、错误用途及已撤销 Key 继续由新版身份边界拒绝；无部门 human 账户仍按 UID 和共享范围隔离。
+
+本次协议装配、业务边界和客户端 unit 共 47 项通过，覆盖权限级别、并发身份、工具错误、委托范围和实际 SDK 结果形状。`test/integration/api/test_knowledge_mcp.py` 已切换新版 API Key、持久文档及 RBAC fixture，完整 HTTP/MinIO 集成尚未在本次合并环境执行。下文旧测试次数仅保留为历史证据，不代表新版生产验收。
+
+旧聊天服务的自动预检索同步退役：不再用硬编码“问候／翻译”白名单或默认全库预取改变输入。当前由已授权的 Knowledge MCP/Skill 选择工具，检索结果进入本 Turn 的工具审计；会话知识选择仍只收窄可见范围，OA 来源元数据随真实检索结果进入新版引用投影。此处是上游交互变化，不声称恢复旧预取时序。
 
 ## 问题
 

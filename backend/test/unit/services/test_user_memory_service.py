@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from yuxi.workspace import paths as workspace_paths
-from yuxi.services import user_memory_service as svc
+from yuxi.modules.agents.services import user_memory as svc
+from yuxi.modules.workspace import paths as workspace_paths
 
 
 class _Result:

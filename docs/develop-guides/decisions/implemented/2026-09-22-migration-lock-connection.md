@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/storage/postgres/manager.py
+Owner：backend/yuxi/migrations/schema.py
+
+## 当前迁移状态
+
+2026-11-02：schema lock 的当前装配由 migrations/schema.py 拥有，PostgreSQL manager 委托该入口；本文旧版迁移步骤与通过次数不证明新版旧库转换已经执行。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

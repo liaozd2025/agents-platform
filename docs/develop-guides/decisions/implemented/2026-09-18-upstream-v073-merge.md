@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/storage/postgres/manager.py
+Owner：backend/yuxi/migrations/main.py
+
+## 当前迁移状态
+
+2026-11-02：本文记录原 v0.7.3 合并。当前模块化版本的 schema 初始化由 migrations/main.py 拥有；旧 business/knowledge 版本不被静默重置或接受，旧库离线转换尚未完成。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 PI 执行相关部分由 [PI 退役决策](../implemented/2026-09-18-retire-pi-executor.md) 取代；本记录中的对应验证仅代表退役前版本。
 

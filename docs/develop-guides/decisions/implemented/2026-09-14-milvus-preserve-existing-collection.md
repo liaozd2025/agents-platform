@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/knowledge/implementations/milvus.py
+Owner：backend/yuxi/modules/knowledge/implementations/milvus.py
 
 ## 问题
 集合初始化由查询、入库和分块更新共用。旧实现遇到模型描述不匹配或缺少 BM25 schema 时直接删除集合，导致 PostgreSQL 仍显示 indexed，而向量数据已经丢失。

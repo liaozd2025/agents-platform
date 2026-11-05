@@ -13,7 +13,7 @@ from PIL import Image
 @pytest.fixture
 def cli(monkeypatch, tmp_path):
     """加载实际随技能分发的脚本。"""
-    path = Path(__file__).resolve().parents[3] / "package/yuxi/agents/skills/buildin/image-gen/scripts/image_gen.py"
+    path = Path(__file__).resolve().parents[3] / "yuxi/modules/extensions/skills/builtin/image-gen/scripts/image_gen.py"
     spec = importlib.util.spec_from_file_location("image_gen_cli", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

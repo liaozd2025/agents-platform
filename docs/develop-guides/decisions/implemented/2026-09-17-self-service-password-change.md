@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：feature
-Owner：backend/server/routers/auth_router.py
+Owner：backend/yuxi/api/routers/identity/auth.py
+
+## 当前迁移状态
+
+2026-11-02：本人改密入口迁入 identity/auth，沿当前身份、密码与会话版本边界执行。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

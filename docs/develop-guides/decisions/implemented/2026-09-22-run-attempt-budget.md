@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/services/run_worker.py
+Owner：backend/yuxi/modules/agents/services/runner.py
+
+## 当前迁移状态
+
+2026-11-02：准备阶段持久 attempt 预算由新版 runner 与 RunAttempt 领取事务共同拥有，ARQ job_try 不作为业务重试计数。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

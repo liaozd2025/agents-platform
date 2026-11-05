@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/assets/css/base.css
+Owner：frontend/src/assets/css/base.css
 
 ## 问题
 

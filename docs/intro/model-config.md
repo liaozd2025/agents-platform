@@ -2,7 +2,7 @@
 
 Yuxi 在「智能体 → 模型供应商」中统一管理聊天、嵌入和重排模型。只有管理员可以新增或修改供应商；普通用户可以在有权限的地方选择已经启用的模型。读完本页，你能完成一次供应商接入并把模型投入实际使用，也能定位「模型不可用」的常见原因。
 
-系统有一个默认对话模型（当前内置为硅基流动 `siliconflow-cn:deepseek-ai/DeepSeek-V4-Flash`，安装时可调整）。它同时也是删除操作的保护对象：Web 管理页面会在系统默认模型仍引用某个供应商或模型时阻止删除或停用。因此接入新模型前，先弄清当前默认模型指向哪里；替换或停用它之前，先把默认模型切换到别的模型。
+系统有一个默认对话模型（当前内置为硅基流动 `siliconflow-cn:deepseek-ai/DeepSeek-V4.1-Flash`，安装时可调整）。它同时也是删除操作的保护对象：Web 管理页面会在系统默认模型仍引用某个供应商或模型时阻止删除或停用。因此接入新模型前，先弄清当前默认模型指向哪里；替换或停用它之前，先把默认模型切换到别的模型。
 
 ## 配置顺序
 
@@ -28,35 +28,17 @@ docker compose up -d --force-recreate api worker
 
 模型供应商页签仅向持有 `model_provider:manage` 的账号开放；所有登录用户均可新建会话和使用可见智能体，创建、编辑、删除及配置智能体需要 `agent:manage`。
 
-系统启动时会同步内置供应商模板。模板提供供应商 ID、API 地址、凭证变量名和模型发现地址；是否可用取决于凭证、供应商状态和已启用模型。页面列出的内容是当前实例的实际配置，完整模板由 [`builtin.py`](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/models/providers/builtin.py) 维护。
+`app-init` 同步代码拥有的供应商模板，提供供应商 ID、API 地址、凭证变量名和模型发现地址。管理员在页面查看当前实例的配置；完整模板由 [`builtin.py`](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/models/providers/builtin.py) 维护，更新流程见[共享内容更新](../advanced/deployment.md#共享内容更新与失败重试)。
 
-| 展示名称 | Provider ID | 常见类型 | 凭证环境变量 |
-| --- | --- | --- | --- |
-| OpenAI | `openai` | chat | `OPENAI_API_KEY` |
-| DeepSeek | `deepseek` | chat | `DEEPSEEK_API_KEY` |
-| DashScope（中国站） | `alibaba-cn` | chat、embedding、rerank | `DASHSCOPE_API_KEY` |
-| DashScope（国际站） | `alibaba` | chat | `DASHSCOPE_API_KEY` |
-| Aliyun Coding Plan（中国站） | `alibaba-coding-plan-cn` | chat | `DASHSCOPE_API_KEY` |
-| Aliyun Coding Plan（国际站） | `alibaba-coding-plan` | chat | `DASHSCOPE_API_KEY` |
-| Zhipu（BigModel） | `zhipuai` | chat | `ZHIPUAI_API_KEY` |
-| Zhipu Coding Plan（BigModel） | `zhipuai-coding-plan` | chat | `ZHIPUAI_API_KEY` |
-| Zhipu（Z.AI） | `zai` | chat | `ZAI_API_KEY` |
-| Zhipu Coding Plan（Z.AI） | `zai-coding-plan` | chat | `ZAI_API_KEY` |
-| XiaomiMiMo Token Plan | `xiaomi-token-plan-cn` | chat | `XIAOMI_MIMO_TOKEN_PLAN_API_KEY` |
-| XiaomiMiMo | `xiaomi` | chat | `XIAOMI_MIMO_API_KEY` |
-| Kimi Code | `kimi-for-coding` | chat | `KIMI_CODE_API_KEY` |
-| Moonshot（中国站） | `moonshotai-cn` | chat | `MOONSHOT_API_KEY` |
-| Moonshot（国际站） | `moonshotai` | chat | `MOONSHOT_API_KEY` |
-| MiniMax（中国站） | `minimax-cn` | chat | `MINIMAX_API_KEY` |
-| MiniMax（国际站） | `minimax` | chat | `MINIMAX_API_KEY` |
-| OpenRouter | `openrouter` | chat、embedding | `OPENROUTER_API_KEY` |
-| ModelScope | `modelscope` | chat | `MODELSCOPE_ACCESS_TOKEN` |
-| OpenCode | `opencode` | chat | `OPENCODE_API_KEY` |
-| OpenCode Go | `opencode-go` | chat | `OPENCODE_GO_API_KEY` |
-| SiliconFlow（中国站） | `siliconflow-cn` | chat、embedding、rerank | `SILICONFLOW_API_KEY` |
-| SiliconFlow（国际站） | `siliconflow` | chat、embedding、rerank | `SILICONFLOW_GLOBAL_API_KEY` |
+接入时先按用途选择供应商能力：
 
-表中「常见类型」是模板预置或当前常见用途；模型仍需在供应商中启用，实际可用性以当前实例配置和供应商接口为准。`alibaba-cn`、`openrouter`、`siliconflow-cn` 和 `siliconflow` 的模板明确包含嵌入或重排能力，其他供应商能否添加某类模型取决于当前供应商配置的能力和接口。不要把 `alibaba` 和 `alibaba-cn` 混用：前者是 DashScope 国际站模板，后者带有内置的嵌入和重排配置。
+| 用途 | 需要配置什么 |
+| --- | --- |
+| 聊天与工具调用 | `chat` 能力、聊天 API 地址和可用模型 |
+| 文档向量化 | `embedding` 能力、嵌入 API 地址、模型和向量维度 |
+| 检索重排 | `rerank` 能力、重排 API 地址和模型 |
+
+例如，`siliconflow-cn` 使用 `SILICONFLOW_API_KEY`，`alibaba-cn` 使用 `DASHSCOPE_API_KEY`，两者模板都包含聊天、嵌入和重排配置。中国站、国际站与 Coding Plan 使用不同模板，应按账号所属服务选择。模板存在不代表模型已可用，还需要有效凭证、启用的供应商和模型，以及实际连接测试。
 
 ## 添加和启用模型
 
@@ -113,13 +95,14 @@ OpenAI Completions API 兼容供应商的 `chat` 模型可以配置「模型请�
 
 在供应商的已启用模型列表中移除模型。Web 页面不会让当前默认模型直接移除，先在系统配置中换用其他模型再操作；直接调用管理 API 时需要自行保证默认引用仍然有效。知识库的嵌入模型变更后，按知识库页面重新建立索引。
 
-旧版 `provider/model`、旧知识库 JSON 模型字段以及配置文件中的 `model_names`、`embed_model_names`、`reranker_names` 不属于当前运行时来源。升级后如果历史 Agent 或知识库仍保存旧格式，请在界面重新选择模型并保存；知识库嵌入模型变更后还要重建索引。
 
 ## Ollama
 
-当前版本没有 Ollama provider 类型，也没有 Ollama embedding 运行时适配。已有 Ollama embedding 知识库需要选择新的嵌入模型并重建索引。
+当前版本没有 Ollama provider 类型，也没有 Ollama embedding 运行时适配。
 
 ## 排查模型不可用
+
+看到“模型缓存不可用”时，先检查 Redis 连通性与 API/worker 的缓存初始化日志；缓存快照缺失或无法读取会明确报错。修复 Redis 后重新启动 API/worker 或保存供应商配置以重建快照，再重试请求。正常读取的缓存中没有目标模型时，才会报告“未找到模型”。
 
 按下面顺序检查：
 

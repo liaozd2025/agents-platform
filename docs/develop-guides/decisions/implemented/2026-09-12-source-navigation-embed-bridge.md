@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/utils/sourceNavigation.js
+Owner：frontend/src/shared/lib/sourceNavigation.js
 
 ## 问题
 

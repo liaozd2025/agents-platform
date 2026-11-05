@@ -1,8 +1,8 @@
 import pytest
 from pydantic import ValidationError
 
-from server.routers.auth_dept_router import DepartmentCreate
-from server.routers.auth_router import InitializeAdmin, UserCreate, UserPasswordChange, UserUpdate
+from yuxi.api.routers.identity.auth import InitializeAdmin, UserCreate, UserPasswordChange, UserUpdate
+from yuxi.api.routers.identity.departments import DepartmentCreate
 
 
 @pytest.mark.parametrize(
@@ -69,6 +69,4 @@ def test_password_change_rejects_empty_old_password_and_extra_fields():
         UserPasswordChange.model_validate({"old_password": "", "new_password": "12345678"})
 
     with pytest.raises(ValidationError):
-        UserPasswordChange.model_validate(
-            {"old_password": "old-password", "new_password": "12345678", "user_id": 2}
-        )
+        UserPasswordChange.model_validate({"old_password": "old-password", "new_password": "12345678", "user_id": 2})

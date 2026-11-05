@@ -1,46 +1,33 @@
-import os
 from pathlib import Path
 import stat
+import runpy
 import subprocess
 
 import pytest
 import yaml
+from test.unit.config._shared import load_compose, project_root
 
 
-def _project_root() -> Path:
-    """定位包含 Compose 文件的仓库根目录。"""
-    configured = os.environ.get("YUXI_PROJECT_ROOT")
-    if configured:
-        return Path(configured)
-
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "docker-compose.yml").exists():
-            return parent
-    pytest.skip("当前测试环境未挂载仓库根目录")
-
-
-def test_compose_does_not_expose_checkpoint_backend_or_local_storage():
+@pytest.mark.parametrize("filename", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_compose_does_not_expose_checkpoint_backend_or_local_storage(filename):
     """LangGraph checkpoint 固定使用 PostgreSQL，不保留本地后端配置面。"""
-    project_root = _project_root()
-    for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
-        compose = yaml.safe_load((project_root / filename).read_text())
-        assert "LANGGRAPH_CHECKPOINTER_BACKEND" not in compose["x-api-worker-env"]
-        assert "YUXI_CHECKPOINT_DIR" not in compose["x-api-worker-env"]
+    compose = load_compose(filename)
+    assert "LANGGRAPH_CHECKPOINTER_BACKEND" not in compose["x-api-worker-env"]
+    assert "YUXI_CHECKPOINT_DIR" not in compose["x-api-worker-env"]
 
 
-def test_api_key_derivation_secret_is_required_for_api_and_worker():
-    project_root = _project_root()
-    for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
-        compose = yaml.safe_load((project_root / filename).read_text())
-        configured = compose["x-api-worker-env"]["API_KEY_DERIVATION_SECRET"]
+@pytest.mark.parametrize("filename", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_api_key_derivation_secret_is_required_for_api_and_worker(filename):
+    compose = load_compose(filename)
+    configured = compose["x-api-worker-env"]["API_KEY_DERIVATION_SECRET"]
 
-        assert configured.startswith("${API_KEY_DERIVATION_SECRET:?")
+    assert configured.startswith("${API_KEY_DERIVATION_SECRET:?")
 
 
 def test_initialization_scripts_enforce_security_secret_contract():
-    project_root = _project_root()
-    shell_script = project_root / "scripts/init.sh"
-    powershell_script = (project_root / "scripts/init.ps1").read_text()
+    root = project_root()
+    shell_script = root / "scripts/init.sh"
+    powershell_script = (root / "scripts/init.ps1").read_text()
 
     assert shell_script.stat().st_mode & stat.S_IXUSR
     assert "--validate-security-env" in shell_script.read_text()
@@ -55,23 +42,21 @@ def test_initialization_scripts_enforce_security_secret_contract():
     [
         {"API_KEY_DERIVATION_SECRET": "short"},
         {"API_KEY_DERIVATION_SECRET": "jwt-secret-value-that-is-at-least-32-characters"},
-        {"SANDBOX_PROVISIONER_TOKEN": "api-secret-value-that-is-at-least-32-characters"},
         {"JWT_SECRET_KEY": " padded-secret-value-that-is-at-least-32-characters "},
         {"JWT_SECRET_KEY": '"123456789012345678901234567890"'},
     ],
 )
 def test_shell_initialization_validation_rejects_short_reused_or_padded_secrets(tmp_path: Path, overrides: dict):
-    project_root = _project_root()
+    root = project_root()
     values = {
         "JWT_SECRET_KEY": "jwt-secret-value-that-is-at-least-32-characters",
         "API_KEY_DERIVATION_SECRET": "api-secret-value-that-is-at-least-32-characters",
-        "SANDBOX_PROVISIONER_TOKEN": "sandbox-secret-value-that-is-at-least-32-characters",
         **overrides,
     }
     (tmp_path / ".env").write_text("".join(f"{name}={value}\n" for name, value in values.items()))
 
     completed = subprocess.run(
-        ["bash", str(project_root / "scripts/init.sh"), "--validate-security-env"],
+        ["bash", str(root / "scripts/init.sh"), "--validate-security-env"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -82,15 +67,14 @@ def test_shell_initialization_validation_rejects_short_reused_or_padded_secrets(
 
 
 def test_shell_initialization_validation_accepts_distinct_strong_secrets(tmp_path: Path):
-    project_root = _project_root()
+    root = project_root()
     (tmp_path / ".env").write_text(
         "JWT_SECRET_KEY=jwt-secret-value-that-is-at-least-32-characters\n"
         "API_KEY_DERIVATION_SECRET=api-secret-value-that-is-at-least-32-characters\n"
-        "SANDBOX_PROVISIONER_TOKEN=sandbox-secret-value-that-is-at-least-32-characters\n"
     )
 
     completed = subprocess.run(
-        ["bash", str(project_root / "scripts/init.sh"), "--validate-security-env"],
+        ["bash", str(root / "scripts/init.sh"), "--validate-security-env"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -101,73 +85,67 @@ def test_shell_initialization_validation_accepts_distinct_strong_secrets(tmp_pat
 
 
 def test_backend_unit_workflow_runs_for_initialization_contract_changes():
-    project_root = _project_root()
-    workflow = yaml.load((project_root / ".github/workflows/test.yml").read_text(), Loader=yaml.BaseLoader)
+    root = project_root()
+    workflow = yaml.load((root / ".github/workflows/test.yml").read_text(), Loader=yaml.BaseLoader)
 
-    for event in ("pull_request", "push"):
-        paths = workflow["on"][event]["paths"]
-        assert ".env.template" in paths
-        assert "scripts/init.sh" in paths
-        assert "scripts/init.ps1" in paths
-        assert "scripts/test_init_security.ps1" in paths
+    select_checks = runpy.run_path(str(root / "scripts/ci/gate.py"))["select_checks"]
+
+    paths = (".env.template", "scripts/init.sh")
+    for path in paths:
+        assert path in workflow["on"]["push"]["paths"]
+        assert select_checks([path])["backend"]
 
 
-def test_api_healthcheck_uses_readiness_in_development_and_production():
+@pytest.mark.parametrize("filename", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_api_healthcheck_uses_readiness_in_development_and_production(filename):
     """Compose 调度只能在核心依赖就绪后把 API 标记为 healthy。"""
-    project_root = _project_root()
-    for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
-        compose = yaml.safe_load((project_root / filename).read_text())
+    compose = load_compose(filename)
 
-        assert compose["services"]["api"]["healthcheck"]["test"] == [
-            "CMD-SHELL",
-            "curl -f http://localhost:5050/api/system/ready || exit 1",
-        ]
+    assert compose["services"]["api"]["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        "curl -f http://localhost:5050/api/system/ready || exit 1",
+    ]
 
 
-def test_worker_healthcheck_uses_arq_health_contract_in_development_and_production():
-    project_root = _project_root()
-    for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
-        compose = yaml.safe_load((project_root / filename).read_text())
+@pytest.mark.parametrize("filename", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_worker_healthcheck_uses_arq_health_contract_in_development_and_production(filename):
+    compose = load_compose(filename)
 
-        assert compose["services"]["worker"]["healthcheck"]["test"] == [
-            "CMD",
-            "python",
-            "-m",
-            "yuxi.services.worker_health",
-        ]
-
-
-def test_compose_uses_upstream_sandbox_without_pi_builder_and_keeps_resource_budgets():
-    """开发和生产使用普通沙箱镜像，并保留通用资源预算。"""
-    project_root = _project_root()
-    for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
-        compose = yaml.safe_load((project_root / filename).read_text())
-        assert "pi-sandbox-image" not in compose["services"]
-        provisioner = compose["services"]["sandbox-provisioner"]
-        assert "pi-sandbox-image" not in provisioner["depends_on"]
-        environment = dict(item.split("=", 1) for item in provisioner["environment"])
-        assert environment["SANDBOX_IMAGE"] == (
-            "${SANDBOX_IMAGE:-enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0}"
-        )
-        assert environment["SANDBOX_MEMORY_MB"] == "${SANDBOX_MEMORY_MB:-4096}"
-        assert environment["SANDBOX_MAX_INSTANCES"] == "${SANDBOX_MAX_INSTANCES:-6}"
-        assert environment["SANDBOX_MAX_INSTANCES_PER_USER"] == "${SANDBOX_MAX_INSTANCES_PER_USER:-4}"
-        assert compose["x-api-worker-env"]["YUXI_WORKER_MAX_JOBS"] == "${YUXI_WORKER_MAX_JOBS:-4}"
+    assert compose["services"]["worker"]["healthcheck"]["test"] == [
+        "CMD",
+        "python",
+        "-m",
+        "yuxi.workers.health",
+    ]
 
 
-def test_worker_starts_owned_entrypoint_in_development_and_production():
+@pytest.mark.parametrize("filename", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_runner_owns_legacy_resource_budget_and_worker_limit(filename):
+    """旧预算由正在启动的 runner 转换，新 worker 接收兼容后的并发值。"""
+    compose = load_compose(filename)
+    assert "pi-sandbox-image" not in compose["services"]
+    assert "sandbox-provisioner" not in compose["services"]
+    runner = compose["services"]["sandbox-runner"]
+    assert "/usr/local/bin/yuxi-sandbox-runner.py" in runner["command"]
+    for name in ("SANDBOX_MEMORY_MB", "SANDBOX_TMPFS_MB", "SANDBOX_MAX_INSTANCES", "SANDBOX_MAX_INSTANCES_PER_USER"):
+        assert runner["environment"][name] == "${" + name + ":-}"
+    assert compose["services"]["worker"]["environment"]["ARQ_MAX_JOBS"] == "${ARQ_MAX_JOBS:-${YUXI_WORKER_MAX_JOBS:-4}}"
+
+
+@pytest.mark.parametrize("filename", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_worker_starts_owned_entrypoint_in_development_and_production(filename):
     """正式部署必须进入拥有本地任务过滤的 Worker 入口。"""
-    project_root = _project_root()
-    for filename in ("docker-compose.yml", "docker-compose.prod.yml"):
-        compose = yaml.safe_load((project_root / filename).read_text())
-        assert "python -m server.worker_main" in str(compose["services"]["worker"].get("entrypoint", "")) + str(
-            compose["services"]["worker"].get("command", "")
-        )
+    compose = load_compose(filename)
+    assert "python -m yuxi.workers.main" in compose["services"]["worker"]["command"]
 
 
 def test_arq_dependency_changes_trigger_real_dispatch_regression():
     """单独升级依赖也必须触发拥有 ARQ 适配语义的真实 Redis gate。"""
-    project_root = _project_root()
-    workflow = yaml.load((project_root / ".github/workflows/system-tests.yml").read_text(), Loader=yaml.BaseLoader)
-    for event in ("pull_request", "push"):
-        assert {"backend/uv.lock", "backend/pyproject.toml"}.issubset(workflow["on"][event]["paths"])
+    root = project_root()
+    workflow = yaml.load((root / ".github/workflows/system-tests.yml").read_text(), Loader=yaml.BaseLoader)
+    select_checks = runpy.run_path(str(root / "scripts/ci/gate.py"))["select_checks"]
+
+    for path in ("backend/uv.lock", "backend/pyproject.toml"):
+        assert path in workflow["on"]["push"]["paths"]
+        selected = select_checks([path])
+        assert selected["system"] and selected["service"]

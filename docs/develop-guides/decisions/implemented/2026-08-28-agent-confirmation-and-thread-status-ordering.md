@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/agents/toolkits/service.py
+Owner：backend/yuxi/modules/extensions/tools/builtin/__init__.py
+
+## 当前迁移状态
+
+2026-11-02：基础工具由 BASE_TOOL_NAMES 声明，ask_user_question 继续作为基础交互；新版前端会话状态由 Session/Turn 投影与 reducer 拥有，不恢复旧 Run 本地状态机制。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：web/src/components/AgentChatComponent.vue
+Owner：frontend/src/modules/session/ui/SessionWorkspace.vue
 
 ## 问题
 

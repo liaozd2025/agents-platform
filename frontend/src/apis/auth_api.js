@@ -1,0 +1,234 @@
+/**
+ * 认证相关 API
+ */
+
+import { apiDelete, apiGet, apiPost, apiPut } from './base'
+
+async function parseErrorDetail(response, fallbackMessage) {
+  const contentType = response.headers.get('content-type') || ''
+
+  if (contentType.includes('application/json')) {
+    const error = await response.json()
+    return error?.detail || fallbackMessage
+  }
+
+  const text = (await response.text()).trim()
+  return text || fallbackMessage
+}
+
+/** 使用一次性凭证交换 Yuxi 登录态。 */
+async function exchangeLoginCredential(url, payload, fallbackMessage) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+
+  if (!response.ok) {
+    throw new Error(await parseErrorDetail(response, fallbackMessage))
+  }
+  return response.json()
+}
+
+/**
+ * 获取 OIDC 配置
+ * @returns {Promise<{enabled: boolean, provider_name?: string}>}
+ */
+async function getOIDCConfig() {
+  return apiGet('/api/auth/oidc/config', {}, false)
+}
+
+/**
+ * 获取 OIDC 登录 URL
+ * @param {string} redirectPath - 登录后的重定向路径
+ * @returns {Promise<{login_url: string}>}
+ */
+async function getOIDCLoginUrl(redirectPath = '/') {
+  const params = new URLSearchParams({ redirect_path: redirectPath })
+  return apiGet(`/api/auth/oidc/login-url?${params}`, {}, false)
+}
+
+/**
+ * 查询共享配置浮层的候选用户（支持关键字远程搜索与分页）。
+ * 后端已在 SQL 层完成授权范围过滤，此处只需按需分页拉取。
+ * @param {{ keyword?: string, skip?: number, limit?: number }} params
+ *   keyword 为空串时表示不按关键字过滤，返回管理域内前 limit 条
+ * @returns {Promise<{ users: Array, total: number }>}
+ *   total 取自响应头 X-Total-Count，供调用方判断是否还有未加载的用户
+ */
+async function getUserAccessOptions({ keyword = '', skip = 0, limit = 100 } = {}) {
+  const params = new URLSearchParams({ skip: String(skip), limit: String(limit) })
+  if (keyword.trim()) params.set('keyword', keyword.trim())
+
+  // 与其他接口默认只返回 JSON 的行为保持一致，此处额外读取分页总数响应头。
+  const response = await apiGet(`/api/auth/users/access-options?${params}`, {}, true, 'response')
+  return { users: await response.json(), total: Number(response.headers.get('X-Total-Count') || 0) }
+}
+
+async function checkUidAvailability(uid) {
+  return apiGet(`/api/auth/check-uid/${encodeURIComponent(uid)}`)
+}
+
+/**
+ * 使用一次性 code 交换 OIDC 登录结果
+ * @param {string} code - 一次性登录 code
+ * @returns {Promise<{
+ *   access_token: string,
+ *   token_type: string,
+ *   user_id: number,
+ *   username: string,
+ *   uid: string,
+ *   phone_number: string | null,
+ *   avatar: string | null,
+ *   roles: Array,
+ *   effective_permissions: string[],
+ *   department_id: number | null,
+ *   department_name: string | null
+ * }>}
+ */
+async function exchangeOIDCCode(code) {
+  return exchangeLoginCredential('/api/auth/oidc/exchange-code', { code }, 'OIDC 登录失败')
+}
+
+/** 使用 OA 现有登录凭证交换 Yuxi token。 */
+async function exchangeOAToken(token) {
+  return exchangeLoginCredential('/api/auth/oa/exchange-token', { token }, 'OA 免登录失败')
+}
+
+/** 使用父项目提供的 OA 账号换取 Yuxi 登录态。 */
+async function exchangeOAAccount(account) {
+  return exchangeLoginCredential('/api/auth/oa/exchange-account', { account }, 'OA 账号登录失败')
+}
+
+async function login(credentials) {
+  const formData = new FormData()
+  formData.append('username', credentials.loginId)
+  formData.append('password', credentials.password)
+  return apiPost('/api/auth/token', formData, {}, false)
+}
+
+async function initialize(admin) {
+  return apiPost('/api/auth/initialize', admin, {}, false)
+}
+
+async function checkFirstRun() {
+  return apiGet('/api/auth/check-first-run', {}, false)
+}
+
+async function getUsers({ skip = 0, limit = 100, keyword = '', departmentId = null, role = '' } = {}) {
+  const params = new URLSearchParams({ skip: String(skip), limit: String(limit) })
+  if (keyword.trim()) params.set('keyword', keyword.trim())
+  if (departmentId != null) params.set('department_id', String(departmentId))
+  if (role) params.set('role', role)
+
+  // 保持其他接口仍只返回 JSON；用户列表需要同时读取分页总数响应头。
+  const response = await apiGet(`/api/auth/users?${params}`, {}, true, 'response')
+  return { users: await response.json(), total: Number(response.headers.get('X-Total-Count') || 0) }
+}
+
+async function getUsersPage({
+  offset = 0,
+  limit = 50,
+  search,
+  departmentId,
+  departmentIds = [],
+  role,
+  roles = [],
+  userKind = 'human'
+} = {}) {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  if (search) params.set('search', search)
+  if (departmentId) params.set('department_id', String(departmentId))
+  if (departmentIds.length) params.set('department_ids', departmentIds.map(String).join(','))
+  if (role) params.set('role', role)
+  if (roles.length) params.set('roles', roles.join(','))
+  params.set('user_kind', userKind)
+  return apiGet(`/api/auth/users/page?${params}`)
+}
+
+async function createUser(userData) {
+  return apiPost('/api/auth/users', userData)
+}
+
+async function updateUser(userId, userData) {
+  return apiPut(`/api/auth/users/${encodeURIComponent(userId)}`, userData)
+}
+
+async function deleteUser(userId) {
+  return apiDelete(`/api/auth/users/${encodeURIComponent(userId)}`)
+}
+
+async function validateUsername(username) {
+  return apiPost('/api/auth/validate-username', { username })
+}
+
+async function uploadAvatar(file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return apiPost('/api/auth/upload-avatar', formData)
+}
+
+async function getCurrentUser(signal) {
+  return apiGet('/api/auth/me', signal ? { signal } : {})
+}
+
+async function updateProfile(profileData) {
+  return apiPut('/api/auth/profile', profileData)
+}
+
+// 普通用户自助修改自己的登录密码；后端会校验原密码，成功后返回 { message }
+async function changePassword(passwordData) {
+  return apiPut('/api/auth/password', passwordData)
+}
+
+async function impersonateUser(userId) {
+  return apiPost(`/api/auth/impersonate/${encodeURIComponent(userId)}`, {})
+}
+
+async function getCLIAuthSession(userCode) {
+  const encoded = encodeURIComponent(userCode)
+  return apiGet(`/api/auth/cli/sessions/${encoded}`)
+}
+
+async function approveCLIAuthSession(userCode) {
+  const encoded = encodeURIComponent(userCode)
+  return apiPost(`/api/auth/cli/sessions/${encoded}/approve`, {})
+}
+
+async function logout() {
+  return apiPost('/api/auth/oidc/logout', {})
+}
+
+async function checkUid(uid) {
+  return apiGet(`/api/auth/check-uid/${encodeURIComponent(uid)}`)
+}
+
+export const authApi = {
+  logout,
+  checkUid,
+  getMCPConsent: (id) => apiGet(`/api/mcp/consent/${encodeURIComponent(id)}`),
+  approveMCPConsent: (id) => apiPost(`/api/mcp/consent/${encodeURIComponent(id)}`, {}),
+  login,
+  initialize,
+  checkFirstRun,
+  getUsers,
+  getUsersPage,
+  createUser,
+  updateUser,
+  deleteUser,
+  validateUsername,
+  uploadAvatar,
+  getCurrentUser,
+  updateProfile,
+  changePassword,
+  impersonateUser,
+  getOIDCConfig,
+  getOIDCLoginUrl,
+  getUserAccessOptions,
+  checkUidAvailability,
+  exchangeOIDCCode,
+  exchangeOAToken,
+  exchangeOAAccount,
+  getCLIAuthSession,
+  approveCLIAuthSession
+}

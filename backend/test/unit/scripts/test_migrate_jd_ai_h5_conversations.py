@@ -5,8 +5,8 @@ import pytest
 from scripts.migrate_jd_ai_h5_conversations import (
     H5SourceReader,
     MigrationStats,
-    build_migration_project,
     build_message_payload,
+    build_migration_project,
     build_yuxi_uid,
     prepare_records,
 )
@@ -140,3 +140,20 @@ def test_source_queries_are_scoped_to_selected_conversations() -> None:
     reader.fetch_files(["c-1"], cutoff)
     assert "m.conversation_id IN (%s)" in connection.cursor_instance.sql
     assert connection.cursor_instance.params[-1] == "c-1"
+
+
+@pytest.mark.asyncio
+async def test_current_schema_rejects_legacy_apply_before_source_connection(monkeypatch):
+    """未实现新协议转换时不能连接源库或应用旧数据。"""
+    from types import SimpleNamespace
+
+    from scripts import migrate_jd_ai_h5_conversations as migration
+
+    def unexpected_connection():
+        pytest.fail("拒绝旧写入必须发生在连接源库之前")
+
+    monkeypatch.setattr(migration, "_connect_source", unexpected_connection)
+    with pytest.raises(RuntimeError, match="不能使用--apply"):
+        await migration.async_main(SimpleNamespace(apply=True))
+    with pytest.raises(RuntimeError, match="禁止直接应用"):
+        await migration.import_records([], postgres_url="unused", stats=MigrationStats())

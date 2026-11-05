@@ -9,27 +9,29 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from yuxi.repositories.scheduled_agent_repository import ScheduledAgentRepository
-from yuxi.repositories.user_repository import UserRepository
-from yuxi.services import scheduled_agent_service as service
-from yuxi.services.scheduled_agent_service import _claim_due_run, _create_run_record
-from yuxi.storage.postgres.models_business import (
-    AgentRun,
-    AgentRunRequest,
-    Conversation,
-    Department,
-    Message,
-    Project,
-    ScheduledAgentJob,
-    ScheduledAgentRun,
-    User,
-)
-from yuxi.utils.datetime_utils import utc_now_naive
 
-pytestmark = pytest.mark.integration
+import yuxi.modules.schedules.service as service
+from yuxi.modules.agents.input_messages import build_chat_input_message, serialize_input_message
+from yuxi.modules.agents.models.inputs import AgentInput, AgentInputReceipt
+from yuxi.modules.agents.models.messages import Message
+from yuxi.modules.agents.models.runs import AgentRun
+from yuxi.modules.agents.models.sessions import Session
+from yuxi.modules.agents.models.turns import AgentTurn
+from yuxi.modules.agents.repositories.input import AgentInputRepository
+from yuxi.modules.agents.repositories.input_receipt import AgentInputReceiptRepository
+from yuxi.modules.agents.repositories.runs import AgentRunRepository
+from yuxi.modules.agents.repositories.turn import AgentTurnRepository
+from yuxi.modules.identity.models import User
+from yuxi.modules.schedules.models import ScheduledAgentJob, ScheduledAgentRun
+from yuxi.modules.schedules.repository import ScheduledAgentRepository
+from yuxi.modules.schedules.service import _claim_due_run, _create_run_record
+from yuxi.modules.workspace.models import Project
+from yuxi.shared.datetime import utc_now
+
+pytestmark = [pytest.mark.integration, pytest.mark.self_managed_resources]
 
 
 @pytest.mark.asyncio
@@ -41,7 +43,7 @@ async def test_claim_concurrency_coalesce_and_soft_delete_history():
     uid = f"scheduled-user-{uuid.uuid4()}"
     project_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
-    now = utc_now_naive()
+    now = utc_now()
 
     try:
         async with session_factory() as db:
@@ -88,74 +90,47 @@ async def test_claim_concurrency_coalesce_and_soft_delete_history():
         async with session_factory() as db:
             repo = ScheduledAgentRepository(db)
             job = await repo.get_job(job_id, uid, lock=True)
-            runs = list(
-                (await db.execute(select(ScheduledAgentRun).where(ScheduledAgentRun.job_id == job_id))).scalars()
-            )
+            runs = list((await db.execute(select(ScheduledAgentRun).where(ScheduledAgentRun.job_id == job_id))).scalars())
             assert len(runs) == 1
             scheduled_run = runs[0]
             assert scheduled_run.thread_id
             assert job.next_run_at > now
 
-            conversation = Conversation(
+            agent_session = Session(
                 thread_id=scheduled_run.thread_id,
                 uid=uid,
                 agent_id="chatbot",
                 project_id=project_id,
             )
-            db.add(conversation)
+            db.add(agent_session)
             await db.flush()
-            message = Message(
-                conversation_id=conversation.id,
-                role="user",
-                request_id=scheduled_run.request_id,
-                content="hello",
-                delivery_status="dispatched",
-            )
-            db.add(message)
-            await db.flush()
-            agent_run_id = f"run-{uuid.uuid4()}"
-            agent_run = AgentRun(
-                id=agent_run_id,
-                conversation_thread_id=scheduled_run.thread_id,
-                runtime_scope_id=scheduled_run.thread_id,
-                agent_slug="chatbot",
+            input_repo = AgentInputRepository(db)
+            input_item = await input_repo.create(
+                input_id=scheduled_run.input_id,
+                thread_id=scheduled_run.thread_id,
                 uid=uid,
-                status="completed",
-                request_id=scheduled_run.request_id,
+                app_id=None,
+                agent_slug="chatbot",
+                kind="follow_up",
+                messages=[serialize_input_message(build_chat_input_message("hello"))],
                 source="scheduled_agent",
                 channel="worker",
-                conversation_id=conversation.id,
-                run_type="chat",
-                input_payload={},
-                finished_at=now,
             )
-            db.add(agent_run)
-            await db.flush()
-            db.add(
-                AgentRunRequest(
-                    request_id=scheduled_run.request_id,
-                    uid=uid,
-                    agent_slug="chatbot",
-                    conversation_thread_id=scheduled_run.thread_id,
-                    source="scheduled_agent",
-                    channel="worker",
-                    queue_policy="enqueue",
-                    status="dispatched",
-                    input_message_id=message.id,
-                    dispatched_run_id=agent_run_id,
-                    input_payload={},
-                )
+            await AgentInputReceiptRepository(db).create(
+                receipt_id=f"receipt-{uuid.uuid4()}",
+                idempotency_key=scheduled_run.id,
+                uid=uid,
+                app_id=None,
+                thread_id=scheduled_run.thread_id,
+                event_type="message",
+                intent_hash="scheduled",
+                input_id=input_item.id,
             )
             scheduled_run.status = "submitted"
             await db.flush()
-            assert await repo.has_active_run(job_id) is False
-
-            agent_run.status = "running"
-            agent_run.finished_at = None
-            await db.flush()
             assert await repo.has_active_run(job_id) is True
 
-            manual_now = utc_now_naive()
+            manual_now = utc_now()
             manual = await _create_run_record(
                 repo=repo,
                 job=job,
@@ -165,9 +140,30 @@ async def test_claim_concurrency_coalesce_and_soft_delete_history():
             )
             assert manual.status == "skipped"
 
+            turn = await AgentTurnRepository(db).create(
+                turn_id=f"turn-{uuid.uuid4()}", thread_id=scheduled_run.thread_id, uid=uid, app_id=None
+            )
+            agent_run = await AgentRunRepository(db).create_run(
+                run_id=f"run-{uuid.uuid4()}",
+                thread_id=scheduled_run.thread_id,
+                agent_slug="chatbot",
+                uid=uid,
+                turn_id=turn.id,
+                input_payload={},
+                source="scheduled_agent",
+                channel="worker",
+                session_record_id=agent_session.id,
+            )
+            await AgentTurnRepository(db).set_current(turn, run_id=agent_run.id)
+            [message] = await input_repo.consume(inputs=[input_item], turn_id=turn.id, run_id=agent_run.id)
+            agent_run.input_message_id = message.id
+            agent_run.status = "running"
+            assert await repo.has_active_run(job_id) is True
+
             agent_run.status = "completed"
             agent_run.finished_at = now
             await db.flush()
+            await AgentTurnRepository(db).set_terminal(turn, status="completed", result_run_id=agent_run.id)
             assert await repo.has_active_run(job_id) is False
 
             await repo.delete_job(job)
@@ -179,18 +175,20 @@ async def test_claim_concurrency_coalesce_and_soft_delete_history():
             assert await repo.get_job(job_id, uid) is None
             assert await repo.get_job(job_id, uid, include_deleted=True) is not None
             runs = await repo.list_recent_runs([job_id], uid, 20)
-            assert manual_id in {run.id for run, _request, _agent_run in runs}
+            assert manual_id in {run.id for run, _input, _agent_run in runs}
+            submitted = next(row for row in runs if row[0].id == scheduled_run.id)
+            assert submitted[1].id == input_item.id and submitted[2].id == agent_run.id
     finally:
         async with session_factory() as db:
             await db.execute(delete(ScheduledAgentRun).where(ScheduledAgentRun.job_id == job_id))
-            await db.execute(delete(AgentRunRequest).where(AgentRunRequest.uid == uid))
+            await db.execute(update(AgentTurn).where(AgentTurn.uid == uid).values(current_run_id=None, result_run_id=None))
+            await db.execute(delete(AgentInputReceipt).where(AgentInputReceipt.uid == uid))
+            await db.execute(delete(Message).where(Message.session_record_id.in_(select(Session.id).where(Session.uid == uid))))
+
+            await db.execute(delete(AgentInput).where(AgentInput.uid == uid))
             await db.execute(delete(AgentRun).where(AgentRun.uid == uid))
-            await db.execute(
-                delete(Message).where(
-                    Message.conversation_id.in_(select(Conversation.id).where(Conversation.uid == uid))
-                )
-            )
-            await db.execute(delete(Conversation).where(Conversation.uid == uid))
+            await db.execute(delete(AgentTurn).where(AgentTurn.uid == uid))
+            await db.execute(delete(Session).where(Session.uid == uid))
             await db.execute(delete(ScheduledAgentJob).where(ScheduledAgentJob.id == job_id))
             await db.execute(delete(Project).where(Project.id == project_id))
             await db.execute(delete(User).where(User.uid == uid))
@@ -236,13 +234,13 @@ async def test_deleted_user_job_is_not_claimed():
                     cron_expression="* * * * *",
                     timezone="UTC",
                     enabled=True,
-                    next_run_at=utc_now_naive() - timedelta(minutes=1),
+                    next_run_at=utc_now() - timedelta(minutes=1),
                 )
             )
             await db.commit()
 
         async with session_factory() as db:
-            assert await ScheduledAgentRepository(db).claim_due_job(now=utc_now_naive()) is None
+            assert await ScheduledAgentRepository(db).claim_due_job(now=utc_now()) is None
     finally:
         async with session_factory() as db:
             await db.execute(delete(ScheduledAgentJob).where(ScheduledAgentJob.id == job_id))
@@ -254,7 +252,7 @@ async def test_deleted_user_job_is_not_claimed():
 
 @pytest.mark.asyncio
 async def test_transient_dispatch_failure_is_recovered_exactly_once(monkeypatch):
-    """Request 写入前的瞬时失败必须保留意图，并由恢复轮次幂等提交。"""
+    """Input 接收前的瞬时失败保留定时意图，恢复后只接收一次。"""
     database_url = os.environ["POSTGRES_URL"]
     engine = create_async_engine(database_url, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -262,10 +260,9 @@ async def test_transient_dispatch_failure_is_recovered_exactly_once(monkeypatch)
     project_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
     scheduled_run_id = f"scheduled-run-{uuid.uuid4()}"
-    request_id = f"request-{uuid.uuid4()}"
+    input_id = f"input-{uuid.uuid4()}"
     thread_id = f"thread-{uuid.uuid4()}"
     calls = 0
-    department_ids = []
 
     async def accept_project(project_id_arg, user, db):
         del db
@@ -274,54 +271,52 @@ async def test_transient_dispatch_failure_is_recovered_exactly_once(monkeypatch)
     async def accept_agent(agent_slug, user, db):
         del db
         assert (agent_slug, user.uid) == ("chatbot", uid)
-        assert tuple(user.department_ancestor_ids) == tuple(department_ids)
 
-    async def fail_once_then_persist(*, request_input, current_user, db):
+    async def fail_once_then_persist(**kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("temporary database interruption")
-        conversation = Conversation(
-            thread_id=request_input.thread_id,
-            creation_request_id=request_input.request_id,
-            uid=str(current_user.uid),
-            agent_id=request_input.agent_slug,
-            title=request_input.conversation_title,
-            project_id=request_input.conversation_project_id,
+        db = kwargs["db"]
+        scope = kwargs["scope"]
+        assert (scope.uid, kwargs["agent_slug"], kwargs["thread_id"]) == (uid, "chatbot", thread_id)
+        assert kwargs["idempotency_key"] == scheduled_run_id
+        agent_session = Session(
+            thread_id=thread_id,
+            uid=uid,
+            agent_id="chatbot",
+            title=kwargs["title"],
+            project_id=project_id,
         )
-        db.add(conversation)
+        db.add(agent_session)
         await db.flush()
-        message = Message(
-            conversation_id=conversation.id,
-            request_id=request_input.request_id,
-            role="user",
-            content="hello",
-            delivery_status="queued",
+        input_item = await AgentInputRepository(db).create(
+            input_id=input_id,
+            thread_id=thread_id,
+            uid=uid,
+            app_id=None,
+            agent_slug="chatbot",
+            kind="follow_up",
+            source="scheduled_agent",
+            channel="worker",
+            messages=[{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
         )
-        db.add(message)
-        await db.flush()
-        db.add(
-            AgentRunRequest(
-                request_id=request_input.request_id,
-                uid=str(current_user.uid),
-                agent_slug=request_input.agent_slug,
-                conversation_thread_id=request_input.thread_id,
-                source="scheduled_agent",
-                channel="worker",
-                external_id=scheduled_run_id,
-                origin_metadata={},
-                queue_policy="enqueue",
-                status="queued",
-                input_message_id=message.id,
-                input_payload={},
-            )
+        await AgentInputReceiptRepository(db).create(
+            receipt_id=f"receipt-{uuid.uuid4()}",
+            idempotency_key=scheduled_run_id,
+            uid=uid,
+            app_id=None,
+            thread_id=thread_id,
+            event_type="yuxi.session.create",
+            intent_hash="scheduled",
+            input_id=input_item.id,
         )
-        await db.flush()
-        return {"request_id": request_input.request_id, "status": "queued"}
+        await db.commit()
+        return {"input_id": input_id, "status": "queued"}
 
     monkeypatch.setattr(service, "_validate_project", accept_project)
     monkeypatch.setattr(service, "_validate_agent", accept_agent)
-    monkeypatch.setattr(service, "submit_agent_request", fail_once_then_persist)
+    monkeypatch.setattr(service, "create_thread", fail_once_then_persist)
 
     class ScopedManager:
         @asynccontextmanager
@@ -333,16 +328,7 @@ async def test_transient_dispatch_failure_is_recovered_exactly_once(monkeypatch)
 
     try:
         async with session_factory() as db:
-            parent = Department(name=uid[:40])
-            db.add(parent)
-            await db.flush()
-            parent.path = f"/{parent.id}/"
-            child = Department(name="scheduler-child", parent_id=parent.id)
-            db.add(child)
-            await db.flush()
-            child.path = f"/{parent.id}/{child.id}/"
-            department_ids.extend([parent.id, child.id])
-            db.add(User(username=uid, uid=uid, password_hash="test", department_id=child.id))
+            db.add(User(username=uid, uid=uid, password_hash="test"))
             await db.flush()
             db.add(
                 Project(
@@ -369,7 +355,7 @@ async def test_transient_dispatch_failure_is_recovered_exactly_once(monkeypatch)
                     cron_expression="0 9 * * *",
                     timezone="UTC",
                     enabled=True,
-                    next_run_at=utc_now_naive() + timedelta(days=1),
+                    next_run_at=utc_now() + timedelta(days=1),
                 )
             )
             await db.flush()
@@ -377,18 +363,18 @@ async def test_transient_dispatch_failure_is_recovered_exactly_once(monkeypatch)
                 ScheduledAgentRun(
                     id=scheduled_run_id,
                     job_id=job_id,
-                    request_id=request_id,
+                    input_id=input_id,
                     thread_id=thread_id,
                     trigger="scheduled",
                     occurrence_key="scheduled:recovery",
-                    scheduled_for=utc_now_naive() - timedelta(minutes=2),
+                    scheduled_for=utc_now() - timedelta(minutes=2),
                     project_id=project_id,
                     agent_slug="chatbot",
-                    conversation_title="Recovery Job",
+                    session_title="Recovery Job",
                     prompt="hello",
                     tool_approval_mode="default",
                     status="dispatching",
-                    created_at=utc_now_naive() - timedelta(minutes=2),
+                    created_at=utc_now() - timedelta(minutes=2),
                 )
             )
             await db.commit()
@@ -398,15 +384,9 @@ async def test_transient_dispatch_failure_is_recovered_exactly_once(monkeypatch)
 
         async with session_factory() as db:
             scheduled_run = await db.get(ScheduledAgentRun, scheduled_run_id)
-            request_count = len(
-                list(
-                    (
-                        await db.execute(select(AgentRunRequest).where(AgentRunRequest.request_id == request_id))
-                    ).scalars()
-                )
-            )
+            input_count = len(list((await db.execute(select(AgentInput).where(AgentInput.id == input_id))).scalars()))
             assert scheduled_run is not None and scheduled_run.status == "dispatching"
-            assert request_count == 0
+            assert input_count == 0
 
         async def list_only_test_run(repository, *, before, limit=100):
             del before, limit
@@ -418,28 +398,26 @@ async def test_transient_dispatch_failure_is_recovered_exactly_once(monkeypatch)
 
         async with session_factory() as db:
             scheduled_run = await db.get(ScheduledAgentRun, scheduled_run_id)
-            requests = list(
-                (await db.execute(select(AgentRunRequest).where(AgentRunRequest.request_id == request_id))).scalars()
-            )
+            inputs = list((await db.execute(select(AgentInput).where(AgentInput.id == input_id))).scalars())
             assert scheduled_run is not None and scheduled_run.status == "submitted"
-            assert len(requests) == 1
+            assert len(inputs) == 1
             assert calls == 2
     finally:
         async with session_factory() as db:
-            await db.execute(delete(AgentRunRequest).where(AgentRunRequest.request_id == request_id))
-            await db.execute(delete(Message).where(Message.request_id == request_id))
-            await db.execute(delete(Conversation).where(Conversation.thread_id == thread_id))
+            await db.execute(delete(AgentInputReceipt).where(AgentInputReceipt.input_id == input_id))
+            await db.execute(delete(AgentInput).where(AgentInput.id == input_id))
+            await db.execute(delete(Message).where(Message.session_record_id.in_(select(Session.id).where(Session.thread_id == thread_id))))
+            await db.execute(delete(Session).where(Session.thread_id == thread_id))
             await db.execute(delete(ScheduledAgentRun).where(ScheduledAgentRun.id == scheduled_run_id))
             await db.execute(delete(ScheduledAgentJob).where(ScheduledAgentJob.id == job_id))
             await db.execute(delete(Project).where(Project.id == project_id))
             await db.execute(delete(User).where(User.uid == uid))
-            for department_id in reversed(department_ids):
-                await db.execute(delete(Department).where(Department.id == department_id))
             await db.commit()
         await engine.dispose()
 
 
 @pytest.mark.asyncio
+@pytest.mark.self_managed_resources
 async def test_account_soft_deletion_removes_scheduled_job_history():
     """真实账号软删除必须同步移除任务定义与调度历史。"""
     database_url = os.environ["POSTGRES_URL"]
@@ -479,7 +457,7 @@ async def test_account_soft_deletion_removes_scheduled_job_history():
                     cron_expression="0 9 * * *",
                     timezone="UTC",
                     enabled=False,
-                    next_run_at=utc_now_naive(),
+                    next_run_at=utc_now(),
                 )
             )
             await db.flush()
@@ -487,14 +465,14 @@ async def test_account_soft_deletion_removes_scheduled_job_history():
                 ScheduledAgentRun(
                     id=run_id,
                     job_id=job_id,
-                    request_id=f"request-{uuid.uuid4()}",
+                    input_id=f"input-{uuid.uuid4()}",
                     thread_id=f"thread-{uuid.uuid4()}",
                     trigger="manual",
                     occurrence_key=f"manual:{uuid.uuid4()}",
-                    scheduled_for=utc_now_naive(),
+                    scheduled_for=utc_now(),
                     project_id=project_id,
                     agent_slug="chatbot",
-                    conversation_title="Cascade Job",
+                    session_title="Cascade Job",
                     prompt="hello",
                     tool_approval_mode="default",
                     status="failed",
@@ -505,6 +483,8 @@ async def test_account_soft_deletion_removes_scheduled_job_history():
         async with session_factory() as db:
             user = await db.scalar(select(User).where(User.uid == uid).with_for_update())
             assert user is not None
+            from yuxi.modules.identity.repositories.users import UserRepository
+
             await UserRepository(db).delete_for_admin(user)
             await db.commit()
 

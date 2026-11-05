@@ -3,37 +3,27 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import event, update
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-import yuxi.services.dashboard_service as dashboard_service
-from yuxi.repositories.dashboard_repository import DashboardRepository
-from yuxi.services.dashboard_scope_service import dashboard_tool_history_filter
-from yuxi.services.dashboard_service import DashboardService
-from yuxi.storage.postgres.models_business import (
-    Agent,
-    AgentRun,
-    Base,
-    Conversation,
-    ConversationStats,
-    Department,
-    Message,
-    MessageFeedback,
-    ToolCall,
-    User,
-)
-from yuxi.utils.datetime_utils import utc_now_naive
+from test.support.sqlite import create_utc_sqlite_engine
+from yuxi.infrastructure.postgres.base import Base
+from yuxi.modules.agents.models.definitions import Agent
+from yuxi.modules.agents.models.messages import Message
+from yuxi.modules.agents.models.sessions import Session
+from yuxi.modules.identity.models import Department, User
+from yuxi.modules.system.services.dashboard import DashboardService
+from yuxi.shared.datetime import UTC, utc_now
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
 @pytest_asyncio.fixture()
 async def dashboard_db():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_utc_sqlite_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -68,22 +58,24 @@ async def dashboard_db():
         )
 
         agent1 = Agent(
+            visibility="shared",
             slug="agent-helper",
             backend_id="b-1",
             name="Helper Agent",
             share_config={},
         )
         agent2 = Agent(
+            visibility="shared",
             slug="agent-coder",
             backend_id="b-2",
             name="Coder Agent",
             share_config={},
         )
 
-        now = utc_now_naive()
+        now = utc_now()
         yesterday = now - timedelta(days=1)
 
-        conv1 = Conversation(
+        conv1 = Session(
             thread_id="thread-101",
             project_id="p-1",
             uid="uid-alice",
@@ -94,7 +86,7 @@ async def dashboard_db():
             created_at=yesterday,
             updated_at=now,
         )
-        conv2 = Conversation(
+        conv2 = Session(
             thread_id="thread-102",
             project_id="p-2",
             uid="uid-bob",
@@ -105,7 +97,7 @@ async def dashboard_db():
             created_at=now,
             updated_at=now,
         )
-        conv3 = Conversation(
+        conv3 = Session(
             thread_id="thread-103",
             project_id="p-3",
             uid="uid-alice",
@@ -116,63 +108,59 @@ async def dashboard_db():
             created_at=yesterday,
             updated_at=yesterday,
         )
-        deleted_conversation = Conversation(
+        deleted_session = Session(
             thread_id="thread-deleted",
             project_id="p-deleted",
             uid="uid-alice",
             agent_id="agent-helper",
-            title="Deleted conversation",
+            title="Deleted agent_session",
             status="deleted",
             created_at=yesterday,
             updated_at=now,
         )
-        deleted_user_conversation = Conversation(
+        deleted_user_session = Session(
             thread_id="thread-deleted-user",
             project_id="p-deleted-user",
             uid="uid-deleted",
             agent_id="agent-helper",
-            title="Deleted user conversation",
+            title="Deleted user agent_session",
             status="active",
             created_at=yesterday,
             updated_at=now,
         )
-        missing_agent_conversation = Conversation(
+        missing_agent_session = Session(
             thread_id="thread-missing-agent",
             project_id="p-missing-agent",
             uid="uid-alice",
             agent_id="removed-agent",
-            title="Removed agent conversation",
+            title="Removed agent agent_session",
             status="active",
             created_at=yesterday,
             updated_at=now,
         )
-        subagent_conversation = Conversation(
-            thread_id="thread-subagent",
-            project_id="p-subagent",
+        cooperation_session = Session(
+            thread_id="thread-cooperation",
+            project_id="p-cooperation",
             uid="uid-alice",
             agent_id="agent-helper",
-            title="Subagent conversation",
-            status="subagent",
+            title="Cooperation session",
+            status="active",
             created_at=yesterday,
             updated_at=now,
         )
 
-        stats1 = ConversationStats(conversation=conv1, message_count=4, total_tokens=1200)
-        stats2 = ConversationStats(conversation=conv2, message_count=8, total_tokens=3500)
-        stats3 = ConversationStats(conversation=conv3, message_count=1, total_tokens=300)
-
-        msg1 = Message(conversation=conv1, role="user", content="Hello", created_at=yesterday)
-        msg2 = Message(conversation=conv1, role="assistant", content="Hi there!", created_at=yesterday)
-        msg3 = Message(conversation=conv2, role="user", content="Write code", created_at=now)
+        msg1 = Message(agent_session=conv1, role="user", content="Hello", created_at=yesterday)
+        msg2 = Message(agent_session=conv1, role="assistant", content="Hi there!", created_at=yesterday)
+        msg3 = Message(agent_session=conv2, role="user", content="Write code", created_at=now)
         msg4 = Message(
-            conversation=conv2,
+            agent_session=conv2,
             role="assistant",
             content="Here is code",
             created_at=now,
             extra_metadata={"usage_metadata": {"input_tokens": 5, "output_tokens": 3}},
         )
         hidden_model_audit = Message(
-            conversation=conv2,
+            agent_session=conv2,
             role="assistant",
             content="Intermediate model output",
             message_type="model_audit",
@@ -181,79 +169,11 @@ async def dashboard_db():
             created_at=now,
             extra_metadata={"usage_metadata": {"input_tokens": 100, "output_tokens": 100}},
         )
-        hidden_tool_audit = Message(
-            conversation=conv2,
-            role="tool",
-            content="Intermediate tool output",
-            message_type="tool_audit",
-            operation_id="tool-audit-1",
-            started_at=now,
-            sequence=2,
-            execution_status="completed",
-            created_at=now,
-            extra_metadata={"usage_metadata": {"input_tokens": 100, "output_tokens": 100}},
-        )
         removed_agent_message = Message(
-            conversation=missing_agent_conversation,
+            agent_session=missing_agent_session,
             role="assistant",
             content="Historical removed agent output",
             created_at=now,
-        )
-
-        tool1 = ToolCall(message=msg4, tool_name="bash", status="success", created_at=now)
-        removed_agent_tool = ToolCall(
-            message=removed_agent_message,
-            tool_name="legacy_tool",
-            status="success",
-            created_at=now,
-        )
-
-        feedback1 = MessageFeedback(message=msg2, uid="uid-alice", rating="like", created_at=yesterday)
-        hidden_model_feedback = MessageFeedback(
-            message=hidden_model_audit,
-            uid="uid-bob",
-            rating="dislike",
-            created_at=now,
-        )
-        hidden_tool_feedback = MessageFeedback(
-            message=hidden_tool_audit,
-            uid="uid-bob",
-            rating="like",
-            created_at=now,
-        )
-        removed_agent_feedback = MessageFeedback(
-            message=removed_agent_message,
-            uid="uid-alice",
-            rating="dislike",
-            created_at=now,
-        )
-        older_run = AgentRun(
-            id="run-thread-102-older",
-            conversation_thread_id=conv2.thread_id,
-            runtime_scope_id=conv2.thread_id,
-            agent_slug=conv2.agent_id,
-            uid=conv2.uid,
-            status="failed",
-            request_id="request-thread-102-older",
-            conversation_id=conv2.id,
-            run_type="chat",
-            input_payload={},
-            created_at=yesterday,
-            finished_at=yesterday,
-        )
-        completed_run = AgentRun(
-            id="run-thread-102-completed",
-            conversation_thread_id=conv2.thread_id,
-            runtime_scope_id=conv2.thread_id,
-            agent_slug=conv2.agent_id,
-            uid=conv2.uid,
-            status="completed",
-            request_id="request-thread-102-completed",
-            conversation_id=conv2.id,
-            run_type="chat",
-            input_payload={},
-            created_at=now,
-            finished_at=now,
         )
 
         db.add_all(
@@ -268,30 +188,46 @@ async def dashboard_db():
                 conv1,
                 conv2,
                 conv3,
-                deleted_conversation,
-                deleted_user_conversation,
-                missing_agent_conversation,
-                subagent_conversation,
-                stats1,
-                stats2,
-                stats3,
+                deleted_session,
+                deleted_user_session,
+                missing_agent_session,
+                cooperation_session,
                 msg1,
                 msg2,
                 msg3,
                 msg4,
                 hidden_model_audit,
-                hidden_tool_audit,
                 removed_agent_message,
-                tool1,
-                removed_agent_tool,
-                feedback1,
-                hidden_model_feedback,
-                hidden_tool_feedback,
-                removed_agent_feedback,
-                older_run,
-                completed_run,
             ]
         )
+        await db.flush()
+        tool1 = Message(
+            session_record_id=msg4.session_record_id,
+            turn_id=msg4.turn_id,
+            run_id=msg4.run_id,
+            role="tool",
+            message_type="tool_audit",
+            operation_id="bash",
+            content="",
+            execution_status="completed",
+            started_at=now,
+            extra_metadata={"source_model_message_id": msg4.id, "tool_name": "bash", "input": {}},
+            created_at=now,
+        )
+        removed_agent_tool = Message(
+            session_record_id=removed_agent_message.session_record_id,
+            turn_id=removed_agent_message.turn_id,
+            run_id=removed_agent_message.run_id,
+            role="tool",
+            message_type="tool_audit",
+            operation_id="legacy_tool",
+            content="",
+            execution_status="completed",
+            started_at=now,
+            extra_metadata={"source_model_message_id": removed_agent_message.id, "tool_name": "legacy_tool", "input": {}},
+            created_at=now,
+        )
+        db.add_all([tool1, removed_agent_tool])
         await db.commit()
         yield db
     await engine.dispose()
@@ -301,113 +237,69 @@ async def test_dashboard_service_basic_stats(dashboard_db):
     service = DashboardService(dashboard_db)
     stats = await service.get_basic_stats()
 
-    assert stats["total_conversations"] == 5
-    assert stats["active_conversations"] == 4
-    assert stats["total_messages"] == 5
+    assert stats["total_sessions"] == 4
+    assert stats["active_sessions"] == 3
+    assert stats["total_messages"] == 4
     assert stats["total_users"] == 3
-    assert stats["feedback_stats"]["total_feedbacks"] == 2
-    assert stats["feedback_stats"]["satisfaction_rate"] == 50.0
+    assert "feedback_stats" not in stats
 
     tool_stats = await service.get_tool_call_stats()
-    assert tool_stats["total_calls"] == 2
+    assert tool_stats["total_calls"] == 1
 
     user_stats = await service.get_user_activity_stats()
     assert len(user_stats["daily_active_users"]) == 120
     assert user_stats["daily_active_users"][0]["date"] < user_stats["daily_active_users"][-1]["date"]
 
-    feedbacks = await service.get_feedbacks()
-    assert len(feedbacks) == 2
 
-
-async def test_dashboard_self_scope_uses_tool_call_conversation_owner(dashboard_db):
-    authorization = SimpleNamespace(
-        user=SimpleNamespace(id=3, uid="uid-bob", department_id=None),
-        permission_scopes=lambda _permission: (("self", frozenset()),),
-    )
-    scope_filter = await dashboard_tool_history_filter(dashboard_db, authorization, None)
-    repository = DashboardRepository(dashboard_db)
-
-    tool_stats = await repository.get_tool_call_stats(scope_filter=scope_filter)
-    assert tool_stats["total_calls"] == 1
-    assert tool_stats["most_used_tools"] == [{"tool_name": "bash", "count": 1}]
-
-    await dashboard_db.execute(
-        update(ToolCall).where(ToolCall.tool_name == "legacy_tool").values(organization_snapshot_inferred=True)
-    )
-    await dashboard_db.commit()
-    basic_stats = await repository.get_basic_stats(tool_filter=scope_filter)
-    assert basic_stats["contains_inferred_data"] is False
-
-
-async def test_resource_scope_aggregation_lives_in_dashboard_service(dashboard_db, monkeypatch):
-    service = DashboardService(dashboard_db)
-    owned = SimpleNamespace(
-        created_by="uid-bob",
-        organization_path_snapshot="/1/2/",
-        organization_snapshot_inferred=True,
-        share_config={"version": 2, "read_scope": None, "manage_scope": None},
-        source_scope="shared",
-    )
-    authorization = SimpleNamespace(
-        user=SimpleNamespace(id=3, uid="uid-bob"),
-        allows=lambda _permission, target: target.owner_user_id == 3,
-    )
-
-    async def list_resources(_model):
-        return [owned]
-
-    async def subjects(_db, _authorization, _department_id):
-        return [{"uid": "uid-bob", "department_ancestor_ids": (1, 2)}]
-
-    monkeypatch.setattr(service.repo, "list_resources", list_resources)
-    monkeypatch.setattr(dashboard_service, "dashboard_resource_subjects", subjects)
-
-    result = await service.get_resource_scope_stats(authorization=authorization, department_id=2)
-
-    assert result["knowledge_bases"]["creation_count"] == 1
-    assert (
-        result["agents"]
-        == result["skills"]
-        == {
-            "creation_count": 1,
-            "shared_visible_count": 1,
-            "contains_inferred_data": True,
-        }
-    )
-    assert result["contains_inferred_data"] is True
-
-
-async def test_agent_analytics_keeps_top_performers_wire_contract(dashboard_db):
-    """智能体统计保留历史 Agent 概览与既有 TOP 5 协议。"""
+async def test_agent_analytics_omits_removed_top_performers_contract(dashboard_db):
+    """智能体统计保留概览字段且不再生成 TOP 5 排行。"""
     analytics = await DashboardService(dashboard_db).get_agent_analytics()
 
     assert set(analytics) == {
         "total_agents",
-        "agent_conversation_counts",
-        "agent_satisfaction_rates",
+        "agent_session_counts",
         "agent_tool_usage",
-        "top_performing_agents",
         "agent_names",
     }
-    assert analytics["total_agents"] == 3
+    assert analytics["total_agents"] == 2
     assert analytics["agent_names"] == {
         "agent-helper": "Helper Agent",
         "agent-coder": "Coder Agent",
-        "removed-agent": "removed-agent",
     }
-    assert {item["agent_id"] for item in analytics["top_performing_agents"]} == {
-        "agent-helper",
-        "agent-coder",
-        "removed-agent",
-    }
-    coder_satisfaction = next(
-        item for item in analytics["agent_satisfaction_rates"] if item["agent_id"] == "agent-coder"
-    )
-    assert coder_satisfaction == {
-        "agent_id": "agent-coder",
-        "satisfaction_rate": 100,
-        "total_feedbacks": 0,
-    }
+
+
+async def test_tool_statistics_count_started_execution_statuses(dashboard_db):
+    """审批拒绝不计执行，运行中与中断不冒充失败。"""
+    session = await dashboard_db.scalar(select(Session).where(Session.thread_id == "thread-102"))
+    assert session is not None
+    now = utc_now()
+    for status, started, source in [
+        ("running", now, None),
+        ("failed", now, None),
+        ("interrupted", now, None),
+        ("failed", None, "approval_rejection"),
+    ]:
+        dashboard_db.add(
+            Message(
+                session_record_id=session.id,
+                role="tool",
+                message_type="tool_audit",
+                content="",
+                execution_status=status,
+                started_at=started,
+                created_at=now,
+                extra_metadata={"tool_name": source or status, "source": source},
+            )
+        )
+    await dashboard_db.commit()
+
+    stats = await DashboardService(dashboard_db).get_tool_call_stats()
+    assert stats["total_calls"] == 4
+    assert stats["successful_calls"] == 1
+    assert stats["failed_calls"] == 1
+    assert stats["success_rate"] == 25
+    assert stats["tool_error_distribution"] == {"failed": 1}
+    assert {tool["tool_name"] for tool in stats["most_used_tools"]} == {"bash", "running", "failed", "interrupted"}
 
 
 async def test_dashboard_service_thread_analytics(dashboard_db):
@@ -415,47 +307,36 @@ async def test_dashboard_service_thread_analytics(dashboard_db):
     analytics = await service.get_thread_analytics(time_range="7days")
 
     summary = analytics["summary"]
-    assert summary["total_threads"] == 5
+    assert summary["total_threads"] == 4
     assert summary["active_threads"] >= 1
     assert summary["pinned_threads"] == 1
-    assert summary["total_messages"] == 5
-    assert summary["total_tokens"] == 5000
+    assert summary["total_messages"] == 4
+    assert summary["total_tokens"] is None  # 无 Run 用量事实时保留未知
+    assert summary["token_usage_complete"] is False
     assert summary["avg_messages_per_thread"] > 0
-    assert summary["avg_tokens_per_thread"] > 0
+    assert summary["avg_tokens_per_thread"] is None
 
     assert len(analytics["daily_trends"]) == 7
 
     depth = analytics["depth_distribution"]
-    assert depth["0 条"] == 2  # deleted user and removed agent histories have no ConversationStats
-    assert depth["1-2 条"] == 1  # conv3 has 1 message
-    assert depth["3-5 条"] == 1  # conv1 has 4 messages
-    assert depth["6-10 条"] == 1  # conv2 has 8 messages
+    assert depth["0 条"] == 2  # conv3 无消息
+    assert depth["1-2 条"] == 2  # conv1/conv2 各 2 条
+    assert depth["3-5 条"] == 0
+    assert depth["6-10 条"] == 0
 
     agents = analytics["agent_distribution"]
-    assert len(agents) == 3
+    assert len(agents) == 2
     coder_stat = next(a for a in agents if a["agent_id"] == "agent-coder")
     assert coder_stat["thread_count"] == 2
     assert coder_stat["agent_name"] == "Coder Agent"
-    removed_stat = next(a for a in agents if a["agent_id"] == "removed-agent")
-    assert removed_stat["thread_count"] == 1
-    assert removed_stat["agent_name"] == "removed-agent"
-
-    with_subagents = await service.get_thread_analytics(time_range="7days", include_subagents=True)
-    assert with_subagents["summary"]["total_threads"] == 6
-    helper_with_subagent = next(
-        item for item in with_subagents["agent_distribution"] if item["agent_id"] == "agent-helper"
-    )
-    assert helper_with_subagent["thread_count"] == 3
 
     top_users = analytics["top_users"]
     assert len(top_users) >= 2
     alice_stat = next(u for u in top_users if u["uid"] == "uid-alice")
     assert alice_stat["username"] == "Alice"
-    assert alice_stat["display_name"] == "爱丽丝"
     assert alice_stat["thread_count"] == 3
-    assert next(u for u in top_users if u["uid"] == "uid-deleted")["username"] == "Deleted User"
 
-    assert analytics["status_distribution"]["active"] == 4
+    assert analytics["status_distribution"]["active"] == 3
     assert analytics["status_distribution"]["archived"] == 1
 
     coder_only = await service.get_thread_analytics(time_range="7days", agent_id="agent-coder")
@@ -466,46 +347,13 @@ async def test_dashboard_service_thread_analytics(dashboard_db):
     assert {item["uid"] for item in coder_only["top_users"]} == {"uid-alice", "uid-bob"}
 
 
-async def test_dashboard_resolves_legacy_account_to_display_name(dashboard_db):
-    """历史会话仍使用 OA 原始账号时，Dashboard 也应关联到当前用户姓名。"""
-    legacy_user = User(
-        username="2024102811",
-        display_name="吴轩",
-        uid="oa:ZD:2024102811",
-        password_hash="$argon2id$placeholder",
-    )
-    legacy_conversation = Conversation(
-        thread_id="thread-legacy-oa",
-        project_id="p-legacy-oa",
-        uid="2024102811",
-        agent_id="agent-helper",
-        title="Legacy OA conversation",
-        status="active",
-        created_at=utc_now_naive(),
-        updated_at=utc_now_naive(),
-    )
-    dashboard_db.add_all([legacy_user, legacy_conversation])
-    await dashboard_db.commit()
-
-    service = DashboardService(dashboard_db)
-    result = await service.list_conversations(limit=20)
-
-    item = next(item for item in result["items"] if item["thread_id"] == "thread-legacy-oa")
-    assert item["username"] == "2024102811"
-    assert item["display_name"] == "吴轩"
-
-    analytics = await service.get_thread_analytics(time_range="7days")
-    top_user = next(user for user in analytics["top_users"] if user["uid"] == "2024102811")
-    assert top_user["display_name"] == "吴轩"
-
-
 async def test_thread_analytics_groups_daily_trends_by_shanghai_date(dashboard_db):
     service = DashboardService(dashboard_db)
     fixed_now = datetime(2026, 8, 24, 1, 0)
     baseline = await service.repo.get_thread_analytics(time_range="7days", now=fixed_now)
     baseline_by_date = {item["date"]: item for item in baseline["daily_trends"]}
 
-    boundary_conversation = Conversation(
+    boundary_session = Session(
         thread_id="thread-shanghai-boundary",
         project_id="p-boundary",
         uid="uid-alice",
@@ -516,12 +364,12 @@ async def test_thread_analytics_groups_daily_trends_by_shanghai_date(dashboard_d
         updated_at=datetime(2026, 8, 23, 16, 30),
     )
     boundary_message = Message(
-        conversation=boundary_conversation,
+        agent_session=boundary_session,
         role="user",
         content="After Shanghai midnight",
         created_at=datetime(2026, 8, 23, 16, 30),
     )
-    dashboard_db.add_all([boundary_conversation, boundary_message])
+    dashboard_db.add_all([boundary_session, boundary_message])
     await dashboard_db.commit()
 
     analytics = await service.repo.get_thread_analytics(time_range="7days", now=fixed_now)
@@ -556,14 +404,14 @@ async def test_thread_analytics_query_count_does_not_grow_with_time_range(dashbo
     assert statement_counts[0] <= 12
 
 
-async def test_dashboard_service_list_conversations_search(dashboard_db):
+async def test_dashboard_service_list_sessions_search(dashboard_db):
     service = DashboardService(dashboard_db)
 
-    all_convs = await service.list_conversations(limit=20)
+    all_convs = await service.list_sessions(limit=20)
     assert all_convs["total"] == 6
     assert len(all_convs["items"]) == 6
     assert all(item["status"] != "deleted" for item in all_convs["items"])
-    deleted_convs = await service.list_conversations(status="deleted", limit=20)
+    deleted_convs = await service.list_sessions(status="deleted", limit=20)
     assert deleted_convs["total"] == 1
     assert deleted_convs["items"][0]["thread_id"] == "thread-deleted"
     deleted_item = next(item for item in all_convs["items"] if item["thread_id"] == "thread-deleted-user")
@@ -571,29 +419,17 @@ async def test_dashboard_service_list_conversations_search(dashboard_db):
     assert deleted_item["user_deleted"] is True
     assert missing_agent_item["agent_deleted"] is True
 
-    search_result = await service.list_conversations(search="Python")
+    search_result = await service.list_sessions(search="Python")
     assert search_result["total"] == 1
     assert search_result["items"][0]["thread_id"] == "thread-103"
     assert search_result["items"][0]["username"] == "Alice"
-    assert search_result["items"][0]["display_name"] == "爱丽丝"
     assert search_result["items"][0]["agent_name"] == "Coder Agent"
 
-    display_name_search = await service.list_conversations(search="爱丽丝")
-    assert display_name_search["total"] == 4
-    assert all(item["display_name"] == "爱丽丝" for item in display_name_search["items"])
+    active_only = await service.list_sessions(status="active")
+    assert active_only["total"] == 5
+    assert len(active_only["items"]) == 5
 
-    completed_item = next(item for item in all_convs["items"] if item["thread_id"] == "thread-102")
-    assert completed_item["status"] == "active"
-    assert completed_item["run_status"] == "completed"
-    no_run_item = next(item for item in all_convs["items"] if item["thread_id"] == "thread-101")
-    assert no_run_item["run_status"] is None
-
-    active_only = await service.list_conversations(status="active")
-    assert active_only["total"] == 4
-    assert len(active_only["items"]) == 4
-
-    options = await service.get_conversation_filter_options()
-    assert next(item for item in options["users"] if item["uid"] == "uid-alice")["display_name"] == "爱丽丝"
+    options = await service.get_session_filter_options()
     assert next(item for item in options["users"] if item["uid"] == "uid-deleted")["is_deleted"] is True
     assert next(item for item in options["agents"] if item["agent_id"] == "removed-agent")["is_deleted"] is True
 
@@ -602,94 +438,286 @@ async def test_dashboard_audit_timestamps_carry_timezone_designator(dashboard_db
     """审计接口对外时间必须带时区标识（约定 UTC + Z 后缀），否则前端会按本地时间误读。"""
     service = DashboardService(dashboard_db)
 
-    conversations = await service.list_conversations(limit=20)
-    assert conversations["items"]
-    for item in conversations["items"]:
+    sessions = await service.list_sessions(limit=20)
+    assert sessions["items"]
+    for item in sessions["items"]:
         assert item["created_at"].endswith("Z")
         assert item["updated_at"].endswith("Z")
 
-    detail = await service.get_conversation_detail("thread-102")
+    detail = await service.get_session_detail("thread-102")
     assert detail is not None
     assert detail["created_at"].endswith("Z")
     assert detail["updated_at"].endswith("Z")
     for message in detail["messages"]:
         assert message["created_at"].endswith("Z")
 
-    feedbacks = await service.get_feedbacks()
-    assert feedbacks
-    for feedback in feedbacks:
-        assert feedback["created_at"].endswith("Z")
 
-
-async def test_dashboard_service_conversation_detail(dashboard_db):
+async def test_dashboard_service_session_detail(dashboard_db):
     service = DashboardService(dashboard_db)
-    detail = await service.get_conversation_detail("thread-102")
+    detail = await service.get_session_detail("thread-102")
 
     assert detail is not None
     assert detail["thread_id"] == "thread-102"
-    assert detail["total_tokens"] == 3500
+    assert detail["total_tokens"] is None  # 无 Run 用量事实时暴露未知而不是旧汇总
     assert detail["user_deleted"] is False
-    assert detail["display_name"] == "鲍勃"
     assert detail["agent_deleted"] is False
-    assert detail["status"] == "active"
-    assert detail["run_status"] == "completed"
     assert len(detail["messages"]) == 2
     assistant_msg = next(m for m in detail["messages"] if m["role"] == "assistant")
-    assert "tool_calls" in assistant_msg
-    assert assistant_msg["tool_calls"][0]["tool_name"] == "bash"
+    assert "tool_executions" in assistant_msg
+    assert assistant_msg["tool_executions"][0]["tool_name"] == "bash"
 
 
-async def test_conversation_tokens_use_runs_and_expose_missing_usage(dashboard_db):
+async def test_session_tokens_use_runs_and_expose_missing_usage(dashboard_db):
     """审计累加同会话 Run，忽略旧汇总并区分真实零和未知。"""
     from sqlalchemy import select
-    from yuxi.storage.postgres.models_business import AgentRun
 
-    conversation = (
-        await dashboard_db.execute(select(Conversation).where(Conversation.thread_id == "thread-102"))
-    ).scalar_one()
+    from yuxi.modules.agents.models.runs import AgentRun
+    from yuxi.modules.agents.models.turns import AgentTurn
+
+    agent_session = (await dashboard_db.execute(select(Session).where(Session.thread_id == "thread-102"))).scalar_one()
+    dashboard_db.add(
+        AgentTurn(
+            id="usage-turn",
+            thread_id=agent_session.thread_id,
+            uid=agent_session.uid,
+            status="completed",
+        )
+    )
+    await dashboard_db.flush()
     for index, usage in enumerate(
         [
-            {"total": {"total_tokens": 120}, "complete": True, "usage_reported_call_count": 1},
-            {"total": {"total_tokens": 80}, "complete": True, "usage_reported_call_count": 1},
+            {"total": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}, "complete": True, "usage_reported_call_count": 1},
+            {"total": {"input_tokens": 50, "output_tokens": 30, "total_tokens": 80}, "complete": True, "usage_reported_call_count": 1},
         ]
     ):
         dashboard_db.add(
             AgentRun(
                 id=f"usage-run-{index}",
-                conversation_id=conversation.id,
-                conversation_thread_id=conversation.thread_id,
-                runtime_scope_id=conversation.thread_id,
-                agent_slug=conversation.agent_id,
-                uid=conversation.uid,
-                status="completed",
-                request_id=f"usage-request-{index}",
+                session_record_id=agent_session.id,
+                thread_id=agent_session.thread_id,
+                runtime_scope_id=agent_session.thread_id,
+                agent_slug=agent_session.agent_id,
+                uid=agent_session.uid,
+                status="yielded" if index == 0 else "completed",
+                turn_id="usage-turn",
+                run_type="chat" if index == 0 else "resume",
+                resume_from_run_id="usage-run-0" if index else None,
                 token_usage=usage,
             )
         )
+        await dashboard_db.flush()
     await dashboard_db.commit()
     service = DashboardService(dashboard_db)
-    detail = await service.get_conversation_detail(conversation.thread_id)
-    item = (await service.list_conversations(search="thread-102"))["items"][0]
+    detail = await service.get_session_detail(agent_session.thread_id)
+    item = (await service.list_sessions(search="thread-102"))["items"][0]
     assert detail["total_tokens"] == item["total_tokens"] == 200
     assert item["token_usage_complete"] is True
 
     run = await dashboard_db.get(AgentRun, "usage-run-1")
     run.token_usage = {"available": False}
     await dashboard_db.commit()
-    item = (await service.list_conversations(search="thread-102"))["items"][0]
+    item = (await service.list_sessions(search="thread-102"))["items"][0]
     assert item["total_tokens"] == 120
     assert item["token_usage_complete"] is False
 
     run = await dashboard_db.get(AgentRun, "usage-run-0")
-    run.token_usage = {"total": {"total_tokens": 0}, "complete": False, "usage_reported_call_count": 0}
+    run.token_usage = {
+        "total": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        "complete": False,
+        "usage_reported_call_count": 0,
+    }
     await dashboard_db.commit()
-    item = (await service.list_conversations(search="thread-102"))["items"][0]
+    item = (await service.list_sessions(search="thread-102"))["items"][0]
     assert item["total_tokens"] is None
     assert item["token_usage_complete"] is False
 
-    run.token_usage = {"total": {"total_tokens": 0}, "complete": True, "usage_reported_call_count": 1}
+    run.token_usage = {
+        "total": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        "complete": True,
+        "usage_reported_call_count": 1,
+    }
     await dashboard_db.delete(await dashboard_db.get(AgentRun, "usage-run-1"))
     await dashboard_db.commit()
-    item = (await service.list_conversations(search="thread-102"))["items"][0]
+    item = (await service.list_sessions(search="thread-102"))["items"][0]
     assert item["total_tokens"] == 0
     assert item["token_usage_complete"] is True
+
+
+async def test_tool_stats_preserve_rolling_boundaries_with_one_aggregate(dashboard_db):
+    """滚动窗口保留下界、排除上界，单次聚合与时间桶缺口不改变统计。"""
+    now = datetime(2026, 10, 15, 12)
+    service = DashboardService(dashboard_db)
+    baseline = await service.get_tool_call_stats(now=now)
+    agent_session = await dashboard_db.scalar(select(Session).where(Session.thread_id == "thread-102"))
+    for offset in [
+        timedelta(),
+        timedelta(microseconds=1),
+        timedelta(days=1),
+        timedelta(days=1, microseconds=1),
+        timedelta(days=7),
+        timedelta(days=7, microseconds=1),
+    ]:
+        dashboard_db.add(
+            Message(
+                session_record_id=agent_session.id,
+                role="tool",
+                message_type="tool_audit",
+                content="",
+                started_at=now - offset,
+                created_at=now - offset,
+                execution_status="completed",
+                extra_metadata={"tool_name": "boundary"},
+            )
+        )
+    await dashboard_db.commit()
+    statements = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _many):
+        """记录真实数据库执行预算，不替代业务结果断言。"""
+        statements.append(statement)
+
+    engine = dashboard_db.bind.sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        stats = await service.get_tool_call_stats(now=now)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+    assert len(statements) == 1
+    assert stats["total_calls"] == baseline["total_calls"] + 6
+    assert stats["successful_calls"] == baseline["successful_calls"] + 6
+    assert [
+        after["call_count"] - before["call_count"] for after, before in zip(stats["daily_tool_calls"], baseline["daily_tool_calls"])
+    ] == [1, 0, 0, 0, 0, 1, 2]
+
+
+@pytest.mark.parametrize(
+    "time_range,expected_threads,expected_average", [("all", 8, 1.4), ("3months", 6, 1.7), ("30days", 4, 1.8), ("7days", 2, 2.0)]
+)
+async def test_agent_distribution_uses_created_cohort_and_weighted_messages(dashboard_db, time_range, expected_threads, expected_average):
+    """创建边界、闰月回退、空会话和消息排除共同约束同口径的摘要与排行。"""
+    from zoneinfo import ZoneInfo
+
+    template = await dashboard_db.scalar(select(Session).where(Session.thread_id == "thread-101"))
+    now = datetime(2020, 5, 31, 12, tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(UTC)
+    dates_and_messages = [
+        (datetime(2019, 1, 1), 1),
+        (datetime(2020, 2, 28, 23, 59, 59, 999999), 0),
+        (datetime(2020, 2, 29), 2),
+        (datetime(2020, 5, 1, 23, 59, 59, 999999), 1),
+        (datetime(2020, 5, 2), 3),
+        (datetime(2020, 5, 24, 23, 59, 59, 999999), 0),
+        (datetime(2020, 5, 25), 4),
+        (datetime(2020, 5, 31), 0),
+    ]
+    sessions = []
+    for index, (created, count) in enumerate(dates_and_messages):
+        session = Session(
+            thread_id=f"cohort-{index}",
+            project_id=template.project_id,
+            uid=template.uid,
+            agent_id="agent-coder" if index == 7 else "agent-helper",
+            status="active",
+            created_at=created.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(UTC),
+        )
+        dashboard_db.add(session)
+        await dashboard_db.flush()
+        sessions.append(session)
+        for _ in range(count):
+            dashboard_db.add(Message(session_record_id=session.id, role="assistant", content="sample", created_at=now))
+    for message_type in ("model_audit", "tool_audit"):
+        dashboard_db.add(Message(session_record_id=sessions[6].id, role="assistant", content="", created_at=now, message_type=message_type))
+    dashboard_db.add(Message(session_record_id=sessions[6].id, role="assistant", content="future", created_at=now + timedelta(seconds=1)))
+    for index, (created, status, uid) in enumerate(
+        [(now + timedelta(seconds=1), "active", template.uid), (now, "deleted", template.uid), (now, "active", "uid-deleted")]
+    ):
+        dashboard_db.add(
+            Session(
+                thread_id=f"excluded-cohort-{index}",
+                project_id=template.project_id,
+                uid=uid,
+                agent_id="agent-helper",
+                status=status,
+                created_at=created,
+            )
+        )
+    await dashboard_db.flush()
+
+    result = await DashboardService(dashboard_db).repo.get_agent_session_distribution(time_range=time_range, now=now)
+
+    assert result["total_threads"] == expected_threads
+    assert result["agent_count"] == 2
+    assert result["avg_messages_per_thread"] == expected_average
+    assert sum(row["thread_count"] for row in result["agent_distribution"]) == expected_threads
+    assert (
+        sum(row["message_count"] for row in result["agent_distribution"]) == {"all": 11, "3months": 10, "30days": 7, "7days": 4}[time_range]
+    )
+    empty_agent = next(row for row in result["agent_distribution"] if row["agent_id"] == "agent-coder")
+    assert empty_agent["thread_count"] == 1
+    assert empty_agent["avg_messages"] == 0
+
+
+async def test_agent_distribution_empty_range_has_zero_summary(dashboard_db):
+    """无会话范围返回可解释的零值与空排行。"""
+    from yuxi.shared.datetime import UTC
+
+    result = await DashboardService(dashboard_db).repo.get_agent_session_distribution(
+        time_range="7days", now=datetime(2000, 1, 1, tzinfo=UTC)
+    )
+    assert result == {"total_threads": 0, "agent_count": 0, "avg_messages_per_thread": 0.0, "agent_distribution": []}
+
+
+async def test_dashboard_history_scope_survives_user_transfer(dashboard_db):
+    """用户调部门不改变历史归属；同一会话的新组织消息不能泄露给原组织。"""
+    from sqlalchemy import update
+
+    from yuxi.modules.agents.models.runs import AgentRun
+
+    sessions = list((await dashboard_db.scalars(select(Session))).all())
+    for item in sessions:
+        item.organization_path_snapshot = "/1/10/" if item.uid == "uid-alice" else "/1/20/"
+    for message in (await dashboard_db.scalars(select(Message))).all():
+        owner = next(item for item in sessions if item.id == message.session_record_id)
+        message.organization_path_snapshot = owner.organization_path_snapshot
+    first = next(item for item in sessions if item.thread_id == "thread-101")
+    dashboard_db.add(Message(session_record_id=first.id, role="assistant", content="新组织私密内容", organization_path_snapshot="/1/20/"))
+    await dashboard_db.execute(update(User).where(User.uid == "uid-alice").values(department_id=None))
+    await dashboard_db.commit()
+    service = DashboardService(
+        dashboard_db,
+        session_filter=Session.organization_path_snapshot.like("%/10/%"),
+        message_filter=Message.organization_path_snapshot.like("%/10/%"),
+        run_filter=AgentRun.organization_path_snapshot.like("%/10/%"),
+        total_users=0,
+    )
+
+    listing = await service.list_sessions(limit=100)
+    assert listing["items"] and all(item["uid"] == "uid-alice" for item in listing["items"])
+    assert await service.get_session_detail("thread-102") is None
+    detail = await service.get_session_detail("thread-101")
+    assert {item["content"] for item in detail["messages"]} == {"Hello", "Hi there!"}
+    assert (await service.get_basic_stats())["total_users"] == 0
+    assert (await service.get_session_filter_options())["users"][0]["uid"] == "uid-alice"
+
+
+async def test_dashboard_self_scope_uses_tool_message_session_owner(dashboard_db):
+    """self 范围通过真实消息所属 Session 求交，不因相同组织而扩大工具统计。"""
+    from types import SimpleNamespace
+
+    from yuxi.modules.system.services.dashboard_scope import dashboard_tool_history_filter
+
+    authorization = SimpleNamespace(
+        user=SimpleNamespace(id=3, uid="uid-bob", department_id=None),
+        permission_scopes=lambda _permission: (("self", frozenset()),),
+    )
+    scope_filter = await dashboard_tool_history_filter(dashboard_db, authorization, None)
+    service = DashboardService(dashboard_db, message_filter=scope_filter)
+    tool_stats = await service.get_tool_call_stats()
+    assert tool_stats["total_calls"] == 1
+    assert tool_stats["most_used_tools"] == [{"tool_name": "bash", "count": 1}]
+
+
+async def test_dashboard_display_name_search_uses_current_stable_user_identity(dashboard_db):
+    """新 Session 继续以稳定 UID 关联展示名，不依赖已退役的旧账号兼容表。"""
+    listing = await DashboardService(dashboard_db).list_sessions(search="爱丽丝")
+    assert listing["items"]
+    assert all(item["display_name"] == "爱丽丝" for item in listing["items"])

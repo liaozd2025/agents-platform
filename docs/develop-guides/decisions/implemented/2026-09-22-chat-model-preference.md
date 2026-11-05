@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/utils/conversationModel.js
+Owner：frontend/src/shared/lib/conversationModel.js
 
 ## 问题
 

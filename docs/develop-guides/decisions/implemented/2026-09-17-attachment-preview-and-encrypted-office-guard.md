@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/utils/filepreview.py
+Owner：backend/yuxi/infrastructure/file_preview.py
 
 ## 问题
 

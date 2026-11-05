@@ -4,24 +4,22 @@ langchain_openai 把 AIMessage.invalid_tool_calls 序列化成 type:"function"�
 为截断 JSON 的 tool_call，DeepSeek 等接口因此报参数解析失败。窄方案在
 ChatCompletionsAdapter._get_request_payload 里按 id 移除这些截断调用，并在 content
 里给模型明确的 text 反馈，覆盖同步/异步/流式/非流式四条路径；不改 Anthropic/Gemini，
-不删孤儿 ToolMessage（按根因单独处理），原始 checkpoint 消息对象不动。
+仅过滤同批已移除无效调用的补齐结果，保留真实孤儿 ToolMessage，原始 checkpoint 消息对象不动。
 """
 
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, InvalidToolCall
+from langchain_core.messages import AIMessage, HumanMessage, InvalidToolCall, SystemMessage, ToolMessage
 from pydantic import SecretStr
 
-os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
-from yuxi.models.chat import ChatCompletionsAdapter, _sanitize_wire_invalid_tool_calls
+def _adapter(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    from yuxi.modules.models.chat import ChatCompletionsAdapter
 
-
-def _adapter() -> ChatCompletionsAdapter:
     return ChatCompletionsAdapter(
         model="deepseek-chat",
         api_key=SecretStr("test-key"),
@@ -37,21 +35,23 @@ def _messages_with_invalid() -> list:
     return [
         HumanMessage(content="hi"),
         AIMessage(content="", invalid_tool_calls=[_invalid_call()]),
+        ToolMessage(content="patched error", tool_call_id="call-bad"),
     ]
 
 
 # ---- 单元：wire 净化函数 ----
 
 
-def test_pure_invalid_call_is_removed_and_feedback_added():
+def test_pure_invalid_call_is_removed_and_feedback_added(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    from yuxi.modules.models.chat import _sanitize_wire_invalid_tool_calls
+
     wire = [
         {"role": "user", "content": "hi"},
         {
             "role": "assistant",
             "content": None,
-            "tool_calls": [
-                {"type": "function", "id": "call-bad", "function": {"name": "kbs_search", "arguments": '{"query":'}}
-            ],
+            "tool_calls": [{"type": "function", "id": "call-bad", "function": {"name": "kbs_search", "arguments": '{"query":'}}],
         },
     ]
     originals = [
@@ -65,7 +65,10 @@ def test_pure_invalid_call_is_removed_and_feedback_added():
     assert wire[1]["content"] == [{"type": "text", "text": "[工具调用失败] kbs_search: Unterminated string"}]
 
 
-def test_mixed_keeps_valid_call_and_adds_feedback():
+def test_mixed_keeps_valid_call_and_adds_feedback(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    from yuxi.modules.models.chat import _sanitize_wire_invalid_tool_calls
+
     wire = [
         {
             "role": "assistant",
@@ -94,7 +97,10 @@ def test_mixed_keeps_valid_call_and_adds_feedback():
     assert wire[0]["content"] == [{"type": "text", "text": "[工具调用失败] kbs_search: Unterminated string"}]
 
 
-def test_no_invalid_call_leaves_wire_unchanged():
+def test_no_invalid_call_leaves_wire_unchanged(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    from yuxi.modules.models.chat import _sanitize_wire_invalid_tool_calls
+
     wire = [
         {
             "role": "assistant",
@@ -143,36 +149,70 @@ def _stream_response() -> str:
     return 'data: {"choices":[{"delta":{"content":"ok"},"index":0}]}\n\ndata: [DONE]\n\n'
 
 
-def test_invoke_sanitizes_request_body(httpx_mock):
-    httpx_mock.add_response(url="http://test.local/v1/chat/completions", json=_ok_response())
-
-    _adapter().invoke(_messages_with_invalid())
-
-    _assert_body_has_no_invalid_tool_call(httpx_mock.get_request())
-
-
 @pytest.mark.asyncio
-async def test_ainvoke_sanitizes_request_body(httpx_mock):
-    httpx_mock.add_response(url="http://test.local/v1/chat/completions", json=_ok_response())
+@pytest.mark.parametrize("entrypoint", ["invoke", "ainvoke", "stream", "astream"])
+async def test_adapter_entrypoints_sanitize_request_body(httpx_mock, monkeypatch, entrypoint):
+    adapter = _adapter(monkeypatch)
+    if entrypoint in {"stream", "astream"}:
+        httpx_mock.add_response(url="http://test.local/v1/chat/completions", text=_stream_response())
+    else:
+        httpx_mock.add_response(url="http://test.local/v1/chat/completions", json=_ok_response())
 
-    await _adapter().ainvoke(_messages_with_invalid())
-
-    _assert_body_has_no_invalid_tool_call(httpx_mock.get_request())
-
-
-def test_stream_sanitizes_request_body(httpx_mock):
-    httpx_mock.add_response(url="http://test.local/v1/chat/completions", text=_stream_response())
-
-    list(_adapter().stream(_messages_with_invalid()))
-
-    _assert_body_has_no_invalid_tool_call(httpx_mock.get_request())
-
-
-@pytest.mark.asyncio
-async def test_astream_sanitizes_request_body(httpx_mock):
-    httpx_mock.add_response(url="http://test.local/v1/chat/completions", text=_stream_response())
-
-    async for _ in _adapter().astream(_messages_with_invalid()):
-        pass
+    if entrypoint == "invoke":
+        adapter.invoke(_messages_with_invalid())
+    elif entrypoint == "ainvoke":
+        await adapter.ainvoke(_messages_with_invalid())
+    elif entrypoint == "stream":
+        list(adapter.stream(_messages_with_invalid()))
+    else:
+        async for _ in adapter.astream(_messages_with_invalid()):
+            pass
 
     _assert_body_has_no_invalid_tool_call(httpx_mock.get_request())
+
+
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_patched_invalid_result_is_removed_without_losing_valid_pairs(monkeypatch, reasoning):
+    """补齐的无效结果与被删除调用一起过滤，合法结果及后续复用 ID 保留。"""
+    from copy import deepcopy
+
+    adapter = _adapter(monkeypatch)
+    adapter.preserve_reasoning = reasoning
+    original = AIMessage(
+        content="",
+        tool_calls=[{"id": "good", "name": "read", "args": {}}],
+        invalid_tool_calls=[_invalid_call()],
+        additional_kwargs={"reasoning_content": "原始推理"},
+    )
+    messages = [
+        HumanMessage(content="hi"),
+        original,
+        ToolMessage(content="invalid result", tool_call_id="call-bad"),
+        ToolMessage(content="valid result", tool_call_id="good"),
+        AIMessage(content="", tool_calls=[{"id": "call-bad", "name": "read", "args": {}}]),
+        ToolMessage(content="reused valid result", tool_call_id="call-bad"),
+        ToolMessage(content="unrelated orphan", tool_call_id="orphan"),
+        HumanMessage(content="继续"),
+    ]
+    before = deepcopy(messages)
+    payload = adapter._get_request_payload(messages)["messages"]
+    assert [m["content"] for m in payload if m["role"] == "tool"] == ["valid result", "reused valid result", "unrelated orphan"]
+    assert [c["id"] for c in payload[1]["tool_calls"]] == ["good"]
+    assert "工具调用失败" in str(payload[1]["content"])
+    if reasoning:
+        assert payload[1]["reasoning_content"] == "原始推理"
+    assert messages == before
+
+
+@pytest.mark.parametrize("boundary", [HumanMessage(content="下一轮"), SystemMessage(content="边界")])
+def test_invalid_call_filter_stops_at_non_tool_boundary(monkeypatch, boundary):
+    """同 ID 出现在用户或系统消息之后的孤儿结果不能被静默删除。"""
+
+    payload = _adapter(monkeypatch)._get_request_payload(
+        [
+            AIMessage(content="", invalid_tool_calls=[_invalid_call()]),
+            boundary,
+            ToolMessage(content="true orphan", tool_call_id="call-bad"),
+        ]
+    )
+    assert payload["messages"][-1] == {"role": "tool", "content": "true orphan", "tool_call_id": "call-bad"}

@@ -14,7 +14,7 @@ import pytest
 from PIL import Image
 
 pytestmark = pytest.mark.integration
-SCRIPT = Path(__file__).resolve().parents[2] / "package/yuxi/agents/skills/buildin/image-gen/scripts/image_gen.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "yuxi/modules/extensions/skills/builtin/image-gen/scripts/image_gen.py"
 
 # 仅替换外部网络路由；实际脚本、CLI 解析、HTTP 序列化和文件行为保持不变。
 DRIVER = """

@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：simplification
-Owner：backend/package/yuxi/services/oa_sso_service.py
+Owner：backend/yuxi/modules/identity/services/oa.py
 
 ## 问题
 
@@ -27,3 +27,10 @@ Owner：backend/package/yuxi/services/oa_sso_service.py
 旧能力不存在：账号换票入口不再接收共享密钥、签名或时间戳。
 
 重新引入条件：OA 父项目能提供可信的服务端签名并完成接入契约调整。
+
+
+## 当前登录限流边界
+
+2026-11-02：密码登录与 OA 两种换票入口共用进程内登录限流。`api/middleware/access_log.py` 只信任 Compose 的 `frontend` 代理地址提供的 X-Real-IP；直接访问 API 不采信客户端 X-Forwarded-For 或 X-Real-IP。Vite 与 Nginx 在转发前覆盖 X-Real-IP，不透传用户自报来源。代理地址解析失败时使用实际连接地址。
+
+`test/unit/test_login_rate_limit.py` 覆盖三个入口、代理头伪造、直接访问和 DNS 失败关闭；不把这些单测等同生产网关容量或分布式限流验收。

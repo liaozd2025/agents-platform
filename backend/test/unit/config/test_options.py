@@ -4,23 +4,43 @@ import json
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from yuxi.config import options
-from yuxi.storage.postgres.models_business import Base
+from test.support.sqlite import create_utc_sqlite_engine
+from yuxi.bootstrap.options import ensure_options_in_db
+from yuxi.infrastructure.postgres.base import Base
+from yuxi.modules.documents.options import mineru_official_api_opts
+from yuxi.modules.models.providers.builtin import BUILTIN_PROVIDERS
+from yuxi.modules.system.options import system_options
+from yuxi.modules.system.services import options
 
 
 @pytest.mark.parametrize("key", ["default_model", "fast_model"])
 def test_system_chat_model_defaults_to_fork_qwen(key):
     """未配置的对话与快速模型使用硅基流动 DeepSeek Flash。"""
-    assert options.system_options.resolve({})[key] == "alibaba-cn:qwen3.7-max"
+    assert system_options.resolve({})[key] == "alibaba-cn:qwen3.7-max"
+
+
+def test_system_chat_model_defaults_are_enabled_builtin_models():
+    """默认模型必须存在于内置DashScope模型列表，否则新部署会引用不可用模型。"""
+    alibaba = next(provider for provider in BUILTIN_PROVIDERS if provider["provider_id"] == "alibaba-cn")
+    enabled_specs = {f"alibaba-cn:{model['id']}" for model in alibaba["enabled_models"]}
+    resolved = system_options.resolve({})
+
+    assert {resolved["default_model"], resolved["fast_model"]} <= enabled_specs
 
 
 @pytest.mark.parametrize("key", ["default_model", "fast_model"])
 def test_system_chat_model_preserves_saved_selection(key):
     """默认值更新不覆盖管理员已保存的模型选择。"""
     saved_model = "siliconflow-cn:Pro/MiniMaxAI/MiniMax-M2.5"
-    assert options.system_options.resolve({key: saved_model})[key] == saved_model
+    assert system_options.resolve({key: saved_model})[key] == saved_model
+
+
+def test_reference_model_defaults_to_empty_and_keeps_admin_selection():
+    """空标注配置由用例沿用快速模型，管理员显式选择保持独立。"""
+    assert system_options.resolve({})["reference_model"] == ""
+    assert system_options.resolve({"reference_model": "provider:references"})["reference_model"] == "provider:references"
 
 
 class FakeRedis:
@@ -57,7 +77,7 @@ class FakeRedis:
 
 @pytest_asyncio.fixture
 async def db_session():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_utc_sqlite_engine()
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
@@ -67,7 +87,7 @@ async def db_session():
 
 def test_system_option_defaults_use_dashscope_models():
     """空配置解析时应使用 DashScope 的聊天、向量和重排模型。"""
-    values = options.system_options.resolve({})
+    values = system_options.resolve({})
 
     assert values["default_model"] == "alibaba-cn:qwen3.7-max"
     assert values["fast_model"] == "alibaba-cn:qwen3.7-max"
@@ -78,18 +98,18 @@ def test_system_option_defaults_use_dashscope_models():
 @pytest.mark.asyncio
 async def test_explicit_session_reads_database_instead_of_shared_cache(db_session, monkeypatch):
     fake_redis = FakeRedis()
-    cache_key = f"{options.OPTION_CACHE_PREFIX}{options.system_options.key}"
+    cache_key = f"{options.OPTION_CACHE_PREFIX}{system_options.key}"
     fake_redis.values[cache_key] = json.dumps({"default_model": "cached:model"})
     monkeypatch.setattr(options, "get_async_redis_client", lambda: _async_value(fake_redis))
-    await options.ensure_options_in_db(db_session)
+    await ensure_options_in_db(db_session)
     await options.update_option_value(
         db_session,
-        options.system_options.key,
+        system_options.key,
         {"default_model": "database:model"},
         "tester",
     )
 
-    values = await options.system_options.get(db_session)
+    values = await system_options.get(db_session)
 
     assert values["default_model"] == "database:model"
 
@@ -97,11 +117,11 @@ async def test_explicit_session_reads_database_instead_of_shared_cache(db_sessio
 @pytest.mark.asyncio
 async def test_implicit_option_read_uses_shared_cache(monkeypatch):
     fake_redis = FakeRedis()
-    cache_key = f"{options.OPTION_CACHE_PREFIX}{options.system_options.key}"
+    cache_key = f"{options.OPTION_CACHE_PREFIX}{system_options.key}"
     fake_redis.values[cache_key] = json.dumps({"default_model": "cached:model"})
     monkeypatch.setattr(options, "get_async_redis_client", lambda: _async_value(fake_redis))
 
-    values = await options.system_options.get()
+    values = await system_options.get()
 
     assert values["default_model"] == "cached:model"
 
@@ -110,15 +130,15 @@ async def test_implicit_option_read_uses_shared_cache(monkeypatch):
 async def test_sensitive_option_does_not_use_redis(db_session, monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr(options, "get_async_redis_client", lambda: _async_value(fake_redis))
-    await options.ensure_options_in_db(db_session)
+    await ensure_options_in_db(db_session)
     await options.update_option_value(
         db_session,
-        options.mineru_official_api_opts.key,
+        mineru_official_api_opts.key,
         {"api_key": "database-secret"},
         "tester",
     )
 
-    values = await options.mineru_official_api_opts.get(db_session)
+    values = await mineru_official_api_opts.get(db_session)
 
     assert values["api_key"] == "database-secret"
     assert fake_redis.values == {}
@@ -127,11 +147,11 @@ async def test_sensitive_option_does_not_use_redis(db_session, monkeypatch):
 @pytest.mark.asyncio
 async def test_invalidate_option_cache_removes_cached_value(monkeypatch):
     fake_redis = FakeRedis()
-    key = f"{options.OPTION_CACHE_PREFIX}{options.system_options.key}"
+    key = f"{options.OPTION_CACHE_PREFIX}{system_options.key}"
     fake_redis.values[key] = "{}"
     monkeypatch.setattr(options, "get_async_redis_client", lambda: _async_value(fake_redis))
 
-    await options.invalidate_option_cache(options.system_options.key)
+    await options.invalidate_option_cache(system_options.key)
 
     assert key not in fake_redis.values
 
@@ -140,12 +160,12 @@ async def test_invalidate_option_cache_removes_cached_value(monkeypatch):
 async def test_stale_database_read_does_not_refill_invalidated_cache(monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr(options, "get_async_redis_client", lambda: _async_value(fake_redis))
-    version = await options._load_cache_version(options.system_options.key)
+    version = await options._load_cache_version(system_options.key)
 
-    await options.invalidate_option_cache(options.system_options.key)
-    await options._save_cached_value(options.system_options.key, {"default_model": "stale:model"}, version)
+    await options.invalidate_option_cache(system_options.key)
+    await options._save_cached_value(system_options.key, {"default_model": "stale:model"}, version)
 
-    cache_key = f"{options.OPTION_CACHE_PREFIX}{options.system_options.key}"
+    cache_key = f"{options.OPTION_CACHE_PREFIX}{system_options.key}"
     assert cache_key not in fake_redis.values
 
 
@@ -154,13 +174,41 @@ async def test_first_implicit_option_read_initializes_cache_version(monkeypatch)
     fake_redis = FakeRedis()
     monkeypatch.setattr(options, "get_async_redis_client", lambda: _async_value(fake_redis))
 
-    version = await options._load_cache_version(options.system_options.key)
-    await options._save_cached_value(options.system_options.key, {"default_model": "first:model"}, version)
+    version = await options._load_cache_version(system_options.key)
+    await options._save_cached_value(system_options.key, {"default_model": "first:model"}, version)
 
-    cache_key = f"{options.OPTION_CACHE_PREFIX}{options.system_options.key}"
+    cache_key = f"{options.OPTION_CACHE_PREFIX}{system_options.key}"
     assert version == "0"
     assert json.loads(fake_redis.values[cache_key]) == {"default_model": "first:model"}
 
 
 async def _async_value(value):
     return value
+
+
+def test_cooperation_depth_defaults_to_two_and_preserves_zero():
+    """整数配置的零值用于禁止新增子会话，不可被默认值覆盖。"""
+    assert system_options.resolve({})["max_cooperation_depth"] == 2
+    assert system_options.resolve({"max_cooperation_depth": 0})["max_cooperation_depth"] == 0
+
+
+def test_cooperation_concurrency_defaults_to_four_and_preserves_one():
+    """并发执行上限默认 4，允许降到 1 但不允许清零冻结整树。"""
+    assert system_options.resolve({})["max_cooperation_concurrency"] == 4
+    assert system_options.resolve({"max_cooperation_concurrency": 1})["max_cooperation_concurrency"] == 1
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 2.5, "4", None])
+def test_cooperation_concurrency_rejects_non_integer_or_below_one_values(value):
+    """配置持久化边界拒绝错误数值，不把 0 当成合法上限。"""
+    field = {"key": "max_cooperation_concurrency", "type": "integer", "min": 1}
+    with pytest.raises(ValueError, match="不小于 1 的整数"):
+        options.normalize_option_value(field, value)
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5, "2", None])
+def test_cooperation_depth_rejects_non_integer_or_negative_values(value):
+    """配置持久化边界拒绝错误数值，不按字符串或布尔值凑成深度。"""
+    field = {"key": "max_cooperation_depth", "type": "integer", "min": 0}
+    with pytest.raises(ValueError, match="非负整数"):
+        options.normalize_option_value(field, value)

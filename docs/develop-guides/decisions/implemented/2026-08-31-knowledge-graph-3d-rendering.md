@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：web/src/components/GraphCanvas.vue
+Owner：frontend/src/modules/knowledge/ui/GraphCanvas.vue
 
 本记录取代并延续历史记录：[2026-08-28-knowledge-graph-node-visuals.md](../archived/2026-08-28-knowledge-graph-node-visuals.md)。
 

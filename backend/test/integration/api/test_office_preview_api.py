@@ -6,14 +6,15 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from redis.asyncio import Redis
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from redis.asyncio import Redis
-from yuxi.knowledge.cache import KNOWLEDGE_BASE_CACHE_KEY_PREFIX
-from yuxi.storage.minio import get_minio_client
-from yuxi.storage.postgres.models_knowledge import KnowledgeBase, KnowledgeFile
+from test.integration.api.helpers import create_default_agent_thread, delete_created_threads, get_thread_workdir_path
+from yuxi.infrastructure.minio import get_minio_client
+from yuxi.modules.knowledge.cache import KNOWLEDGE_BASE_CACHE_KEY_PREFIX
+from yuxi.modules.knowledge.models import KnowledgeBase, KnowledgeFile
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 FIXTURES = Path(__file__).parents[2] / "fixtures/office"
@@ -52,13 +53,10 @@ async def test_office_preview_across_all_existing_entries(test_client, admin_hea
     filename = f"pytest-office-{identity}.{suffix}"
     content = (FIXTURES / f"readonly.{suffix}").read_bytes()
     workspace_path = f"/{filename}"
-    default = await test_client.get("/api/agent/default", headers=admin_headers)
-    assert default.status_code == 200
-    created = await test_client.post(
-        "/api/chat/thread", headers=admin_headers, json={"agent_id": default.json()["agent"]["slug"], "title": filename}
-    )
-    assert created.status_code == 200, created.text
-    thread = created.json()
+    thread_id = await create_default_agent_thread(test_client, admin_headers, title_prefix="office-preview")
+    profile = await test_client.get("/api/auth/me", headers=admin_headers)
+    assert profile.status_code == 200, profile.text
+    thread = {"id": thread_id, "uid": profile.json()["uid"], "workdir_path": await get_thread_workdir_path(thread_id)}
     kb_id, file_id = f"pytest-office-{identity}", identity
     minio = get_minio_client()
     bucket = minio.KB_BUCKETS["documents"]
@@ -73,9 +71,7 @@ async def test_office_preview_across_all_existing_entries(test_client, admin_hea
         assert upload.status_code == 200, upload.text
         result = await test_client.get("/api/workspace/file", headers=admin_headers, params={"path": workspace_path})
         assert_preview(result, suffix)
-        original = await test_client.get(
-            "/api/workspace/download", headers=admin_headers, params={"path": workspace_path}
-        )
+        original = await test_client.get("/api/workspace/download", headers=admin_headers, params={"path": workspace_path})
         assert original.content == content
         anonymous = await test_client.get("/api/workspace/file", params={"path": workspace_path})
         assert anonymous.status_code in {401, 403}
@@ -93,8 +89,7 @@ async def test_office_preview_across_all_existing_entries(test_client, admin_hea
             params={"thread_id": thread["id"], "path": workspace_path},
         )
         assert_preview(result, suffix)
-        artifact_path = f"home/gem/user-data/{thread['workdir_path']}/{filename}"
-        artifact_url = f"/api/chat/thread/{thread['id']}/artifacts/{artifact_path}"
+        artifact_url = upload.json()["entries"][0]["artifact_url"]
         result = await test_client.get(artifact_url, headers=admin_headers, params={"preview": "true"})
         assert_preview(result, suffix)
         original = await test_client.get(artifact_url, headers=admin_headers, params={"download": "true"})
@@ -115,9 +110,7 @@ async def test_office_preview_across_all_existing_entries(test_client, admin_hea
                 )
             )
         await minio.aupload_file(bucket_name=bucket, object_name=object_name, data=content)
-        result = await test_client.get(
-            "/api/workspace/knowledge/file", headers=admin_headers, params={"kb_id": kb_id, "file_id": file_id}
-        )
+        result = await test_client.get("/api/workspace/knowledge/file", headers=admin_headers, params={"kb_id": kb_id, "file_id": file_id})
         assert_preview(result, suffix)
         assert await minio.adownload_file(bucket, object_name) == content
     finally:
@@ -127,7 +120,7 @@ async def test_office_preview_across_all_existing_entries(test_client, admin_hea
             headers=admin_headers,
             params={"thread_id": thread["id"], "path": workspace_path},
         )
-        await test_client.delete(f"/api/chat/thread/{thread['id']}", headers=admin_headers)
+        await delete_created_threads(thread["id"])
         async with Redis.from_url(os.environ["REDIS_URL"]) as redis:
             await redis.delete(f"{KNOWLEDGE_BASE_CACHE_KEY_PREFIX}{kb_id}")
         async with sessions.begin() as session:

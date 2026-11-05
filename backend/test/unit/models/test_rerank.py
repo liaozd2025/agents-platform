@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from yuxi.models.rerank import DashscopeReranker, OpenAIReranker
+from yuxi.modules.models.rerank import DashscopeReranker, OpenAIReranker
 
 
 @pytest.fixture(params=[OpenAIReranker, DashscopeReranker])
@@ -86,9 +86,7 @@ async def test_invalid_entry_or_missing_field_is_rejected(reranker, entry):
         await reranker._batch_rerank("query", ["A"], max_length=128)
 
 
-@pytest.mark.parametrize(
-    "score", [None, True, False, "invalid", float("nan"), float("inf"), -float("inf"), "NaN", "inf"]
-)
+@pytest.mark.parametrize("score", [None, True, False, "invalid", float("nan"), float("inf"), -float("inf"), "NaN", "inf"])
 async def test_invalid_score_is_rejected(reranker, score):
     _respond_with(reranker, [{"index": 0, "relevance_score": score}])
 
@@ -121,6 +119,16 @@ async def test_connection_reports_invalid_response(reranker):
 
     assert success is False
     assert "Rerank response" in message
+
+
+async def test_connection_reports_transport_failure_without_fallback(reranker):
+    """连接探针不能把默认分数当成远端可用。"""
+    reranker.session.post.side_effect = ConnectionError("provider unavailable")
+
+    success, message = await reranker.test_connection()
+
+    assert success is False
+    assert "provider unavailable" in message
 
 
 async def test_empty_input_does_not_request_provider(reranker):

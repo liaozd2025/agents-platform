@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：simplification
-Owner：backend/package/yuxi/services/run_worker.py
+Owner：backend/yuxi/modules/agents/services/runner.py
+
+## 当前迁移状态
+
+2026-11-02：PI 新执行入口继续退役。当前新版 Session/Turn/Run 不直接读取旧 PI 表；旧历史与文件需要离线转换，本次未实现或验证该转换，不声称已完成原历史查看承诺。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

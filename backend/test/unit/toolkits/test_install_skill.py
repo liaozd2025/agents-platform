@@ -1,266 +1,134 @@
+"""退役 install_skill 工具的发布边界由个人 Skill 用例与远程草稿 Owner 验证。"""
+
 from __future__ import annotations
 
-import importlib
 import threading
-from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
-from yuxi.agents.toolkits.buildin import install_skill as exported_install_skill
-from yuxi.services.skills import personal as personal_service
-from yuxi.workspace.paths import user_workspace_dir
 
-install_skill_module = importlib.import_module("yuxi.agents.toolkits.buildin.install_skill")
-sandbox_backend_module = importlib.import_module("yuxi.agents.backends.sandbox")
-
-
-def _runtime(**context_values):
-    return SimpleNamespace(context=SimpleNamespace(**context_values))
+from yuxi.infrastructure.postgres.manager import pg_manager
+from yuxi.modules.extensions.skills import install_draft, personal, remote
+from yuxi.modules.identity.models import User
+from yuxi.modules.workspace import paths
+from yuxi.modules.workspace.paths import user_workspace_dir
 
 
-@pytest.mark.asyncio
-async def test_install_personal_skill_does_not_require_agent_config_access(monkeypatch, tmp_path):
-    """安装回读真实个人文件，数据库不可用也无需修改 Agent 配置。"""
-    from yuxi.storage.postgres.manager import pg_manager
-    from yuxi.workspace import paths
-
-    def fail_get_session():
-        """拒绝安装过程访问数据库。"""
-        raise AssertionError("个人 Skill 安装不应访问 Agent 配置")
-
-    monkeypatch.setattr(pg_manager, "get_async_session_context", fail_get_session)
-    monkeypatch.setattr(paths, "get_user_data_dir", lambda: tmp_path / "user-data")
-    source_dir = tmp_path / "demo-skill"
-    source_dir.mkdir()
-    content = "---\nname: demo-skill\ndescription: Personal skill\n---\n# Demo\n"
-    (source_dir / "SKILL.md").write_text(content, encoding="utf-8")
-    monkeypatch.setattr(personal_service, "_download_sandbox_skill", lambda *args: source_dir)
-    runtime = _runtime(uid="user-1", thread_id="shared-agent-thread", skills=[])
-
-    result = await install_skill_module.install_skill.coroutine(
-        "/home/gem/user-data/demo-skill", runtime=runtime, tool_call_id="tool-1"
-    )
-
-    installed = user_workspace_dir("user-1") / "agents" / "skills" / "demo-skill" / "SKILL.md"
-    assert installed.read_text(encoding="utf-8") == content
-    assert result.update["messages"][0].content.splitlines() == [
-        "已安装 Skill: demo-skill",
-        "Skill 路径: /home/gem/user-data/agents/skills/demo-skill/SKILL.md",
-    ]
-    assert runtime.context.skills == []
+@pytest.fixture
+def source(tmp_path, monkeypatch):
+    """使用本例独立持久源，不触碰 Agent 配置或真实沙盒。"""
+    monkeypatch.setattr(paths, "get_user_data_dir", lambda: tmp_path / "users")
+    monkeypatch.setenv("YUXI_SKILL_DATA_DIR", str(tmp_path / "skills"))
+    directory = tmp_path / "source"
+    directory.mkdir()
+    (directory / "SKILL.md").write_text("---\nname: demo\ndescription: personal skill\n---\nOriginal body", encoding="utf-8")
+    return directory
 
 
 @pytest.mark.asyncio
-async def test_install_skill_from_sandbox_installs_as_current_user_private_skill(monkeypatch, tmp_path: Path):
-    assert exported_install_skill.name == "install_skill"
+async def test_personal_install_is_private_without_database_and_offloads_io(source, monkeypatch):
+    """安装不读 Agent 配置，真实文件复制在线程池中执行且结果属于当前用户。"""
 
-    calls = {}
-    event_loop_thread_id = threading.get_ident()
-    source_dir = tmp_path / "demo-skill"
+    def no_database():
+        raise AssertionError("个人安装不得读取 Agent 数据库配置")
 
-    def prepare_skill_from_sandbox(
-        source,
-        thread_id,
-        uid,
-        staging_root,
-        workdir_relative_path,
-        workdir_path,
-    ):
-        calls["prepare_thread_id"] = threading.get_ident()
-        calls["prepare"] = {
-            "source": source,
-            "thread_id": thread_id,
-            "uid": uid,
-            "staging_root": staging_root,
-            "workdir_relative_path": workdir_relative_path,
-            "workdir_path": workdir_path,
-        }
-        return source_dir
+    monkeypatch.setattr(pg_manager, "get_async_session_context", no_database)
+    main_thread = threading.get_ident()
+    original_copy = personal.copy_skill_snapshot
+    threads = []
 
-    async def install_personal_skill_dir(uid, source_dir_arg, **kwargs):
-        calls["install"] = {"uid": uid, "source_dir": source_dir_arg, **kwargs}
-        return SimpleNamespace(
-            slug="demo-skill",
-            name="Demo Skill",
-            description="demo description",
-            source_scope="personal",
-            tool_dependencies=[],
-            mcp_dependencies=[],
-            skill_dependencies=[],
-            source_dir=source_dir,
-        )
+    def copy(*args, **kwargs):
+        threads.append(threading.get_ident())
+        return original_copy(*args, **kwargs)
 
+    monkeypatch.setattr(personal, "copy_skill_snapshot", copy)
+    result = await personal.install_personal_skill_dir("current-user", source, origin="remote")
+    installed = user_workspace_dir("current-user") / "agents/skills/demo/SKILL.md"
+    assert installed.read_bytes() == (source / "SKILL.md").read_bytes()
+    assert result.created_by == "current-user" and result.source_scope == "personal"
+    assert result.origin == "remote" and result.enabled is True
+    assert threads and all(thread != main_thread for thread in threads)
+    assert result.tool_dependencies == result.mcp_dependencies == result.skill_dependencies == []
+    assert not (user_workspace_dir("other-user") / "agents/skills/demo").exists()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_install_preserves_existing_content_and_state(source):
+    """重复安装不得覆盖已有内容或把用户禁用状态重置为启用。"""
+    await personal.install_personal_skill_dir("user", source, origin="remote")
+    await personal.update_personal_skill_enabled("user", "demo", enabled=False)
+    original = (user_workspace_dir("user") / "agents/skills/demo/SKILL.md").read_bytes()
+    (source / "SKILL.md").write_text("---\nname: demo\ndescription: replacement\n---\nReplace", encoding="utf-8")
+    with pytest.raises(ValueError, match="已存在同名 Skill"):
+        await personal.install_personal_skill_dir("user", source)
+    assert (user_workspace_dir("user") / "agents/skills/demo/SKILL.md").read_bytes() == original
+    item = (await personal.list_personal_skills("user"))[0]
+    assert item.enabled is False and item.origin == "remote"
+    assert not list((user_workspace_dir("user") / "agents/skills").glob(".install.tmp-*"))
+
+
+@pytest.mark.asyncio
+async def test_failed_publish_leaves_no_half_installed_skill(source, monkeypatch):
+    """原子发布失败保留原异常，不把暂存内容当作已安装成果。"""
+
+    def fail(*args):
+        raise OSError("fixture publish failed")
+
+    monkeypatch.setattr(personal, "publish_directory_fd", fail)
+    with pytest.raises(OSError, match="fixture publish failed"):
+        await personal.install_personal_skill_dir("user", source)
+    assert await personal.list_personal_skills("user") == []
+    assert not list((user_workspace_dir("user") / "agents/skills").glob(".install.tmp-*"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_text,skills", [("", ["demo"]), ("owner/repo", [])])
+async def test_remote_source_and_selection_are_required_before_sandbox_access(monkeypatch, source_text, skills):
+    """来源和选择不完整时，不访问沙盒或把路径交给宿主文件系统。"""
     monkeypatch.setattr(
-        personal_service,
-        "_download_sandbox_skill",
-        prepare_skill_from_sandbox,
-    )
-    monkeypatch.setattr(personal_service, "install_personal_skill_dir", install_personal_skill_dir)
-    runtime = _runtime(
-        uid="normal-user",
-        thread_id="thread-1",
-        workdir_relative_path="projects/11111111-1111-4111-8111-111111111111",
-        workdir_path="/home/gem/user-data/projects/11111111-1111-4111-8111-111111111111",
-        skills=["existing-skill"],
-    )
-    result = await install_skill_module.install_skill.coroutine(
-        " /home/gem/user-data/demo-skill ",
-        runtime=runtime,
-        tool_call_id="tool-1",
+        remote, "remote_skill_source_policy", SimpleNamespace(get=AsyncMock(return_value={"allowed_hosts": ["github.com"]}))
     )
 
-    assert "activated_skills" not in result.update
-    assert calls["prepare"]["uid"] == "normal-user"
-    assert calls["prepare_thread_id"] != event_loop_thread_id
-    assert calls["install"] == {"uid": "normal-user", "source_dir": source_dir}
-    assert calls["prepare"]["source"] == "/home/gem/user-data/demo-skill"
-    assert result.update["messages"][0].content.splitlines() == [
-        "已安装 Skill: demo-skill",
-        "Skill 路径: /home/gem/user-data/agents/skills/demo-skill/SKILL.md",
-    ]
-    assert runtime.context.skills == ["existing-skill"]
+    def no_sandbox(*args):
+        raise AssertionError("非法远程请求不得创建沙盒")
+
+    monkeypatch.setattr(remote._RemoteSkillRequest, "create", no_sandbox)
+    with pytest.raises(ValueError):
+        await remote.download_remote_skills(source=source_text, skills=skills, uid="user")
 
 
 @pytest.mark.asyncio
-async def test_install_skill_rejects_subagent_runtime_before_install(monkeypatch):
-    def fail_install(*args, **kwargs):
-        raise AssertionError("子智能体运行态不应执行安装")
+async def test_remote_draft_installs_for_authenticated_owner_and_cleans_download(source, tmp_path, monkeypatch):
+    """远程准备只产出草稿；确认发布保留来源并清理已消费临时内容。"""
+    downloaded = tmp_path / "download"
+    downloaded.mkdir()
+    package = downloaded / "demo"
+    package.mkdir()
+    (package / "SKILL.md").write_bytes((source / "SKILL.md").read_bytes())
 
-    monkeypatch.setattr(
-        personal_service,
-        "install_personal_skill_dir",
-        fail_install,
-    )
+    async def prepare(*, source, skills, uid):
+        assert source == "owner/repo" and skills == ["demo"] and uid == "user"
+        return remote.RemoteSkillDownloads(temp_home=str(downloaded), results=[remote.DownloadedSkill(slug="demo", source_dir=package)])
 
-    result = await install_skill_module.install_skill.coroutine(
-        "/home/gem/user-data/demo-skill",
-        runtime=_runtime(uid="user-1", thread_id="child-thread", is_subagent_runtime=True),
-        tool_call_id="tool-1",
-    )
-
-    assert "只能在主智能体中使用" in result.update["messages"][0].content
-    assert "activated_skills" not in result.update
-
-
-@pytest.mark.asyncio
-async def test_install_skill_git_source_requires_skill_names():
-    result = await install_skill_module.install_skill.coroutine(
-        "owner/repo",
-        runtime=_runtime(uid="user-1", thread_id="thread-1"),
-        tool_call_id="tool-1",
-    )
-
-    assert "必须通过 skill_names 指定技能名称" in result.update["messages"][0].content
+    monkeypatch.setattr(remote, "download_remote_skills", prepare)
+    user = User(uid="user")
+    draft = await install_draft.create_remote_skill_draft(source="owner/repo", skills=["demo"], operator=user)
+    assert not downloaded.exists()
+    assert await personal.list_personal_skills("user") == []
+    result = await personal.confirm_personal_skill_install_draft(draft_id=draft["draft_id"], slugs=["demo"], operator=user)
+    assert result[0]["success"] is True and result[0]["skill"]["origin"] == "remote"
+    assert (user_workspace_dir("user") / "agents/skills/demo/SKILL.md").read_bytes() == (source / "SKILL.md").read_bytes()
+    with pytest.raises(ValueError):
+        await personal.confirm_personal_skill_install_draft(draft_id=draft["draft_id"], slugs=["demo"], operator=user)
 
 
 @pytest.mark.asyncio
-async def test_install_skill_git_source_installs_and_cleans_prepared_directory(monkeypatch, tmp_path):
-    """Git 来源复用远程准备流程，安装后保留结果并清理临时目录。"""
-    from yuxi.services.skills import remote as remote_install
-
-    staging = tmp_path / "staging"
-    staging.mkdir()
-    skill_dir = staging / "demo"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("# Demo", encoding="utf-8")
-    installed = tmp_path / "installed.md"
-
-    async def prepare(*, source, skills):
-        assert source == "owner/repo"
-        assert skills == ["demo"]
-        return remote_install.RemoteSkillDownloads(
-            temp_home=str(staging),
-            results=[remote_install.DownloadedSkill(slug="demo", source_dir=skill_dir)],
-        )
-
-    async def install(uid, source_dir):
-        assert uid == "user-1"
-        installed.write_bytes((source_dir / "SKILL.md").read_bytes())
-        return SimpleNamespace(slug="demo")
-
-    monkeypatch.setattr(remote_install, "download_remote_skills", prepare)
-    monkeypatch.setattr(personal_service, "install_personal_skill_dir", install)
-    result = await install_skill_module.install_skill.coroutine(
-        "owner/repo", runtime=_runtime(uid="user-1", thread_id="thread-1"), tool_call_id="tool-1", skill_names=["demo"]
+async def test_draft_cannot_be_confirmed_by_another_user(source):
+    """草稿归属不能被客户端指定的另一名用户绕过。"""
+    draft = await install_draft.create_uploaded_skill_draft(
+        filename="SKILL.md", file_bytes=(source / "SKILL.md").read_bytes(), operator=User(uid="owner")
     )
-
-    assert installed.read_text(encoding="utf-8") == "# Demo"
-    assert not staging.exists()
-    assert result.update["messages"][0].content.splitlines() == [
-        "已安装 Skill: demo",
-        "Skill 路径: /home/gem/user-data/agents/skills/demo/SKILL.md",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_install_skill_rejects_empty_source():
-    result = await install_skill_module.install_skill.coroutine(
-        " ",
-        runtime=_runtime(uid="user-1", thread_id="thread-1"),
-        tool_call_id="tool-1",
-    )
-
-    assert "Skill 来源不能为空" in result.update["messages"][0].content
-
-
-def test_download_sandbox_skill_uses_sandbox_api_without_host_path_resolution(monkeypatch, tmp_path: Path):
-    remote_dir = "/home/gem/user-data/demo-skill"
-
-    class FakeProvisionerSandboxBackend:
-        def __init__(self, *, thread_id, uid, workdir_path, create_if_missing):
-            assert thread_id == "thread-1"
-            assert uid == "user-1"
-            assert workdir_path is None
-            assert create_if_missing is True
-
-        def ls(self, path):
-            assert path == remote_dir
-            return SimpleNamespace(
-                error=None,
-                entries=[{"path": f"{remote_dir}/SKILL.md", "is_dir": False, "size": 6}],
-            )
-
-        def download_files(self, paths):
-            assert paths == [f"{remote_dir}/SKILL.md"]
-            return [SimpleNamespace(error=None, content=b"# demo")]
-
-    monkeypatch.setattr(sandbox_backend_module, "ProvisionerSandboxBackend", FakeProvisionerSandboxBackend)
-
-    staging = personal_service._download_sandbox_skill(
-        remote_dir,
-        "thread-1",
-        "user-1",
-        tmp_path / "staging",
-    )
-
-    assert (staging / "SKILL.md").read_text(encoding="utf-8") == "# demo"
-
-
-def test_download_sandbox_skill_preserves_download_error_message(monkeypatch, tmp_path: Path):
-    remote_dir = "/home/gem/user-data/demo-skill"
-
-    class FakeProvisionerSandboxBackend:
-        def __init__(self, *, thread_id, uid, workdir_path, create_if_missing):
-            assert thread_id == "thread-1"
-            assert uid == "user-1"
-            assert workdir_path is None
-            assert create_if_missing is True
-
-        def ls(self, _path):
-            return SimpleNamespace(
-                error=None,
-                entries=[{"path": f"{remote_dir}/SKILL.md", "is_dir": False, "size": 1}],
-            )
-
-        def download_files(self, _paths):
-            return [SimpleNamespace(error="read_failed", content=None)]
-
-    monkeypatch.setattr(sandbox_backend_module, "ProvisionerSandboxBackend", FakeProvisionerSandboxBackend)
-
-    with pytest.raises(ValueError, match="下载沙盒文件失败"):
-        personal_service._download_sandbox_skill(
-            remote_dir,
-            "thread-1",
-            "user-1",
-            tmp_path / "staging",
-        )
+    with pytest.raises(ValueError, match="无权"):
+        await personal.confirm_personal_skill_install_draft(draft_id=draft["draft_id"], slugs=["demo"], operator=User(uid="other"))
+    assert await personal.list_personal_skills("other") == []

@@ -4,41 +4,105 @@ import asyncio
 import os
 import sys
 import uuid
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from langchain.tools.tool_node import ToolCallRequest
+from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from test.integration.mcp.test_http_origin import mcp_server
-from yuxi.agents.mcp import service
-from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import MCPServer
+from yuxi.infrastructure.postgres.base import Base
+from yuxi.infrastructure.postgres.manager import pg_manager
+from yuxi.modules.agents.runtime.agent_backends.chatbot.context import ChatBotContext
+from yuxi.modules.agents.runtime.middlewares import authorization
+from yuxi.modules.extensions.mcp import service
+from yuxi.modules.extensions.mcp.models import MCPServer
+from yuxi.modules.extensions.mcp.runtime import get_mcp_client
+from yuxi.modules.identity.models import User
+
+pytestmark = [pytest.mark.integration, pytest.mark.self_managed_resources]
 
 
 @pytest_asyncio.fixture
 async def mcp_database(monkeypatch):
     """只在显式测试数据库的新 schema 中建表，结束后清理。"""
-    url = os.environ.get("TEST_MCP_POSTGRES_URL")
+    url = os.environ.get("TEST_MCP_POSTGRES_URL") or os.environ.get("POSTGRES_URL")
     if not url:
         pytest.fail("需要独立 PostgreSQL：请设置 TEST_MCP_POSTGRES_URL（postgresql+asyncpg://...）")
+    monkeypatch.setenv("TEST_MCP_POSTGRES_URL", url)
     schema = f"mcp_test_{uuid.uuid4().hex}"
     engine = create_async_engine(url, connect_args={"server_settings": {"search_path": schema}})
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with engine.begin() as conn:
             await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-            await conn.run_sync(MCPServer.__table__.create)
+            await conn.run_sync(Base.metadata.create_all)
         monkeypatch.setattr(pg_manager, "_initialized", True)
         monkeypatch.setattr(pg_manager, "AsyncSession", sessions)
-        service.clear_mcp_cache()
+        async with sessions() as db:
+            db.add(User(uid="fixture-user", username="Fixture", password_hash="!fixture"))
+            await db.commit()
+
+        async def actor(context, *, db):
+            """只隔离本测试无关的 Agent/Run 外壳，MCP主体仍从当前数据库读取。"""
+            user = await db.scalar(select(User).where(User.uid == context.uid, User.is_deleted == 0))
+            assert user is not None
+            return user, None, None
+
+        async def retain_resources(*args, **kwargs):
+            """保留已经准备好的资源选择；实际MCP可用策略不替换。"""
+
+        monkeypatch.setattr(authorization, "_require_execution_actor", actor)
+        monkeypatch.setattr(authorization, "refresh_agent_context_resources", retain_resources)
         yield sessions, schema
     finally:
-        service.clear_mcp_cache()
         async with engine.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await engine.dispose()
+
+
+def tool_context(slug, tools):
+    """装配当前运行已注册的工具集合，不重新发现或替换已持有对象。"""
+    return ChatBotContext(
+        uid="fixture-user",
+        run_id=None,
+        thread_id="fixture",
+        mcps=[slug],
+        tools=[],
+        registered_builtin_tool_names=set(),
+        middleware_tool_names=set(),
+        mcp_tool_servers={tool.name: slug for tool in tools},
+        mcp_unavailable={},
+        skill_runtime_snapshot={
+            "capability_limited": False,
+            "context_skills": [],
+            "context_preload_skills": [],
+            "effective_skills": [],
+            "runtime_skills": {},
+            "skill_metadata": {},
+            "preloaded_skills": [],
+            "preloaded_skill_contents": {},
+        },
+    )
+
+
+async def execute_held_tool(tool, context):
+    """经生产执行拦截器验证当前策略，再进入SDK和真实HTTP传输。"""
+    request = ToolCallRequest(
+        tool=tool,
+        tool_call={"name": tool.name, "args": {}, "id": "test-call", "type": "tool_call"},
+        state={},
+        runtime=SimpleNamespace(context=context),
+    )
+
+    async def invoke(request):
+        """真实工具副作用只从已通过授权的handler发生。"""
+        return await tool.ainvoke(request.tool_call)
+
+    return await authorization.RuntimeAuthorizationMiddleware().awrap_tool_call(request, invoke)
 
 
 async def change_in_other_process(schema, slug, action):
@@ -46,7 +110,7 @@ async def change_in_other_process(schema, slug, action):
     script = """
 import asyncio, os, sys
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from yuxi.agents.mcp import service
+from yuxi.modules.extensions.mcp import service
 
 async def main():
     schema, slug, action = sys.argv[1:]
@@ -103,24 +167,24 @@ async def test_held_tool_rejects_committed_revocation(mcp_database, transport, a
         assert len(tools) == 2
         held = next(tool for tool in tools if tool.name == "probe")
         other = next(tool for tool in tools if tool.name == "other_probe")
-        call = {"name": "probe", "args": {}, "id": "test-call", "type": "tool_call"}
-        result = await held.ainvoke(call)
+        context = tool_context("revocation", tools)
+        result = await execute_held_tool(held, context)
         assert result.status == "success" and "MCP_ORIGIN_OK" in str(result.content)
 
         await change_in_other_process(schema, "revocation", action)
         remote.records.clear()
-        result = await held.ainvoke(call)
+        result = await execute_held_tool(held, context)
         assert not remote.records, "禁用提交后，旧工具仍向 MCP 发出了请求"
         assert result.status == "error"
-        assert "已禁用或删除" in str(result.content)
+        assert "无权使用该工具" in str(result.content)
         available = await service.get_enabled_mcp_tools("revocation")
         assert [tool.name for tool in available] == (["other_probe"] if action == "tool" else [])
         if action == "tool":
-            assert "MCP_ORIGIN_OK" in str(await other.ainvoke({}))
+            assert "MCP_ORIGIN_OK" in str(await execute_held_tool(other, context))
 
         if action != "delete":
             await change_in_other_process(schema, "revocation", "tool" if action == "tool" else "enable")
-            result = await held.ainvoke(call)
+            result = await execute_held_tool(held, context)
             assert result.status == "success" and "MCP_ORIGIN_OK" in str(result.content)
             assert remote.records
 
@@ -139,48 +203,34 @@ async def test_database_failure_cannot_execute_held_tool(mcp_database):
                 url=remote.url + remote.endpoint,
                 created_by="test",
             )
-        held = (await service.get_enabled_mcp_tools("db-failure"))[0]
-        assert "MCP_ORIGIN_OK" in str(await held.ainvoke({}))
+        tools = await service.get_enabled_mcp_tools("db-failure")
+        held = tools[0]
+        context = tool_context("db-failure", tools)
+        assert "MCP_ORIGIN_OK" in str(await execute_held_tool(held, context))
         async with sessions() as db:
             await db.execute(text("ALTER TABLE mcp_servers RENAME TO unavailable_mcp_servers"))
             await db.commit()
         remote.records.clear()
         with pytest.raises(DBAPIError):
-            await held.ainvoke({})
+            await execute_held_tool(held, context)
         assert not remote.records
 
 
 @pytest.mark.asyncio
-async def test_builtin_stdio_revocation_prevents_process_start(mcp_database, monkeypatch, tmp_path):
-    """内置 stdio 被禁用后旧工具不能再启动服务进程。"""
+async def test_retired_stdio_configuration_never_starts_process(mcp_database, tmp_path):
+    """新远程协议不启动遗留stdio：启用记录和直接客户端调用均不能绕过边界。"""
     sessions, schema = mcp_database
     marker = tmp_path / "started.txt"
     script = tmp_path / "mcp_fixture.py"
-    script.write_text(
-        "from pathlib import Path\n"
-        "import sys\n"
-        "from mcp.server.fastmcp import FastMCP\n"
-        "with Path(sys.argv[1]).open('a') as f: f.write('started\\n')\n"
-        "mcp = FastMCP('fixture')\n"
-        "@mcp.tool()\n"
-        "def probe() -> str:\n"
-        "    return 'STDIO_OK'\n"
-        "mcp.run()\n"
-    )
-    slug = "mcp-server-chart"
-    monkeypatch.setitem(
-        service._DEFAULT_MCP_SERVERS,
-        slug,
-        {"transport": "stdio", "command": sys.executable, "args": [str(script), str(marker)]},
-    )
+    script.write_text("from pathlib import Path\nPath(" + repr(str(marker)) + ").write_text('started')\n")
+    slug = "retired-stdio"
     async with sessions() as db:
         db.add(MCPServer(slug=slug, name=slug, transport="stdio", enabled=1, created_by="test", updated_by="test"))
         await db.commit()
-    held = (await service.get_enabled_mcp_tools(slug))[0]
-    assert "STDIO_OK" in str(await held.ainvoke({}))
-    started = marker.read_text()
-    assert started == "started\nstarted\n"
+    assert await service.get_enabled_mcp_tools(slug) == []
+    with pytest.raises(ValueError, match="MCP 仅支持"):
+        await get_mcp_client({slug: {"transport": "stdio", "command": sys.executable, "args": [str(script)]}})
+    assert not marker.exists()
     await change_in_other_process(schema, slug, "server")
-    result = await held.ainvoke({"name": "probe", "args": {}, "id": "stdio-call", "type": "tool_call"})
-    assert result.status == "error"
-    assert marker.read_text() == started
+    assert await service.get_enabled_mcp_tools(slug) == []
+    assert not marker.exists()

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yuxi.agents import context as agent_context
+from yuxi.modules.agents.runtime import context as agent_context
 
 
 class _FakeModelCache:
@@ -28,11 +28,7 @@ class _FakeModelCache:
         return SimpleNamespace(spec=spec, model_type=model_type)
 
     def get_all_specs(self, model_type: str | None = None):
-        return [
-            SimpleNamespace(spec=spec, mt=mt)
-            for spec, mt in self._specs.items()
-            if model_type is None or mt == model_type
-        ]
+        return [SimpleNamespace(spec=spec, mt=mt) for spec, mt in self._specs.items() if model_type is None or mt == model_type]
 
 
 @pytest.fixture
@@ -43,7 +39,7 @@ def fake_cache(monkeypatch: pytest.MonkeyPatch):
     def _install(specs: dict[str, str]) -> _FakeModelCache:
         cache = _FakeModelCache(specs)
         holder["cache"] = cache
-        import yuxi.models.providers.cache as cache_module
+        import yuxi.modules.models.providers.cache as cache_module
 
         monkeypatch.setattr(cache_module, "model_cache", cache)
         return cache
@@ -158,9 +154,9 @@ async def test_prepare_agent_runtime_context_resolves_available_model(fake_cache
     from contextlib import asynccontextmanager
     from unittest.mock import AsyncMock
 
-    from yuxi.repositories.user_repository import UserRepository
-    from yuxi.services import user_memory_service
-    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.infrastructure.postgres.manager import pg_manager
+    from yuxi.modules.agents.services import user_memory as user_memory_service
+    from yuxi.modules.identity.repositories.users import UserRepository
 
     class Session:
         """资料同步所需的最小会话。"""
@@ -174,11 +170,12 @@ async def test_prepare_agent_runtime_context_resolves_available_model(fake_cache
         yield Session()
 
     fake_cache({"provider:available": "chat", "provider:chosen": "chat"})
-    monkeypatch.setattr(
-        type(agent_context.system_options), "get", AsyncMock(return_value={"default_model": "provider:removed"})
-    )
+    monkeypatch.setattr(type(agent_context.system_options), "get", AsyncMock(return_value={"default_model": "provider:removed"}))
     monkeypatch.setattr(pg_manager, "get_async_session_context", session)
-    monkeypatch.setattr(UserRepository, "get_by_uid_with_db", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        UserRepository, "get_by_uid_with_db", AsyncMock(return_value=SimpleNamespace(uid="synthetic-user", is_deleted=False))
+    )
+    monkeypatch.setattr(agent_context, "refresh_agent_context_resources", AsyncMock())
     monkeypatch.setattr(user_memory_service, "sync_user_profile_to_memory", AsyncMock())
     monkeypatch.setattr(agent_context, "_append_workspace_agent_prompt", AsyncMock())
     context = agent_context.BaseContext(uid="synthetic-user", model=model)
@@ -194,8 +191,8 @@ async def test_bound_run_rejects_unavailable_model_without_switching(fake_cache,
     from contextlib import asynccontextmanager
     from unittest.mock import AsyncMock
 
-    from yuxi.services import user_memory_service
-    from yuxi.storage.postgres.manager import pg_manager
+    from yuxi.infrastructure.postgres.manager import pg_manager
+    from yuxi.modules.agents.services import user_memory as user_memory_service
 
     class Session:
         """提供资料同步的局部事务。"""

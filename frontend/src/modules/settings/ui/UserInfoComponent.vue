@@ -1,0 +1,371 @@
+<template>
+  <div class="user-info-component">
+    <a-dropdown
+      v-model:open="menuOpen"
+      :trigger="['click']"
+      placement="topLeft"
+      :align="{ offset: [0, -8] }"
+      v-if="userStore.isLoggedIn"
+    >
+      <div class="user-info-dropdown" :class="{ 'is-open': menuOpen }" :data-align="showRole ? 'left' : 'center'">
+        <div class="user-avatar">
+          <FallbackAvatar
+            :src="userStore.avatar || avatarDefaultSrc"
+            :name="userStore.displayName"
+            :seed="userStore.uid || userStore.username"
+            kind="user"
+            :size="32"
+            shape="circle"
+            :alt="userStore.displayName"
+            class="avatar-image"
+          />
+        </div>
+        <div v-if="showRole" class="user-identity">
+          <!-- 优先展示中文姓名；历史账号没有姓名时回退到登录账号。 -->
+          <div class="user-name">{{ userStore.displayName || userStore.username }}</div>
+          <div class="user-department">{{ userStore.departmentName || '未分配部门' }}</div>
+        </div>
+        <div v-if="slots.actions" class="user-info-actions">
+          <slot name="actions" />
+        </div>
+      </div>
+      <template #overlay>
+        <a-menu class="user-account-menu" @click="handleMenuClick">
+          <a-menu-item key="user-info" @click="openProfile">
+            <div class="user-info-display">
+              <div class="user-menu-username" :title="userStore.displayName">
+                {{ userStore.displayName }}
+              </div>
+              <div class="user-menu-details">
+                <span class="user-menu-info">ID: {{ userStore.uid }}</span>
+                <span class="user-menu-role">{{ assignedRolesText }}</span>
+              </div>
+            </div>
+          </a-menu-item>
+          <a-menu-divider />
+          <a-menu-item key="theme" @click="toggleTheme">
+            <template #icon>
+              <Sun v-if="themeStore.themeMode === 'light'" :size="16" />
+              <Moon v-else-if="themeStore.themeMode === 'dark'" :size="16" />
+              <Monitor v-else :size="16" />
+            </template>
+            <span class="menu-text">主题：{{ themeStore.themeLabel }}</span>
+          </a-menu-item>
+          <a-menu-divider />
+          <a-menu-item
+            v-if="userStore.hasPermission('system_log:read')"
+            key="debug"
+            @click="infoStore.openDebugModal"
+          >
+            <template #icon><Terminal :size="16" /></template>
+            <span class="menu-text">调试面板（非生产环境）</span>
+          </a-menu-item>
+          <a-menu-item key="setting" @click="goToSetting">
+            <template #icon><Settings :size="16" /></template>
+            <span class="menu-text">设置</span>
+          </a-menu-item>
+          <a-menu-item v-if="props.allowLogout" key="logout" @click="logout">
+            <template #icon><LogOut :size="16" /></template>
+            <span class="menu-text">退出登录</span>
+          </a-menu-item>
+        </a-menu>
+      </template>
+    </a-dropdown>
+    <a-button v-else-if="showButton" type="primary" @click="goToLogin"> 登录 </a-button>
+
+    <!-- 调试面板 Modal -->
+    <DebugComponent v-model:show="infoStore.showDebugModal" />
+  </div>
+</template>
+
+<script setup>
+import { computed, inject, ref, useSlots } from 'vue'
+import { useRouter } from 'vue-router'
+import { authApi } from '@/apis/auth_api.js'
+import { useUserStore } from '@/modules/identity'
+import { useInfoStore } from '@/modules/settings/model/info'
+import DebugComponent from '@/modules/settings/ui/DebugComponent.vue'
+import { message } from 'ant-design-vue'
+import { Sun, Moon, Monitor, LogOut, Settings, Terminal } from '@lucide/vue'
+import { useThemeStore } from '@/shared/model/theme.js'
+import { generatePixelAvatar } from '@/shared/lib/pixelAvatar'
+import FallbackAvatar from '@/shared/ui/FallbackAvatar.vue'
+
+const router = useRouter()
+const userStore = useUserStore()
+const infoStore = useInfoStore()
+const themeStore = useThemeStore()
+const slots = useSlots()
+const menuOpen = ref(false)
+/** 主题项允许连续轮换，其他菜单操作关闭浮层。 */
+function handleMenuClick({ key }) {
+  if (key !== 'theme') menuOpen.value = false
+}
+
+// Inject settings modal methods
+const { openSettingsModal } = inject('settingsModal', {})
+
+const avatarDefaultSrc = computed(() => (userStore.uid ? generatePixelAvatar(userStore.uid) : ''))
+
+const props = defineProps({
+  showRole: {
+    type: Boolean,
+    default: false
+  },
+  showButton: {
+    type: Boolean,
+    default: false
+  },
+  // 嵌入 OA 时由宿主系统维护登录态，默认仅独立站允许主动退出。
+  allowLogout: {
+    type: Boolean,
+    default: true
+  }
+})
+
+const assignedRolesText = computed(
+  () => userStore.userRoles.map((role) => role.name).join('、') || '未分配角色'
+)
+
+// 退出登录
+const logout = async () => {
+  // 防止隐藏菜单以外的调用破坏 OA 宿主的登录会话。
+  if (!props.allowLogout) {
+    console.info('[用户菜单] 当前为嵌入模式，已忽略主动退出登录操作')
+    return
+  }
+
+  try {
+    await authApi.logout()
+  } catch (error) {
+    if (error.status !== 401) {
+      message.error(error.message || '退出未完成，请重试')
+      return
+    }
+  }
+  userStore.logout()
+  await router.replace('/login')
+}
+
+// 前往登录页
+const goToLogin = () => {
+  router.push('/login')
+}
+
+const toggleTheme = () => {
+  themeStore.toggleTheme()
+}
+
+// 前往设置页
+const goToSetting = () => {
+  if (openSettingsModal) {
+    openSettingsModal('account')
+  }
+}
+
+const openProfile = () => {
+  if (openSettingsModal) {
+    openSettingsModal('account')
+  }
+}
+</script>
+
+<style lang="less" scoped>
+.user-info-component {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gray-800);
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Noto Sans SC', 'Roboto', 'HarmonyOS Sans SC', 'Segoe UI',
+    'Helvetica Neue', Arial, sans-serif;
+}
+
+.user-info-dropdown {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+
+  &[data-align='center'] {
+    justify-content: center;
+  }
+
+  &[data-align='left'] {
+    justify-content: flex-start;
+  }
+}
+
+.user-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-identity {
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.user-department {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gray-500);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-info-actions {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.user-avatar {
+  @avatar-size: 32px;
+  width: @avatar-size;
+  height: @avatar-size;
+  min-width: @avatar-size;
+  flex: 0 0 @avatar-size;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 16px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 2px 8px var(--shadow-1);
+
+  &:hover {
+    opacity: 0.9;
+  }
+
+  .avatar-image {
+    width: 100%;
+    height: 100%;
+    display: block;
+    box-sizing: border-box;
+    object-fit: cover;
+    border-radius: 50%;
+    border: 2px solid var(--gray-150);
+  }
+}
+
+.user-role-badge {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  right: 0;
+  bottom: 0;
+  border: 2px solid var(--gray-0);
+
+  &.superadmin {
+    background-color: var(--color-warning-500);
+  }
+
+  &.admin {
+    background-color: var(--color-info-500); /* 蓝色，管理员 */
+  }
+
+  &.user {
+    background-color: var(--color-success-500); /* 绿色，普通用户 */
+  }
+}
+
+.user-account-menu {
+  width: 260px;
+  max-width: calc(100vw - 24px);
+  border-radius: 8px;
+}
+
+.user-info-display {
+  min-width: 0;
+  width: 100%;
+  padding: 4px 0;
+  line-height: 1.4;
+}
+
+.user-menu-username {
+  font-weight: 600;
+  color: var(--gray-900);
+  font-size: 14px;
+  display: block;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-menu-details {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.user-menu-info {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--gray-500);
+}
+
+.user-menu-separator {
+  color: var(--gray-400);
+}
+
+.user-menu-role {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--gray-500);
+}
+
+.login-icon {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 50%;
+  transition:
+    background-color 0.2s,
+    color 0.2s;
+  color: var(--gray-900);
+
+  &:hover {
+    background-color: var(--main-10);
+    color: var(--main-color);
+  }
+}
+
+:deep(.ant-dropdown-menu) {
+  padding: 8px 0;
+}
+
+:deep(.ant-dropdown-menu-title-content) {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--gray-900);
+}
+
+:deep(.ant-dropdown-menu-item svg) {
+  margin-right: 4px;
+  color: var(--gray-900);
+  vertical-align: middle;
+}
+
+.menu-text {
+  line-height: 20px;
+}
+</style>

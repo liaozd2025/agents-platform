@@ -2,7 +2,7 @@
 
 状态：archived
 类型：feature
-Owner：backend/package/yuxi/agents/tool_approval.py
+Owner：backend/yuxi/modules/agents/runtime/tool_approval.py
 
 ## 问题
 

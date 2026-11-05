@@ -13,12 +13,13 @@ import pytest_asyncio
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from yuxi.services import login_rate_limit_service as login_limiter
-from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import (
+import yuxi.modules.identity.services.login_limits as login_limiter
+from test.integration.api.helpers import delete_department_by_id, delete_user_by_id
+from yuxi.infrastructure.postgres.manager import pg_manager
+from yuxi.infrastructure.redis import close_async_redis_client, create_async_redis_client, get_async_redis_client
+from yuxi.modules.identity.models import (
     ROOT_DEPARTMENT_ID,
     Department,
-    OperationLog,
     Role,
     RoleDefaultDepartment,
     RolePermission,
@@ -26,9 +27,9 @@ from yuxi.storage.postgres.models_business import (
     User,
     UserRoleAssignment,
 )
-from yuxi.storage.redis import close_async_redis_client, create_async_redis_client, get_async_redis_client
-from yuxi.utils.auth_utils import AuthUtils
-from yuxi.utils.datetime_utils import utc_now_naive
+from yuxi.modules.identity.security import AuthUtils
+from yuxi.modules.system.models import OperationLog
+from yuxi.shared.datetime import utc_now
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -46,10 +47,7 @@ async def user_management_test_users(test_client):
     async with pg_manager.get_async_session_context() as session:
         root = await session.get(Department, ROOT_DEPARTMENT_ID)
         assert root is not None, "用户管理集成测试需要现有集团根节点"
-        roles = {
-            role.code: role
-            for role in (await session.scalars(select(Role).where(Role.code.in_(("superadmin", "user"))))).all()
-        }
+        roles = {role.code: role for role in (await session.scalars(select(Role).where(Role.code.in_(("superadmin", "user"))))).all()}
         users = [
             User(
                 username=f"pytest-user-admin-{suffix}",
@@ -122,11 +120,7 @@ async def _expire_login_lock(user_id: int) -> None:
     try:
         session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
         async with session_factory() as session:
-            await session.execute(
-                update(User)
-                .where(User.id == user_id)
-                .values(login_locked_until=utc_now_naive() - timedelta(seconds=1))
-            )
+            await session.execute(update(User).where(User.id == user_id).values(login_locked_until=utc_now() - timedelta(seconds=1)))
             await session.commit()
     finally:
         await engine.dispose()
@@ -231,9 +225,7 @@ async def _create_custom_user(
             default_scope_type=scope_type,
             permissions=[RolePermission(permission_key=key) for key in permission_keys],
             default_departments=(
-                [RoleDefaultDepartment(department_id=department_id)]
-                if scope_type == "selected_organizations_and_descendants"
-                else []
+                [RoleDefaultDepartment(department_id=department_id)] if scope_type == "selected_organizations_and_descendants" else []
             ),
         )
         user = User(
@@ -477,9 +469,7 @@ async def test_standard_user_can_change_own_password(test_client, user_managemen
     # 真 HTTP 复核：旧密码失效、新密码可用（只看接口返回值不算证据）
     old_login = await test_client.post("/api/auth/token", data={"username": login_identifier, "password": password})
     assert old_login.status_code == 401, old_login.text
-    new_login = await test_client.post(
-        "/api/auth/token", data={"username": login_identifier, "password": new_password}
-    )
+    new_login = await test_client.post("/api/auth/token", data={"username": login_identifier, "password": new_password})
     assert new_login.status_code == 200, new_login.text
 
     # 失败计数已清零；并写入「密码已更新」操作日志（批量运维判断「是否改过密码」依赖该文案）
@@ -585,11 +575,7 @@ async def test_user_list_returns_display_name(test_client, user_management_test_
     )
 
     assert response.status_code == 200, response.text
-    listed_user = next(
-        item
-        for item in response.json()
-        if item["id"] == user_management_test_users["admin_id"]
-    )
+    listed_user = next(item for item in response.json() if item["id"] == user_management_test_users["admin_id"])
     assert listed_user["display_name"] == "用户列表管理员"
 
 
@@ -617,9 +603,7 @@ async def test_user_list_paginates_and_returns_filtered_total(test_client, user_
     assert next_page.json() == []
 
 
-async def test_admin_password_mutations_reject_passwords_shorter_than_eight_characters(
-    test_client, admin_headers, standard_user
-):
+async def test_admin_password_mutations_reject_passwords_shorter_than_eight_characters(test_client, admin_headers, standard_user):
     create_response = await test_client.post(
         "/api/auth/users",
         json={"username": f"weak_{uuid.uuid4().hex[:8]}", "password": "short"},
@@ -853,9 +837,7 @@ async def test_user_management_follows_authorized_organization_subtree(test_clie
         )
         assert move_outside_scope.status_code == 404, move_outside_scope.text
 
-        role_escalation = await test_client.put(
-            f"/api/auth/users/{user_a['id']}", json={"role": "admin"}, headers=dept_a["admin_headers"]
-        )
+        role_escalation = await test_client.put(f"/api/auth/users/{user_a['id']}", json={"role": "admin"}, headers=dept_a["admin_headers"])
         assert role_escalation.status_code == 422, role_escalation.text
 
         cross_delete = await test_client.delete(f"/api/auth/users/{user_b['id']}", headers=dept_a["admin_headers"])
@@ -865,13 +847,9 @@ async def test_user_management_follows_authorized_organization_subtree(test_clie
         assert child_delete.status_code == 200, child_delete.text
         user_ids.remove(child_user["id"])
 
-        missing_user_permission = await test_client.get(
-            "/api/auth/users", headers=user_management_test_users["standard_headers"]
-        )
+        missing_user_permission = await test_client.get("/api/auth/users", headers=user_management_test_users["standard_headers"])
         assert missing_user_permission.status_code == 403, missing_user_permission.text
-        missing_department_permission = await test_client.get(
-            "/api/departments", headers=user_management_test_users["standard_headers"]
-        )
+        missing_department_permission = await test_client.get("/api/departments", headers=user_management_test_users["standard_headers"])
         assert missing_department_permission.status_code == 403, missing_department_permission.text
 
         move_admin_with_backup = await test_client.put(
@@ -970,9 +948,7 @@ async def test_role_delegation_requires_atomic_permissions_and_scope(test_client
                     is_active=True,
                     default_scope_type=scope_type,
                     permissions=[RolePermission(permission_key=key) for key in permission_keys],
-                    default_departments=[
-                        RoleDefaultDepartment(department_id=department_id) for department_id in default_department_ids
-                    ],
+                    default_departments=[RoleDefaultDepartment(department_id=department_id) for department_id in default_department_ids],
                 )
                 session.add(role)
                 roles.append(role)
@@ -1188,3 +1164,178 @@ async def test_locked_user_token_is_rejected(test_client, standard_user):
     profile_response = await test_client.get("/api/auth/me", headers=standard_user["headers"])
     assert profile_response.status_code == 423
     assert "X-Lock-Remaining" in profile_response.headers
+
+
+async def test_admin_user_page_accepts_multi_select_role_and_department_filters(test_client, admin_headers):
+    """恢复单值相等过滤时，表头多选筛选必须在真实 HTTP 链路上失败。"""
+    await _require_superadmin(test_client, admin_headers)
+
+    created_users = []
+    department_ids: list[int] = []
+    try:
+        dept_a = await _create_department_with_admin(test_client, admin_headers, "m1")
+        dept_b = await _create_department_with_admin(test_client, admin_headers, "m2")
+        department_ids = [dept_a["department"]["id"], dept_b["department"]["id"]]
+
+        for label in ("u1", "u2"):
+            response = await test_client.post(
+                "/api/auth/users",
+                json={
+                    "username": f"mu_{uuid.uuid4().hex[:8]}_{label}",
+                    "password": "routerTest123!",
+                    "role": "user",
+                    "department_id": dept_b["department"]["id"],
+                },
+                headers=admin_headers,
+            )
+            assert response.status_code == 200, response.text
+            created_users.append(response.json())
+
+        # 超管视角：角色与部门多选同时生效。
+        multi_response = await test_client.get(
+            "/api/auth/users/page",
+            params={
+                "roles": "admin,user",
+                "department_ids": f"{dept_a['department']['id']},{dept_b['department']['id']}",
+                "limit": 100,
+            },
+            headers=admin_headers,
+        )
+        assert multi_response.status_code == 200, multi_response.text
+        multi_page = multi_response.json()
+        assert {item["id"] for item in multi_page["items"]} == {
+            dept_a["admin_id"],
+            dept_b["admin_id"],
+            created_users[0]["id"],
+            created_users[1]["id"],
+        }
+
+        single_role_response = await test_client.get(
+            "/api/auth/users/page",
+            params={"roles": "admin", "limit": 100},
+            headers=admin_headers,
+        )
+        assert single_role_response.status_code == 200, single_role_response.text
+        single_role_ids = {item["id"] for item in single_role_response.json()["items"]}
+        assert dept_a["admin_id"] in single_role_ids
+        assert {created_users[0]["id"], created_users[1]["id"]}.isdisjoint(single_role_ids)
+
+        # 部门管理员视角：多选角色生效，但可见部门始终限定本部门。
+        dept_view_response = await test_client.get(
+            "/api/auth/users/page",
+            params={
+                "roles": "admin,user",
+                "department_ids": str(dept_b["department"]["id"]),
+                "limit": 100,
+            },
+            headers=dept_a["admin_headers"],
+        )
+        assert dept_view_response.status_code == 200, dept_view_response.text
+        dept_view = dept_view_response.json()
+        assert {item["id"] for item in dept_view["items"]} == {dept_a["admin_id"]}
+    finally:
+        for user in created_users:
+            await test_client.delete(f"/api/auth/users/{user['id']}", headers=admin_headers)
+        for department_id in department_ids:
+            await delete_department_by_id(test_client, admin_headers, department_id)
+
+
+async def test_department_admin_is_limited_to_own_department_users(test_client, admin_headers):
+    await _require_superadmin(test_client, admin_headers)
+
+    user_ids: list[int] = []
+    admin_ids: list[int] = []
+    department_ids: list[int] = []
+
+    try:
+        dept_a = await _create_department_with_admin(test_client, admin_headers, "a")
+        dept_b = await _create_department_with_admin(test_client, admin_headers, "b")
+        department_a = dept_a["department"]
+        department_b = dept_b["department"]
+        department_ids.extend([department_a["id"], department_b["id"]])
+        admin_ids.extend([dept_a["admin_id"], dept_b["admin_id"]])
+
+        user_a = await _create_user(test_client, dept_a["admin_headers"], "a")
+        user_b = await _create_user(test_client, dept_b["admin_headers"], "b")
+        superadmin_created_user = await _create_user(test_client, admin_headers, "s", department_id=department_b["id"])
+        user_ids.extend([user_a["id"], user_b["id"], superadmin_created_user["id"]])
+
+        assert user_a["department_id"] == department_a["id"]
+        assert superadmin_created_user["department_id"] == department_b["id"]
+
+        forbidden_create = await test_client.post(
+            "/api/auth/users",
+            json={
+                "username": f"ux_{uuid.uuid4().hex[:8]}",
+                "password": "routerTest123!",
+                "role": "user",
+                "department_id": department_b["id"],
+            },
+            headers=dept_a["admin_headers"],
+        )
+        assert forbidden_create.status_code == 403, forbidden_create.text
+
+        list_response = await test_client.get("/api/auth/users", headers=dept_a["admin_headers"])
+        assert list_response.status_code == 200, list_response.text
+        listed_users = list_response.json()
+        listed_user_ids = {user["id"] for user in listed_users}
+        assert user_a["id"] in listed_user_ids
+        assert user_b["id"] not in listed_user_ids
+        assert all(user["department_id"] == department_a["id"] for user in listed_users)
+
+        page_response = await test_client.get(
+            "/api/auth/users/page",
+            params={"department_id": department_b["id"], "limit": 100},
+            headers=dept_a["admin_headers"],
+        )
+        assert page_response.status_code == 200, page_response.text
+        paged_users = page_response.json()["items"]
+        paged_user_ids = {user["id"] for user in paged_users}
+        assert user_a["id"] in paged_user_ids
+        assert user_b["id"] not in paged_user_ids
+        assert all(user["department_id"] == department_a["id"] for user in paged_users)
+
+        options_response = await test_client.get("/api/auth/users/access-options", headers=dept_a["admin_headers"])
+        assert options_response.status_code == 200, options_response.text
+        access_options = options_response.json()
+        option_uids = {user["uid"] for user in access_options}
+        assert user_a["uid"] in option_uids
+        assert user_b["uid"] in option_uids
+        assert all(set(user) == {"uid", "username", "role", "department_id", "department_name"} for user in access_options)
+
+        superadmin_list_response = await test_client.get("/api/auth/users?limit=1000", headers=admin_headers)
+        assert superadmin_list_response.status_code == 200, superadmin_list_response.text
+        superadmin_user_ids = {user["id"] for user in superadmin_list_response.json()}
+        assert user_a["id"] in superadmin_user_ids
+        assert user_b["id"] in superadmin_user_ids
+
+        own_read = await test_client.get(f"/api/auth/users/{user_a['id']}", headers=dept_a["admin_headers"])
+        assert own_read.status_code == 200, own_read.text
+
+        cross_read = await test_client.get(f"/api/auth/users/{user_b['id']}", headers=dept_a["admin_headers"])
+        assert cross_read.status_code == 403, cross_read.text
+
+        cross_update = await test_client.put(
+            f"/api/auth/users/{user_b['id']}",
+            json={"username": f"ub_{uuid.uuid4().hex[:8]}"},
+            headers=dept_a["admin_headers"],
+        )
+        assert cross_update.status_code == 403, cross_update.text
+
+        role_escalation = await test_client.put(f"/api/auth/users/{user_a['id']}", json={"role": "admin"}, headers=dept_a["admin_headers"])
+        assert role_escalation.status_code == 403, role_escalation.text
+        assert role_escalation.json()["detail"] == "只有系统管理员可以提升角色"
+
+        cross_delete = await test_client.delete(f"/api/auth/users/{user_b['id']}", headers=dept_a["admin_headers"])
+        assert cross_delete.status_code == 403, cross_delete.text
+
+        own_delete = await test_client.delete(f"/api/auth/users/{user_a['id']}", headers=dept_a["admin_headers"])
+        assert own_delete.status_code == 200, own_delete.text
+        user_ids.remove(user_a["id"])
+    finally:
+        for user_id in user_ids:
+            await delete_user_by_id(test_client, admin_headers, user_id)
+        for admin_id in admin_ids:
+            await delete_user_by_id(test_client, admin_headers, admin_id)
+        for department_id in department_ids:
+            await delete_department_by_id(test_client, admin_headers, department_id)

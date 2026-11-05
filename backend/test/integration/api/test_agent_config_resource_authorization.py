@@ -9,15 +9,17 @@ import asyncpg
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from yuxi.agents.buildin.chatbot.context import ChatBotContext
-from yuxi.agents.context import normalize_agent_context_config
-from yuxi.repositories.user_repository import UserRepository
+from yuxi.modules.agents.runtime.agent_backends.chatbot.context import ChatBotContext
+from yuxi.modules.agents.runtime.context import normalize_agent_context_config
+from yuxi.modules.identity.repositories.users import UserRepository
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 
 async def test_mcp_selection_requires_explicit_agent_config(test_client, admin_headers):
     """真实保存与运行边界只启用 Agent 显式选择的 MCP。"""
+    from yuxi.infrastructure.postgres.manager import pg_manager
+
     suffix = uuid.uuid4().hex[:10]
     agent_slug = f"pytest-mcp-selection-agent-{suffix}"
     mcp_slug = f"pytest-mcp-selection-{suffix}"
@@ -66,9 +68,7 @@ async def test_mcp_selection_requires_explicit_agent_config(test_client, admin_h
             assert owner is not None
             persisted = (await _read_agent_config(conn, agent_slug))["context"]
             assert "mcps" not in persisted
-            normalized = await normalize_agent_context_config(
-                persisted, db=db, user=owner, context_schema=ChatBotContext
-            )
+            normalized = await normalize_agent_context_config(persisted, db=db, user=owner, context_schema=ChatBotContext)
             assert normalized["mcps"] == []
             for saved_value, expected in (([], []), ([mcp_slug], [mcp_slug])):
                 response = await test_client.put(
@@ -79,17 +79,13 @@ async def test_mcp_selection_requires_explicit_agent_config(test_client, admin_h
                 assert response.status_code == 200, response.text
                 persisted = (await _read_agent_config(conn, agent_slug))["context"]
                 assert persisted.get("mcps") == saved_value
-                normalized = await normalize_agent_context_config(
-                    persisted, db=db, user=owner, context_schema=ChatBotContext
-                )
+                normalized = await normalize_agent_context_config(persisted, db=db, user=owner, context_schema=ChatBotContext)
                 assert normalized["mcps"] == expected
 
             response = await test_client.put(mcp_path + "/status", headers=admin_headers, json={"enabled": False})
             assert response.status_code == 200, response.text
             persisted = (await _read_agent_config(conn, agent_slug))["context"]
-            normalized = await normalize_agent_context_config(
-                persisted, db=db, user=owner, context_schema=ChatBotContext
-            )
+            normalized = await normalize_agent_context_config(persisted, db=db, user=owner, context_schema=ChatBotContext)
             assert normalized["mcps"] == []
     finally:
         if created_agent:
@@ -99,17 +95,14 @@ async def test_mcp_selection_requires_explicit_agent_config(test_client, admin_h
             response = await test_client.delete(mcp_path, headers=admin_headers)
             assert response.status_code in {200, 404}, response.text
         await engine.dispose()
+        await pg_manager.close()
         await conn.close()
 
 
-async def test_admin_settings_are_hidden_and_immutable_without_function_permission(
-    test_client, admin_headers, standard_user
-):
+async def test_admin_settings_are_hidden_and_immutable_without_function_permission(test_client, admin_headers, standard_user):
     """缺少功能权限时隐藏管理参数，拒绝写入并保留 PostgreSQL 原值。"""
     slug = f"pytest-config-auth-{uuid.uuid4().hex[:10]}"
-    uid = str(standard_user["user"]["uid"])
     headers = standard_user["headers"]
-    scope = {"access_level": "user", "department_ids": [], "user_uids": [uid]}
     settings = {
         "tool_approval_mode": "always_trust",
         "summary_threshold": 37,
@@ -123,19 +116,17 @@ async def test_admin_settings_are_hidden_and_immutable_without_function_permissi
     try:
         created = await test_client.post(
             "/api/agent",
-            headers=admin_headers,
+            headers=headers,
             json={
                 "name": "Pytest config auth",
                 "slug": slug,
                 "backend_id": "ChatbotAgent",
-                "share_config": {"version": 2, "read_scope": scope, "manage_scope": scope},
-                "config_json": {"context": {**settings, "max_execution_steps": 60}},
+                "visibility": "private",
+                "config_json": {"context": {"system_prompt": "owner prompt"}},
             },
         )
         assert created.status_code == 200, created.text
-        updated = await test_client.put(
-            f"/api/agent/{slug}", headers=admin_headers, json={"config_json": {"context": settings}}
-        )
+        updated = await test_client.put(f"/api/agent/{slug}", headers=admin_headers, json={"config_json": {"context": settings}})
         assert updated.status_code == 200, updated.text
         read = await test_client.get(f"/api/agent/{slug}", headers=headers)
         assert read.status_code == 200, read.text
@@ -156,10 +147,17 @@ async def test_admin_settings_are_hidden_and_immutable_without_function_permissi
             headers=headers,
             json={"config_json": {"context": {**overwritten, "system_prompt": "user edit"}}},
         )
-        assert saved.status_code == 403, saved.text
+        assert saved.status_code == 422, saved.text
+        rejected = (await _read_agent_config(conn, slug))["context"]
+        assert {key: rejected[key] for key in settings} == settings
+        assert rejected["system_prompt"] == "owner prompt"
+        edited = await test_client.put(
+            f"/api/agent/{slug}", headers=headers, json={"config_json": {"context": {"system_prompt": "user edit"}}}
+        )
+        assert edited.status_code == 200, edited.text
         persisted = (await _read_agent_config(conn, slug))["context"]
         assert {key: persisted[key] for key in settings} == settings
-        assert persisted.get("system_prompt") != "user edit"
+        assert persisted.get("system_prompt") == "user edit"
     finally:
         deleted = await test_client.delete(f"/api/agent/{slug}", headers=admin_headers)
         assert deleted.status_code in {200, 404}, deleted.text
@@ -202,8 +200,7 @@ async def test_delegated_manager_resource_patch_preserves_hidden_config_and_reje
         )
         await conn.execute("INSERT INTO role_permissions VALUES ($1,'agent:manage')", manager_role_id)
         await conn.execute(
-            "INSERT INTO user_role_assignments (user_id,role_id,scope_mode) "
-            "SELECT id,$1,'inherit' FROM users WHERE uid=$2",
+            "INSERT INTO user_role_assignments (user_id,role_id,scope_mode) SELECT id,$1,'inherit' FROM users WHERE uid=$2",
             manager_role_id,
             manager_uid,
         )
@@ -235,13 +232,14 @@ async def test_delegated_manager_resource_patch_preserves_hidden_config_and_reje
             headers=manager_headers,
         )
         assert forbidden_create.status_code == 422, forbidden_create.text
-        assert "无权新增智能体资源 skills" in forbidden_create.json()["detail"]
+        assert "无权新增智能体资源 skills" in forbidden_create.json()["detail"]["message"]
         assert await conn.fetchval("SELECT count(*) FROM agents WHERE slug = $1", forbidden_agent_slug) == 0
 
         create_response = await test_client.post(
             "/api/agent",
             json={
                 "name": "Pytest shared resource agent",
+                "visibility": "shared",
                 "slug": agent_slug,
                 "backend_id": "ChatbotAgent",
                 "config_json": {"context": {"skills": configured, "system_prompt": "owner prompt"}},
@@ -276,7 +274,6 @@ async def test_delegated_manager_resource_patch_preserves_hidden_config_and_reje
                         "knowledges": [],
                         "mcps": [],
                         "skills": configured,
-                        "subagents": ["missing"],
                     },
                     db=db,
                     user=manager,
@@ -402,7 +399,7 @@ async def test_personal_skills_are_automatic_and_absent_from_agent_options(test_
     """真实 HTTP 选项只含共享，个人文件自动进入空、固定和全部运行范围。"""
     from types import SimpleNamespace
 
-    from yuxi.agents.skills.runtime import resolve_runtime_skills_for_context
+    from yuxi.modules.extensions.skills.runtime import resolve_runtime_skills_for_context
 
     uid = str(standard_user["user"]["uid"])
     headers = standard_user["headers"]
@@ -421,8 +418,7 @@ async def test_personal_skills_are_automatic_and_absent_from_agent_options(test_
         )
         await conn.execute("INSERT INTO role_permissions VALUES ($1,'agent:manage')", manager_role_id)
         await conn.execute(
-            "INSERT INTO user_role_assignments (user_id,role_id,scope_mode) "
-            "SELECT id,$1,'inherit' FROM users WHERE uid=$2",
+            "INSERT INTO user_role_assignments (user_id,role_id,scope_mode) SELECT id,$1,'inherit' FROM users WHERE uid=$2",
             manager_role_id,
             uid,
         )
@@ -460,7 +456,7 @@ async def test_personal_skills_are_automatic_and_absent_from_agent_options(test_
                 "name": "Personal skills test",
                 "slug": agent_slug,
                 "backend_id": "ChatbotAgent",
-                "config_json": {"context": {"skills": [], "tools": [], "knowledges": [], "subagents": []}},
+                "config_json": {"context": {"skills": [], "tools": [], "knowledges": []}},
             },
         )
         assert created.status_code == 200, created.text
@@ -526,20 +522,18 @@ async def test_resource_selection_protocol_persists_intent_and_rejects_invalid_v
                 "name": "Selection test",
                 "slug": slug,
                 "backend_id": "ChatbotAgent",
-                "config_json": {"context": {"skills": "all", "subagents": [], "mcps": "all", "preload_skills": "all"}},
+                "config_json": {"context": {"skills": "all", "mcps": "all", "preload_skills": "all"}},
             },
         )
         assert response.status_code == 200, response.text
-        expected = {"skills": "all", "subagents": [], "mcps": "all", "preload_skills": "all"}
+        expected = {"skills": "all", "mcps": "all", "preload_skills": "all"}
         assert (await _read_agent_config(conn, slug))["context"] == expected
         response = await test_client.put(path, headers=admin_headers, json={"config_json": {"context": {"model": ""}}})
         assert response.status_code == 200, response.text
         expected["model"] = ""
-        for field in ("tools", "knowledges", "skills", "subagents", "mcps", "preload_skills"):
+        for field in ("tools", "knowledges", "skills", "mcps", "preload_skills"):
             for invalid in (None, "full", ["ok", 1], [""]):
-                response = await test_client.put(
-                    path, headers=admin_headers, json={"config_json": {"context": {field: invalid}}}
-                )
+                response = await test_client.put(path, headers=admin_headers, json={"config_json": {"context": {field: invalid}}})
                 assert response.status_code == 422, response.text
                 assert field in response.json()["detail"]
                 assert (await _read_agent_config(conn, slug))["context"] == expected

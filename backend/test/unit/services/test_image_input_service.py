@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from yuxi.services import image_input_service
+from yuxi.modules.agents.services import image_input as image_input_service
 
 
 @pytest.fixture(autouse=True)
@@ -90,7 +90,7 @@ async def test_transcribe_replaces_image_blocks_and_keeps_text(monkeypatch: pyte
             return AIMessage(content="图中是一枚红色方块。")
 
     monkeypatch.setattr(image_input_service, "system_options", _Options())
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", lambda _spec, **_kwargs: _VisionModel())
+    monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", lambda _spec, **_kwargs: _VisionModel())
     message = HumanMessage(
         content=[
             {"type": "text", "text": "参考图路径：/home/gem/user-data/projects/p/uploads/a.png"},
@@ -122,7 +122,7 @@ async def test_transcribe_skips_when_vision_model_is_the_main_model(monkeypatch:
         raise AssertionError("视觉模型与主模型相同时不应加载模型")
 
     monkeypatch.setattr(image_input_service, "system_options", _Options())
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", fail_load)
+    monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", fail_load)
     message = HumanMessage(content=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}])
 
     assert await image_input_service.transcribe_message_images(message, exclude_spec="alibaba-cn:qwen3.7-max") is None
@@ -167,7 +167,7 @@ async def test_tuning_params_only_apply_to_openai_compatible_providers(
             return _VisionModel()
 
         monkeypatch.setattr(image_input_service, "system_options", _Options())
-        monkeypatch.setattr("yuxi.models.chat.load_chat_model", fake_load)
+        monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", fake_load)
 
         result = await image_input_service.transcribe_message_images(message, exclude_spec="main:m")
 
@@ -202,7 +202,7 @@ async def test_transcript_cache_scopes_identity_prunes_expiry_and_limits_capacit
         return Vision()
 
     monkeypatch.setattr(image_input_service, "system_options", Options())
-    monkeypatch.setattr("yuxi.models.chat.load_chat_model", load)
+    monkeypatch.setattr("yuxi.modules.models.chat.load_chat_model", load)
     monkeypatch.setattr(image_input_service, "_VISION_CACHE_MAX_ENTRIES", 2)
     message = HumanMessage(content=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}])
     for uid, thread in [("u1", "t1"), ("u1", "t1"), ("u2", "t1"), ("u2", "t2")]:
@@ -234,9 +234,9 @@ def test_image_fingerprint_preserves_block_boundaries():
     right = [{"url": "https://a.test/a"}, {"url": "https://b.test/chttps://d.test/e"}]
     assert image_input_service._image_fingerprint(left) != image_input_service._image_fingerprint(right)
     assert image_input_service._image_fingerprint(left) != image_input_service._image_fingerprint(left[::-1])
-    assert image_input_service._image_fingerprint(
-        [{"base64": "AA", "mime_type": "image/png"}]
-    ) != image_input_service._image_fingerprint([{"base64": "AA", "mime_type": "image/jpeg"}])
+    assert image_input_service._image_fingerprint([{"base64": "AA", "mime_type": "image/png"}]) != image_input_service._image_fingerprint(
+        [{"base64": "AA", "mime_type": "image/jpeg"}]
+    )
 
 
 def test_image_fingerprint_ignores_generated_block_ids():

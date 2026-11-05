@@ -1,19 +1,25 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from datetime import timedelta
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from server.routers.auth_router import delete_user
-from server.routers.user_router import APIKeyCreate, create_api_key, get_accessible_api_key
-from server.utils.auth_middleware import _verify_api_key, get_required_user
-from yuxi.repositories.api_key_repository import APIKeyRepository
-from yuxi.repositories.user_repository import UserRepository
-from yuxi.storage.postgres.models_business import APIKey, Base, Department, User
-from yuxi.utils.auth_utils import AuthUtils
+from test.support.sqlite import create_utc_sqlite_engine
+from yuxi.api.dependencies.auth import get_required_user
+from yuxi.api.routers.identity.auth import delete_user
+from yuxi.api.routers.identity.users import APIKeyCreate, create_api_key
+from yuxi.infrastructure.postgres.base import Base
+from yuxi.modules.identity.models import APIKey, Department, Role, RolePermission, User, UserRoleAssignment
+from yuxi.modules.identity.permissions import build_authorization_context
+from yuxi.modules.identity.repositories.api_keys import APIKeyRepository
+from yuxi.modules.identity.repositories.users import UserRepository
+from yuxi.modules.identity.security import AuthUtils
+from yuxi.modules.identity.services.api_keys import get_accessible_api_key
+from yuxi.modules.identity.services.public_auth import verify_api_key
+from yuxi.shared.datetime import utc_now
+from yuxi.shared.errors import PermissionDeniedError
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -43,14 +49,22 @@ class _FakeApiKeySession:
 
 @pytest_asyncio.fixture()
 async def session():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_utc_sqlite_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
         dept_a = Department(name="Dept A")
         dept_b = Department(name="Dept B")
+        manager_role = Role(
+            code="key-test-super",
+            name="Key test manager",
+            default_scope_type="all",
+            permissions=[RolePermission(permission_key="api_key:manage_all"), RolePermission(permission_key="user:delete")],
+            default_departments=[],
+        )
         superadmin = User(
+            role_assignments=[UserRoleAssignment(role=manager_role)],
             username="Super Admin",
             uid="superadmin",
             password_hash="$argon2id$placeholder",
@@ -82,6 +96,9 @@ async def session():
         dept_a.path = f"/{dept_a.id}/"
         dept_b.path = f"/{dept_b.id}/"
         await db.commit()
+        superadmin = await UserRepository().get_by_id_with_db(db, superadmin.id)
+        dept_b_admin = await UserRepository().get_by_id_with_db(db, dept_b_admin.id)
+        regular_user = await UserRepository().get_by_id_with_db(db, regular_user.id)
         yield {
             "db": db,
             "dept_a": dept_a,
@@ -108,7 +125,7 @@ async def test_api_key_rejects_deleted_bound_user_without_department_or_superadm
     db.add(api_key)
     await db.commit()
 
-    user, verified_key = await _verify_api_key(secret, db)
+    user, verified_key = await verify_api_key(secret, db)
 
     assert user is None
     assert verified_key is None
@@ -127,7 +144,7 @@ async def test_api_key_user_loads_department_ancestor_ids(session):
     db.add(api_key)
     await db.commit()
 
-    user, verified_key = await _verify_api_key(secret, db)
+    user, verified_key = await verify_api_key(secret, db)
 
     assert verified_key is not None
     assert user.department_ancestor_ids == (session["dept_a"].id,)
@@ -161,7 +178,7 @@ async def test_api_key_without_user_binding_is_rejected_before_department_mappin
     )
     fake_db = _FakeApiKeySession(api_key)
 
-    user, verified_key = await _verify_api_key(secret, fake_db)
+    user, verified_key = await verify_api_key(secret, fake_db)
 
     assert user is None
     assert verified_key is None
@@ -171,18 +188,18 @@ async def test_api_key_without_user_binding_is_rejected_before_department_mappin
 async def test_create_api_key_rejects_mismatched_department(session):
     db = session["db"]
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(PermissionDeniedError) as exc:
         await create_api_key(
             APIKeyCreate(
                 request_id="request-wrong-department",
                 name="wrong department",
                 department_id=session["dept_b"].id,
             ),
-            authorization=SimpleNamespace(user=session["regular_user"]),
+            current_user=session["regular_user"],
             db=db,
         )
 
-    assert exc.value.status_code == 403
+    assert exc.value.message
 
 
 async def test_create_api_key_allows_current_user_department(session):
@@ -194,13 +211,13 @@ async def test_create_api_key_allows_current_user_department(session):
             name="own department",
             department_id=session["dept_a"].id,
         ),
-        authorization=SimpleNamespace(user=session["regular_user"]),
+        current_user=session["regular_user"],
         db=db,
     )
 
-    assert response.api_key.user_id == session["regular_user"].id
-    assert response.api_key.department_id == session["dept_a"].id
-    assert response.secret.startswith(response.api_key.key_prefix)
+    assert response["api_key"]["user_id"] == session["regular_user"].id
+    assert response["api_key"]["department_id"] == session["dept_a"].id
+    assert response["secret"].startswith(response["api_key"]["key_prefix"])
 
 
 async def test_api_key_repository_enforces_requester_visibility(session):
@@ -222,24 +239,18 @@ async def test_api_key_repository_enforces_requester_visibility(session):
 
     foreign_access = await repository.get_accessible(
         api_key_id=api_key.id,
-        requester_user_id=session["dept_b_admin"].id,
-        is_superadmin=False,
+        visible_user_ids=[session["dept_b_admin"].id],
     )
     assert foreign_access.api_key is None
     assert foreign_access.exists is True
 
-    with pytest.raises(HTTPException) as exc:
-        await get_accessible_api_key(
-            db,
-            api_key.id,
-            SimpleNamespace(user=session["dept_b_admin"], has_permission=lambda _key: False),
-        )
-    assert exc.value.status_code == 403
+    with pytest.raises(PermissionDeniedError) as exc:
+        await get_accessible_api_key(repository, api_key.id, session["dept_b_admin"])
+    assert exc.value.message
 
     superadmin_access = await repository.get_accessible(
         api_key_id=api_key.id,
-        requester_user_id=session["superadmin"].id,
-        is_superadmin=True,
+        visible_user_ids=[session["regular_user"].id, session["superadmin"].id],
     )
     assert superadmin_access.api_key is api_key
 
@@ -259,15 +270,32 @@ async def test_delete_user_disables_owned_api_keys(session, monkeypatch):
     await db.refresh(api_key)
     await db.refresh(session["regular_user"], ["role_assignments"])
 
-    async def get_target_user(*_args, **_kwargs):
-        """隔离本用例无关的管理域查询。"""
-
-        return session["regular_user"]
-
-    monkeypatch.setattr("server.routers.auth_router._get_authorized_user", get_target_user)
-    authorization = SimpleNamespace(user=session["superadmin"])
-    result = await delete_user(session["regular_user"].id, None, authorization, db)
+    result = await delete_user(session["regular_user"].id, None, build_authorization_context(session["superadmin"]), db)
     await db.refresh(api_key)
 
     assert result["success"] is True
     assert api_key.is_enabled is False
+
+
+@pytest.mark.parametrize("key_state", ["valid", "disabled", "revoked", "expired"])
+async def test_identity_verifies_api_key_lifecycle(session, key_state):
+    """只有未停用、未撤销、未过期的凭据返回绑定身份。"""
+    db = session["db"]
+    owner = session["regular_user"]
+    secret, key_hash, key_prefix = AuthUtils.generate_api_key()
+    key = APIKey(
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name="lifecycle key",
+        user_id=owner.id,
+        created_by=str(owner.id),
+        is_enabled=key_state != "disabled",
+        revoked_at=utc_now() if key_state == "revoked" else None,
+        expires_at=utc_now() - timedelta(seconds=1) if key_state == "expired" else None,
+    )
+    db.add(key)
+    await db.commit()
+
+    result = await verify_api_key(secret, db)
+    assert result == ((owner, key) if key_state == "valid" else (None, None))
+    assert await verify_api_key("yxkey_unknown", db) == (None, None)

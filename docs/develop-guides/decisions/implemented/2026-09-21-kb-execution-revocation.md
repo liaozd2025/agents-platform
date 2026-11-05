@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/agents/toolkits/kbs/tools.py
+Owner：backend/yuxi/modules/knowledge/services/access.py
+
+## 当前迁移状态
+
+2026-11-02：Knowledge MCP/Public 共用 access 入口逐次重算功能、资源与选择交集，APP 还核对有效 owner；旧七工具和 ToolCall 表已由新协议替代。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

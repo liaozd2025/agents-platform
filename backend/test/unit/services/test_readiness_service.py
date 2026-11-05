@@ -3,9 +3,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
-from yuxi.services import readiness_service, task_queue_service
-
+import yuxi.infrastructure.worker_health as job_health
+import yuxi.modules.system.readiness as readiness_service
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
@@ -26,7 +25,7 @@ def reset_readiness_cache(monkeypatch: pytest.MonkeyPatch) -> None:
                 return readiness_service.WORKER_HEALTH_MAX_TTL_MS
             if key == readiness_service.WORKER_RECONCILIATION_HEALTH_KEY:
                 return readiness_service.WORKER_RECONCILIATION_HEALTH_TTL_SECONDS * 1000
-            return readiness_service.TASK_RECONCILIATION_HEALTH_TTL_SECONDS * 1000
+            return readiness_service.JOB_RECONCILIATION_HEALTH_TTL_SECONDS * 1000
 
     async def healthy_redis() -> HealthyWorkerRedis:
         return HealthyWorkerRedis()
@@ -152,7 +151,7 @@ async def test_worker_probe_requires_arq_and_reconciliation_leases_with_bounded_
                 return readiness_service.WORKER_HEALTH_MAX_TTL_MS
             if key == readiness_service.WORKER_RECONCILIATION_HEALTH_KEY:
                 return readiness_service.WORKER_RECONCILIATION_HEALTH_TTL_SECONDS * 1000
-            return readiness_service.TASK_RECONCILIATION_HEALTH_TTL_SECONDS * 1000
+            return readiness_service.JOB_RECONCILIATION_HEALTH_TTL_SECONDS * 1000
 
     async def worker_redis() -> WorkerRedis:
         return WorkerRedis()
@@ -166,8 +165,8 @@ async def test_worker_probe_requires_arq_and_reconciliation_leases_with_bounded_
         ("pttl", readiness_service.WORKER_HEALTH_KEY),
         ("get", readiness_service.WORKER_RECONCILIATION_HEALTH_KEY),
         ("pttl", readiness_service.WORKER_RECONCILIATION_HEALTH_KEY),
-        ("get", task_queue_service.TASK_RECONCILIATION_HEALTH_KEY),
-        ("pttl", task_queue_service.TASK_RECONCILIATION_HEALTH_KEY),
+        ("get", job_health.JOB_RECONCILIATION_HEALTH_KEY),
+        ("pttl", job_health.JOB_RECONCILIATION_HEALTH_KEY),
     ]
 
 

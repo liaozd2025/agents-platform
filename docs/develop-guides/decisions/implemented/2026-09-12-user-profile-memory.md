@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/services/user_memory_service.py
+Owner：backend/yuxi/modules/agents/services/user_memory.py
 
 ## 问题
 

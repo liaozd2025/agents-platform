@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/utils/auth_utils.py
+Owner：backend/yuxi/modules/identity/services/public_auth.py
 
 ## 问题
 

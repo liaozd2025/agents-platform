@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from yuxi.knowledge.graphs.extractors.llm import (
+from yuxi.modules.knowledge.graphs.extractors.llm import (
     DEFAULT_EXTRACTION_TIMEOUT_SECONDS,
     LLMGraphExtractor,
 )

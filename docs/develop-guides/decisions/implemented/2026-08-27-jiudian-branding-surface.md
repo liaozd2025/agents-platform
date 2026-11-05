@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/config/static/info.template.yaml
+Owner：backend/yuxi/modules/system/static/info.template.yaml
+
+## 当前迁移状态
+
+2026-11-02：品牌默认值进入 system/static；前端文件迁至 frontend，旧 web 目录和旧启动路径不再是当前 Owner。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

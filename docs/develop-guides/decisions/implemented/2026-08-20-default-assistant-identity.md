@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/agents/buildin/chatbot/prompt.py
+Owner：backend/yuxi/modules/agents/runtime/agent_backends/chatbot/prompt.py
+
+## 当前迁移状态
+
+2026-11-02：默认九典身份保留在新的 Chatbot prompt；已配置自定义身份时不同时注入默认身份。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：bug-fix
-Owner：backend/package/yuxi/knowledge/manager.py
+Owner：backend/yuxi/modules/knowledge/manager.py
 
 ## 问题
 

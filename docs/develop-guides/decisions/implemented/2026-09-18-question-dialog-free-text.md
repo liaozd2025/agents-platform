@@ -2,13 +2,15 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/agents/toolkits/buildin/tools.py
+Owner：backend/yuxi/modules/extensions/tools/builtin/ask_user_question.py
 
 ## 问题
 
 `ask_user_question` 过去只向模型说明带选项的问题，前端也把自行填写编码为特殊“其他”选项，因此 Agent 无法直接提出需要用户自由填写的纯问答，问题导航和逐题跳过也不清晰。
 
 ## 决策
+
+参数入口和标准结构的收敛由[内置工具与提问契约决策](2026-09-30-builtin-tool-question-contract.md)维护，本记录继续拥有纯问答与弹窗交互取舍。
 
 - 保持 `questions` 与 resume object 的单一协议：规范化后的 `options` 为空时是纯问答，有选项时由 `multi_select` 判别单选或多选。
 - `options` 只保存真实业务选项，不注入或识别“其他”选项或 sentinel。`allow_other` 独立控制选择题底部的自行填写入口。
@@ -33,8 +35,8 @@ Owner：backend/package/yuxi/agents/toolkits/buildin/tools.py
 ## 验证
 
 - `docker compose exec api pytest test/unit/agents/toolkits/buildin/test_ask_user_question.py test/unit/services/test_chat_stream_interrupt.py -q`：26 passed；纯问答测试同时约束模型可见说明和 interrupt payload。
-- `docker compose exec web node --test --test-concurrency=1 test/unit/questionUtils.test.js test/unit/humanApprovalModal.test.js`：6 passed；覆盖纯文本、选择、自行填写、内嵌操作区、从自行填写切回多选、选择题焦点与逐题跳过。
+- `docker compose exec frontend node --test --test-concurrency=1 test/unit/questionUtils.test.js test/unit/humanApprovalModal.test.js`：6 passed；覆盖纯文本、选择、自行填写、内嵌操作区、从自行填写切回多选、选择题焦点与逐题跳过。
 - `docker compose exec api pytest test/unit -m 'not slow'`：2181 passed、54 skipped、7 subtests passed。
-- `docker compose exec web pnpm run test:unit`：351 passed。
-- `docker compose exec web pnpm run lint:check` 与 `docker compose exec web pnpm run build`：通过；构建仅保留既有 chunk size 提示。
+- `docker compose exec frontend pnpm run test:unit`：351 passed。
+- `docker compose exec frontend pnpm run lint:check` 与 `docker compose exec frontend pnpm run build`：通过；构建仅保留既有 chunk size 提示。
 - Playwright 在 1440×900 浅色、375×812 暗色和 812×375 横屏检查真实组件；横屏 `scrollWidth` 等于 `clientWidth`，图标按钮有可访问名称，输入获得可见焦点。

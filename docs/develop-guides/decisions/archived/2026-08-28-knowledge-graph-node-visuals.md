@@ -2,7 +2,7 @@
 
 状态：archived
 类型：feature
-Owner：web/src/components/GraphCanvas.vue
+Owner：frontend/src/modules/knowledge/ui/GraphCanvas.vue
 
 本记录已由 [2026-08-31-knowledge-graph-3d-rendering.md](../implemented/2026-08-31-knowledge-graph-3d-rendering.md) 取代，仅保留 Sigma 阶段的历史决策。
 

@@ -2,9 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 from starlette.requests import Request
-from yuxi.permissions.authorization import AuthorizationTarget, build_authorization_context
 
-from server.utils.auth_middleware import get_authorization_context
+from yuxi.api.dependencies.auth import get_authorization_context
+from yuxi.modules.identity.permissions.authorization import AuthorizationTarget, build_authorization_context
 
 
 def _assignment(permission_keys, scope_type, department_ids=()):

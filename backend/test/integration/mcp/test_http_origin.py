@@ -7,12 +7,16 @@ import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import RedirectResponse
 
-from yuxi.agents.mcp.service import get_mcp_client
+from yuxi.modules.extensions.mcp import runtime
+from yuxi.modules.extensions.mcp.runtime import get_mcp_client
+
+pytestmark = [pytest.mark.integration, pytest.mark.self_managed_resources]
 
 
 @contextmanager
@@ -84,13 +88,6 @@ async def connect(url, transport):
     return client
 
 
-def exception_messages(error):
-    """展开 SDK task group 异常以核对拒绝原因。"""
-    if isinstance(error, BaseExceptionGroup):
-        return " ".join(exception_messages(child) for child in error.exceptions)
-    return str(error)
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["sse", "streamable_http"])
 @pytest.mark.parametrize("redirect", ["none", "relative", "absolute"])
@@ -135,4 +132,101 @@ async def test_cross_origin_redirect_never_reaches_target(transport, change, pha
         reached = sink.records if change == "port" else source.records[1:]
         assert not reached, "跨源目标已收到请求，可能包含自定义密钥"
         assert error is not None
-        assert "MCP HTTP request must stay on the configured origin" in exception_messages(error)
+        # 当前 SDK 先拒绝跨源 307；检查真实协议响应，不把任意连接失败算作安全拒绝。
+        failures = exception_leaves(error)
+        assert any(
+            isinstance(failure, httpx.HTTPStatusError)
+            and failure.response.status_code == 307
+            and failure.response.headers["location"] == target + sink.endpoint
+            and str(failure.request.url) == source.url + source.endpoint
+            for failure in failures
+        )
+
+
+def exception_leaves(error):
+    """读取 SDK task group 的实际协议异常，避免依赖其外层包装文案。"""
+    if isinstance(error, BaseExceptionGroup):
+        return [leaf for child in error.exceptions for leaf in exception_leaves(child)]
+    return [error]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "streamable_http"])
+@pytest.mark.parametrize("change", ["hostname", "port"])
+async def test_product_http_factory_blocks_cross_origin_even_when_redirects_are_followed(monkeypatch, transport, change):
+    """即使HTTP适配器选择自动跟随，产品发送前guard仍阻止凭据到达跨源目标。"""
+    monkeypatch.setattr(runtime, "create_mcp_http_client", lambda **kwargs: httpx.AsyncClient(follow_redirects=True, **kwargs))
+    with mcp_server(transport) as source, mcp_server(transport) as sink:
+        target = sink.url if change == "port" else source.url.replace("127.0.0.1", "localhost")
+        source.redirects[source.endpoint] = target + sink.endpoint
+        client = await connect(source.url + source.endpoint, transport)
+        factory = client.connections["fixture"]["httpx_client_factory"]
+        async with factory(headers={"X-Vendor-Key": "synthetic-mcp-key"}) as http:
+            with pytest.raises(httpx.RequestError, match="must stay on the configured origin"):
+                async with asyncio.timeout(5):
+                    await http.get(source.url + source.endpoint)
+        reached = sink.records if change == "port" else source.records[1:]
+        assert not reached
+        assert len(source.records) == 1 and source.records[0]["key_received"]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_factory_ignores_environment_proxy_during_discovery_and_call(monkeypatch):
+    """内部知识客户端在错误代理环境中仍直连完成 MCP 握手与工具调用。"""
+    from yuxi.modules.knowledge.mcp.client import knowledge_http_client
+
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(key, "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    with mcp_server("streamable_http") as source:
+        client = await get_mcp_client(
+            {
+                "knowledge": {
+                    "transport": "streamable_http",
+                    "url": source.url + source.endpoint,
+                    "httpx_client_factory": knowledge_http_client,
+                    "headers": {"X-Vendor-Key": "synthetic-mcp-key"},
+                    "timeout": 2,
+                }
+            }
+        )
+        async with asyncio.timeout(5):
+            tools = await client.get_tools()
+            result = await tools[0].ainvoke({})
+        assert "MCP_ORIGIN_OK" in str(result)
+        assert source.records and all(row["key_received"] for row in source.records)
+
+
+@pytest.mark.asyncio
+async def test_custom_factory_keeps_origin_guard_and_its_request_hooks():
+    """保留自定义客户端的 hook，同时阻止重定向凭据跨源。"""
+    observed = []
+
+    async def record(request):
+        """记录自定义工厂安装的实际请求钩子。"""
+        observed.append(request.url)
+
+    def custom_factory(headers=None, timeout=None, auth=None):
+        """自定义传输策略必须与产品的同源校验同时生效。"""
+        return httpx.AsyncClient(
+            headers=headers, timeout=timeout, auth=auth, trust_env=False, follow_redirects=True, event_hooks={"request": [record]}
+        )
+
+    with mcp_server("streamable_http") as source, mcp_server("streamable_http") as sink:
+        source.redirects[source.endpoint] = sink.url + sink.endpoint
+        client = await get_mcp_client(
+            {
+                "fixture": {
+                    "transport": "streamable_http",
+                    "url": source.url + source.endpoint,
+                    "httpx_client_factory": custom_factory,
+                }
+            }
+        )
+        factory = client.connections["fixture"]["httpx_client_factory"]
+        async with factory(headers={"X-Vendor-Key": "synthetic-mcp-key"}) as http:
+            with pytest.raises(httpx.RequestError, match="must stay on the configured origin"):
+                await http.get(source.url + source.endpoint)
+        assert observed
+        assert not sink.records

@@ -1,95 +1,72 @@
-# Agent 请求队列
+# Agent 输入队列与调度
 
-一次 Agent 运行可能包含多次模型调用、知识库检索、工具执行和文件操作。为了避免同一对话同时修改同一份上下文，Yuxi 把“收到请求”和“开始运行”分成两个阶段，并为每个线程维护 FIFO 队列。
+本页解释 Public Thread 中的持久输入、优先队列、steer、控制输入和失败恢复。接口字段与示例见 [Agents Public API](../advanced/agents-public-api.md)。
 
-本页说明调度行为和可观察状态；接口字段以 `/docs` 的 OpenAPI 为准。
+## 范围与事实
 
-## 调度范围
-
-队列按用户、智能体和对话线程确定范围。同一范围最多运行一个普通 AgentRun；同一用户在不同线程中提交的任务可以并行。
+队列按用户、APP、Agent 和 Thread 隔离。Thread 保存长期对话和独立的 `queue_paused`；每次提交对应一个稳定 Input，永久保存有序 `messages` JSON、提交级 `attachment_file_ids`、接收序号、调度类型、冻结配置和消费归属；Receipt 固定保存消息或控制事件的幂等键、意图及命令目标。Turn 保存一轮工作的状态，Run 保存执行段、owner、lease 和结果。PostgreSQL 拥有这些业务事实，Redis 负责 ARQ 投递、短期事件和取消加速。
 
 ```text
-线程 A：请求 1（运行中） → 请求 2（排队） → 请求 3（排队）
-线程 B：请求 4（运行中） → 请求 5（排队）
+Thread A：Turn U / Run U1 运行中；队列：[Input S1][Input S2][Input F1][Input F2]
+          S1/S2 独立接收和取消，消费时合批；F1/F2 各自 FIFO 执行
+Thread B：独立领取自己的优先队头
 ```
 
-顺序由服务端保存的创建顺序决定，不使用浏览器时间。只有当前线程的队头请求可以被派发。
+接收事务依次校验完整作用域、锁定 Thread、重读 Receipt、验证 Turn 状态，并保存 Receipt、Input 和提交级附件绑定。接收不创建 Message。队列按数据库接收序号排序，不使用浏览器时间。相同幂等键和意图返回原回执及 Input ID；同键改变事件类型、模式、内容或附件列表返回 `409`。提交、转引导和取消输入的回执只指向 Input，执行归属从 Input 查询；消费不修改 Receipt。HTTP request ID 不参与生命周期。
 
-## Request 和 Run
+Message 是消费后的执行投影：`source_input_id + input_position` 唯一标识原始消息位置，`received_at` 保留接收时间，`created_at` 表示进入执行投影的时间。消费事务生成 Message，再把每个 Input 的全部附件绑定到该 Input 最后一条用户 Message；正文、逐消息元信息和提交级附件引用继续保留。附件复合外键保证消息来自同一 Input。取消的未消费输入没有 Message。正式历史、搜索和模型记忆只读取执行消息；队列预览读取 Input 原文。已消费证明输入进入执行记录，模型实际读取内容由调用审计证明。
 
-- **Request** 表示输入已被系统接收。它先保存到 PostgreSQL，可以处于排队、已派发、已取消、已拒绝或派发前失败。
-- **AgentRun** 表示请求已经进入执行链路。只有请求获得派发机会后，系统才创建对应 Run。
+## follow-up 与 steer
 
-这种拆分让排队请求可以单独查询和取消，也让刷新页面或重启服务后仍能恢复队列。排队中的用户消息不会提前加入当前 Run 的上下文；请求派发后才成为下一轮运行的输入。审批或用户回答产生的 `resume` 是例外：它从 LangGraph checkpoint 直接创建新的 Run，不经过普通消息 Request 队列。
+两种提交均形成独立持久 Input。`follow_up` 按接收顺序逐条 FIFO 领取；`steer` 优先于 follow-up，同类按原接收序号排序，领取连续附件就绪前缀，遇到未就绪输入立即停止。合批只发生在消费事务中，后到的输入留给下一次消费，不额外等待聚合时间。
 
-## 普通调度流程
+两类 pending Input 都不绑定 Turn。线程没有活跃 Turn 且队列未暂停时，调度器选择就绪优先队头，在同一 Session 锁和事务内创建 Turn 与首个 pending Run，按 Input 接收序号、消息位置创建 Message，并固定 Input 与附件的消费归属。任一步失败整体回滚；提交后才投递 ARQ。多个 Input 的 `consumed_run_id` 可指向同一 Run，Run 的有序 `input_ids` 由该关系派生。steer 在途期间旧 Turn 已结束时，仍以优先输入开启下一轮。
 
-1. API 在 PostgreSQL 中保存输入消息和 Request。
-2. 线程空闲且请求是队头时，创建 AgentRun。
-3. 数据库事务提交后，API 才把 Run 投递给 Redis/ARQ。
-4. Worker 执行 Run。成功结束后，检查同一线程的队头。
-5. 队头存在时，自动创建并投递下一条 Run。
+普通消息的 `mode` 表达优先级和切入时机，发送方不指定目标 Turn，HTTP/SSE 接收回执不返回有效模式。未指定 mode 时，在 Thread 锁内按运行中 steer、空闲 follow-up 选择；幂等重试先读取原 Receipt，不重新入队。等待用户回答、审批或取消清理时拒绝普通消息；协作等待时默认为 follow-up，只进入 FIFO 队列。
 
-同一个 `request_id` 重试会返回已有 Request/Run，不会重复排队。不同用户、智能体、线程或来源复用该 ID 时返回冲突。
+每个 Input 在接收时复制会话的完整可配置 Context，随消息原子应用单次模型与审批覆盖，领取时不重新读取 Agent 定义或系统默认值。会话更新只影响之后接收的输入，运行身份与授权在执行边界重新取得。空闲合批使用批次首个 Input 的冻结配置和执行来源，同 Turn 安全接管继承当前 Run 配置；批次其余 Input 的配置和来源保留审计，不在同一 Run 中切换。
 
-## 队列策略
+当前模型调用和并行工具批次完成后，工具结果及 PostgreSQL checkpoint 先保存；`SteerMiddleware` 在下一次模型调用前，或无工具轮次的模型调用结束后，触发安全接管。旧 Run `yielded`，同一 Turn 创建下一 Run。首次模型调用前的让位允许 yielded Run 没有 AI 输出；真正 completed 的 Run 仍要求自身输出。没有 steer 的普通工具循环保持同一 Run。正在执行的外部工具不因 steer 被强制停止或撤销。
 
-| 策略 | 线程空闲 | 线程忙碌 | 使用场景 |
-| --- | --- | --- | --- |
-| `enqueue` | 立即派发 | 保存并按 FIFO 等待 | 网页聊天、异步 Agent Call |
-| `reject` | 立即派发 | 记录拒绝，不进入队列 | 需要立即得到结果的同步调用 |
-| `steer` | 立即派发 | 保存为待接替请求 | 主会话 Chat/Channel 修正后续方向 |
+## 等待与控制
 
-### `enqueue`
+人工问题或审批使当前 Run `interrupted`、Turn `waiting`，等待点保存绑定的 Run、问题或工具调用 ID。等待期间已有 follow-up 保留，新普通消息被拒绝。客户端提交带 `turn_id`、`waitpoint_id` 和完整结构化回答或审批的恢复事件后，等待点只消费一次，并在同一 Turn 创建下一 Run。旧等待点不能恢复已经切换或取消的工作。
 
-这是普通聊天的默认策略。调用方可以查询排队位置，并在派发前取消。前端把排队输入和正在生成的回复分开显示，避免用户误以为排队消息已经执行。
+`yuxi.session.input.promote` 使用 `input_id` 和 `Idempotency-Key` 将 pending follow-up 原地转为 steer，保留 ID、正文、附件及接收顺序。同命令重试返回原 Receipt；新的命令遇到仍 pending 的 steer 视为已满足，不重复调度。已消费或取消、附件未就绪、等待回答/审批/协作、取消清理期间返回 `409`。空闲时可优先开启下一轮，队列暂停时可调整优先级但不解除暂停。
 
-### `reject`
+`cancel_input` 仅取消选中的 pending Input，保留正文及附件归属，不生成 Message，也不释放附件供其他输入复用。取消最后一条待办时清除空队列的暂停标记。若模型前已让位但事务内已无就绪引导，原 Run 保持 running，由同一 owner 从 checkpoint 继续，不重放原始输入或已完成工具；模型后已完成的轮次不额外调用模型。
 
-只要请求不能立即成为并派发的 FIFO 队头，`reject` 就会返回拒绝结果。线程忙碌、已有积压、队列暂停或运行正在等待人工回答时都可能触发拒绝。拒绝是正常调度结果，不是服务器内部错误。
+取消 Turn 先设置 `cancelling`，有 pending Input 时暂停队列并保留输入；空队列不设置暂停。worker 确认当前 Run 已停止、必要资源清理完成后直接结束 Turn，人工等待取消则先清理 checkpoint。正常结束不等待周期扫描；进程失联或清理失败由恢复扫描补偿。`continue` 只在当前 Turn 已结束时解除暂停并领取优先队头，不复活取消的 Turn。未指定目标的取消在 owning transaction 中固定当前 Turn，重复取消返回原目标；已切换 Run 时可用 `expected_run_id` 拒绝陈旧操作。
 
-同步 Agent Call 固定使用 `reject`，这样调用方可以自己选择重试或切换线程，而不会把排队时间隐藏在同步请求里。
+等待取消通过原图的状态 API 清理 checkpoint：先合入已完成节点的 pending writes 并清除等待任务，再为当前 AI 的未完成调用补齐取消 ToolMessage，最后清除状态改写触发的待办节点。已完成工具结果与业务增量保留；当前 AI 之后的工具结果拥有完成事实，历史重复 call ID 不影响本批次。Thread/Turn 锁覆盖状态复查、资源与 checkpoint 清理和终态提交，使重复清理与下一轮领取串行。清理不执行模型或工具，进程在任一持久改写后失联时可幂等重试；失败仍保留 `cancelling` 由恢复扫描处理。
 
-### `steer`
+## 状态与故障恢复
 
-`steer` 只适用于主会话 Chat/Channel。它把请求保存为队列中的一项；当前 Run 完成已经开始的模型调用和完整工具批次后，`SteerMiddleware` 在下一次模型调用前发现该请求并结束当前 Graph，worker 再按 completed 接力流程派发它。
+| 对象 | 状态 | 业务含义 |
+| --- | --- | --- |
+| Input | `pending`、`consumed`、`cancelled` | 只表达投递，不跟随工作执行重复转态 |
+| Turn | `running`、`waiting`、`cancelling`、`completed`、`failed`、`cancelled` | 一轮工作的当前段、等待点和明确结果 |
+| Run | `pending`、`running`、`cancel_requested`、`completed`、`failed`、`cancelled`、`interrupted`、`yielded` | 一段执行及其 owner、lease 和结束原因 |
 
-因此，Steer 不强制取消正在执行的工具。一个线程同时只能有一个待处理 Steer。普通 Chat 排队项可以提升为 Steer，但等待当前 Run 到达安全点时不能取消。
+正常输出、Run 结束和 Turn 最终结果在 PostgreSQL 中按明确关联收敛；`output_message_id` 只指向同 Run 的 assistant Message，Turn `result_run_id` 只指向同 Turn 的顶层 Run。Run `yielded` 或 `interrupted` 不是 Turn 完成。失败、最终超时和取消仅暂停已有待办。用户显式继续时领取原优先队头；用户提交新的公开消息时，接收事务持久保存恢复意图并解除目标队列暂停，调度器优先单独消费最新恢复消息。该消息的附件未就绪时保留优先位置，旧 steer 不与它合批。新轮成功后恢复旧队列，再次失败或取消则暂停剩余待办；幂等重放、协作与定时输入不触发自动恢复。前轮必要清理未完成时，调度器不创建下一轮。
 
-系统在模型调用前和无工具调用的模型轮次结束后检查 Steer；如果进程在接力前退出，worker 启动恢复会重新扫描 queued Request。这个兜底保证持久化的 Steer 意图最终进入下一次 Run，但不改变已开始批次不可强制终止的边界。
+`services/queue_control.py` 在调用方已经锁定的 Thread 和事务中，从持久待办派生暂停；取消待办只在队列已暂停时刷新，避免重新暂停仍可消费的队列。Input model 拥有恢复标记的 JSON 编码与读取表达，repository 拥有恢复优先排序、单独消费及接收序号边界。各用例继续拥有恢复意图、整树门禁、提交和投递。
 
-## 状态
+附件 Input 先持久接收来源，再准备 Workdir 文件并提交就绪事实。队头未就绪时不创建 Turn/Run，也不跳过它；pending steer 未就绪时不能安全接管。恢复扫描补全同一文件，取消只停止执行，仍完成已接收的文件提交；会话归档或 Project 软删除后准备恢复也继续，执行领取仍拒绝归档会话。准备失败与状态通过 Input/queue 的 `attachment_status`、`attachment_error` 回读，详细文件规则见[公开 API](../advanced/agents-public-api.md#图片与文件附件)。
 
-### Request 状态
+ARQ 投递只发生在 owning transaction 提交后。持久 `pending` Run 可由恢复扫描补投同一个 Run；已经失败的工作不会自动创建新业务 Run。Worker 取得 Run 时记录唯一 attempt token、heartbeat 和 lease；过期的 `running` 或 `cancel_requested` 会收敛为可观察的 `worker_lease_expired` 失败。该失败只说明执行 ownership 丢失，外部工具副作用仍需核对。
 
-| 状态 | 含义 |
-| --- | --- |
-| `queued` | 已保存，等待派发 |
-| `dispatched` | 已关联 AgentRun |
-| `cancelled` | 派发前被取消 |
-| `rejected` | `reject` 策略无法立即派发 |
-| `failed` | 派发前处理失败 |
+`YUXI_JOB_TIMEOUT_SECONDS` 拥有单次 Agent 执行的业务时限，默认 3600 秒。到期后 runner 关闭执行流并持久化 `failed / execution_timeout`，ARQ 在外层额外保留 30 秒用于清理与提交。worker 退出继续使用 lease 释放与恢复路径。模型网络重试预算和工具局部超时由各自 runtime 拥有。
 
-### Run 状态
+Thread SSE 把输入接收、Input 消费、Run 结束、Turn 结束和短期增量分开通知。断线时按 `Last-Event-ID` 续订，并重读 Input、Turn、Run 和历史的持久事实；Redis 的短期事件不是业务终态。
 
-| 状态 | 含义 |
-| --- | --- |
-| `pending` | 数据库已记录投递意图，worker 尚未取得执行 lease |
-| `running` | 当前 attempt 持有 lease 并持续 heartbeat |
-| `cancel_requested` | 已记录取消意图，当前 owner 会在安全边界停止 |
-| `completed` | 执行成功结束 |
-| `failed` | 执行失败或 lease 过期后被收敛 |
-| `cancelled` | worker 确认取消 |
-| `interrupted` | 等待用户回答或工具审批，可由 resume 请求恢复 |
+## 事务与消息归属
 
-终态写入只接受当前 worker attempt，并清除 lease。`pending` 不表示“没有投递”，而是已经提交、仍需被 worker 接收的投递事实。
+接收、配置治理、交互恢复和 checkpoint 结算各由所属 service 提交或回滚，仓储只查询、锁定或 flush。幂等指纹保留接收时的规范 JSON 字节；同命令同意图才重放，用户、APP、Thread 和键的唯一约束仍由 PG 拥有。锁前快速重放与锁后复查保留在各命令入口，权限和资源删除语义由所属用例决定。Run 创建在已有 Thread 锁内固定当前 Turn、冻结配置、Input 与恢复 Message；提交后通过 scheduler 投递同一个 Run。
 
-## 取消和暂停
+[Message 仓储](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/repositories/messages.py)拥有正式消息的共同写入和读取，工具执行只保存在 `tool_audit` Message 中；Input 消费、模型/工具审计与公开 item 仓储分别拥有原始来源投影、执行事实与公开快照的原子更新。[checkpoint 消息结算](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/services/checkpoint_messages.py)显式接收 AsyncSession，在同一事务对账这些事实并结算 Run/Turn。`run_lifecycle` 拥有 Thread→Turn→Input→Run 的共同结算锁序、steer 裁决及 Run/Turn 投影，继续检查 current Run 与 lease；checkpoint 用例在同一事务对账输出并显式提交。最终回答由 `result_run_id` 明确绑定。终态提交后释放运行清理责任，再发布公开事件；协作通知与业务状态在同一 PG 事务写入，观察与恢复可补读。[事件订阅](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/services/subscriptions.py)消费持久生命周期和 Redis 投影，[审计读取](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/services/message_audits.py)只组装已授权持久事实。
 
-- **取消排队请求**：只影响该 Request，不会停止当前 Run；后续排队项会重新计算位置。
-- **取消运行中的 Run**：先在 PostgreSQL 保存 `cancel_requested`，Redis 信号只用于加快 worker 感知；worker 再次确认数据库状态后才写入 `cancelled`。
-- **运行失败或取消**：已经排队的请求会暂停，页面显示原因。点击“继续队列”只会派发当前 FIFO 队头。
-- **运行中断**：等待审批或用户回答时，已有队列保留；新普通消息会在保存 Message/Request 前返回 `run_interrupted`。完成 resume 后，队列才继续。
+执行服务在进入模型流前提交 runtime、附件与追踪准备事务，禁用追踪时也经过此提交点；准备或提交失败会回滚、结束 observation 并进入失败收敛，图不执行。
 
 worker 首次消费智能体执行流之前，基础设施取消或可重试故障可以在预算内释放 lease，保留 pending 投递意图。预算以 PostgreSQL 中同一 Run 的 Attempt 序号计算，沿用 WorkerSettings.max_tries，当前包含首次在内最多两次；ARQ 重新投递不会重置这个预算。耗尽后 Run 和当前 Attempt 记为 failed，错误类型为 `run_retry_exhausted`，错误事件标记 `retryable=false`。终态重复投递与 runtime 清理不增加 Attempt。
 
@@ -97,33 +74,33 @@ worker 首次消费智能体执行流之前，基础设施取消或可重试故�
 
 这个边界覆盖正常停止 worker 和执行中的 ARQ 超时向 worker 传播的取消，不把它们记成用户取消。执行流内部已经转换为 error 或 interrupted 事件的故障继续走原有事件收敛流程。显式用户取消仍以 PostgreSQL 的取消事实收敛；已提交终态不被覆盖，runtime cleanup 失败继续由原有清理流程恢复。
 
-## 恢复和一致性
+协作树和用户环境维护使用[运行锁键](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/runtime_locks.py)。消费、输出和恢复仓储各自维护行锁次序，Input 行锁先于 Run 终态更新；新增路径需沿相同 owning transaction 检查锁序。
 
-API 只有在 PostgreSQL 事务提交后才投递 ARQ。completed 接力和 worker 启动恢复会优先重新投递已有 `pending` Run，再处理新的队头，避免数据库已有 Run 却没有投递任务。
+## 工具声明与执行事实
 
-Worker 取得 Run 时写入唯一 attempt token、heartbeat 和 lease 到期时间。过期的 `running` 或 `cancel_requested` 会被收敛为带 `worker_lease_expired` 原因的 `failed`。这只能证明执行 ownership 已丢失，外部工具副作用可能已经发生，系统不会把它伪装成安全的 exactly-once 重试。
+模型 Message 的 `tool_calls` 保存调用声明，声明本身不代表工具已经执行。每个 Run 内的 `operation_id` 唯一标识一条工具执行 Message，后者拥有输入、结果、错误、起止时间与 `execution_status`。开始、完成、错误和 Run 终态只更新这一条事实；checkpoint 结算只对账当前 Run 已登记的模型与工具消息，缺少模型生命周期事实的最终输出会被拒绝。
 
-intake、resume、continue 和自动接力会在同一线程的 Conversation 行锁内读取和修改 Request/Run；数据库唯一约束提供最后一道保护。SSE 是过程通知，断线后客户端仍以同一 Request/Run 的持久状态和结果为准。
-
-## 对话展示
-
-排队区只显示尚未开始的输入，正文只显示已经进入 Run 的消息。正常顺序是：
-
-```text
-请求 1 → 回复 1 → 请求 2 → 回复 2
+```mermaid
+flowchart LR
+    Protocol["LangGraph ProtocolEvent"] --> Model["模型 Message：调用声明"]
+    Protocol --> Tool["工具 Message：执行事实"]
+    Model --> Public["公开 item：身份、顺序与协议快照"]
+    Tool --> Public
+    Tool --> Reads["Memory / Dashboard / 审计"]
+    Checkpoint["checkpoint：恢复上下文"] --> Reconcile["结算：对账当前 Run"]
+    Reconcile --> Tool
 ```
 
-排队中的请求不会覆盖正在生成的回复。前端在 Request SSE 中等待派发信息，收到对应 Run 后切换到 Run SSE。
+审批拒绝生成没有执行开始时间的工具结果，并记录拒绝来源。恢复后的执行通过同 Session、同 Turn 的明确 resume 来源链关联模型声明。Memory 显式请求工具详情时，只读取已授权模型消息关联的同会话、同 Turn 工具事实；Dashboard 执行统计仅计已经开始的操作，失败、中断与运行中分别按真实状态读取。
 
-## 当前边界
+公开 item 保留分页、断线恢复与公开范围所需的稳定身份及快照。执行事实先提交，公开投影随后提交并发布；投影失败保留已完成的工具事实，恢复可重放补齐同一 item。工具结果的唯一持久来源是对应工具 Message 的 `extra_metadata.output`，公开投影与审计读取复用这一来源。
 
-当前支持：
+## 权限、源码与验证
 
-- `enqueue`、`reject`，以及主会话 Chat/Channel 的 `steer`；
-- 同一线程串行、不同线程并行；
-- 查询排队位置、刷新恢复和派发前取消；
-- Run 结果、事件、错误和产物绑定到同一个 Request/Run。
+Public 身份在 HTTP 边界变为包含 `uid`、`app_id` 的作用域；接收、查询及副作用用例在 Thread 和相关记录上再次校验。归档 Thread 拒绝活跃 Turn 或待处理 Input，并保留历史。Project 删除在同一事务检查这些条件后归档所属 Thread，不修改 Workdir 字节。
 
-当前不支持强制终止正在执行的模型或工具、多个 Steer 的合并与排序、通用优先级、失败后的自动回滚，以及把多个请求合并成一次 Run。
+入口位于 [Public Agent router](https://github.com/xerrors/Yuxi/tree/main/backend/yuxi/api/routers/public_v1/agents)，接收与优先调度分别由 [inputs](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/services/inputs.py) 和 [scheduler](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/services/scheduler.py) 拥有；[turns](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/services/turns.py)、[runs](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/modules/agents/services/runs.py) 与 [worker](https://github.com/xerrors/Yuxi/blob/main/backend/yuxi/workers/settings.py) 拥有控制和执行收敛。真实 PostgreSQL/HTTP 与 worker 测试位于 `backend/test/integration`、`backend/test/e2e`；验收需回读 Input、Turn、Run、消息、checkpoint 和产物，不能只以 `202` 或 SSE 结束判定成功。
 
-实现入口见 [Agent 路由](https://github.com/xerrors/Yuxi/blob/main/backend/server/routers/agent_router.py)、[请求队列服务](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/services/agent_request_queue_service.py) 和[运行 worker](https://github.com/xerrors/Yuxi/blob/main/backend/package/yuxi/services/run_worker.py)。
+## 独立委派
+
+协作会话复用持久 Input、Receipt、优先领取、提交后投递和 lease 链路，各自 Turn 拥有 current_run_id、result_run_id 和等待点。普通取消只影响指定 Turn，父轮次完成、失败或取消均保留后代独立工作。新工作通过 submit_input 按 FIFO 接收，队列暂停时只排队；用户显式“停止全部”才取消整树在途 Turn 并阻止各队列消费。“继续整树队列”重新调度保留输入，已取消的 Turn 保持终态。整树在途工作与清理全部结束后，用户发送新消息可解除整树停止门禁，但只恢复目标会话并优先处理该消息；其他成员的旧待办保持暂停。协作等待保存目标、游标和截止时间，在同一 Turn 建立下一 Run，等待中的普通 follow-up 只排队，steer 明确拒绝。具体约束见[会话协作](../agents/session-cooperation.md)。

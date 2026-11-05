@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/repositories/dashboard_repository.py
+Owner：backend/yuxi/modules/system/repositories/dashboard.py
+
+## 当前迁移状态
+
+2026-11-02：当前 Session 列表、详情、筛选项和活跃用户榜保留 display_name。新版按持久 UID 关联用户；旧账号格式的 Conversation 需要离线身份与会话转换，当前不再以 username 作为运行数据的第二归属键。
 
 ## 问题
 

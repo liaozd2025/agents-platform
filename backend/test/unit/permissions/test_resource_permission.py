@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yuxi.permissions import (
+from yuxi.modules.identity.permissions import (
     ResourcePermission,
     ResourcePermissionDenied,
     require_knowledge_base_permission,
@@ -131,7 +131,7 @@ def test_invalid_v2_scope_does_not_expand_read_access_when_reading():
 
 
 def test_strict_config_rejects_manage_scope_outside_read_scope():
-    from yuxi.permissions import normalize_permission_config
+    from yuxi.modules.identity.permissions import normalize_permission_config
 
     with pytest.raises(ValueError, match="管理范围"):
         normalize_permission_config(
@@ -145,7 +145,7 @@ def test_strict_config_rejects_manage_scope_outside_read_scope():
 
 
 def test_strict_config_rejects_user_manage_scope_under_department_read_scope():
-    from yuxi.permissions import normalize_permission_config
+    from yuxi.modules.identity.permissions import normalize_permission_config
 
     with pytest.raises(ValueError, match="管理范围"):
         normalize_permission_config(
@@ -159,7 +159,7 @@ def test_strict_config_rejects_user_manage_scope_under_department_read_scope():
 
 
 def test_strict_config_accepts_manage_department_under_read_ancestor():
-    from yuxi.permissions import normalize_permission_config
+    from yuxi.modules.identity.permissions import normalize_permission_config
 
     config = {
         "version": 2,
@@ -186,7 +186,7 @@ def test_strict_config_accepts_manage_department_under_read_ancestor():
     ],
 )
 def test_strict_config_rejects_manage_department_outside_read_subtree(read_id, manage_id):
-    from yuxi.permissions import normalize_permission_config
+    from yuxi.modules.identity.permissions import normalize_permission_config
 
     with pytest.raises(ValueError, match="管理范围必须包含在读取范围内"):
         normalize_permission_config(
@@ -202,7 +202,7 @@ def test_strict_config_rejects_manage_department_outside_read_subtree(read_id, m
 
 @pytest.mark.parametrize("scope_name", ["read_scope", "manage_scope"])
 def test_strict_config_rejects_redundant_department_ancestor(scope_name):
-    from yuxi.permissions import normalize_permission_config
+    from yuxi.modules.identity.permissions import normalize_permission_config
 
     config = {
         "version": 2,
@@ -220,7 +220,7 @@ def test_strict_config_rejects_redundant_department_ancestor(scope_name):
 
 
 def test_historical_redundant_department_scope_remains_readable():
-    from yuxi.permissions import normalize_permission_config
+    from yuxi.modules.identity.permissions import normalize_permission_config
 
     config = {
         "version": 2,
@@ -280,7 +280,7 @@ def test_global_knowledge_base_manage_scope_grants_management():
 
 
 def test_legacy_permission_config_is_rejected_at_runtime():
-    from yuxi.permissions import normalize_permission_config
+    from yuxi.modules.identity.permissions import normalize_permission_config
 
     with pytest.raises(ValueError, match="version 2"):
         normalize_permission_config({"access_level": "department", "department_ids": [1]})
@@ -315,7 +315,7 @@ def test_manage_only_scope_also_grants_read_to_matching_users():
 
 
 def test_require_permission_rejects_insufficient_access():
-    from yuxi.permissions import require_resource_permission
+    from yuxi.modules.identity.permissions import require_resource_permission
 
     with pytest.raises(ResourcePermissionDenied):
         require_resource_permission(ResourcePermission.READ, ResourcePermission.MANAGE)
@@ -336,7 +336,7 @@ def test_require_knowledge_base_permission_uses_resolved_resource_permission():
 
 
 def test_v2_scope_validation_rejects_disallowed_access_level():
-    from yuxi.permissions import normalize_permission_config
+    from yuxi.modules.identity.permissions import normalize_permission_config
 
     with pytest.raises(ValueError, match="共享范围"):
         normalize_permission_config(
@@ -347,3 +347,95 @@ def test_v2_scope_validation_rejects_disallowed_access_level():
             },
             allowed_access_levels={"user"},
         )
+
+
+@pytest.mark.parametrize("resolve", [resolve_agent_permission, resolve_skill_permission, resolve_knowledge_base_permission])
+def test_deleted_owner_cannot_read_or_manage_resource(resolve):
+    """软删除身份不能通过资源所有权恢复访问。"""
+    user = _user(uid="owner")
+    user.is_deleted = 1
+    assert resolve(user, _resource(created_by="owner", share_config={"version": 2})) == ResourcePermission.NONE
+
+
+def test_missing_uids_do_not_establish_ownership():
+    """缺失身份和所有者不能被空字符串相等视作所有权。"""
+    resource = _resource(created_by=None, share_config={"version": 2})
+    assert resolve_agent_permission(_user(uid=None), resource) == ResourcePermission.NONE
+
+
+def test_private_agent_ignores_shared_scope_and_legacy_role_bypass():
+    """私有定义只对明确所有者开放。"""
+    resource = _resource(created_by="owner", share_config={"version": 2, "read_scope": {"access_level": "global"}})
+    resource.visibility = "private"
+    stranger = _user(uid="stranger")
+    stranger.role = "superadmin"
+    assert resolve_agent_permission(stranger, resource) == ResourcePermission.NONE
+    owner = _user(uid="owner")
+    assert resolve_agent_permission(owner, resource) == ResourcePermission.MANAGE
+    owner.user_kind = "end_user"
+    assert resolve_agent_permission(owner, resource) == ResourcePermission.NONE
+
+
+def test_bound_skill_uses_app_owner_organization_but_keeps_end_user_read_only():
+    """APP 终端用户继承绑定定义的可见性且不会获得管理权限。"""
+    agent = _resource(
+        created_by="author",
+        share_config={
+            "version": 2,
+            "read_scope": {"access_level": "department", "department_ids": [2]},
+            "manage_scope": {"access_level": "department", "department_ids": [2]},
+        },
+    )
+    agent.visibility = "shared"
+    skill = SimpleNamespace(bound_agent_id="agent-1", bound_agent=agent)
+    owner = _user(department_id=3, department_ancestor_ids=[1, 2, 3])
+    actor = SimpleNamespace(user_kind="end_user", owner_user=owner)
+    assert resolve_skill_permission(actor, skill) == ResourcePermission.READ
+    owner.department_ancestor_ids = [1, 4]
+    assert resolve_skill_permission(actor, skill) == ResourcePermission.NONE
+    owner.department_ancestor_ids = [1, 2, 3]
+    owner.is_deleted = 1
+    assert resolve_skill_permission(actor, skill) == ResourcePermission.NONE
+    owner.is_deleted = 0
+    agent.visibility = "private"
+    assert resolve_skill_permission(actor, skill) == ResourcePermission.NONE
+    skill.bound_agent = None
+    assert resolve_skill_permission(actor, skill) == ResourcePermission.NONE
+
+
+def test_end_user_cannot_manage_shared_resource_or_use_personal_skill():
+    """APP 终端用户不获得企业管理能力和个人技能。"""
+    actor = _user(uid="owner")
+    actor.user_kind = "end_user"
+    resource = _resource(created_by="owner", share_config={"version": 2})
+    assert resolve_agent_permission(actor, resource) == ResourcePermission.READ
+    resource.source_scope = "personal"
+    assert resolve_skill_permission(actor, resource) == ResourcePermission.NONE
+
+
+@pytest.mark.parametrize("config", [None, {}, {"version": 2, "read_scope": "invalid"}])
+def test_invalid_share_config_fails_closed(config):
+    """无效共享配置不得通过所有者路径绕过校验。"""
+    assert resolve_agent_permission(_user(uid="owner"), _resource(created_by="owner", share_config=config)) == ResourcePermission.NONE
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"access_level": False},
+        {"access_level": []},
+        {"access_level": "department", "department_ids": "12"},
+        {"access_level": "department", "department_ids": [True]},
+        {"access_level": "department", "department_ids": [1.5]},
+        {"access_level": "user", "user_uids": "owner"},
+        {"access_level": "user", "user_uids": [123]},
+    ],
+)
+def test_malformed_scope_never_expands_resource_access(scope):
+    """保留上游对范围 JSON 类型的拒绝，不把错误值解释为全局或有效成员。"""
+    from yuxi.modules.identity.permissions import normalize_permission_config
+
+    config = {"version": 2, "read_scope": scope}
+    with pytest.raises(ValueError):
+        normalize_permission_config(config, strict=True)
+    assert resolve_agent_permission(_user(uid="owner"), _resource(created_by="owner", share_config=config)) == ResourcePermission.NONE

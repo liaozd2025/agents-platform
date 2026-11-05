@@ -11,15 +11,13 @@ from scripts.sync_oa_data import build_department_url, run
 @pytest.fixture(autouse=True)
 def isolate_schema_check(monkeypatch):
     """编排单测不连接外部数据库，Schema 由迁移集成测试验证。"""
-    monkeypatch.setattr("yuxi.storage.postgres.manager.pg_manager.initialize", Mock())
-    monkeypatch.setattr("yuxi.storage.postgres.manager.pg_manager.require_current_schema", AsyncMock())
-    monkeypatch.setattr("yuxi.storage.postgres.manager.pg_manager.close", AsyncMock())
+    monkeypatch.setattr("yuxi.infrastructure.postgres.manager.pg_manager.initialize", Mock())
+    monkeypatch.setattr("yuxi.infrastructure.postgres.schema.require_current_schema", AsyncMock())
+    monkeypatch.setattr("yuxi.infrastructure.postgres.manager.pg_manager.close", AsyncMock())
 
 
 def test_build_department_url_requires_user_endpoint():
-    assert build_department_url("https://example.test/DrugDevp/QueryUserPage") == (
-        "https://example.test/DrugDevp/QueryDepartmentTree"
-    )
+    assert build_department_url("https://example.test/DrugDevp/QueryUserPage") == ("https://example.test/DrugDevp/QueryDepartmentTree")
     with pytest.raises(ValueError):
         build_department_url("https://example.test/DrugDevp/Other")
 
@@ -36,24 +34,26 @@ async def test_dry_run_simulates_department_mapping_without_writing(monkeypatch)
     department_action = DepartmentAction("create", 100, "001", "研发部")
     user_actions = [MigrationAction("create", "alice", department_id=-100)]
 
-    monkeypatch.setattr(
-        "scripts.sync_oa_data.user_migration.fetch_oa_access_code", Mock(return_value="runtime-code")
-    )
+    monkeypatch.setattr("scripts.sync_oa_data.user_migration.fetch_oa_access_code", Mock(return_value="runtime-code"))
     monkeypatch.setattr(
         "scripts.sync_oa_data.department_migration.fetch_oa_departments",
         Mock(return_value=[OaDepartment(100, "001", "研发部", None)]),
     )
     monkeypatch.setattr(
-        "scripts.sync_oa_data.department_migration.load_database_departments", AsyncMock(return_value=[]),
+        "scripts.sync_oa_data.department_migration.load_database_departments",
+        AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(
-        "scripts.sync_oa_data.department_migration.build_department_actions", Mock(return_value=[department_action]),
+        "scripts.sync_oa_data.department_migration.build_department_actions",
+        Mock(return_value=[department_action]),
     )
     monkeypatch.setattr(
-        "scripts.sync_oa_data.user_migration.load_database_inputs", AsyncMock(return_value=([], [])),
+        "scripts.sync_oa_data.user_migration.load_database_inputs",
+        AsyncMock(return_value=([], [])),
     )
     monkeypatch.setattr(
-        "scripts.sync_oa_data.user_migration.fetch_oa_users", Mock(return_value=[OaUser("alice", "张三", "研发部", 100)]),
+        "scripts.sync_oa_data.user_migration.fetch_oa_users",
+        Mock(return_value=[OaUser("alice", "张三", "研发部", 100)]),
     )
     build_actions = Mock(return_value=user_actions)
     monkeypatch.setattr("scripts.sync_oa_data.user_migration.build_migration_actions", build_actions)
@@ -78,14 +78,11 @@ async def test_apply_writes_departments_then_reloads_real_mapping_before_users(m
         apply=True,
     )
     events: list[str] = []
+    monkeypatch.setattr("scripts.sync_oa_data.user_migration.fetch_oa_access_code", Mock(return_value="runtime-code"))
+    monkeypatch.setattr("scripts.sync_oa_data.department_migration.fetch_oa_departments", Mock(return_value=[]))
     monkeypatch.setattr(
-        "scripts.sync_oa_data.user_migration.fetch_oa_access_code", Mock(return_value="runtime-code")
-    )
-    monkeypatch.setattr(
-        "scripts.sync_oa_data.department_migration.fetch_oa_departments", Mock(return_value=[])
-    )
-    monkeypatch.setattr(
-        "scripts.sync_oa_data.department_migration.load_database_departments", AsyncMock(return_value=[]),
+        "scripts.sync_oa_data.department_migration.load_database_departments",
+        AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(
         "scripts.sync_oa_data.department_migration.build_department_actions",
@@ -123,9 +120,7 @@ async def test_department_conflict_stops_before_any_write(monkeypatch):
         company_code="ZD",
         apply=True,
     )
-    monkeypatch.setattr(
-        "scripts.sync_oa_data.user_migration.fetch_oa_access_code", Mock(return_value="runtime-code")
-    )
+    monkeypatch.setattr("scripts.sync_oa_data.user_migration.fetch_oa_access_code", Mock(return_value="runtime-code"))
     monkeypatch.setattr("scripts.sync_oa_data.department_migration.fetch_oa_departments", Mock(return_value=[]))
     monkeypatch.setattr("scripts.sync_oa_data.department_migration.load_database_departments", AsyncMock(return_value=[]))
     monkeypatch.setattr(

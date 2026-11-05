@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/services/oa_sso_service.py
+Owner：backend/yuxi/modules/identity/services/oa.py
 
 ## 问题
 

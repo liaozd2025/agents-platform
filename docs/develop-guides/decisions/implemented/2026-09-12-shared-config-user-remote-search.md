@@ -2,7 +2,11 @@
 
 状态：implemented
 类型：feature
-Owner：backend/server/routers/auth_router.py
+Owner：backend/yuxi/modules/identity/services/management.py
+
+## 当前迁移状态
+
+2026-11-02：共享候选用户按关键字分页和授权范围读取，由 identity 管理服务及 repository 拥有；原 HTTP 路径继续由 identity/auth 适配。 以下原测试结果只对应原实现；本次验证以实际执行记录为准。
 
 ## 问题
 

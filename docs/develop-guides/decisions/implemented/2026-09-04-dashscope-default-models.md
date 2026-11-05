@@ -2,7 +2,7 @@
 
 状态：implemented
 类型：feature
-Owner：backend/package/yuxi/config/options.py
+Owner：backend/yuxi/modules/system/options.py
 
 ## 问题
 

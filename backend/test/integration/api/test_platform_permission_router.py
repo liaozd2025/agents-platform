@@ -7,18 +7,20 @@ import uuid
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select
-from yuxi.storage.postgres.manager import pg_manager
-from yuxi.storage.postgres.models_business import (
+
+from yuxi.infrastructure.postgres.manager import pg_manager
+from yuxi.infrastructure.postgres.schema import require_current_schema
+from yuxi.modules.identity.models import (
     ROOT_DEPARTMENT_ID,
     APIKey,
     Department,
-    OperationLog,
     Role,
     SecurityAudit,
     User,
     UserRoleAssignment,
 )
-from yuxi.utils.auth_utils import AuthUtils
+from yuxi.modules.identity.security import AuthUtils
+from yuxi.modules.system.models import OperationLog
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
@@ -29,17 +31,14 @@ async def platform_permission_users(test_client):
 
     pg_manager.initialize()
     await pg_manager.async_engine.dispose()
-    await pg_manager.require_current_schema()
+    await require_current_schema(pg_manager)
 
     suffix = uuid.uuid4().hex[:10]
     password = f"Pw!{uuid.uuid4().hex}"
     async with pg_manager.get_async_session_context() as session:
         root = await session.get(Department, ROOT_DEPARTMENT_ID)
         assert root is not None, "平台权限集成测试需要现有集团根节点"
-        roles = {
-            role.code: role
-            for role in (await session.scalars(select(Role).where(Role.code.in_(("superadmin", "user"))))).all()
-        }
+        roles = {role.code: role for role in (await session.scalars(select(Role).where(Role.code.in_(("superadmin", "user"))))).all()}
         users = [
             User(
                 username=f"pytest-platform-admin-{suffix}",
@@ -142,7 +141,7 @@ async def test_platform_capabilities_follow_effective_permissions(
             ("get", "/api/system/config", {}),
             ("post", "/api/system/config", {"json": {"key": "unknown", "value": False}}),
             ("get", "/api/system/logs", {}),
-            ("get", "/api/tasks", {}),
+            ("get", "/api/background-jobs", {}),
             ("get", "/api/system/model-providers", {}),
             ("get", "/api/system/tools", {}),
             ("get", "/api/system/mcp-servers/pytest-missing", {}),
@@ -168,7 +167,7 @@ async def test_platform_capabilities_follow_effective_permissions(
         capabilities = [
             ("system_config:manage", "get", "/api/system/config", {}, 200),
             ("system_log:read", "get", "/api/system/logs", {}, 200),
-            ("system_task:manage", "get", "/api/tasks", {}, 200),
+            ("system_task:manage", "get", "/api/background-jobs", {}, 200),
             ("model_provider:manage", "get", "/api/system/model-providers", {}, 200),
             ("tool:manage", "get", "/api/system/tools", {}, 200),
             ("mcp:manage", "get", "/api/system/mcp-servers/pytest-missing", {}, 404),
@@ -236,3 +235,38 @@ async def test_platform_capabilities_follow_effective_permissions(
                     )
                 )
                 await session.execute(delete(Role).where(Role.id == role_id))
+
+
+@pytest.mark.self_managed_resources
+async def test_custom_task_permission_applies_without_builtin_admin_role(monkeypatch):
+    """原平台矩阵的任务权限在真实HTTP/PG生效，同一令牌撤权后再次拒绝。"""
+    from fastapi import FastAPI
+
+    from test.integration.support.module_audit import isolated_audit_store, serve_http
+    from yuxi.api.errors import domain_error_handler
+    from yuxi.api.routers.background_jobs import background_jobs
+    from yuxi.modules.identity.models import RolePermission
+    from yuxi.shared.errors import DomainError
+
+    async with isolated_audit_store(monkeypatch) as (_manager, sessions):
+        async with sessions() as db:
+            role = Role(code="custom-task-manager", name="Task fixture", default_scope_type="all", permissions=[])
+            user = User(uid="task-fixture", username="task-fixture", password_hash="fixture")
+            db.add(UserRoleAssignment(user=user, role=role, scope_mode="inherit"))
+            await db.commit()
+            role_id = role.id
+            headers = {"Authorization": "Bearer " + AuthUtils.create_access_token({"sub": str(user.id), "auth_method": "password"})}
+        app = FastAPI()
+        app.add_exception_handler(DomainError, domain_error_handler)
+        app.include_router(background_jobs, prefix="/api")
+        async with serve_http(app) as client:
+            assert (await client.get("/api/background-jobs", headers=headers)).status_code == 403
+            async with sessions() as db:
+                db.add(RolePermission(role_id=role_id, permission_key="system_task:manage"))
+                await db.commit()
+            granted = await client.get("/api/background-jobs", headers=headers)
+            assert granted.status_code == 200, granted.text
+            async with sessions() as db:
+                await db.execute(delete(RolePermission).where(RolePermission.role_id == role_id))
+                await db.commit()
+            assert (await client.get("/api/background-jobs", headers=headers)).status_code == 403
