@@ -769,6 +769,11 @@ async def test_get_accessible_knowledge_bases(test_client, admin_headers, knowle
     kb_ids = [db["kb_id"] for db in payload["knowledge_bases"]]
     assert knowledge_base_resource["kb_id"] in kb_ids
 
+    # 可访问列表补齐 stats，前端卡片才能展示真实文件数量，避免普通用户误显示 0
+    matched = next(db for db in payload["knowledge_bases"] if db["kb_id"] == knowledge_base_resource["kb_id"])
+    assert "stats" in matched
+    assert "file_count" in matched["stats"]
+
 
 async def test_create_knowledge_base_defaults_to_global_share_config(test_client, admin_headers):
     knowledge_base = await _create_test_knowledge_base(test_client, admin_headers)

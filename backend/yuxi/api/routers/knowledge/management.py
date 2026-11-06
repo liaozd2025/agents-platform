@@ -209,6 +209,8 @@ async def get_accessible_knowledge_bases(current_user: User = Depends(require_kn
                 "description": kb.description or "",
                 "created_by": kb.created_by,
                 "kb_type": kb.kb_type,
+                "embedding_model_spec": kb.embedding_model_spec,
+                "stats": serialize_knowledge_base(kb)["stats"],
                 "supports_documents": knowledge_base_manager.knowledge_base_type_supports_documents(kb.kb_type),
                 "supports_document_read": KnowledgeBaseFactory.get_kb_class(kb.kb_type).supports_document_read,
             }
