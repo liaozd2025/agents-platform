@@ -286,3 +286,54 @@ async def test_receipt_recovery_is_scoped_and_preserves_queued_input(test_client
     finally:
         await conn.close()
         await delete_created_threads(*sessions)
+
+
+async def test_legacy_h5_replies_are_visible_without_public_items(test_client, admin_headers):
+    """旧 H5 迁移的助手回复没有 public_items 也要按规则出现在历史分页中。"""
+    created = await test_client.post(
+        "/api/v1/agents/sessions",
+        headers={**admin_headers, "Idempotency-Key": str(uuid.uuid4())},
+        json={"agent_id": "default-chatbot", "title": make_test_session_title("legacy-h5-items")},
+    )
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+    conn = await asyncpg.connect(os.environ["POSTGRES_URL"].replace("+asyncpg", ""))
+    try:
+        record_id = await conn.fetchval("SELECT id FROM sessions WHERE thread_id=$1", session_id)
+        user_message_id = await conn.fetchval(
+            "INSERT INTO messages "
+            "(session_record_id, role, content, message_type, extra_metadata, delivery_status, created_at) "
+            "VALUES ($1, 'user', '旧问题', 'text', $2::json, 'complete', now()) RETURNING id",
+            record_id,
+            json.dumps({"migration": {"source": "jd-ai-h5"}, "raw_message": {"content": [{"type": "input_text", "text": "旧问题"}]}}),
+        )
+        assistant_message_id = await conn.fetchval(
+            "INSERT INTO messages "
+            "(session_record_id, role, content, message_type, extra_metadata, delivery_status, created_at) "
+            "VALUES ($1, 'assistant', '旧回答', 'text', $2::json, 'complete', now()) RETURNING id",
+            record_id,
+            json.dumps({"migration": {"source": "jd-ai-h5"}}),
+        )
+        await conn.execute(
+            "INSERT INTO messages "
+            "(session_record_id, role, content, message_type, extra_metadata, delivery_status, created_at) "
+            "VALUES ($1, 'assistant', '其他旧回答', 'text', $2::json, 'complete', now())",
+            record_id,
+            json.dumps({"legacy": True}),
+        )
+        base = f"/api/v1/agents/sessions/{session_id}/items"
+        ascending = await test_client.get(base, headers=admin_headers, params={"order": "asc", "limit": 10})
+        assert ascending.status_code == 200, ascending.text
+        ids = [item["id"] for item in ascending.json()["data"]]
+        assert [f"input_{user_message_id}", f"legacy_{assistant_message_id}"] == ids
+        texts = [item["content"][0]["text"] for item in ascending.json()["data"]]
+        assert texts == ["旧问题", "旧回答"] and "其他旧回答" not in ascending.text
+        response = await test_client.get(base, headers=admin_headers, params={"order": "asc", "limit": 1})
+        assert response.json()["data"][0]["id"] == ids[0]
+        second = await test_client.get(
+            base, headers=admin_headers, params={"order": "asc", "limit": 1, "after": response.json()["last_id"]}
+        )
+        assert second.json()["data"][0]["id"] == ids[1] and second.json()["has_more"] is False
+    finally:
+        await conn.close()
+        await delete_created_threads(session_id)

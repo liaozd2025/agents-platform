@@ -46,3 +46,23 @@ def test_user_history_keeps_input_identity_and_hides_internal_metadata():
     assert item["yuxi"]["input_id"] == "input-1"
     assert item["content"] == [{"type": "input_text", "text": "hello"}]
     assert "secret" not in str(item)
+
+
+def test_legacy_h5_assistant_history_is_visible_without_public_items():
+    """旧 H5 迁移回复没有 public_items 也保留展示内容，不暴露迁移原文元数据。"""
+    message = SimpleNamespace(
+        id=99,
+        role="assistant",
+        turn_id=None,
+        run_id=None,
+        content="旧回答",
+        delivery_status="complete",
+        created_at=datetime(2026, 9, 3),
+        message_type="text",
+        extra_metadata={"migration": {"source": "jd-ai-h5", "private": "secret"}},
+    )
+    (item,) = serialize_public_items(message, None, None)
+    assert item["type"] == "message" and item["role"] == "assistant"
+    assert item["content"] == [{"type": "output_text", "text": "旧回答"}]
+    assert item["id"] == "legacy_99"
+    assert "secret" not in str(item)

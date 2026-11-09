@@ -119,6 +119,8 @@ def serialize_public_items(
             }
         ]
     items = deepcopy([item] if item is not None else list((message.extra_metadata or {}).get("public_items", {}).values()))
+    if not items and _is_legacy_migration_message(message):
+        items = [_build_legacy_message_item(message)]
     for item in items:
         if item["type"] == "message":
             item["phase"] = (
@@ -130,6 +132,35 @@ def serialize_public_items(
             if run.status == "interrupted" and run.error_type == "cooperation_waiting":
                 item["yuxi"]["waiting_kind"] = "cooperation"
     return sorted(items, key=lambda item: item["yuxi"]["output_index"])
+
+
+def _is_legacy_migration_message(message: Message) -> bool:
+    """旧 H5 迁移只有底层 Message，没有公开 item 投影，需要兼容展示。"""
+
+    source = ((message.extra_metadata or {}).get("migration") or {}).get("source")
+    return message.role == "assistant" and source == "jd-ai-h5"
+
+
+def _build_legacy_message_item(message: Message) -> dict:
+    """为旧迁移回复构造只读展示 item，不写入数据库。"""
+
+    return {
+        "type": "message",
+        "id": f"legacy_{message.id}",
+        "turn_id": message.turn_id,
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": message.content or ""}],
+        "status": "completed",
+        "phase": None,
+        "yuxi": {
+            "run_id": message.run_id,
+            "message_id": message.id,
+            "delivery_status": message.delivery_status,
+            "created_at": format_utc_datetime(message.created_at),
+            "message_type": message.message_type,
+            "output_index": -1,
+        },
+    }
 
 
 def serialize_public_run(run: AgentRun, input_ids: list[str]) -> dict:

@@ -16,6 +16,12 @@ from yuxi.shared.datetime import format_utc_datetime
 from yuxi.shared.hashing import hash_id
 
 
+def _legacy_h5_source_condition():
+    """旧 H5 迁移消息只有底层记录，没有 public_items 投影。"""
+
+    return func.json_extract_path_text(Message.extra_metadata, "migration", "source") == "jd-ai-h5"
+
+
 class PublicItemRepository:
     """在 Thread→Turn→Run 锁内登记已经进入用户输出链路的 item。"""
 
@@ -187,6 +193,10 @@ class PublicItemRepository:
         index = func.coalesce(public.c.value["yuxi"]["output_index"].as_integer(), -1)
         identity = case(
             (Message.role == "user", literal("input_") + cast(Message.id, String)),
+            (
+                and_(Message.role == "assistant", public.c.key.is_(None), _legacy_h5_source_condition()),
+                literal("legacy_") + cast(Message.id, String),
+            ),
             else_=public.c.value["id"].as_string(),
         )
         source = (
@@ -195,8 +205,8 @@ class PublicItemRepository:
                 Message.role,
                 Message.turn_id,
                 Message.run_id,
-                case((Message.role == "user", Message.content), else_="").label("content"),
-                case((Message.role == "user", Message.extra_metadata), else_=None).label("extra_metadata"),
+                Message.content.label("content"),
+                Message.extra_metadata.label("extra_metadata"),
                 Message.created_at,
                 Message.source_input_id,
                 Message.input_position,
@@ -220,6 +230,11 @@ class PublicItemRepository:
                 or_(
                     and_(Message.role == "user", public.c.key.is_(None)),
                     and_(Message.role != "user", public.c.key.is_not(None)),
+                    and_(
+                        Message.role == "assistant",
+                        public.c.key.is_(None),
+                        _legacy_h5_source_condition(),
+                    ),
                 ),
             )
         )
