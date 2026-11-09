@@ -16,6 +16,17 @@ const parseToolResultContent = (content) => {
 }
 
 /**
+ * 将时间字符串解析为毫秒时间戳。
+ * 后端历史消息的 created_at 时区格式不统一（新消息为 UTC 的 Z，旧 H5 迁移消息为 +08:00），
+ * 直接字符串比较会把同一时刻前后颠倒，因此这里统一按真实时间解析。无法解析时返回 null。
+ */
+const parseTimestamp = (value) => {
+  if (!value) return null
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? null : parsed
+}
+
+/**
  * 消息处理工具类
  */
 export class MessageProcessor {
@@ -48,6 +59,11 @@ export class MessageProcessor {
     runGroups.sort((left, right) => {
       const leftTime = left.run?.timing?.created_at || left.messages[0]?.created_at || ''
       const rightTime = right.run?.timing?.created_at || right.messages[0]?.created_at || ''
+      const leftTs = parseTimestamp(leftTime)
+      const rightTs = parseTimestamp(rightTime)
+      // 两端都能解析为有效时间戳时按真实时间升序，避免 Z 与 +08:00 混用时顺序错乱
+      if (leftTs !== null && rightTs !== null) return leftTs - rightTs
+      // 时间缺失或格式异常时回退字符串比较，保证排序稳定且不抛错
       return leftTime.localeCompare(rightTime)
     })
     for (const group of runGroups) {

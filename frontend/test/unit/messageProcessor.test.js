@@ -288,3 +288,21 @@ test('History 按 Run ID 分组，保留零消息 Run、续写和无关联旧消
   assert.equal(groups[0].messages[0].id, 'old')
   assert.equal(history[2].isLast, undefined)
 })
+
+test('历史消息混用 Z 与 +08:00 时按真实时间排序，而非字符串比较', () => {
+  // 旧 H5 迁移回复带 +08:00，新消息带 UTC 的 Z；两者真实时刻 22:00Z 早于 23:30Z。
+  // 若按字符串比较，"2026-09-16..." 会排到 "2026-09-17..." 前面，导致先后颠倒。
+  const history = [
+    { id: 'later', type: 'human', content: '后发消息', created_at: '2026-09-16T23:30:00Z' },
+    { id: 'earlier', type: 'ai', content: '先发消息', created_at: '2026-09-17T06:00:00+08:00' }
+  ]
+  const groups = MessageProcessor.convertServerHistoryToMessages(history)
+  assert.deepEqual(groups.map((group) => group.messages[0].content), ['先发消息', '后发消息'])
+
+  // 时间缺失或非法时回退字符串比较，不应抛错。
+  const fallbackGroups = MessageProcessor.convertServerHistoryToMessages([
+    { id: 'b', type: 'human', content: 'B', created_at: 'not-a-time' },
+    { id: 'a', type: 'human', content: 'A', created_at: '' }
+  ])
+  assert.deepEqual(fallbackGroups.map((group) => group.messages[0].content), ['A', 'B'])
+})
