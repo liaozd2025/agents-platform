@@ -116,6 +116,7 @@ class UserPageResponse(BaseModel):
 class UserAccessOption(BaseModel):
     uid: str
     username: str
+    display_name: str | None = None
     department_id: int | None = None
     department_name: str | None = None
 

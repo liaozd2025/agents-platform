@@ -1301,7 +1301,10 @@ async def test_department_admin_is_limited_to_own_department_users(test_client, 
         option_uids = {user["uid"] for user in access_options}
         assert user_a["uid"] in option_uids
         assert user_b["uid"] in option_uids
-        assert all(set(user) == {"uid", "username", "role", "department_id", "department_name"} for user in access_options)
+        assert all(
+            set(user) == {"uid", "username", "display_name", "role", "department_id", "department_name"}
+            for user in access_options
+        )
 
         superadmin_list_response = await test_client.get("/api/auth/users?limit=1000", headers=admin_headers)
         assert superadmin_list_response.status_code == 200, superadmin_list_response.text

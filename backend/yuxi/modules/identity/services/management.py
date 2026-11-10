@@ -295,7 +295,13 @@ async def read_user_access_options(
         raise ResourceNotFoundError("组织节点不存在")
     visible_rows, total = page_result
     return [
-        {"uid": user.uid, "username": user.username, "department_id": user.department_id, "department_name": dept_name}
+        {
+            "uid": user.uid,
+            "username": user.username,
+            "display_name": user.display_name,
+            "department_id": user.department_id,
+            "department_name": dept_name,
+        }
         for user, dept_name in visible_rows
     ], total
 

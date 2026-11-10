@@ -397,7 +397,14 @@ const setAccessLevel = (scopeKey, accessLevel) => {
 
 const userOptions = computed(() =>
   users.value.map((user) => ({
-    label: user.department_name ? `${user.username}（${user.department_name}）` : user.username,
+    label: [
+      user.display_name && user.display_name !== user.username
+        ? `${user.display_name}（${user.username}）`
+        : user.username,
+      user.department_name
+    ]
+      .filter(Boolean)
+      .join(' · '),
     value: user.uid,
     role: user.role,
     department_id: user.department_id

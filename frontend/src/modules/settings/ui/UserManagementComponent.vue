@@ -59,6 +59,7 @@
           tree-default-expand-all
           show-search
           allow-clear
+          :dropdown-match-select-width="false"
           :dropdown-style="{ maxHeight: '360px', overflow: 'auto' }"
         />
         <a-select v-if="showOrganizationFilters" v-model:value="userManagement.roleFilterValues" mode="multiple" allow-clear placeholder="全部角色" class="filter-select">
@@ -366,6 +367,7 @@
             tree-node-filter-prop="name"
             tree-default-expand-all
             show-search
+            :dropdown-match-select-width="false"
             :dropdown-style="{ maxHeight: '360px', overflow: 'auto' }"
             @change="handleUserDepartmentChange"
           />

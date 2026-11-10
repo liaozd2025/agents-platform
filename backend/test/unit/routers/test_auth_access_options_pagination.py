@@ -50,7 +50,7 @@ def _build_client(monkeypatch: pytest.MonkeyPatch, page_result):
 
 
 def _visible_rows() -> list[tuple[SimpleNamespace, str]]:
-    return [(SimpleNamespace(uid="u1", username="张三", department_id=1), "默认部门")]
+    return [(SimpleNamespace(uid="u1", username="zhangsan", display_name="张三", department_id=1), "默认部门")]
 
 
 async def test_limit_above_upper_bound_is_rejected(monkeypatch) -> None:
@@ -76,7 +76,15 @@ async def test_total_count_header_and_keyword_are_forwarded(monkeypatch) -> None
 
     assert response.status_code == 200, response.text
     assert response.headers["X-Total-Count"] == "7"
-    assert response.json() == [{"uid": "u1", "username": "张三", "department_id": 1, "department_name": "默认部门"}]
+    assert response.json() == [
+        {
+            "uid": "u1",
+            "username": "zhangsan",
+            "display_name": "张三",
+            "department_id": 1,
+            "department_name": "默认部门",
+        }
+    ]
     assert captured["permission_key"] == "user:read"
     assert captured["keyword"] == "张"
     assert captured["limit"] == 100
