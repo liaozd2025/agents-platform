@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
 from langchain.agents import create_agent
+from langchain.agents.middleware.types import ModelResponse
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.messages.utils import count_tokens_approximately
@@ -24,14 +25,16 @@ from yuxi.modules.agents.runtime.agent_backends.chatbot.context import ChatBotCo
 from yuxi.modules.agents.runtime.context import prepare_agent_runtime_context
 from yuxi.modules.agents.runtime.middlewares.authorization import (
     AgentExecutionRevoked,
-    RuntimeAuthorizationMiddleware,
+    ModelTurnAuthorizationMiddleware,
     refresh_execution_authorization,
 )
 from yuxi.modules.extensions.skills import projection
 from yuxi.modules.extensions.skills.edit import edit_shared_skill_file
 from yuxi.modules.extensions.skills.models import Skill
 from yuxi.modules.extensions.tools.runtime import resolve_configured_runtime_tools
-from yuxi.modules.identity.models import User
+from yuxi.modules.identity.models import Role, RolePermission, User, UserRoleAssignment
+from yuxi.modules.identity.repositories.users import UserRepository
+from yuxi.modules.models.providers.cache import ModelInfo
 from yuxi.modules.workspace.models import Project
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.self_managed_resources]
@@ -42,6 +45,18 @@ SHARED = {"version": 2, "read_scope": {"access_level": "global"}, "manage_scope"
 @pytest_asyncio.fixture
 async def authorized_context(tmp_path, monkeypatch):
     """隔离持久权限与来源文件，保留生产解析和投影。"""
+    model_info = ModelInfo(
+        provider_id="fixture",
+        model_id="model",
+        model_type="chat",
+        display_name="fixture",
+        api_key="fixture",
+        base_url="http://model.invalid",
+        provider_type="openai",
+    )
+    monkeypatch.setattr(
+        "yuxi.modules.models.providers.cache.model_cache.get_model_info", lambda spec: model_info if spec == "fixture:model" else None
+    )
     monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path / "users"))
     monkeypatch.setenv("YUXI_SKILL_DATA_DIR", str(tmp_path / "sources"))
     monkeypatch.setenv("YUXI_SKILL_PROJECTION_DIR", str(tmp_path / "projections"))
@@ -52,8 +67,8 @@ async def authorized_context(tmp_path, monkeypatch):
         async with sessions() as db:
             db.add_all(
                 [
-                    User(uid="owner", username="owner", password_hash="fixture", role="user"),
-                    User(uid="caller", username="caller", password_hash="fixture", role="user"),
+                    User(uid="owner", username="owner", password_hash="fixture"),
+                    User(uid="caller", username="caller", password_hash="fixture"),
                     Agent(
                         slug="live-agent",
                         name="Live",
@@ -74,6 +89,12 @@ async def authorized_context(tmp_path, monkeypatch):
                 ]
             )
             await db.flush()
+            role = Role(code="fixture-skill-reader", name="Fixture skill reader", default_scope_type="all")
+            role.permissions = [RolePermission(permission_key="skill:use")]
+            db.add(role)
+            await db.flush()
+            users = (await db.scalars(select(User))).all()
+            db.add_all([UserRoleAssignment(user_id=user.id, role_id=role.id) for user in users])
             db.add(
                 Project(
                     id="live-project", uid="caller", selection_status="implicit", directory_mode="managed", workdir_path="projects/live"
@@ -205,7 +226,7 @@ async def test_refresh_preserves_prepared_bound_root_but_reads_current_shared_ro
     async with fixture.sessions() as db:
         agent = await db.scalar(select(Agent).where(Agent.slug == "live-agent"))
         agent.share_config = {**SHARED, "manage_scope": {"access_level": "user", "user_uids": ["owner"]}}
-        owner = await db.scalar(select(User).where(User.uid == "owner"))
+        owner = await UserRepository(db).get_by_uid("owner")
         owner.role = "admin"
         bound_values = {
             "slug": "bound-skill",
@@ -236,7 +257,7 @@ async def test_refresh_preserves_prepared_bound_root_but_reads_current_shared_ro
     assert context.skill_runtime_snapshot["preloaded_skill_contents"]["bound-skill"] == prepared
     prepared_metadata = dict(context.skill_runtime_snapshot["skill_metadata"]["bound-skill"])
     async with fixture.sessions() as db:
-        owner = await db.scalar(select(User).where(User.uid == "owner"))
+        owner = await UserRepository(db).get_by_uid("owner")
         edited, _ = await edit_shared_skill_file(
             db,
             slug="bound-skill",
@@ -256,9 +277,7 @@ async def test_refresh_preserves_prepared_bound_root_but_reads_current_shared_ro
             await db.commit()
             assert replacement.id != old_id
     (fixture.source / "SKILL.md").write_text("# UPDATED_SHARED_ROOT\n")
-    # 模型边界顺序：完整刷新资源与快照发生在 abefore_model，投影同步发生在实际模型请求入口。
-    await RuntimeAuthorizationMiddleware().abefore_model({}, SimpleNamespace(context=context))
-    await refresh_execution_authorization(context)
+    await refresh_model_turn(context)
     contents = context.skill_runtime_snapshot["preloaded_skill_contents"]
     assert contents["bound-skill"] == (updated if replace_binding else prepared)
     assert contents["live-skill"] == "# UPDATED_SHARED_ROOT\n"
@@ -435,8 +454,7 @@ async def test_prepare_and_refresh_restore_original_selection_after_policy_regra
 
     async def refresh_boundary():
         """按执行边界顺序刷新：资源与快照重建在模型边界，投影同步在实际模型请求入口。"""
-        await RuntimeAuthorizationMiddleware().abefore_model({}, SimpleNamespace(context=fixture.context))
-        await refresh_execution_authorization(fixture.context)
+        await refresh_model_turn(fixture.context)
 
     await refresh_boundary()
     projected = projection.get_user_skills_root_dir("caller") / "live-skill"
@@ -466,16 +484,34 @@ async def test_prepare_and_refresh_restore_original_selection_after_policy_regra
 async def test_model_return_rejects_revocation_without_resource_or_projection_work(authorized_context, revocation):
     """等待后的身份撤销仍在审批前拒绝，成功返回阶段只读身份。"""
     fixture = authorized_context
-    async with fixture.sessions() as db:
-        if revocation == "account":
-            user = await db.scalar(select(User).where(User.uid == "caller"))
-            user.is_deleted = 1
-        else:
-            agent = await db.scalar(select(Agent).where(Agent.slug == "live-agent"))
-            agent.share_config = {"version": 2, "read_scope": None, "manage_scope": None}
-        await db.commit()
+
+    async def revoke_during_model(request):
+        """在模型请求期间提交真实撤权，返回边界必须重新查询。"""
+        async with fixture.sessions() as db:
+            if revocation == "account":
+                user = await db.scalar(select(User).where(User.uid == "caller"))
+                user.is_deleted = 1
+            else:
+                agent = await db.scalar(select(Agent).where(Agent.slug == "live-agent"))
+                agent.share_config = {"version": 2, "read_scope": None, "manage_scope": None}
+            await db.commit()
+        return ModelResponse(result=[AIMessage(content="not publishable")])
+
+    request = SimpleNamespace(state={}, runtime=SimpleNamespace(context=fixture.context))
     with pytest.raises(AgentExecutionRevoked, match="账号已失效|权限已撤销"):
-        await RuntimeAuthorizationMiddleware().aafter_model({}, SimpleNamespace(context=fixture.context))
+        middleware = ModelTurnAuthorizationMiddleware()
+        await middleware.abefore_model(request.state, request.runtime)
+        await revoke_during_model(request)
+        await middleware.aafter_model(request.state, request.runtime)
+
+
+async def refresh_model_turn(context):
+    """经过真实轮次节点刷新资源，并在实际请求前同步投影。"""
+    middleware = ModelTurnAuthorizationMiddleware()
+    runtime = SimpleNamespace(context=context)
+    await middleware.abefore_model({}, runtime)
+    await refresh_execution_authorization(context)
+    await middleware.aafter_model({}, runtime)
 
 
 class CapturingModel(BaseChatModel):

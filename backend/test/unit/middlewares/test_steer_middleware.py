@@ -19,7 +19,7 @@ async def test_before_model_ends_run_when_steer_is_waiting(monkeypatch: pytest.M
     monkeypatch.setattr(runs, "should_yield_for_steer", should_end)
     runtime = SimpleNamespace(context=SimpleNamespace(run_id="run-1"))
 
-    result = await SteerMiddleware().abefore_model({}, runtime)
+    result = await SteerMiddleware().check_before_model({}, runtime)
 
     assert result == {"jump_to": "end"}
 
@@ -33,7 +33,7 @@ async def test_before_model_continues_without_steer(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(runs, "should_yield_for_steer", should_end)
     runtime = SimpleNamespace(context=SimpleNamespace(run_id="run-1"))
 
-    assert await SteerMiddleware().abefore_model({}, runtime) is None
+    assert await SteerMiddleware().check_before_model({}, runtime) is None
 
 
 async def test_before_model_ignores_context_without_run_id(monkeypatch: pytest.MonkeyPatch):
@@ -48,7 +48,7 @@ async def test_before_model_ignores_context_without_run_id(monkeypatch: pytest.M
     monkeypatch.setattr(runs, "should_yield_for_steer", should_end)
     runtime = SimpleNamespace(context=SimpleNamespace())
 
-    assert await SteerMiddleware().abefore_model({}, runtime) is None
+    assert await SteerMiddleware().check_before_model({}, runtime) is None
     assert called is False
 
 

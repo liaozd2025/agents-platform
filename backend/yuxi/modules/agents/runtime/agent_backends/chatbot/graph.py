@@ -18,7 +18,7 @@ from yuxi.modules.agents.runtime.middlewares import (
     create_memory_middleware,
     create_summary_middleware_from_context,
 )
-from yuxi.modules.agents.runtime.middlewares.authorization import RuntimeAuthorizationMiddleware
+from yuxi.modules.agents.runtime.middlewares.authorization import ModelTurnAuthorizationMiddleware, RuntimeAuthorizationMiddleware
 from yuxi.modules.agents.runtime.middlewares.cooperation import create_cooperation_middleware
 from yuxi.modules.agents.runtime.middlewares.filesystem import create_agent_filesystem_middleware
 from yuxi.modules.agents.runtime.middlewares.skills import SkillsMiddleware
@@ -68,7 +68,9 @@ async def _build_middlewares(context, backend, *, cleanup_model=None):
     )
     if approval_middleware:
         middlewares.append(approval_middleware)
-    # after_model 按逆序执行，授权必须先于审批产生等待点。
+    # 前置检查共享节点；后置检查逆序执行，身份复查先于审批，接管晚于审批。
+    middlewares.append(ModelTurnAuthorizationMiddleware(cooperation=cooperation_middleware))
+    # 内层检查动态装配后的工具集，并在每次真实请求和重试前复查。
     middlewares.append(RuntimeAuthorizationMiddleware())
     # 图片回退读取授权过滤后的工具集，保持与实际模型请求一致。
     middlewares.append(ImageInputCompatibilityMiddleware())

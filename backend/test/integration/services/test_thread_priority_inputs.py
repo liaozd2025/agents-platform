@@ -438,7 +438,7 @@ async def test_steer_before_first_model_is_saved_as_yielded_not_failed(sessions,
     current = await _start(sessions)
     steer = await _send(sessions, "S3")
     context = SimpleNamespace(run_id=current.id)
-    jumped = await SteerMiddleware().abefore_model({}, SimpleNamespace(context=context))
+    jumped = await SteerMiddleware().check_before_model({}, SimpleNamespace(context=context))
     assert jumped == {"jump_to": "end"} and context.steer_before_model
     if unready_tail:
         from yuxi.modules.agents.models.attachments import AgentAttachment
@@ -588,7 +588,7 @@ async def test_cancelled_steer_continuation_preserves_wire_ids_and_audit_order(s
                 self.history.append(AIMessage(content=text, id=operation))
             before_model = self.calls == 1
             if before_model:
-                jump = await SteerMiddleware().abefore_model({}, SimpleNamespace(context=context))
+                jump = await SteerMiddleware().check_before_model({}, SimpleNamespace(context=context))
                 assert jump == {"jump_to": "end"} and context.steer_before_model
                 async with sessions() as db:
                     await threads.cancel_input(

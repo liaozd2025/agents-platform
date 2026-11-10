@@ -15,6 +15,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from psycopg_pool import AsyncConnectionPool
 from yuxi.modules.agents.runtime.middlewares.steer import SteerMiddleware
+from yuxi.modules.agents.runtime.middlewares import authorization
 import yuxi.modules.agents.services.runs as runs
 from yuxi.infrastructure.postgres.manager import PostgresManager
 from yuxi.infrastructure.postgres.checkpointer import get_langgraph_checkpointer
@@ -92,6 +93,12 @@ async def test_steer_waits_for_parallel_tools_and_next_run_reads_pg_checkpoint(m
         effects.append("second")
         return "second-result"
 
+    from unittest.mock import AsyncMock
+
+    # 本例只隔离权限存储，保留真实接管节点与 PostgreSQL checkpoint。
+    monkeypatch.setattr(authorization, "_refresh_execution_resources", AsyncMock(return_value={}))
+    monkeypatch.setattr(authorization, "_require_execution_actor", AsyncMock())
+    monkeypatch.setattr(authorization.pg_manager, "get_async_session_context", lambda: AsyncMock())
     manager = object.__new__(PostgresManager)
     manager.__init__()
     url = os.environ["POSTGRES_URL"].replace("+asyncpg", "").replace("+psycopg", "")
@@ -106,10 +113,11 @@ async def test_steer_waits_for_parallel_tools_and_next_run_reads_pg_checkpoint(m
         manager._initialized = True
         manager.langgraph_pool = pool
         saver = get_langgraph_checkpointer(manager)
+        await saver.setup()
         agent = create_agent(
             model=model,
             tools=[first_tool, second_tool],
-            middleware=[SteerMiddleware()],
+            middleware=[SteerMiddleware(), authorization.ModelTurnAuthorizationMiddleware()],
             context_schema=_RunContext,
             checkpointer=saver,
         )

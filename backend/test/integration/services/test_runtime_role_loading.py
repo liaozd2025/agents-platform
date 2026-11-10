@@ -15,7 +15,11 @@ from yuxi.modules.agents.models.runs import AgentRun
 from yuxi.modules.agents.models.sessions import Session
 from yuxi.modules.agents.models.turns import AgentTurn
 from yuxi.modules.agents.runtime.agent_backends.chatbot.context import ChatBotContext
-from yuxi.modules.agents.runtime.middlewares.authorization import AgentExecutionRevoked, RuntimeAuthorizationMiddleware
+from yuxi.modules.agents.runtime.middlewares.authorization import (
+    AgentExecutionRevoked,
+    ModelTurnAuthorizationMiddleware,
+    RuntimeAuthorizationMiddleware,
+)
 from yuxi.modules.extensions.skills.models import Skill
 from yuxi.modules.identity.models import Role, RolePermission, User, UserRoleAssignment
 from yuxi.modules.workspace.models import Project
@@ -26,6 +30,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.self_man
 @pytest.mark.parametrize("with_run", [False, True])
 async def test_model_boundary_loads_roles_and_observes_revocation(tmp_path, monkeypatch, with_run):
     """新数据库会话加载角色，模型轮次成功且后续撤权立即生效。"""
+    monkeypatch.setenv("YUXI_USER_DATA_DIR", str(tmp_path / "users"))
     monkeypatch.setenv("YUXI_SKILL_DATA_DIR", str(tmp_path / "sources"))
     monkeypatch.setenv("YUXI_SKILL_PROJECTION_DIR", str(tmp_path / "projections"))
     source = tmp_path / "sources/shared/runtime-skill"
@@ -127,8 +132,8 @@ async def test_model_boundary_loads_roles_and_observes_revocation(tmp_path, monk
             skills=["runtime-skill"],
             preload_skills=[],
         )
-        middleware = RuntimeAuthorizationMiddleware()
-        graph = create_agent(model=ProbeModel(), middleware=[middleware])
+        middleware = ModelTurnAuthorizationMiddleware()
+        graph = create_agent(model=ProbeModel(), middleware=[middleware, RuntimeAuthorizationMiddleware()])
         result = await graph.ainvoke({"messages": [HumanMessage(content="probe")]}, context=context)
         assert result["messages"][-1].content == "ROLE_REFRESH_OK"
         assert len(requests) == 1

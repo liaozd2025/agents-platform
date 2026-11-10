@@ -2,7 +2,7 @@
 
 from copy import copy
 
-from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from sqlalchemy import select
@@ -14,6 +14,7 @@ from yuxi.modules.agents.models.sessions import Session
 from yuxi.modules.agents.repositories.definitions import AgentRepository
 from yuxi.modules.agents.runtime.context import BaseContext, refresh_agent_context_resources
 from yuxi.modules.agents.runtime.middlewares.skills import injected_skill_identity
+from yuxi.modules.agents.runtime.middlewares.steer import SteerMiddleware
 from yuxi.modules.agents.runtime.state import BaseState, RuntimeWarning
 from yuxi.modules.extensions.mcp.service import available_mcp_servers, runtime_mcp_failure
 from yuxi.modules.extensions.skills.runtime import connected_skills, expand_skill_closure, sync_agent_context_skills
@@ -26,21 +27,35 @@ class AgentExecutionRevoked(PermissionError):
     """账号或 Agent 使用权撤销，必须使执行形成失败终态。"""
 
 
-class RuntimeAuthorizationMiddleware(AgentMiddleware):
-    """每个新模型和工具调用使用当前调用者权限。"""
+class ModelTurnAuthorizationMiddleware(AgentMiddleware):
+    """统一模型前的接管、协作与授权，保留模型后的独立身份检查。"""
 
     state_schema = BaseState
 
+    def __init__(self, *, cooperation=None):
+        """复用当前图的协作实例，不增加独立消息消费节点。"""
+        self.cooperation = cooperation
+        self.steer = SteerMiddleware()
+
+    @hook_config(can_jump_to=["end"])
     async def abefore_model(self, state, runtime):
-        """刷新 Skill 输入，投影同步留给实际请求边界。"""
+        """先响应接管，再刷新 Skills 输入并保存能力警告。"""
+        jump = await self.steer.check_before_model(state, runtime)
+        if jump is not None:
+            return jump
+        cooperation_update = await self.cooperation.consume_messages(state, runtime) if self.cooperation else None
         await _refresh_execution_resources(runtime.context, state=state)
-        return {"warnings": capability_warnings(runtime.context)}
+        return {**(cooperation_update or {}), "warnings": capability_warnings(runtime.context)}
 
     async def aafter_model(self, state, runtime):
-        """模型返回后、审批或工具路由前复查账号与 Agent。"""
+        """模型已提交后、审批前复查身份，接管仍由审批后的节点处理。"""
         async with pg_manager.get_async_session_context() as db:
             await _require_execution_actor(runtime.context, db=db)
         return {"warnings": capability_warnings(runtime.context)}
+
+
+class RuntimeAuthorizationMiddleware(AgentMiddleware):
+    """每次实际模型请求、重试和工具调用使用当前调用者权限。"""
 
     async def awrap_model_call(self, request, handler):
         """复查身份与 MCP 策略并同步 Skill 投影，隐藏本轮已撤销的已注册工具。"""

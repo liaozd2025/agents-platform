@@ -17,6 +17,7 @@ from test.support.agent_stream_fixtures import FinalAnswerModel, native
 from yuxi.modules.agents.runtime.base import BaseAgent, GraphExecutionResult
 from yuxi.modules.agents.runtime.context import BaseContext
 from yuxi.modules.agents.runtime.middlewares.steer import SteerMiddleware
+from yuxi.modules.agents.runtime.middlewares import authorization
 import yuxi.modules.agents.services.execution as svc
 from yuxi.modules.agents.services.execution import RunExecutionResult
 from yuxi.modules.agents.input_messages import build_chat_input_message
@@ -199,9 +200,14 @@ async def test_cancelled_steer_continues_real_graph_without_replaying_input(monk
         )
 
     monkeypatch.setattr(runs, "should_yield_for_steer", should_yield)
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(authorization, "_refresh_execution_resources", AsyncMock(return_value={}))
+    monkeypatch.setattr(authorization, "_require_execution_actor", AsyncMock())
+    monkeypatch.setattr(authorization.pg_manager, "get_async_session_context", lambda: AsyncMock())
     graph = create_agent(
         model=model,
-        middleware=[SteerMiddleware()],
+        middleware=[SteerMiddleware(), authorization.ModelTurnAuthorizationMiddleware()],
         context_schema=BaseContext,
         tools=[complete_tool] if boundary == "after_tools" else [],
         checkpointer=InMemorySaver(),

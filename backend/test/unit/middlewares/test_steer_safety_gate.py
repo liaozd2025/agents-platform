@@ -15,6 +15,7 @@ from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from test.support.agent_stream_fixtures import FinalAnswerModel
 from yuxi.modules.agents.runtime.middlewares.steer import SteerMiddleware
+from yuxi.modules.agents.runtime.middlewares import authorization
 import yuxi.modules.agents.services.runs as runs
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -146,9 +147,14 @@ async def test_tool_free_model_turn_keeps_steer_intent_for_handoff(monkeypatch: 
     monkeypatch.setattr(runs, "should_yield_for_steer", should_end)
     model = FinalAnswerModel()
     checkpointer = InMemorySaver()
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(authorization, "_refresh_execution_resources", AsyncMock(return_value={}))
+    monkeypatch.setattr(authorization, "_require_execution_actor", AsyncMock())
+    monkeypatch.setattr(authorization.pg_manager, "get_async_session_context", lambda: AsyncMock())
     agent = create_agent(
         model=model,
-        middleware=[SteerMiddleware()],
+        middleware=[SteerMiddleware(), authorization.ModelTurnAuthorizationMiddleware()],
         context_schema=_RunContext,
         checkpointer=checkpointer,
     )

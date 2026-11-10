@@ -6,8 +6,7 @@ from langchain.agents.middleware import AgentMiddleware, hook_config
 class SteerMiddleware(AgentMiddleware):
     """在安全生命周期边界结束当前 Run，让队列优先执行 Steer。"""
 
-    @hook_config(can_jump_to=["end"])
-    async def abefore_model(self, state, runtime):  # noqa: ARG002
+    async def check_before_model(self, state, runtime):  # noqa: ARG002
         """模型调用前读取 Steer 待接管事实，命中则结束当前 Run 让队列接管。"""
         jump = await self._jump_if_steer_requested(runtime)
         if jump is not None:

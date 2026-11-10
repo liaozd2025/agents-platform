@@ -292,7 +292,7 @@ async def test_failed_mcp_filters_skill_dependencies_and_updates_warning_state(m
     result = await authorization.RuntimeAuthorizationMiddleware().awrap_model_call(request, handler)
     assert result == "普通聊天继续" and not captured[0].tools
     assert "原始提示" in str(captured[0].system_message.content)
-    middleware = authorization.RuntimeAuthorizationMiddleware()
+    middleware = authorization.ModelTurnAuthorizationMiddleware()
     runtime = SimpleNamespace(context=context)
     update = await middleware.abefore_model(state, runtime)
     assert update["warnings"] == [{"code": "mcp_unavailable", "source": "mcp:remote", "message": "MCP remote：授权凭据不可用，请重新连接"}]
@@ -346,7 +346,7 @@ async def test_warning_checkpoint_is_replaced_after_capability_recovers(monkeypa
     context.mcp_unavailable = {"remote": "未连接，请重新连接", "github": "连接失败"}
     graph = create_agent(
         model=FakeListChatModel(responses=["普通聊天正常"]),
-        middleware=[authorization.RuntimeAuthorizationMiddleware()],
+        middleware=[authorization.ModelTurnAuthorizationMiddleware(), authorization.RuntimeAuthorizationMiddleware()],
         checkpointer=InMemorySaver(),
     )
     config = {"configurable": {"thread_id": "warning-thread"}}

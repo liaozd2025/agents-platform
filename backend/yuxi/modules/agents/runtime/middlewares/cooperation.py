@@ -209,7 +209,7 @@ class CooperationMiddleware(AgentMiddleware):
             request.override(system_message=append_to_system_message(request.system_message, f"{PROMPT}\n\n{self._identity_prompt}"))
         )
 
-    async def abefore_model(self, state, runtime):
+    async def consume_messages(self, state, runtime):
         """消费位置随 checkpoint 保存，崩溃时通过稳定消息 ID 重放。"""
         from yuxi.modules.agents.services.cooperation import SessionCooperationService
 
